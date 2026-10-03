@@ -6,7 +6,8 @@ Threat model, trust boundaries and the controls for each risk. Authorization det
 
 ## Assets
 
-1. CRM data: leads' personal data (names, phones, emails), deal values, notes.
+1. CRM data: leads' personal data (names, phones, emails), deal values, notes (free text
+   that may hold anything a salesperson writes).
 2. User accounts and sessions, especially administrators'.
 3. Audit trail integrity.
 4. Secrets: Django secret key, database, SMTP and AI provider credentials.
@@ -87,6 +88,24 @@ flowchart LR
 | **Stack-trace disclosure** | `DEBUG=False` in production (enforced); JSON 500 handler with a generic message and request id | built |
 | **Clickjacking** | `X-Frame-Options: DENY` on API and web; CSP `frame-ancestors 'none'` (P9) | built |
 | **Dependency vulnerabilities** | lockfiles (`uv.lock`, `pnpm-lock.yaml`); `pip-audit` and `pnpm audit` in CI; pinned container image tags; Dependabot (P11) | built (pip-audit) |
+
+## Notes and other activity text (Phase 4)
+
+- Note bodies, task descriptions, meeting agendas, locations and links are never written to
+  logs, audit metadata (field **names** only), timeline snapshots, exception messages,
+  domain events or analytics; tests assert a secret note never appears in audit or
+  timeline rows.
+- Lists and timelines return a 240-character preview; the whole text only on the record's own
+  page, for someone who may see it.
+- Text is normalised and refused if it hides characters (bidi overrides, zero-width
+  spaces, the tag block) like every other free text (`core.text`).
+- Meeting links: `https://` only (CHECK constraint and validation), no user name or password
+  in the URL (they would leak to everyone who can see the meeting), rendered with
+  `target="_blank" rel="noopener noreferrer"`.
+- A note's text can be edited only by its author, so nobody can put words in someone else's
+  name; edits are audited.
+- No embeddings are generated (Ask Arkray is Phase 8); the activity domain events are the
+  extension point, with no subscribers yet.
 
 ## Security headers
 

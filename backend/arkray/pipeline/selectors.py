@@ -240,6 +240,27 @@ def opportunity_by_id(opportunity_id: UUID) -> Opportunity:
     return _with_relations(Opportunity.objects.filter(pk=opportunity_id)).get()
 
 
+def opportunity_ref(scope: AccessScope, opportunity_id: UUID) -> Opportunity:
+    """The identity and state of an opportunity `scope` may see (id, lead, owner, status,
+    archive state), for modules whose records hang off opportunities (Phase 4: an activity
+    linked to it). NotFoundError outside the scope, exactly as if it didn't exist. Not a
+    display read: no title, amounts or text."""
+    found = (
+        scope.apply(Opportunity.objects.filter(pk=opportunity_id))
+        .only("id", "lead_id", "owner_id", "status", "archived_at")
+        .first()
+    )
+    if found is None:
+        raise NotFoundError()
+    return found
+
+
+def stages_by_id(stage_ids: list[UUID]) -> dict[UUID, Stage]:
+    """Stages (configuration, the same for everyone) by id, in one query: e.g. the names a
+    timeline entry records as they are at the moment of a transition."""
+    return {stage.pk: stage for stage in Stage.objects.filter(pk__in=stage_ids)}
+
+
 def pipeline_totals(scope: AccessScope, filters: OpportunityFilters) -> PipelineTotals:
     """Pipeline value, weighted pipeline and the number of open opportunities: over the
     open, non-archived opportunities in `scope` that match `filters`. One query."""

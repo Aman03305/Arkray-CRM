@@ -267,7 +267,7 @@ navigates that user's Dashboard, Pipeline, Leads and Activities, with a persiste
   `/admin/users/{id}/leads`; the workspace comes from the URL
   ([ADR-0010](adr/0010-frontend-workspace-routing.md)).
 
-## Object-level and mutation rules (built for leads in Phase 2 and opportunities in Phase 3; Phase 4 follows the same rules)
+## Object-level and mutation rules (built for leads in Phase 2, opportunities in Phase 3 and activities in Phase 4)
 
 - **Writing** anywhere is authorised by one function, `identity.workspaces.authorize_write(actor, scope)`,
   which every CRM service calls before any change: the own workspace (`me`) needs
@@ -282,6 +282,12 @@ navigates that user's Dashboard, Pipeline, Leads and Activities, with a persiste
 
 - **Lookups** always use `scope.apply(Model.objects…)`; a record outside the scope is
   **404**, never 403, so its existence isn't revealed.
+- **Activities have no chosen owner either** (Phase 4): an activity is always about a lead
+  in the caller's scope (directly or through one of its opportunities) and is created for
+  that lead's owner; `created_by` is the actor. Linking to a lead or opportunity outside the
+  scope is a 404 identical to a missing one (non-enumerating, tested). A note's text may be
+  edited only by its author (403 otherwise); lifecycle changes are explicit actions
+  (`/complete`, `/cancel`, `/reopen`, `/archive`, `/restore`).
 - **Opportunities have no chosen owner at all** (Phase 3): an opportunity is always
   created for, and owned by, its lead's owner; the lead must be in the caller's scope
   (404 otherwise), and creating one in someone else's workspace needs `crm.manage_any`
@@ -318,6 +324,10 @@ Because visibility is owner-based, related open records share an owner:
   ([ADR-0018](adr/0018-pipeline-integrity-by-composite-keys.md)). Reopening a closed
   opportunity makes it the lead's current owner's, which only someone whose workspace
   includes that owner may do ([pipeline.md](pipeline.md#ownership)).
+- **Built for activities in Phase 4**, the same way: open tasks, scheduled meetings and notes
+  follow the lead (author unchanged); completed and cancelled tasks and meetings keep their
+  owner; a deferred composite key refuses current work left with anyone but the lead's owner
+  ([ADR-0020](adr/0020-activity-integrity.md), [activities.md](activities.md#lead-reassignment)).
 
 For open records this guarantees a user never sees a record whose parent they can't
 open. Closed records a user keeps after the parent moved on (a won opportunity whose lead
@@ -329,12 +339,20 @@ introduced, this rule is relaxed together with the new scope kind, not before.
 - A serializer that embeds a related record (for example an activity's lead) renders it
   only if it is visible in the same scope; otherwise it renders `{"id": null, "restricted": true}`.
   Built in Phase 3 for an opportunity's lead (tested: the previous owner of a reassigned
-  lead sees their won opportunity but not the lead's name).
+  lead sees their won opportunity but not the lead's name) and in Phase 4 for an activity's
+  lead and opportunity and a timeline entry's opportunity.
 - **Aggregates are scoped like rows** (Phase 3): every total, count and per-stage value is
   computed from `scope.apply()` first, in the selectors, so a sum can never include a
   record the caller couldn't list.
-- A lead's timeline is visible to whoever can see the lead. Timeline `data` contains safe
-  summaries only (titles, from/to values).
+- **Timelines** (Phase 4, [ADR-0021](adr/0021-materialized-timeline.md)): a lead's timeline is
+  readable by whoever can see the lead (404 otherwise), an opportunity's by whoever can see
+  the opportunity. Lead events are shown to whoever sees the lead; an entry about an activity
+  or an opportunity only while that record is visible in the same scope and not archived
+  (after a reassignment the new owner doesn't see the previous owner's completed meetings or
+  closed opportunities). Snapshots hold safe values only (status and stage names, owner ids,
+  meeting times); titles and note text come from the live, visible record, as previews.
+- **Counts are scoped like rows** for activities too: the activity summary is computed from
+  `scope.apply()` first and is identical whether or not other users have records.
 
 ## Ask Arkray alignment
 
@@ -366,4 +384,6 @@ See [rag-architecture.md](rag-architecture.md#security-invariant).
 | Services enforce scope and capabilities for direct callers too | `arkray/leads/tests/test_audit_and_events.py` |
 | Cross-user suite for the pipeline: User A vs User B both ways over lists (every filter, sort and page size), guessed ids, history, the board and its totals, per-stage values, the summary, stage and lead filters, cursors replayed across workspaces, every write, creating or converting against the other's lead, crafted payloads (owner, status, closed_at, category, version, probability flags, tenant, audit actor, capabilities), workspace substitution, and admin workspaces summing exactly one user | `tests/security/test_pipeline_cross_user.py` |
 | Opportunity services enforce scope and capabilities for direct callers; ownership follows the lead; the database refuses ownership drift | `arkray/pipeline/tests/test_services.py`, `test_reassignment.py`, `test_models.py` |
-| Cross-user suites for later modules | Phases 4–8 ([testing.md](testing.md#critical-cross-user-security-suite)) |
+| Cross-user suite for activities and timelines: User A vs User B both ways over lists (every filter, sort and page size), guessed ids, both timelines (bodies and errors identical to missing ids), relationship fields (own task on the other's lead or opportunity: identical 404s), every action, summary counts (unchanged by the other's records), cursors replayed across workspaces, workspace substitution, crafted payloads; admin workspaces scoped to one user | `tests/security/test_activities_cross_user.py` |
+| Activity services enforce scope, capabilities, author-only note edits and lead-owner ownership for direct callers; the database refuses ownership drift and mismatched relationships | `arkray/activities/tests/test_services.py`, `test_reassignment.py`, `test_models.py` |
+| Cross-user suites for later modules | Phases 5–8 ([testing.md](testing.md#critical-cross-user-security-suite)) |

@@ -2,6 +2,7 @@ import { screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { adminViewer, makeAdminUser, RAHUL_ID, salesViewer } from "@/test/fixtures";
+import { asListItem, makeActivity, page, SUMMARY } from "@/test/activity-fixtures";
 import { makeBoard, PIPELINES } from "@/test/pipeline-fixtures";
 import { apiError, mockApi, renderWithProviders } from "@/test/render";
 
@@ -43,11 +44,16 @@ describe("Dashboard", () => {
 });
 
 describe("modules in another user's workspace", () => {
-  it("say plainly that nothing is available yet, without fake data", () => {
+  it("the Activities (Phase 4) load that user's activities, scoped to their workspace", async () => {
     navigation.pathname = `/admin/users/${RAHUL_ID}/activities`;
+    const api = mockApi({
+      [`GET /api/v1/workspaces/${RAHUL_ID}/activities`]: { status: 200, body: page([asListItem(makeActivity())]) },
+      [`GET /api/v1/workspaces/${RAHUL_ID}/activity-summary`]: { status: 200, body: SUMMARY },
+    });
     renderWithProviders(<ActivitiesView />, { viewer: adminViewer });
     expect(screen.getByText("Selected user's records")).toBeInTheDocument();
-    expect(screen.getByText("This user's activities will appear here once the module is enabled.")).toBeInTheDocument();
+    expect((await screen.findAllByText("Send the revised quotation")).length).toBeGreaterThan(0);
+    expect(api.calls.every((c) => !c.path.includes("/workspaces/all") && !c.path.includes("/workspaces/me"))).toBe(true);
   });
 
   it("the Pipeline (Phase 3) loads that user's board, scoped to their workspace", async () => {

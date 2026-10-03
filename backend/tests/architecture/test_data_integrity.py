@@ -34,6 +34,7 @@ def test_business_entities_use_uuid_primary_keys():
         "AuthThrottleEvent",
         "IdempotencyRecord",
         "StageHistory",
+        "TimelineEntry",
     }
     offenders = [
         m.__name__

@@ -5,8 +5,10 @@ import { useCallback, useEffect, useState } from "react";
 
 import type { Lead, LeadOptions } from "@/lib/api/types";
 import { hasCapability, type Viewer } from "@/lib/viewer";
+import { useViewer } from "@/lib/viewer-context";
 import type { Workspace } from "@/lib/workspace";
 
+import { activityKeys, timelineKeys } from "@/features/activities/api";
 import { pipelineKeys } from "@/features/pipeline/api";
 
 import { leadKeys, leadsApi } from "./api";
@@ -22,21 +24,46 @@ export function useLeadOptions() {
  * so no page shows the lead as it was. The lead just written isn't refetched: its fresh copy
  * is in hand, and after a reassignment out of this workspace it would no longer be found.
  * Pipeline data is marked stale too: a reassignment moves the lead's open opportunities,
- * and cards show the lead's name.
+ * and cards show the lead's name. So are activities and timelines: a reassignment moves
+ * the lead's current work, and every lead change is on its timeline.
+ *
+ * A reassignment out of the workspace being viewed (`viewerId`: whose "self" workspace it
+ * is) leaves the lead's own timeline and open work under that workspace alone: the page
+ * still showing them would refetch them where the lead no longer is (a 404 flashing up as
+ * an error while the page moves away). The lead page drops them once it is gone.
  */
-export function syncAfterLeadWrite(queryClient: QueryClient, workspace: Workspace, lead: Lead): void {
+export function syncAfterLeadWrite(queryClient: QueryClient, workspace: Workspace, lead: Lead, viewerId?: string): void {
   const key = leadKeys.detail(workspace, lead.id);
   queryClient.setQueryData(key, lead);
   void queryClient.invalidateQueries({
     queryKey: leadKeys.all,
     predicate: (query) => JSON.stringify(query.queryKey) !== JSON.stringify(key),
   });
+  const left = movedOutOf(workspace, lead, viewerId) ? leftBehind(workspace, lead.id) : [];
+  const keep = (queryKey: readonly unknown[]) => !left.includes(JSON.stringify(queryKey));
   void queryClient.invalidateQueries({ queryKey: pipelineKeys.all });
+  void queryClient.invalidateQueries({ queryKey: activityKeys.all, predicate: (query) => keep(query.queryKey) });
+  void queryClient.invalidateQueries({ queryKey: timelineKeys.all, predicate: (query) => keep(query.queryKey) });
+}
+
+/** Whether `lead` now belongs to someone other than the owner of the workspace viewed. */
+export function movedOutOf(workspace: Workspace, lead: Pick<Lead, "owner">, viewerId?: string): boolean {
+  const owner = workspace.kind === "user" ? workspace.userId : workspace.kind === "self" ? viewerId : undefined;
+  return owner !== undefined && lead.owner.id !== owner;
+}
+
+/** The lead page's own activity queries under `workspace` (serialised query keys). */
+export function leftBehind(workspace: Workspace, leadId: string): string[] {
+  return [
+    JSON.stringify(timelineKeys.subject(workspace, { kind: "lead", id: leadId })),
+    JSON.stringify(activityKeys.current(workspace, { lead: leadId })),
+  ];
 }
 
 export function useLeadWriteSync(workspace: Workspace) {
   const queryClient = useQueryClient();
-  return useCallback((lead: Lead) => syncAfterLeadWrite(queryClient, workspace, lead), [queryClient, workspace]);
+  const viewerId = useViewer()?.id;
+  return useCallback((lead: Lead) => syncAfterLeadWrite(queryClient, workspace, lead, viewerId), [queryClient, workspace, viewerId]);
 }
 
 export function statusName(options: LeadOptions | undefined, key: string): string {

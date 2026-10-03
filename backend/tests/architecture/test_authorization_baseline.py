@@ -90,7 +90,14 @@ def test_workspace_routes_take_the_workspace_segment():
 def test_every_crm_route_is_nested_under_a_workspace():
     """CRM data is only reachable through a resolved AccessScope."""
     for route in AUTHZ_MATRIX:
-        for resource in ("/leads", "/opportunities", "/pipeline-board", "/pipeline-summary"):
+        for resource in (
+            "/leads",
+            "/opportunities",
+            "/pipeline-board",
+            "/pipeline-summary",
+            "/activities",
+            "/activity-summary",
+        ):
             if resource in route:
                 assert route.startswith(f"api/v1/workspaces/<str:workspace>{resource}"), route
 

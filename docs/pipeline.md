@@ -269,6 +269,10 @@ locked an opportunity before its lead; a deliberate mutation of `_lock` produced
 3. **user rows**: `FOR SHARE` (`lock_assignable_user`), leaf locks;
 4. inserts: stage history, audit, idempotency records.
 
+Phase 4 extends the order with **activities** after opportunities and before user rows
+(lead → opportunities → activities → user rows → inserts); activity writes lock the lead
+and never the opportunity ([activities.md](activities.md#lock-order)).
+
 The opportunity's `lead_id` is read first (unlocked: it never changes), then the lead is
 locked, then the opportunity is locked through the scope and re-checked.
 
@@ -356,6 +360,9 @@ bumps the versions of the opportunities it moves.
   the filters change.
 - Lead page: an **Opportunities** section (this workspace's opportunities of the lead,
   10 per page, "+ Opportunity") and **Convert** (a dialog; lands on the new opportunity).
+- Since Phase 4 the opportunity page also shows its **open work** (+ Task, + Meeting) and its
+  **timeline** (creation, stage changes, won/lost/reopened and its activities) with a note
+  box; opportunity writes mark timelines and activity views stale.
 - **No stale data across workspaces**: views are keyed by workspace, every query key
   starts with `["pipeline", kind, <workspace>]`, and "keep the previous data while loading"
   applies only within the same workspace (and, for stage lists, the same stage). Tested:
@@ -379,8 +386,8 @@ Query counts per request are pinned (identical at 10 and 100 opportunities,
 | summary | 3 |
 | history | 4 |
 | pipeline configuration | 4 |
-| move (a write) | 12, independent of how many opportunities the lead has |
-| lead reassignment moving 1 or 25 open opportunities | 10 either way (one lock, one update, one audit insert for all; review: it was 9 + N) |
+| move (a write) | 14 (12 before Phase 4; + the timeline's stage-name snapshot and entry), independent of how many opportunities the lead has |
+| lead reassignment moving 1 or 25 open opportunities | 12 either way (10 before Phase 4; + the activities' lock query and the timeline entry; review: it was 9 + N) |
 
 Benchmark: 300,000 opportunities (100,000 leads, 60 owners, one with 20,100; 60 % open,
 25 % won, 15 % lost, 3 % archived, 20 % undated), EXPLAIN ANALYZE of the exact SQL the

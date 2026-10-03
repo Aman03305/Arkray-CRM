@@ -318,6 +318,143 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/workspaces/{workspace}/activities": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get: operations["activities_list"];
+        readonly put?: never;
+        readonly post: operations["activities_create"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/activities/{activity_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get: operations["activities_retrieve"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch: operations["activities_update"];
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/activities/{activity_id}/archive": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Hide an activity from lists, timelines and counts. */
+        readonly post: operations["activities_archive"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/activities/{activity_id}/cancel": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Cancel a task or a meeting. */
+        readonly post: operations["activities_cancel"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/activities/{activity_id}/complete": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Complete a task, or record that a meeting took place (updates last contact). */
+        readonly post: operations["activities_complete"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/activities/{activity_id}/reopen": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Reopen a completed or cancelled task or meeting (it follows the lead's owner). */
+        readonly post: operations["activities_reopen"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/activities/{activity_id}/restore": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Bring an archived activity back. */
+        readonly post: operations["activities_restore"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/activity-summary": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * @description Open tasks, tasks due today, overdue tasks, today's meetings and upcoming meetings in
+         *     this workspace: the authoritative figures (the dashboard will show exactly these).
+         */
+        readonly get: operations["activity_summary"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/workspaces/{workspace}/leads": {
         readonly parameters: {
             readonly query?: never;
@@ -432,6 +569,26 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         readonly post: operations["leads_change_status"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/leads/{lead_id}/timeline": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * @description A lead's history, newest first: lead events, its opportunities' events and its
+         *     activities, each only while visible in this workspace.
+         */
+        readonly get: operations["leads_timeline"];
+        readonly put?: never;
+        readonly post?: never;
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -560,6 +717,23 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/timeline": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** @description An opportunity's history and its activities, newest first. */
+        readonly get: operations["opportunities_timeline"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/workspaces/{workspace}/pipeline-board": {
         readonly parameters: {
             readonly query?: never;
@@ -605,6 +779,180 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        readonly Activity: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly type: components["schemas"]["ActivityTypeEnum"];
+            readonly title: string;
+            readonly status: (components["schemas"]["ActivityStatusEnum"] | components["schemas"]["NullEnum"]) | null;
+            readonly priority: (components["schemas"]["PriorityEnum"] | components["schemas"]["NullEnum"]) | null;
+            /** Format: date-time */
+            readonly due_at: string | null;
+            /** Format: date-time */
+            readonly starts_at: string | null;
+            /** Format: date-time */
+            readonly ends_at: string | null;
+            /** @description An open task past its due time, or a scheduled meeting past its end. */
+            readonly is_overdue: boolean;
+            /** @description Can be completed now: an open task, or a scheduled meeting that has started (the caller's permissions aside). */
+            readonly completable: boolean;
+            readonly lead: components["schemas"]["ActivityLeadRef"];
+            readonly opportunity: components["schemas"]["ActivityOpportunityRef"] | null;
+            readonly owner: components["schemas"]["UserRef"];
+            /** @description Who created it (a note's author). */
+            readonly created_by: components["schemas"]["UserRef"];
+            /** Format: date-time */
+            readonly completed_at: string | null;
+            /** Format: date-time */
+            readonly cancelled_at: string | null;
+            /** Format: date-time */
+            readonly archived_at: string | null;
+            readonly version: number;
+            /** Format: date-time */
+            readonly created_at: string;
+            /** Format: date-time */
+            readonly updated_at: string;
+            readonly description: string;
+            readonly location: string;
+            readonly meeting_url: string;
+            readonly completed_by: components["schemas"]["UserRef"] | null;
+            readonly cancelled_by: components["schemas"]["UserRef"] | null;
+        };
+        /** @description Every type-specific field (each type accepts only its own: validation.py). */
+        readonly ActivityCreateRequest: {
+            /** @description Subject. Tasks and meetings. */
+            readonly title?: string;
+            /** @description A task's description, a meeting's agenda, a note's text. */
+            readonly description?: string;
+            /**
+             * @description Tasks; normal if omitted.
+             *
+             *     * `low` - Low
+             *     * `normal` - Normal
+             *     * `high` - High
+             */
+            readonly priority?: components["schemas"]["PriorityEnum"];
+            /**
+             * Format: date-time
+             * @description Tasks, optional.
+             */
+            readonly due_at?: string | null;
+            /**
+             * Format: date-time
+             * @description Meetings.
+             */
+            readonly starts_at?: string;
+            /**
+             * Format: date-time
+             * @description Meetings: after the start, within 24 hours.
+             */
+            readonly ends_at?: string;
+            /** @description Meetings. */
+            readonly location?: string;
+            /** @description Meetings: an https:// link. */
+            readonly meeting_url?: string;
+            readonly type: components["schemas"]["ActivityTypeEnum"];
+            /**
+             * Format: uuid
+             * @description The lead (in this workspace) it is about.
+             */
+            readonly lead?: string;
+            /**
+             * Format: uuid
+             * @description An opportunity (in this workspace) it is about; its lead is implied.
+             */
+            readonly opportunity?: string;
+        };
+        readonly ActivityLeadRef: {
+            /** Format: uuid */
+            readonly id: string | null;
+            readonly display_name?: string;
+            readonly organization_name?: string;
+            readonly restricted: boolean;
+        };
+        /** @description A list row: the text only as a bounded preview. */
+        readonly ActivityListItem: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly type: components["schemas"]["ActivityTypeEnum"];
+            readonly title: string;
+            /** @description At most 240 characters. */
+            readonly preview: string;
+            readonly preview_truncated: boolean;
+            readonly status: (components["schemas"]["ActivityStatusEnum"] | components["schemas"]["NullEnum"]) | null;
+            readonly priority: (components["schemas"]["PriorityEnum"] | components["schemas"]["NullEnum"]) | null;
+            /** Format: date-time */
+            readonly due_at: string | null;
+            /** Format: date-time */
+            readonly starts_at: string | null;
+            /** Format: date-time */
+            readonly ends_at: string | null;
+            /** @description An open task past its due time, or a scheduled meeting past its end. */
+            readonly is_overdue: boolean;
+            /** @description Can be completed now: an open task, or a scheduled meeting that has started (the caller's permissions aside). */
+            readonly completable: boolean;
+            readonly lead: components["schemas"]["ActivityLeadRef"];
+            readonly opportunity: components["schemas"]["ActivityOpportunityRef"] | null;
+            readonly owner: components["schemas"]["UserRef"];
+            /** @description Who created it (a note's author). */
+            readonly created_by: components["schemas"]["UserRef"];
+            /** Format: date-time */
+            readonly completed_at: string | null;
+            /** Format: date-time */
+            readonly cancelled_at: string | null;
+            /** Format: date-time */
+            readonly archived_at: string | null;
+            readonly version: number;
+            /** Format: date-time */
+            readonly created_at: string;
+            /** Format: date-time */
+            readonly updated_at: string;
+        };
+        readonly ActivityOpportunityRef: {
+            /** Format: uuid */
+            readonly id: string | null;
+            readonly title?: string;
+            readonly status?: components["schemas"]["StageCategoryEnum"];
+            readonly restricted: boolean;
+        };
+        /** @description One keyset-paginated page of activities (follow `next` / `previous` as given). */
+        readonly ActivityPage: {
+            readonly results: readonly components["schemas"]["ActivityListItem"][];
+            readonly next: string | null;
+            readonly previous: string | null;
+        };
+        /**
+         * @description * `open` - Open
+         *     * `scheduled` - Scheduled
+         *     * `completed` - Completed
+         *     * `cancelled` - Cancelled
+         * @enum {string}
+         */
+        readonly ActivityStatusEnum: "open" | "scheduled" | "completed" | "cancelled";
+        /**
+         * @description The authoritative activity figures for this workspace (archived activities never
+         *     count; "today" is the business day in Asia/Kolkata).
+         */
+        readonly ActivitySummary: {
+            readonly open_tasks: number;
+            /** @description Earlier today included. */
+            readonly tasks_due_today: number;
+            readonly overdue_tasks: number;
+            /** @description Scheduled or completed. */
+            readonly meetings_today: number;
+            /** @description Scheduled, from now on. */
+            readonly upcoming_meetings: number;
+        };
+        /**
+         * @description * `task` - Task
+         *     * `meeting` - Meeting
+         *     * `note` - Note
+         * @enum {string}
+         */
+        readonly ActivityTypeEnum: "task" | "meeting" | "note";
+        readonly ActivityVersionRequest: {
+            readonly version: number;
+        };
         /** @description A user as administrators see it. Expects selectors.admin_user_* querysets. */
         readonly AdminUser: {
             /** Format: uuid */
@@ -706,13 +1054,6 @@ export interface components {
         readonly InvitationTokenRequest: {
             readonly token: string;
         };
-        /**
-         * @description * `self` - self
-         *     * `user` - user
-         *     * `organization` - organization
-         * @enum {string}
-         */
-        readonly KindEnum: "self" | "user" | "organization";
         readonly Lead: {
             /** Format: uuid */
             readonly id: string;
@@ -1018,6 +1359,41 @@ export interface components {
         readonly PasswordResetRequestRequest: {
             readonly email: string;
         };
+        /** @description Every type-specific field (each type accepts only its own: validation.py). */
+        readonly PatchedActivityUpdateRequest: {
+            /** @description Subject. Tasks and meetings. */
+            readonly title?: string;
+            /** @description A task's description, a meeting's agenda, a note's text. */
+            readonly description?: string;
+            /**
+             * @description Tasks; normal if omitted.
+             *
+             *     * `low` - Low
+             *     * `normal` - Normal
+             *     * `high` - High
+             */
+            readonly priority?: components["schemas"]["PriorityEnum"];
+            /**
+             * Format: date-time
+             * @description Tasks, optional.
+             */
+            readonly due_at?: string | null;
+            /**
+             * Format: date-time
+             * @description Meetings.
+             */
+            readonly starts_at?: string;
+            /**
+             * Format: date-time
+             * @description Meetings: after the start, within 24 hours.
+             */
+            readonly ends_at?: string;
+            /** @description Meetings. */
+            readonly location?: string;
+            /** @description Meetings: an https:// link. */
+            readonly meeting_url?: string;
+            readonly version?: number;
+        };
         /** @description Profile fields (all optional here; the services enforce what a lead needs). */
         readonly PatchedLeadUpdateRequest: {
             readonly first_name?: string;
@@ -1102,6 +1478,13 @@ export interface components {
             readonly open_count: number;
         };
         /**
+         * @description * `low` - Low
+         *     * `normal` - Normal
+         *     * `high` - High
+         * @enum {string}
+         */
+        readonly PriorityEnum: "low" | "normal" | "high";
+        /**
          * @description * `hot` - Hot
          *     * `warm` - Warm
          *     * `cold` - Cold
@@ -1176,6 +1559,68 @@ export interface components {
             readonly name: string;
             readonly category: components["schemas"]["CategoryEnum"];
         };
+        readonly TimelineActivity: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly type: components["schemas"]["ActivityTypeEnum"];
+            readonly title: string;
+            readonly preview: string;
+            readonly preview_truncated: boolean;
+            readonly status: (components["schemas"]["ActivityStatusEnum"] | components["schemas"]["NullEnum"]) | null;
+            /** Format: date-time */
+            readonly due_at: string | null;
+            /** Format: date-time */
+            readonly starts_at: string | null;
+            /** Format: date-time */
+            readonly ends_at: string | null;
+        };
+        /**
+         * @description One event. `details` is the event's snapshot (status and stage names as they were,
+         *     people as {id, full_name, is_active}, a meeting's times when it was scheduled); the
+         *     activity and opportunity are the live records, shown only because they are visible.
+         */
+        readonly TimelineEntry: {
+            readonly id: number;
+            readonly kind: components["schemas"]["TimelineKindEnum"];
+            /** Format: date-time */
+            readonly occurred_at: string;
+            /** @description Null when the system acted. */
+            readonly actor: components["schemas"]["UserRef"] | null;
+            readonly details: {
+                readonly [key: string]: unknown;
+            };
+            readonly activity: components["schemas"]["TimelineActivity"] | null;
+            readonly opportunity: components["schemas"]["ActivityOpportunityRef"] | null;
+        };
+        /**
+         * @description * `lead.created` - Lead created
+         *     * `lead.status_changed` - Lead status changed
+         *     * `lead.reassigned` - Lead reassigned
+         *     * `lead.archived` - Lead archived
+         *     * `lead.restored` - Lead restored
+         *     * `opportunity.created` - Opportunity created
+         *     * `opportunity.stage_changed` - Opportunity stage changed
+         *     * `opportunity.won` - Opportunity won
+         *     * `opportunity.lost` - Opportunity lost
+         *     * `opportunity.reopened` - Opportunity reopened
+         *     * `task.created` - Task created
+         *     * `task.completed` - Task completed
+         *     * `task.cancelled` - Task cancelled
+         *     * `task.reopened` - Task reopened
+         *     * `meeting.scheduled` - Meeting scheduled
+         *     * `meeting.rescheduled` - Meeting rescheduled
+         *     * `meeting.completed` - Meeting completed
+         *     * `meeting.cancelled` - Meeting cancelled
+         *     * `meeting.reopened` - Meeting reopened
+         *     * `note.added` - Note added
+         * @enum {string}
+         */
+        readonly TimelineKindEnum: "lead.created" | "lead.status_changed" | "lead.reassigned" | "lead.archived" | "lead.restored" | "opportunity.created" | "opportunity.stage_changed" | "opportunity.won" | "opportunity.lost" | "opportunity.reopened" | "task.created" | "task.completed" | "task.cancelled" | "task.reopened" | "meeting.scheduled" | "meeting.rescheduled" | "meeting.completed" | "meeting.cancelled" | "meeting.reopened" | "note.added";
+        readonly TimelinePage: {
+            readonly results: readonly components["schemas"]["TimelineEntry"][];
+            readonly next: string | null;
+            readonly previous: string | null;
+        };
         readonly UserCreateRequest: {
             readonly first_name: string;
             /** @default  */
@@ -1204,9 +1649,16 @@ export interface components {
             readonly capabilities: readonly string[];
         };
         readonly Workspace: {
-            readonly kind: components["schemas"]["KindEnum"];
+            readonly kind: components["schemas"]["WorkspaceKindEnum"];
             readonly subject: components["schemas"]["WorkspaceSubject"] | null;
         };
+        /**
+         * @description * `self` - self
+         *     * `user` - user
+         *     * `organization` - organization
+         * @enum {string}
+         */
+        readonly WorkspaceKindEnum: "self" | "user" | "organization";
         readonly WorkspaceSubject: {
             /** Format: uuid */
             readonly id: string;
@@ -1693,6 +2145,363 @@ export interface operations {
             };
         };
     };
+    readonly activities_list: {
+        readonly parameters: {
+            readonly query?: {
+                readonly archived?: boolean;
+                /** @description false leaves cancelled tasks and meetings out; true keeps only them. */
+                readonly cancelled?: boolean | null;
+                /** @description Open tasks and scheduled meetings. */
+                readonly current?: boolean;
+                readonly cursor?: string;
+                /** @description Inclusive business date of the due time / start / creation. */
+                readonly date_from?: string;
+                /** @description Inclusive. */
+                readonly date_to?: string;
+                readonly lead?: string;
+                readonly opportunity?: string;
+                /**
+                 * @description * `-created_at` - -created_at
+                 *     * `-scheduled` - -scheduled
+                 *     * `created_at` - created_at
+                 *     * `scheduled` - scheduled
+                 */
+                readonly ordering?: "-created_at" | "-scheduled" | "created_at" | "scheduled";
+                readonly overdue?: boolean;
+                /** @description Organisation-wide workspace only. */
+                readonly owner?: string;
+                readonly page_size?: number;
+                /**
+                 * @description * `open` - Open
+                 *     * `scheduled` - Scheduled
+                 *     * `completed` - Completed
+                 *     * `cancelled` - Cancelled
+                 */
+                readonly status?: "open" | "scheduled" | "completed" | "cancelled";
+                /**
+                 * @description * `task` - Task
+                 *     * `meeting` - Meeting
+                 *     * `note` - Note
+                 */
+                readonly type?: "task" | "meeting" | "note";
+                /** @description Open tasks and scheduled meetings due or starting from now on. */
+                readonly upcoming?: boolean;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ActivityPage"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly activities_create: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: {
+                /** @description A UUID chosen by the client. Repeating the same request with the same key within 24 hours returns the lead created the first time instead of a duplicate. */
+                readonly "Idempotency-Key"?: string;
+            };
+            readonly path: {
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ActivityCreateRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Activity"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly activities_retrieve: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly activity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Activity"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly activities_update: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly activity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["PatchedActivityUpdateRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Activity"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly activities_archive: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly activity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ActivityVersionRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Activity"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly activities_cancel: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly activity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ActivityVersionRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Activity"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly activities_complete: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly activity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ActivityVersionRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Activity"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly activities_reopen: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly activity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ActivityVersionRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Activity"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly activities_restore: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly activity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ActivityVersionRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Activity"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly activity_summary: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ActivitySummary"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     readonly leads_list: {
         readonly parameters: {
             readonly query?: {
@@ -2014,6 +2823,38 @@ export interface operations {
             };
         };
     };
+    readonly leads_timeline: {
+        readonly parameters: {
+            readonly query?: {
+                readonly cursor?: string;
+                readonly page_size?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly lead_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["TimelinePage"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     readonly leads_duplicates: {
         readonly parameters: {
             readonly query?: {
@@ -2323,6 +3164,38 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["Opportunity"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly opportunities_timeline: {
+        readonly parameters: {
+            readonly query?: {
+                readonly cursor?: string;
+                readonly page_size?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly opportunity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["TimelinePage"];
                 };
             };
             /** @description Not found, or outside this workspace. */

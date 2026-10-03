@@ -471,6 +471,439 @@ paths:
           description: ''
         '404':
           description: No response body
+  /api/v1/workspaces/{workspace}/activities:
+    get:
+      operationId: activities_list
+      parameters:
+      - in: query
+        name: archived
+        schema:
+          type: boolean
+          default: false
+      - in: query
+        name: cancelled
+        schema:
+          type: boolean
+          nullable: true
+        description: false leaves cancelled tasks and meetings out; true keeps only
+          them.
+      - in: query
+        name: current
+        schema:
+          type: boolean
+          default: false
+        description: Open tasks and scheduled meetings.
+      - in: query
+        name: cursor
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 1000
+      - in: query
+        name: date_from
+        schema:
+          type: string
+          format: date
+        description: Inclusive business date of the due time / start / creation.
+      - in: query
+        name: date_to
+        schema:
+          type: string
+          format: date
+        description: Inclusive.
+      - in: query
+        name: lead
+        schema:
+          type: string
+          format: uuid
+      - in: query
+        name: opportunity
+        schema:
+          type: string
+          format: uuid
+      - in: query
+        name: ordering
+        schema:
+          enum:
+          - -created_at
+          - -scheduled
+          - created_at
+          - scheduled
+          type: string
+          default: -created_at
+          minLength: 1
+        description: |-
+          * `-created_at` - -created_at
+          * `-scheduled` - -scheduled
+          * `created_at` - created_at
+          * `scheduled` - scheduled
+      - in: query
+        name: overdue
+        schema:
+          type: boolean
+          default: false
+      - in: query
+        name: owner
+        schema:
+          type: string
+          format: uuid
+        description: Organisation-wide workspace only.
+      - in: query
+        name: page_size
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 25
+      - in: query
+        name: status
+        schema:
+          enum:
+          - open
+          - scheduled
+          - completed
+          - cancelled
+          type: string
+          minLength: 1
+        description: |-
+          * `open` - Open
+          * `scheduled` - Scheduled
+          * `completed` - Completed
+          * `cancelled` - Cancelled
+      - in: query
+        name: type
+        schema:
+          enum:
+          - task
+          - meeting
+          - note
+          type: string
+          minLength: 1
+        description: |-
+          * `task` - Task
+          * `meeting` - Meeting
+          * `note` - Note
+      - in: query
+        name: upcoming
+        schema:
+          type: boolean
+          default: false
+        description: Open tasks and scheduled meetings due or starting from now on.
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityPage'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+    post:
+      operationId: activities_create
+      parameters:
+      - in: header
+        name: Idempotency-Key
+        schema:
+          type: string
+          format: uuid
+        description: A UUID chosen by the client. Repeating the same request with
+          the same key within 24 hours returns the lead created the first time instead
+          of a duplicate.
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivityCreateRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Activity'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/activities/{activity_id}:
+    get:
+      operationId: activities_retrieve
+      parameters:
+      - in: path
+        name: activity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Activity'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+    patch:
+      operationId: activities_update
+      parameters:
+      - in: path
+        name: activity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedActivityUpdateRequest'
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Activity'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/activities/{activity_id}/archive:
+    post:
+      operationId: activities_archive
+      summary: Hide an activity from lists, timelines and counts.
+      parameters:
+      - in: path
+        name: activity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivityVersionRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Activity'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/activities/{activity_id}/cancel:
+    post:
+      operationId: activities_cancel
+      summary: Cancel a task or a meeting.
+      parameters:
+      - in: path
+        name: activity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivityVersionRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Activity'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/activities/{activity_id}/complete:
+    post:
+      operationId: activities_complete
+      summary: Complete a task, or record that a meeting took place (updates last
+        contact).
+      parameters:
+      - in: path
+        name: activity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivityVersionRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Activity'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/activities/{activity_id}/reopen:
+    post:
+      operationId: activities_reopen
+      summary: Reopen a completed or cancelled task or meeting (it follows the lead's
+        owner).
+      parameters:
+      - in: path
+        name: activity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivityVersionRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Activity'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/activities/{activity_id}/restore:
+    post:
+      operationId: activities_restore
+      summary: Bring an archived activity back.
+      parameters:
+      - in: path
+        name: activity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivityVersionRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Activity'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/activity-summary:
+    get:
+      operationId: activity_summary
+      description: |-
+        Open tasks, tasks due today, overdue tasks, today's meetings and upcoming meetings in
+        this workspace: the authoritative figures (the dashboard will show exactly these).
+      parameters:
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivitySummary'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
   /api/v1/workspaces/{workspace}/leads:
     get:
       operationId: leads_list
@@ -858,6 +1291,50 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Lead'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/leads/{lead_id}/timeline:
+    get:
+      operationId: leads_timeline
+      description: |-
+        A lead's history, newest first: lead events, its opportunities' events and its
+        activities, each only while visible in this workspace.
+      parameters:
+      - in: query
+        name: cursor
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 1000
+      - in: path
+        name: lead_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: query
+        name: page_size
+        schema:
+          type: integer
+          maximum: 50
+          minimum: 1
+          default: 20
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimelinePage'
           description: ''
         '404':
           description: Not found, or outside this workspace.
@@ -1274,6 +1751,48 @@ paths:
           description: ''
         '404':
           description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/timeline:
+    get:
+      operationId: opportunities_timeline
+      description: An opportunity's history and its activities, newest first.
+      parameters:
+      - in: query
+        name: cursor
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 1000
+      - in: path
+        name: opportunity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: query
+        name: page_size
+        schema:
+          type: integer
+          maximum: 50
+          minimum: 1
+          default: 20
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimelinePage'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
   /api/v1/workspaces/{workspace}/pipeline-board:
     get:
       operationId: pipeline_board
@@ -1428,6 +1947,433 @@ paths:
           description: Not found, or outside this workspace.
 components:
   schemas:
+    Activity:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        type:
+          allOf:
+          - $ref: '#/components/schemas/ActivityTypeEnum'
+          readOnly: true
+        title:
+          type: string
+          readOnly: true
+        status:
+          readOnly: true
+          nullable: true
+          oneOf:
+          - $ref: '#/components/schemas/ActivityStatusEnum'
+          - $ref: '#/components/schemas/NullEnum'
+        priority:
+          readOnly: true
+          nullable: true
+          oneOf:
+          - $ref: '#/components/schemas/PriorityEnum'
+          - $ref: '#/components/schemas/NullEnum'
+        due_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        starts_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        ends_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        is_overdue:
+          type: boolean
+          readOnly: true
+          description: An open task past its due time, or a scheduled meeting past
+            its end.
+        completable:
+          type: boolean
+          readOnly: true
+          description: 'Can be completed now: an open task, or a scheduled meeting
+            that has started (the caller''s permissions aside).'
+        lead:
+          allOf:
+          - $ref: '#/components/schemas/ActivityLeadRef'
+          readOnly: true
+        opportunity:
+          allOf:
+          - $ref: '#/components/schemas/ActivityOpportunityRef'
+          nullable: true
+          readOnly: true
+        owner:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+        created_by:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+          description: Who created it (a note's author).
+        completed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        cancelled_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        archived_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        version:
+          type: integer
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+        description:
+          type: string
+          readOnly: true
+        location:
+          type: string
+          readOnly: true
+        meeting_url:
+          type: string
+          readOnly: true
+        completed_by:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+          nullable: true
+        cancelled_by:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+          nullable: true
+      required:
+      - archived_at
+      - cancelled_at
+      - cancelled_by
+      - completable
+      - completed_at
+      - completed_by
+      - created_at
+      - created_by
+      - description
+      - due_at
+      - ends_at
+      - id
+      - is_overdue
+      - lead
+      - location
+      - meeting_url
+      - opportunity
+      - owner
+      - priority
+      - starts_at
+      - status
+      - title
+      - type
+      - updated_at
+      - version
+    ActivityCreateRequest:
+      type: object
+      description: 'Every type-specific field (each type accepts only its own: validation.py).'
+      properties:
+        title:
+          type: string
+          description: Subject. Tasks and meetings.
+          maxLength: 200
+        description:
+          type: string
+          description: A task's description, a meeting's agenda, a note's text.
+          maxLength: 10000
+        priority:
+          allOf:
+          - $ref: '#/components/schemas/PriorityEnum'
+          description: |-
+            Tasks; normal if omitted.
+
+            * `low` - Low
+            * `normal` - Normal
+            * `high` - High
+        due_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Tasks, optional.
+        starts_at:
+          type: string
+          format: date-time
+          description: Meetings.
+        ends_at:
+          type: string
+          format: date-time
+          description: 'Meetings: after the start, within 24 hours.'
+        location:
+          type: string
+          description: Meetings.
+          maxLength: 200
+        meeting_url:
+          type: string
+          description: 'Meetings: an https:// link.'
+          maxLength: 500
+        type:
+          $ref: '#/components/schemas/ActivityTypeEnum'
+        lead:
+          type: string
+          format: uuid
+          description: The lead (in this workspace) it is about.
+        opportunity:
+          type: string
+          format: uuid
+          description: An opportunity (in this workspace) it is about; its lead is
+            implied.
+      required:
+      - type
+    ActivityLeadRef:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          nullable: true
+        display_name:
+          type: string
+        organization_name:
+          type: string
+        restricted:
+          type: boolean
+      required:
+      - id
+      - restricted
+    ActivityListItem:
+      type: object
+      description: 'A list row: the text only as a bounded preview.'
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        type:
+          allOf:
+          - $ref: '#/components/schemas/ActivityTypeEnum'
+          readOnly: true
+        title:
+          type: string
+          readOnly: true
+        preview:
+          type: string
+          readOnly: true
+          description: At most 240 characters.
+        preview_truncated:
+          type: boolean
+          readOnly: true
+        status:
+          readOnly: true
+          nullable: true
+          oneOf:
+          - $ref: '#/components/schemas/ActivityStatusEnum'
+          - $ref: '#/components/schemas/NullEnum'
+        priority:
+          readOnly: true
+          nullable: true
+          oneOf:
+          - $ref: '#/components/schemas/PriorityEnum'
+          - $ref: '#/components/schemas/NullEnum'
+        due_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        starts_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        ends_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        is_overdue:
+          type: boolean
+          readOnly: true
+          description: An open task past its due time, or a scheduled meeting past
+            its end.
+        completable:
+          type: boolean
+          readOnly: true
+          description: 'Can be completed now: an open task, or a scheduled meeting
+            that has started (the caller''s permissions aside).'
+        lead:
+          allOf:
+          - $ref: '#/components/schemas/ActivityLeadRef'
+          readOnly: true
+        opportunity:
+          allOf:
+          - $ref: '#/components/schemas/ActivityOpportunityRef'
+          nullable: true
+          readOnly: true
+        owner:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+        created_by:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+          description: Who created it (a note's author).
+        completed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        cancelled_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        archived_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        version:
+          type: integer
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - archived_at
+      - cancelled_at
+      - completable
+      - completed_at
+      - created_at
+      - created_by
+      - due_at
+      - ends_at
+      - id
+      - is_overdue
+      - lead
+      - opportunity
+      - owner
+      - preview
+      - preview_truncated
+      - priority
+      - starts_at
+      - status
+      - title
+      - type
+      - updated_at
+      - version
+    ActivityOpportunityRef:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          nullable: true
+        title:
+          type: string
+        status:
+          $ref: '#/components/schemas/StageCategoryEnum'
+        restricted:
+          type: boolean
+      required:
+      - id
+      - restricted
+    ActivityPage:
+      type: object
+      description: One keyset-paginated page of activities (follow `next` / `previous`
+        as given).
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActivityListItem'
+        next:
+          type: string
+          nullable: true
+        previous:
+          type: string
+          nullable: true
+      required:
+      - next
+      - previous
+      - results
+    ActivityStatusEnum:
+      enum:
+      - open
+      - scheduled
+      - completed
+      - cancelled
+      type: string
+      description: |-
+        * `open` - Open
+        * `scheduled` - Scheduled
+        * `completed` - Completed
+        * `cancelled` - Cancelled
+    ActivitySummary:
+      type: object
+      description: |-
+        The authoritative activity figures for this workspace (archived activities never
+        count; "today" is the business day in Asia/Kolkata).
+      properties:
+        open_tasks:
+          type: integer
+        tasks_due_today:
+          type: integer
+          description: Earlier today included.
+        overdue_tasks:
+          type: integer
+        meetings_today:
+          type: integer
+          description: Scheduled or completed.
+        upcoming_meetings:
+          type: integer
+          description: Scheduled, from now on.
+      required:
+      - meetings_today
+      - open_tasks
+      - overdue_tasks
+      - tasks_due_today
+      - upcoming_meetings
+    ActivityTypeEnum:
+      enum:
+      - task
+      - meeting
+      - note
+      type: string
+      description: |-
+        * `task` - Task
+        * `meeting` - Meeting
+        * `note` - Note
+    ActivityVersionRequest:
+      type: object
+      properties:
+        version:
+          type: integer
+          minimum: 1
+      required:
+      - version
     AdminUser:
       type: object
       description: A user as administrators see it. Expects selectors.admin_user_*
@@ -1711,16 +2657,6 @@ components:
           maxLength: 128
       required:
       - token
-    KindEnum:
-      enum:
-      - self
-      - user
-      - organization
-      type: string
-      description: |-
-        * `self` - self
-        * `user` - user
-        * `organization` - organization
     Lead:
       type: object
       properties:
@@ -2600,6 +3536,51 @@ components:
           maxLength: 254
       required:
       - email
+    PatchedActivityUpdateRequest:
+      type: object
+      description: 'Every type-specific field (each type accepts only its own: validation.py).'
+      properties:
+        title:
+          type: string
+          description: Subject. Tasks and meetings.
+          maxLength: 200
+        description:
+          type: string
+          description: A task's description, a meeting's agenda, a note's text.
+          maxLength: 10000
+        priority:
+          allOf:
+          - $ref: '#/components/schemas/PriorityEnum'
+          description: |-
+            Tasks; normal if omitted.
+
+            * `low` - Low
+            * `normal` - Normal
+            * `high` - High
+        due_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Tasks, optional.
+        starts_at:
+          type: string
+          format: date-time
+          description: Meetings.
+        ends_at:
+          type: string
+          format: date-time
+          description: 'Meetings: after the start, within 24 hours.'
+        location:
+          type: string
+          description: Meetings.
+          maxLength: 200
+        meeting_url:
+          type: string
+          description: 'Meetings: an https:// link.'
+          maxLength: 500
+        version:
+          type: integer
+          minimum: 1
     PatchedLeadUpdateRequest:
       type: object
       description: Profile fields (all optional here; the services enforce what a
@@ -2813,6 +3794,16 @@ components:
       - open_count
       - pipeline_value
       - weighted_pipeline
+    PriorityEnum:
+      enum:
+      - low
+      - normal
+      - high
+      type: string
+      description: |-
+        * `low` - Low
+        * `normal` - Normal
+        * `high` - High
     RatingEnum:
       enum:
       - hot
@@ -3004,6 +3995,149 @@ components:
       - category
       - key
       - name
+    TimelineActivity:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/ActivityTypeEnum'
+        title:
+          type: string
+        preview:
+          type: string
+        preview_truncated:
+          type: boolean
+        status:
+          nullable: true
+          oneOf:
+          - $ref: '#/components/schemas/ActivityStatusEnum'
+          - $ref: '#/components/schemas/NullEnum'
+        due_at:
+          type: string
+          format: date-time
+          nullable: true
+        starts_at:
+          type: string
+          format: date-time
+          nullable: true
+        ends_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+      - due_at
+      - ends_at
+      - id
+      - preview
+      - preview_truncated
+      - starts_at
+      - status
+      - title
+      - type
+    TimelineEntry:
+      type: object
+      description: |-
+        One event. `details` is the event's snapshot (status and stage names as they were,
+        people as {id, full_name, is_active}, a meeting's times when it was scheduled); the
+        activity and opportunity are the live records, shown only because they are visible.
+      properties:
+        id:
+          type: integer
+        kind:
+          $ref: '#/components/schemas/TimelineKindEnum'
+        occurred_at:
+          type: string
+          format: date-time
+        actor:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          nullable: true
+          description: Null when the system acted.
+        details:
+          type: object
+          additionalProperties: true
+          readOnly: true
+        activity:
+          allOf:
+          - $ref: '#/components/schemas/TimelineActivity'
+          nullable: true
+          readOnly: true
+        opportunity:
+          allOf:
+          - $ref: '#/components/schemas/ActivityOpportunityRef'
+          nullable: true
+          readOnly: true
+      required:
+      - activity
+      - actor
+      - details
+      - id
+      - kind
+      - occurred_at
+      - opportunity
+    TimelineKindEnum:
+      enum:
+      - lead.created
+      - lead.status_changed
+      - lead.reassigned
+      - lead.archived
+      - lead.restored
+      - opportunity.created
+      - opportunity.stage_changed
+      - opportunity.won
+      - opportunity.lost
+      - opportunity.reopened
+      - task.created
+      - task.completed
+      - task.cancelled
+      - task.reopened
+      - meeting.scheduled
+      - meeting.rescheduled
+      - meeting.completed
+      - meeting.cancelled
+      - meeting.reopened
+      - note.added
+      type: string
+      description: |-
+        * `lead.created` - Lead created
+        * `lead.status_changed` - Lead status changed
+        * `lead.reassigned` - Lead reassigned
+        * `lead.archived` - Lead archived
+        * `lead.restored` - Lead restored
+        * `opportunity.created` - Opportunity created
+        * `opportunity.stage_changed` - Opportunity stage changed
+        * `opportunity.won` - Opportunity won
+        * `opportunity.lost` - Opportunity lost
+        * `opportunity.reopened` - Opportunity reopened
+        * `task.created` - Task created
+        * `task.completed` - Task completed
+        * `task.cancelled` - Task cancelled
+        * `task.reopened` - Task reopened
+        * `meeting.scheduled` - Meeting scheduled
+        * `meeting.rescheduled` - Meeting rescheduled
+        * `meeting.completed` - Meeting completed
+        * `meeting.cancelled` - Meeting cancelled
+        * `meeting.reopened` - Meeting reopened
+        * `note.added` - Note added
+    TimelinePage:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/TimelineEntry'
+        next:
+          type: string
+          nullable: true
+        previous:
+          type: string
+          nullable: true
+      required:
+      - next
+      - previous
+      - results
     UserCreateRequest:
       type: object
       properties:
@@ -3089,7 +4223,7 @@ components:
       type: object
       properties:
         kind:
-          $ref: '#/components/schemas/KindEnum'
+          $ref: '#/components/schemas/WorkspaceKindEnum'
         subject:
           allOf:
           - $ref: '#/components/schemas/WorkspaceSubject'
@@ -3097,6 +4231,16 @@ components:
       required:
       - kind
       - subject
+    WorkspaceKindEnum:
+      enum:
+      - self
+      - user
+      - organization
+      type: string
+      description: |-
+        * `self` - self
+        * `user` - user
+        * `organization` - organization
     WorkspaceSubject:
       type: object
       properties:

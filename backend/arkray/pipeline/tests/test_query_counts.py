@@ -175,5 +175,6 @@ def test_moving_an_opportunity_costs_the_same_whatever_else_exists(
         )
     assert response.status_code == 200
     # session, user, savepoint, lead id, lead lock, opportunity lock, target stage, update,
-    # history insert, audit insert, release savepoint, reload
-    assert len(queries) == 12
+    # history insert, audit insert, release savepoint, reload; since Phase 4 also the
+    # timeline's stage-name snapshot and its entry (arkray.activities.subscribers)
+    assert len(queries) == 14

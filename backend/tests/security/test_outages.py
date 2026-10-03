@@ -130,3 +130,56 @@ class TestMailOutage:
             format="json",
         )
         assert response.status_code == 204
+
+
+class TestActivitiesKeepWorking:
+    """Activities depend on PostgreSQL only: no cache, broker, worker or provider is on the
+    path of a create, a completion, a list or a timeline, and nothing is queued."""
+
+    def journey(self, owner):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from tests.factories import LeadFactory, MeetingFactory
+
+        client = signed_in(owner)
+        lead = LeadFactory(owner=owner)
+        me = "/api/v1/workspaces/me"
+        created = client.post(
+            f"{me}/activities", {"type": "task", "lead": str(lead.pk), "title": "x"}, format="json"
+        )
+        assert created.status_code == 201
+        start = timezone.now() - timedelta(hours=2)
+        meeting = MeetingFactory(lead=lead, starts_at=start, ends_at=start + timedelta(hours=1))
+        assert (
+            client.post(
+                f"{me}/activities/{meeting.pk}/complete", {"version": 1}, format="json"
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                f"{me}/activities",
+                {"type": "note", "lead": str(lead.pk), "description": "y"},
+                format="json",
+            ).status_code
+            == 201
+        )
+        assert client.get(f"{me}/activities").status_code == 200
+        assert client.get(f"{me}/activity-summary").status_code == 200
+        assert len(client.get(f"{me}/leads/{lead.pk}/timeline").json()["results"]) == 3
+        assert not OutboxEvent.objects.exists()
+
+    @pytest.mark.usefixtures("redis_down")
+    def test_during_a_redis_outage(self, user_a):
+        started = time.monotonic()
+        self.journey(user_a)
+        assert time.monotonic() - started < 10  # fail-fast cache: no multi-second stalls
+
+    def test_during_a_broker_outage(self, user_a, monkeypatch):
+        def broker_down(*args, **kwargs):
+            raise OperationalError("broker unavailable")
+
+        monkeypatch.setattr(tasks.process_outbox_event, "apply_async", broker_down)
+        self.journey(user_a)

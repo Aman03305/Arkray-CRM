@@ -18,9 +18,11 @@ const MARGIN = 8;
  * A "more actions" menu button (WAI-ARIA menu button pattern): Enter/Space/ArrowDown open
  * it, arrow keys move between items, Escape closes and returns focus to the button.
  * The menu is portalled and positioned against the viewport, so a scrolling table can't
- * clip it; near the bottom of the screen it opens upwards.
+ * clip it; near the bottom of the screen it opens upwards. While `disabled` (an action on
+ * its row is running) it stays focusable but doesn't open (aria-disabled, so focus coming
+ * back to it from the menu isn't lost).
  */
-export function ActionMenu({ label, actions }: { label: string; actions: readonly MenuAction[] }) {
+export function ActionMenu({ label, actions, disabled = false }: { label: string; actions: readonly MenuAction[]; disabled?: boolean }) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<{ top: number; right: number } | null>(null);
   const menuId = useId();
@@ -104,20 +106,25 @@ export function ActionMenu({ label, actions }: { label: string; actions: readonl
         type="button"
         aria-label={label}
         aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={open ? menuId : undefined}
-        onClick={() => (open ? close(false) : setOpen(true))}
+        aria-expanded={open && !disabled}
+        aria-controls={open && !disabled ? menuId : undefined}
+        aria-disabled={disabled || undefined}
+        onClick={() => {
+          if (disabled) return;
+          if (open) close(false);
+          else setOpen(true);
+        }}
         onKeyDown={(event) => {
           if (event.key === "ArrowDown") {
             event.preventDefault();
-            setOpen(true);
+            if (!disabled) setOpen(true);
           }
         }}
-        className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+        className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-800 aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
       >
         <MoreHorizontal aria-hidden="true" className="size-4" />
       </button>
-      {open
+      {open && !disabled
         ? createPortal(
             <ul
               ref={menu}

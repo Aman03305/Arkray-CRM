@@ -252,8 +252,10 @@ def test_reassignment_query_count_is_constant(n):
         )
     assert Opportunity.objects.filter(lead=lead, owner=b).count() == n
     # savepoint, lead lock, user share lock, lead update, lead audit, opportunities lock,
-    # opportunities update, one audit insert for all of them, release, reload
-    assert len(queries) == 10
+    # opportunities update, one audit insert for all of them, release, reload; since Phase 4
+    # also the activities' lock query (no current work here) and the timeline entry
+    # (arkray/activities/tests/test_reassignment.py pins the count with activities moving)
+    assert len(queries) == 12
 
 
 # --- P3: a Phase 2 "Converted" lead without an opportunity can be converted properly ---------

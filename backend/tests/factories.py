@@ -1,11 +1,13 @@
 """Test data factories shared by all module test suites."""
 
 import importlib
+from datetime import timedelta
 from decimal import Decimal
 
 import factory
 from django.utils import timezone
 
+from arkray.activities.models import Activity, ActivityStatus, ActivityType, Priority
 from arkray.identity.models import Role, User, UserStatus
 from arkray.leads.models import Lead, LeadSource, LeadStatus
 from arkray.pipeline.models import Opportunity, Pipeline, Stage
@@ -130,3 +132,70 @@ class OpportunityFactory(factory.django.DjangoModelFactory[Opportunity]):
     closed_at = factory.LazyAttribute(
         lambda o: None if o.stage.category == "open" else timezone.now()
     )
+
+
+_INITIAL_STATUS = {
+    ActivityType.TASK: ActivityStatus.OPEN,
+    ActivityType.MEETING: ActivityStatus.SCHEDULED,
+    ActivityType.NOTE: None,
+}
+
+
+class ActivityFactory(factory.django.DjangoModelFactory[Activity]):
+    """An activity that respects the database invariants: owned by its lead's owner (pass
+    `owner` only for completed/cancelled work, which may keep a previous owner), type-
+    specific columns filled exactly for its type, completion/cancellation fields set exactly
+    for those statuses, the lead of its opportunity. Created directly, bypassing services (no
+    timeline or audit): tests of the services go through arkray.activities.services."""
+
+    class Meta:
+        model = Activity
+
+    type = ActivityType.TASK
+    opportunity = None
+    lead = factory.LazyAttribute(
+        lambda o: o.opportunity.lead if o.opportunity is not None else LeadFactory()
+    )
+    owner = factory.LazyAttribute(lambda o: o.lead.owner)
+    created_by = factory.LazyAttribute(lambda o: o.owner)
+    title = factory.LazyAttribute(
+        lambda o: "" if o.type == ActivityType.NOTE else f"{o.type.title()} subject"
+    )
+    description = factory.LazyAttribute(
+        lambda o: "Spoke about the analyser upgrade." if o.type == ActivityType.NOTE else ""
+    )
+    status = factory.LazyAttribute(lambda o: _INITIAL_STATUS[ActivityType(o.type)])
+    priority = factory.LazyAttribute(
+        lambda o: Priority.NORMAL if o.type == ActivityType.TASK else None
+    )
+    due_at = None
+    starts_at = factory.LazyAttribute(
+        lambda o: timezone.now() + timedelta(days=1) if o.type == ActivityType.MEETING else None
+    )
+    ends_at = factory.LazyAttribute(
+        lambda o: o.starts_at + timedelta(hours=1) if o.starts_at is not None else None
+    )
+    completed_at = factory.LazyAttribute(
+        lambda o: timezone.now() if o.status == ActivityStatus.COMPLETED else None
+    )
+    completed_by = factory.LazyAttribute(
+        lambda o: o.owner if o.status == ActivityStatus.COMPLETED else None
+    )
+    cancelled_at = factory.LazyAttribute(
+        lambda o: timezone.now() if o.status == ActivityStatus.CANCELLED else None
+    )
+    cancelled_by = factory.LazyAttribute(
+        lambda o: o.owner if o.status == ActivityStatus.CANCELLED else None
+    )
+
+
+class TaskFactory(ActivityFactory):
+    type = ActivityType.TASK
+
+
+class MeetingFactory(ActivityFactory):
+    type = ActivityType.MEETING
+
+
+class NoteFactory(ActivityFactory):
+    type = ActivityType.NOTE

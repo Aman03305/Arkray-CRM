@@ -15,15 +15,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, timedelta
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
-from django.conf import settings
 from django.db.models import BooleanField, ExpressionWrapper, Q, QuerySet, Value
 from django.db.models.functions import Lower, Upper
 
 from arkray.core.access import AccessScope
+from arkray.core.business_time import business_midnight
 from arkray.core.errors import InvalidInputError, NotFoundError
 from arkray.core.keyset import KeysetOrdering, SortKey
 from arkray.core.text import TextRejected, clean_line
@@ -77,10 +76,6 @@ class LeadFilters:
     archived: bool = False
 
 
-def _business_midnight(day: date) -> datetime:
-    return datetime.combine(day, time.min, tzinfo=ZoneInfo(settings.CRM_TIME_ZONE))
-
-
 def _contains(needle: str) -> Q:
     # upper() in PostgreSQL, like the indexed column, so both sides fold alike.
     return Q(search_text__contains=Upper(Value(needle)))
@@ -124,9 +119,9 @@ def lead_list(scope: AccessScope, filters: LeadFilters) -> QuerySet[Lead]:
     if filters.rating is not None:
         queryset = queryset.filter(rating=filters.rating)
     if filters.created_from is not None:
-        queryset = queryset.filter(created_at__gte=_business_midnight(filters.created_from))
+        queryset = queryset.filter(created_at__gte=business_midnight(filters.created_from))
     if filters.created_to is not None:
-        end = _business_midnight(filters.created_to + timedelta(days=1))
+        end = business_midnight(filters.created_to + timedelta(days=1))
         queryset = queryset.filter(created_at__lt=end)
     queryset = _searched(queryset, filters.q)
     return queryset.select_related("owner", "status", "source").only(
@@ -169,6 +164,18 @@ def lead_detail(scope: AccessScope, lead_id: UUID) -> Lead:
     """One lead, if `scope` may see it. Otherwise NotFoundError, exactly as if it did not
     exist, so a guessed id reveals nothing."""
     lead = _with_relations(scope.apply(Lead.objects.filter(pk=lead_id))).first()
+    if lead is None:
+        raise NotFoundError()
+    return lead
+
+
+def lead_ref(scope: AccessScope, lead_id: UUID) -> Lead:
+    """The identity and state of a lead `scope` may see (id, owner, archive state), for
+    modules whose records hang off leads (Phase 4: whether its timeline may be read).
+    NotFoundError outside the scope. Not a display read: no names or contact data."""
+    lead = (
+        scope.apply(Lead.objects.filter(pk=lead_id)).only("id", "owner_id", "archived_at").first()
+    )
     if lead is None:
         raise NotFoundError()
     return lead

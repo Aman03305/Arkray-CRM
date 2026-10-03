@@ -1,6 +1,6 @@
 # 0009. One activity model for tasks, meetings and notes
 
-Status: Accepted
+Status: Accepted (refined by [0020](0020-activity-integrity.md) and [0021](0021-materialized-timeline.md))
 Date: 2026-09-30
 
 ## Context

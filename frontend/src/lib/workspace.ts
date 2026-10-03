@@ -94,3 +94,8 @@ export function newOpportunityHref(workspace: Workspace, leadId?: string): strin
   const base = `${workspaceHref(workspace, "pipeline")}/new`;
   return leadId ? `${base}?lead=${encodeURIComponent(leadId)}` : base;
 }
+
+/** An activity's page in this workspace, e.g. /activities/{id} or /admin/users/{userId}/activities/{id}. */
+export function activityHref(workspace: Workspace, activityId: string): string {
+  return `${workspaceHref(workspace, "activities")}/${encodeURIComponent(activityId)}`;
+}

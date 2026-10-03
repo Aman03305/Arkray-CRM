@@ -1,6 +1,7 @@
 import uuid
 
 import pytest
+from django.db.models import Q
 
 from arkray.core.access import AccessScope, ScopeKind
 
@@ -74,3 +75,13 @@ class TestInvariants:
         assert AccessScope.own(actor).permits_owner(actor)
         assert not AccessScope.own(actor).permits_owner(other)
         assert AccessScope.organization(actor).permits_owner(other)
+
+
+def test_condition_restricts_through_a_relation_like_apply():
+    actor, other = uuid.uuid4(), uuid.uuid4()
+    assert AccessScope.own(actor).condition("activity__owner_id") == Q(
+        activity__owner_id__in=frozenset({actor})
+    )
+    assert AccessScope.for_user(actor, other).condition("x") == Q(x__in=frozenset({other}))
+    # Only an organisation-wide scope is unrestricted; there is no empty-owners shortcut.
+    assert AccessScope.organization(actor).condition("x") == Q()

@@ -31,6 +31,7 @@ def _rule(access: str, *methods: str) -> RouteRule:
 USERS_MANAGE = "capability:users.manage"
 ASSIGN_ANY = "capability:crm.assign_any"
 OPPORTUNITY = "api/v1/workspaces/<str:workspace>/opportunities/<uuid:opportunity_id>"
+ACTIVITY = "api/v1/workspaces/<str:workspace>/activities/<uuid:activity_id>"
 
 # Route pattern (as produced by the URL resolver) -> rule.
 AUTHZ_MATRIX: dict[str, RouteRule] = {
@@ -77,4 +78,17 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     f"{OPPORTUNITY}/history": _rule("workspace", "GET"),
     "api/v1/workspaces/<str:workspace>/leads/<uuid:lead_id>/convert": _rule("workspace", "POST"),
     "api/v1/config/pipelines": _rule("authenticated", "GET"),
+    # --- activities (Phase 4). Same workspace rules: the scope decides which activities,
+    # timelines and counts exist; writes in delegated workspaces need crm.manage_any. Nobody
+    # chooses an owner (current work follows the lead); lifecycle changes are actions. -------
+    "api/v1/workspaces/<str:workspace>/activities": _rule("workspace", "GET", "POST"),
+    "api/v1/workspaces/<str:workspace>/activity-summary": _rule("workspace", "GET"),
+    f"{ACTIVITY}": _rule("workspace", "GET", "PATCH"),
+    f"{ACTIVITY}/complete": _rule("workspace", "POST"),
+    f"{ACTIVITY}/cancel": _rule("workspace", "POST"),
+    f"{ACTIVITY}/reopen": _rule("workspace", "POST"),
+    f"{ACTIVITY}/archive": _rule("workspace", "POST"),
+    f"{ACTIVITY}/restore": _rule("workspace", "POST"),
+    "api/v1/workspaces/<str:workspace>/leads/<uuid:lead_id>/timeline": _rule("workspace", "GET"),
+    f"{OPPORTUNITY}/timeline": _rule("workspace", "GET"),
 }

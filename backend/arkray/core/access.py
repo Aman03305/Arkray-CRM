@@ -21,6 +21,8 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, TypeVar
 from uuid import UUID
 
+from django.db.models import Q
+
 if TYPE_CHECKING:
     from django.db.models import Model, QuerySet
 
@@ -102,3 +104,11 @@ class AccessScope:
         if self.is_organization_wide:
             return queryset
         return queryset.filter(**{f"{owner_field}__in": self.owner_ids})
+
+    def condition(self, owner_field: str) -> Q:
+        """The same restriction as a Q object, for records reached through a relation inside
+        a larger condition (a timeline entry is visible if *its activity* is). An empty Q
+        (no restriction) only for organisation-wide scopes, never for an empty owner set."""
+        if self.is_organization_wide:
+            return Q()
+        return Q(**{f"{owner_field}__in": self.owner_ids})

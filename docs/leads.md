@@ -34,7 +34,7 @@ or many; activities (Phase 4) will too.
 | `rating` | optional `hot`, `warm` or `cold`: the salesperson's own judgement, **not** a computed or AI score (none exists in Phase 2) |
 | `owner` | required; the one ownership concept ("owner" = "assigned to"); changed only by reassignment |
 | `created_by` | set once; provenance (for example the admin who created a lead for a salesperson) |
-| `last_contacted_at` | optional timestamp entered by the user; not in the future (5 min skew allowed), not before 2000; Phase 4 activities will also advance it |
+| `last_contacted_at` | optional timestamp entered by the user; not in the future (5 min skew allowed), not before 2000; since Phase 4 also advanced (never moved back) when a meeting is completed ([activities.md](activities.md#last-contacted)) |
 | `description` | optional multi-line text, up to 5,000 characters |
 | `archived_at` | set by archive, cleared by restore |
 | `version` | optimistic-concurrency counter |
@@ -50,10 +50,10 @@ or many; activities (Phase 4) will too.
 - `converted_at` (in the Phase 0 draft) is not stored: conversion is defined by
   opportunities (Phase 3, [ADR-0019](adr/0019-lead-conversion.md)), and the audit trail
   records every conversion and status change with its time.
-- **Notes and the lead timeline** (planned for Phase 2 in the Phase 0 draft) move to
-  Phase 4, where notes are activities and the timeline is built with them. Until then the
-  lead page reserves the space ("Activities will appear here.") without inventing entries,
-  and the audit log keeps the history (created, edited, status, reassignment, archive).
+- **Notes and the lead timeline** (planned for Phase 2 in the Phase 0 draft) were built in
+  Phase 4: notes are activities of type note (there is no `notes` column) and the lead page
+  shows its open work and its timeline, backfilled from the audit log for leads created
+  before Phase 4 ([activities.md](activities.md)).
 - CSV import/export (listed for Phase 2 in the Phase 0 security draft) is not part of this
   phase's brief and is deferred; its controls stay designed in [security.md](security.md).
 
@@ -143,7 +143,9 @@ Reassign lead (crm.assign_any; lead inside the workspace; current version; not a
         new owner, one opportunity.owner_changed audit event each; won and lost ones
         keep the owner who closed them. The database refuses to commit an open
         opportunity whose owner isn't its lead's owner (docs/pipeline.md#ownership).
-        Phase 4: current activities follow the same way.
+        Phase 4 (built): open tasks, scheduled meetings and notes follow the lead (one
+        {type}.owner_changed audit event each; notes keep their author); completed and
+        cancelled work stays with whoever had it; the timeline records the reassignment.
   → commit (all or nothing)
 ```
 
@@ -272,7 +274,10 @@ The actor is whoever acted; `subject_user_id` is the lead's owner when that is s
 else (the previous owner for a reassignment). No-op and refused requests write nothing.
 Domain events run in the same transaction ([ADR-0017](adr/0017-in-transaction-domain-events.md)).
 Since Phase 3 the pipeline module subscribes (`LeadReassigned`: open opportunities follow;
-`LeadStatusChanged`/`LeadCreated`: the conversion rule); still **no** outbox work is queued.
+`LeadStatusChanged`/`LeadCreated`: the conversion rule); since Phase 4 the activities module
+too (`LeadReassigned`: current work follows; every lead event is written to the lead's
+timeline). Still **no** outbox work is queued. A completed meeting records the contact with
+`services.record_contact` (audited as `lead.updated` with `via: meeting_completed`).
 A conversion also writes `lead.converted` (`opportunity_id`, from/to status). Ask Arkray re-indexing (Phase 8),
 analytics and automation subscribe later and enqueue outbox work from their subscribers.
 

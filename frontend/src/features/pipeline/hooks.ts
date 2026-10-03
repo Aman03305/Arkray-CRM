@@ -3,6 +3,7 @@
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState, useSyncExternalStore } from "react";
 
+import { activityKeys, timelineKeys } from "@/features/activities/api";
 import type { Board, Opportunity, OpportunityCard, OpportunityPage, PipelineDto, Stage } from "@/lib/api/types";
 import { hasCapability, type Viewer } from "@/lib/viewer";
 import type { Workspace } from "@/lib/workspace";
@@ -101,7 +102,8 @@ export function patchCachedCards(queryClient: QueryClient, workspace: Workspace,
 /**
  * After any opportunity write: cache the returned opportunity for this workspace, patch it
  * into cached boards and stage lists, and mark every pipeline query stale (boards, totals,
- * stage lists, a lead's opportunities, history), so no page shows it as it was. (Writes
+ * stage lists, a lead's opportunities, history), so no page shows it as it was, and the
+ * timelines and activity views that show it (stage changes, opportunity titles). (Writes
  * that change a lead, such as a conversion, sync the lead's queries themselves.)
  */
 export function syncAfterOpportunityWrite(queryClient: QueryClient, workspace: Workspace, opportunity?: Opportunity): void {
@@ -114,6 +116,8 @@ export function syncAfterOpportunityWrite(queryClient: QueryClient, workspace: W
     queryKey: pipelineKeys.all,
     predicate: (query) => key === null || JSON.stringify(query.queryKey) !== JSON.stringify(key),
   });
+  void queryClient.invalidateQueries({ queryKey: timelineKeys.all });
+  void queryClient.invalidateQueries({ queryKey: activityKeys.all });
 }
 
 export function useOpportunityWriteSync(workspace: Workspace) {

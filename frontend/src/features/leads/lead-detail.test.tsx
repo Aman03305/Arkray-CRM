@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LeadView } from "@/features/workspace/views";
 import { adminViewer, LEAD_ID, LEAD_OPTIONS, makeLead, PRIYA_ID, RAHUL_ID, salesViewer } from "@/test/fixtures";
+import { asListItem, makeActivity, makeEntry, page } from "@/test/activity-fixtures";
 import { apiError, mockApi, renderWithProviders, type RecordedCall } from "@/test/render";
 
 const nav = vi.hoisted(() => ({ pathname: "/leads/x", push: vi.fn() }));
@@ -21,20 +22,29 @@ beforeEach(() => {
 });
 
 describe("lead detail", () => {
-  it("shows the lead's sections, with the activity timeline reserved but not faked", async () => {
-    mockApi({
+  it("shows the lead's sections, its open work and its real timeline (nothing invented)", async () => {
+    const api = mockApi({
       ...OPTIONS,
       [`GET ${ME}`]: {
         status: 200,
         body: makeLead({ address_line_1: "7 Hospital Road", description: "Needs two analysers.", mobile: "+44 20 7946 0958" }),
       },
+      [`GET ${ME}/timeline`]: { status: 200, body: page([makeEntry()]) },
+      "GET /api/v1/workspaces/me/activities": { status: 200, body: page([asListItem(makeActivity())]) },
     });
     renderWithProviders(<LeadView leadId={LEAD_ID} />, { viewer: salesViewer });
     expect(await screen.findByRole("heading", { level: 1, name: "Asha Mehta" })).toBeInTheDocument();
-    for (const section of ["Contact", "Organization and role", "Address", "Sales information", "Description", "Record details", "Activity"]) {
+    for (const section of ["Contact", "Organization and role", "Address", "Sales information", "Description", "Record details"]) {
       expect(screen.getByRole("region", { name: section })).toBeInTheDocument();
     }
-    expect(screen.getByText("Activities will appear here.")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Open work" })).toBeInTheDocument();
+    const timeline = screen.getByRole("region", { name: "Timeline" });
+    expect(await within(timeline).findByText(/Lead created/)).toBeInTheDocument();
+    expect(within(timeline).getByRole("textbox", { name: "Add a note" })).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: "Send the revised quotation" })).toBeInTheDocument();
+    // Both are this lead's, in this workspace.
+    expect(api.callsTo("GET", "/api/v1/workspaces/me/activities")[0]!.query.get("lead")).toBe(LEAD_ID);
+    expect(screen.queryByText("Activities will appear here.")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "asha@apollo.example" })).toHaveAttribute("href", "mailto:asha@apollo.example");
     expect(screen.getByRole("link", { name: "+44 20 7946 0958" })).toHaveAttribute("href", "tel:+442079460958");
     expect(screen.getByText(/7 Hospital Road/)).toBeInTheDocument();

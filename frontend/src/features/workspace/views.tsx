@@ -1,8 +1,10 @@
 "use client";
 
-import { CalendarCheck, LayoutDashboard } from "lucide-react";
+import { LayoutDashboard } from "lucide-react";
 
 import { Skeleton } from "@/components/ui/Skeleton";
+import { ActivitiesListView } from "@/features/activities/ActivitiesListView";
+import { ActivityDetailView } from "@/features/activities/ActivityDetailView";
 import { LeadDetailView } from "@/features/leads/LeadDetailView";
 import { LeadFormView } from "@/features/leads/LeadFormView";
 import { LeadsListView } from "@/features/leads/LeadsListView";
@@ -106,7 +108,16 @@ export function EditOpportunityView({ opportunityId }: { opportunityId: string }
   );
 }
 
+// Activity views are keyed by workspace (and activity): Rahul's activities, filters and
+// counts never carry over into Priya's (docs/activities.md#frontend).
 export function ActivitiesView() {
+  const workspace = useWorkspace();
   if (useViewer() === null) return <ViewSkeleton />;
-  return <ModulePlaceholder title="Activities" icon={CalendarCheck} />;
+  return <ActivitiesListView key={workspaceApiSegment(workspace)} workspace={workspace} />;
+}
+
+export function ActivityView({ activityId }: { activityId: string }) {
+  const workspace = useWorkspace();
+  if (useViewer() === null) return <ViewSkeleton />;
+  return <ActivityDetailView key={`${workspaceApiSegment(workspace)}/${activityId}`} workspace={workspace} activityId={activityId} />;
 }

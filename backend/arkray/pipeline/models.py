@@ -312,6 +312,10 @@ class Opportunity(UUIDPrimaryKeyModel, TimeStampedModel):
             models.CheckConstraint(
                 condition=Q(version__gte=1), name="pipeline_opp_version_positive"
             ),
+            # Trivially unique (id is the key); it exists so an activity can reference an
+            # opportunity *together with its lead*: an activity's lead is always its
+            # opportunity's lead, enforced by a foreign key (docs/activities.md, Phase 4).
+            models.UniqueConstraint(fields=["id", "lead"], name="pipeline_opportunity_id_lead_key"),
         ]
 
     def __str__(self) -> str:

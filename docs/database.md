@@ -2,7 +2,7 @@
 
 PostgreSQL 16 with the `pgvector` extension is the single system of record
 ([ADR-0002](adr/0002-postgresql-data-integrity.md)). This document is the target schema for
-Phases 0–8. Tables marked **(built)** exist (Phases 0–3); the rest are the design that
+Phases 0–8. Tables marked **(built)** exist (Phases 0–4); the rest are the design that
 each phase implements, refines under test, and records here.
 
 ## Conventions
@@ -34,11 +34,13 @@ erDiagram
     leads_lead_source |o--o{ leads_lead : "source"
     leads_lead ||--o{ pipeline_opportunity : "has"
     leads_lead ||--o{ activities_activity : "related"
-    leads_lead ||--o{ leads_timeline_event : "history"
+    leads_lead ||--o{ activities_timeline_entry : "history"
     pipeline_pipeline ||--|{ pipeline_stage : "has"
     pipeline_stage ||--o{ pipeline_opportunity : "current stage"
     pipeline_opportunity ||--o{ pipeline_stage_history : "transitions"
     pipeline_opportunity |o--o{ activities_activity : "related"
+    pipeline_opportunity |o--o{ activities_timeline_entry : "history"
+    activities_activity |o--o{ activities_timeline_entry : "history"
 
     identity_user {
         uuid id PK
@@ -114,24 +116,28 @@ erDiagram
     activities_activity {
         uuid id PK
         varchar type "task | meeting | note"
-        varchar status
-        uuid owner_id FK
-        uuid lead_id FK
-        uuid opportunity_id FK
-        date due_date "task"
+        varchar status "NULL for notes"
+        uuid owner_id FK "= lead owner while current"
+        uuid created_by_id FK "author"
+        uuid lead_id FK "required"
+        uuid opportunity_id FK "of the same lead"
+        timestamptz due_at "task"
         timestamptz starts_at "meeting"
         timestamptz ends_at "meeting"
         timestamptz completed_at
+        timestamptz cancelled_at
+        timestamptz archived_at
+        int version
     }
-    leads_timeline_event {
+    activities_timeline_entry {
         bigint id PK
         uuid lead_id FK
-        uuid opportunity_id
-        uuid activity_id
-        varchar event_type
+        uuid opportunity_id FK
+        uuid activity_id FK
+        varchar kind
         uuid actor_id FK
         timestamptz occurred_at
-        jsonb data
+        jsonb data "safe snapshot"
     }
 ```
 
@@ -318,24 +324,6 @@ index (197 ms). A 2-character term can't use trigrams (32 ms for a rare one at 3
 `tests/performance/test_lead_query_plans.py` pins which index serves each list, search and
 duplicate query shape.
 
-### `leads_timeline_event` (Phase 4, append-only; moved from Phase 2 together with notes)
-
-`lead_id FK`, `opportunity_id uuid NULL`, `activity_id uuid NULL`, `event_type`
-(`lead.created`, `lead.reassigned`, `lead.status_changed`, `note.added`,
-`task.created`, `task.completed`, `meeting.scheduled`, `meeting.completed`,
-`opportunity.created`, `opportunity.stage_changed`, …), `actor_id FK NULL` (NULL = system),
-`occurred_at`, `data jsonb` (safe summary: titles, from/to values).
-
-- Written in the same transaction as the change it records (a subscriber to the lead
-  domain events, [ADR-0017](adr/0017-in-transaction-domain-events.md)). Lead history from
-  Phases 2–3 is in the audit log and can be backfilled from it.
-- `opportunity_id` and `activity_id` are plain UUIDs rather than FKs. This keeps the
-  dependency direction `pipeline/activities → leads` acyclic; the referenced rows are never
-  hard-deleted.
-- Indexes: `(lead_id, occurred_at DESC, id DESC)`;
-  `(opportunity_id, occurred_at DESC) WHERE opportunity_id IS NOT NULL`.
-- Visible to whoever can see the lead ([authorization.md](authorization.md#related-records-and-timelines)).
-
 ### `pipeline_pipeline`, `pipeline_stage` (built, Phase 3)
 
 Configuration rows seeded by `pipeline.0003` ([pipeline.md](pipeline.md#stages)).
@@ -427,38 +415,114 @@ the opportunity entered the stage, `lost_reason`, `actor_id` FK, `occurred_at`.
 - Index `pipeline_history_opp_idx (opportunity_id, occurred_at DESC, id DESC)`: the
   history page (keyset, newest first).
 
-### `activities_activity` (Phase 4)
+### `activities_activity` (built, Phase 4)
 
-One table for every activity type ([ADR-0009](adr/0009-unified-activity-model.md)).
+One table for every activity type ([ADR-0009](adr/0009-unified-activity-model.md),
+[ADR-0020](adr/0020-activity-integrity.md), [activities.md](activities.md)).
 
 | Column | task | meeting | note |
 |---|---|---|---|
-| `type` | `task` | `meeting` | `note` |
-| `title` | required | required | optional |
-| `description` | optional | optional | required (the note body) |
-| `status` | open, completed, cancelled | scheduled, completed, cancelled, no_show | logged |
-| `priority` | low, medium, high (required) | NULL | NULL |
-| `due_date` (date) | optional | NULL | NULL |
-| `starts_at`, `ends_at` | NULL | required, `ends_at > starts_at` | NULL |
-| `location`, `meeting_url` | — | optional (`https://` only) | — |
-| `completed_at` | set iff completed | set iff completed | NULL |
-| `lead_id`, `opportunity_id` | optional | optional | at least one required |
+| `type` varchar(16) | `task` | `meeting` | `note` |
+| `title` varchar(200) | required | required | `''` |
+| `description` text (≤ 10,000) | optional | optional (agenda) | required (the note) |
+| `status` varchar(16) | `open`, `completed`, `cancelled` | `scheduled`, `completed`, `cancelled` | NULL |
+| `priority` varchar(8) | `low`/`normal`/`high` (NOT NULL) | NULL | NULL |
+| `due_at` timestamptz | optional, 2000–2099 | NULL | NULL |
+| `starts_at`, `ends_at` timestamptz | NULL | required; `starts < ends`, `ends - starts ≤ 24 h` (an absolute interval); start 2000–2099 | NULL |
+| `location` varchar(200), `meeting_url` varchar(500) | `''` | optional; the URL `https://` only | `''` |
+| `completed_at` + `completed_by_id` | set exactly while completed | same | NULL |
+| `cancelled_at` + `cancelled_by_id` | set exactly while cancelled | same | NULL |
 
-Common columns: `owner_id` (the assignee; the authorization key), `created_by_id`,
-`archived_at`, `version`, timestamps. Every row of the matrix above is a CHECK constraint.
-If `opportunity_id` is set, the service sets `lead_id` to the opportunity's lead.
+Common: `lead_id` FK NOT NULL, `opportunity_id` FK NULL, `owner_id` FK, `created_by_id` FK
+(all PROTECT; default FK indexes disabled), `archived_at`, `version` (CHECK ≥ 1),
+`created_at`, `updated_at`. Generated, stored: `current_owner_id` (`owner_id` while the
+activity is a note or open/scheduled, else NULL), `schedule_sort` (`COALESCE(due_at,
+'9999-12-31')` for tasks, `starts_at` for meetings, `created_at` for notes; CHECK NOT NULL),
+`opportunity_key` (`COALESCE(opportunity_id, '00000000-…-000000000000')`: "no opportunity"
+as a value, for the timeline's key) and `created_sort` (`created_at`, read only by the
+organisation-wide newest/oldest lists, so their index can never serve a narrower list).
 
-Indexes:
+Every row of the matrix is a CHECK constraint (`activities_activity_*`): type valid; status
+per type; priority only (and always) for tasks; title per type (with a visible character:
+`title ~ '\S'`); a note has a body (with a visible character); text length; due time only
+for tasks and in range; meeting times; meeting duration (`ends_at - starts_at <= 24 hours`,
+measured as an interval: `starts_at + interval '1 day'` would follow the session time zone's
+daylight-saving rules); start in range; place only for meetings; https link; completion and
+cancellation fields set exactly with their status. They are written **NULL-safe**: a CHECK
+passes on NULL, so every comparison of a nullable column is paired with `IS NOT NULL`
+(Django adds it inside negations); a note with completion data is refused although its
+status is NULL (raw-SQL tests for every rule in `arkray/activities/tests/test_models.py`).
 
-| Index | Query pattern |
-|---|---|
-| `(owner_id, due_date) WHERE type='task' AND status='open' AND archived_at IS NULL` | open / due today / overdue tasks |
-| `(owner_id, starts_at) WHERE type='meeting' AND archived_at IS NULL` | today's and upcoming meetings; meetings needing follow-up (`ends_at < now()` and still scheduled) |
-| `(lead_id, created_at DESC)`, `(opportunity_id, created_at DESC)` | timelines, related lists |
+Keys (migration `activities.0002`; Django can't declare them):
 
-Adding Call, Email or WhatsApp later: add the enum value, the type's status set and any
-columns (for example `duration_seconds`, `direction`) with their CHECKs in one migration,
-plus a type spec in code. No new tables and no API redesign.
+- `activities_activity_opportunity_lead_fk`: `(opportunity_id, lead_id) REFERENCES
+  pipeline_opportunity (id, lead_id)` (MATCH SIMPLE; `pipeline_opportunity` gained the
+  trivially unique `pipeline_opportunity_id_lead_key`, `pipeline.0004`).
+- `activities_activity_current_owner_fk`: `(lead_id, current_owner_id) REFERENCES leads_lead
+  (id, owner_id) DEFERRABLE INITIALLY DEFERRED`: current work is owned by its lead's owner,
+  checked at commit; completed and cancelled work (NULL key) keeps its historical owner.
+- UNIQUE `activities_activity_timeline_key (id, lead_id, opportunity_key, type)`: the
+  target of the timeline's key (`activities.0005`).
+
+Extended statistics (`activities.0006`): `activities_owner_type_status_stats (mcv,
+dependencies) ON owner_id, type, status` (statistics target 1000) and
+`activities_type_status_stats ON type, status`. Owners, types and statuses are far from
+independent (one owner holds a tenth of the rows; a status rare for one owner is common for
+another); without them the planner misjudged rare combinations by orders of magnitude.
+
+**Indexes and the queries they serve.** Justified by `EXPLAIN ANALYZE` of the exact SQL on
+a 403,000-activity benchmark (60 owners, the heaviest with 29,800) and a 2-million one (the
+same plus older closed history); [activities.md](activities.md#performance) has the full
+table. Times are the heaviest owner's or the organisation's, at 403k / 2M:
+
+| Index | Query pattern | Measured |
+|---|---|---|
+| `activities_owner_sched_idx (owner_id, type, status, schedule_sort, id) WHERE archived_at IS NULL` | one owner's tabs: open tasks by due, overdue, scheduled meetings; the summary's counts; upcoming meetings | 0.07–0.28 ms; summary 4.1 / 12 ms |
+| `activities_owner_when_idx (owner_id, schedule_sort, id) WHERE archived_at IS NULL` | one owner's "all" by due/start; date ranges | 0.1–0.26 ms (9–24 ms before) |
+| `activities_owner_type_when_idx (owner_id, type, schedule_sort, id) WHERE archived_at IS NULL` | one owner's tasks or meetings of any status by due/start | 0.2–0.35 ms (38 ms at 2M before) |
+| `activities_owner_current_idx (owner_id, schedule_sort, id) WHERE archived_at IS NULL AND status IN ('open', 'scheduled')` | one owner's open-and-scheduled work, upcoming work | 0.16–0.25 ms (124 ms at 2M before) |
+| `activities_owner_created_idx (owner_id, created_at DESC, id DESC)` | one owner's newest/oldest, notes, archived view, rare or old matches; an administrator's owner filter | 0.17–2.5 ms (up to 500 ms at 2M before: see `created_sort`) |
+| `activities_sched_idx (type, status, schedule_sort, id) WHERE archived_at IS NULL` | organisation-wide tabs; the organisation-wide summary | 0.3–0.6 ms; summary 25 / 31 ms |
+| `activities_when_idx (schedule_sort, id) WHERE archived_at IS NULL` | organisation-wide by due/start, date ranges | 0.23–0.43 ms (261 ms before) |
+| `activities_type_when_idx (type, schedule_sort, id) WHERE archived_at IS NULL` | organisation-wide tasks or meetings of any status by due/start | 0.34–0.49 ms (0.5 s at 2M before) |
+| `activities_current_idx (schedule_sort, id) WHERE archived_at IS NULL AND status IN ('open', 'scheduled')` | organisation-wide open-and-scheduled and upcoming work | 0.25–0.73 ms (0.5 s at 2M before) |
+| `activities_created_idx (created_sort, id)` | organisation-wide newest/oldest (no owner, lead or opportunity filter), archived view; ascending (rows arrive newest last), read backwards for newest first | 0.26–1.5 ms |
+| `activities_lead_idx (lead_id, schedule_sort, id)` | a lead's activities and open work; the reassignment lock query; the ownership key's lookups when a lead's owner changes | 0.02–0.48 ms |
+| `activities_opportunity_idx (opportunity_id, created_at DESC, id DESC) WHERE opportunity_id IS NOT NULL` | an opportunity's activities | 0.07–0.13 ms |
+
+Known slower shape (administrators only; risk R44): the organisation-wide summary (25 ms at
+403k, 31 ms at 2M; one aggregate per page load).
+`tests/performance/test_activity_query_plans.py` pins which index serves each shape.
+
+### `activities_timeline_entry` (built, Phase 4, append-only)
+
+The lead and opportunity history ([ADR-0021](adr/0021-materialized-timeline.md)). `id bigint`,
+`lead_id` FK NOT NULL, `opportunity_id` FK NULL, `activity_id` FK NULL (PROTECT), `kind`
+(CHECK: one of 20 kinds), `actor_id` FK NULL (NULL = the system), `occurred_at`, `data` jsonb
+(an allowlisted snapshot per kind: status and stage names, owner ids, meeting times; never
+titles, note text or contact data).
+
+- CHECK `timeline_subject_matches_kind`: lead events name only the lead; opportunity events
+  an opportunity and no activity; activity events their activity.
+- Generated, stored: `opportunity_key` (as on the activity) and `subject_type` (for an
+  activity's entry, the type its kind names: `split_part(kind, '.', 1)`, so `task` for
+  `task.completed`; NULL otherwise).
+- Keys: `activities_timeline_activity_fk (activity_id, lead_id, opportunity_key,
+  subject_type) → activities_activity (id, lead_id, opportunity_key, type)` (MATCH SIMPLE:
+  lead and opportunity entries have no activity) and `(opportunity_id, lead_id) →
+  pipeline_opportunity (id, lead_id)`: every entry about an activity is filed under that
+  activity's own lead and opportunity and named for its own type, and an activity with
+  history can't change any of them (`activities.0005`, Phase 4 review).
+- Append-only: `AppendOnlyModel` plus the `activities_timeline_entry_append_only` trigger.
+- Written in the transaction of the change (services and subscribers); pre-Phase-4 history
+  backfilled from `audit_event` and `pipeline_stage_history` (`activities.0003`).
+- Indexes: `timeline_lead_idx (lead_id, occurred_at DESC, id DESC)` (a lead's timeline,
+  0.1 ms per page even 2,500 entries deep); `timeline_opportunity_idx (opportunity_id,
+  occurred_at DESC, id DESC) WHERE opportunity_id IS NOT NULL`.
+
+Adding Call, Email or WhatsApp later: the enum value, the type's statuses and any columns
+(for example `duration_seconds`, `direction`) with NULL-safe CHECKs in one migration, plus a
+type spec in code. No new tables and no API redesign.
 
 ### `ai_knowledge_chunk` (Phase 8)
 
@@ -493,12 +557,21 @@ SELECT coalesce(sum(value), 0.00)                               AS pipeline_valu
 FROM pipeline_opportunity
 WHERE owner_id IN (:u) AND archived_at IS NULL AND status = 'open';
 
--- Tasks
-SELECT count(*)                                     AS open_tasks,
-       count(*) FILTER (WHERE due_date = :today)    AS due_today,
-       count(*) FILTER (WHERE due_date < :today)    AS overdue
+-- Activities (built in Phase 4: activities.selectors.activity_summary, one statement; the
+-- dashboard calls that). schedule_sort is the due time for tasks ("undated" = 9999-12-31,
+-- never due today or overdue) and the start for meetings. task := type 'task' AND status
+-- 'open'; meeting := type 'meeting' AND status IN ('scheduled', 'completed').
+SELECT count(*) FILTER (WHERE task)                                       AS open_tasks,
+       count(*) FILTER (WHERE task AND schedule_sort >= :today_start
+                                   AND schedule_sort <  :today_end)       AS tasks_due_today,
+       count(*) FILTER (WHERE task AND schedule_sort < :now)              AS overdue_tasks,
+       count(*) FILTER (WHERE meeting AND schedule_sort >= :today_start
+                                      AND schedule_sort <  :today_end)    AS meetings_today,
+       count(*) FILTER (WHERE type = 'meeting' AND status = 'scheduled'
+                              AND schedule_sort >= :now)                  AS upcoming_meetings
 FROM activities_activity
-WHERE owner_id = :u AND type = 'task' AND status = 'open' AND archived_at IS NULL;
+WHERE owner_id = :u AND archived_at IS NULL
+  AND (task OR (meeting AND schedule_sort >= :today_start));  -- no past meeting can count
 ```
 
 Worked example from the requirements: one open opportunity of ₹1,000,000 at 50% gives
@@ -515,5 +588,10 @@ per page regardless of how many users or records exist.
 - Production changes follow **expand → migrate → contract**: add nullable or defaulted
   columns first, deploy code that writes both shapes, backfill in batches, then tighten
   constraints in a later release. No long table locks during business hours.
+- Migrations run under the application's statement timeout (`DB_STATEMENT_TIMEOUT_MS`,
+  10 s). One that backfills, rewrites or indexes a whole large table lifts it for its own
+  transaction first (`SET LOCAL statement_timeout = 0`; `activities.0003`, `0005`, `0006`,
+  `0007`; pinned by `tests/architecture/test_migrations.py`). At 403,000 activities and
+  733,000 timeline entries, `activities.0005`–`0007` took 11 s together.
 - Extensions (`vector`, `pg_trgm`) are created by the migration of the module that needs
   them. Both are "trusted" extensions installable by the database owner role.

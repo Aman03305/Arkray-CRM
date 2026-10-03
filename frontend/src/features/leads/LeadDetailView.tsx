@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, ArrowLeft, CalendarClock, Pencil, Repeat } from "lucide-react";
+import { Archive, ArrowLeft, Pencil, Repeat } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
@@ -11,6 +11,8 @@ import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { NotFoundView } from "@/components/ui/NotFoundView";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { CurrentWork } from "@/features/activities/CurrentWork";
+import { NoteComposer, Timeline } from "@/features/activities/Timeline";
 import { ConvertLeadDialog } from "@/features/pipeline/ConvertLeadDialog";
 import { LeadOpportunities } from "@/features/pipeline/LeadOpportunities";
 import { describeError, isApiError } from "@/lib/api/errors";
@@ -21,7 +23,7 @@ import { useViewer } from "@/lib/viewer-context";
 import { leadHref, opportunityHref, type Workspace, workspaceHref } from "@/lib/workspace";
 
 import { leadKeys, leadsApi } from "./api";
-import { countryName, leadPermissions, useLeadOptions, useLeadWriteSync } from "./hooks";
+import { countryName, leadPermissions, leftBehind, movedOutOf, useLeadOptions, useLeadWriteSync } from "./hooks";
 import { ChangeStatusDialog, ReassignDialog } from "./LeadActionDialogs";
 import { PersonName, RatingLabel, StatusBadge, telHref } from "./LeadBits";
 
@@ -91,12 +93,16 @@ export function LeadDetailView({ workspace, leadId }: { workspace: Workspace; le
   const [notice, setNotice] = useFlash();
   const permissions = leadPermissions(viewer, workspace);
   // Set when a reassignment moves the lead out of the workspace being viewed: its cached
-  // copy under this workspace is dropped once this page is gone (dropping it while the
-  // page is still mounted would refetch it here, where it no longer exists).
+  // copy under this workspace, with its timeline and open work there, is dropped once this
+  // page is gone (dropping them while the page is still mounted would refetch them here,
+  // where the lead no longer exists).
   const movedOut = useRef(false);
   useEffect(
     () => () => {
-      if (movedOut.current) queryClient.removeQueries({ queryKey: leadKeys.detail(workspace, leadId) });
+      if (!movedOut.current) return;
+      queryClient.removeQueries({ queryKey: leadKeys.detail(workspace, leadId) });
+      const left = leftBehind(workspace, leadId);
+      queryClient.removeQueries({ predicate: (query) => left.includes(JSON.stringify(query.queryKey)) });
     },
     [queryClient, workspace, leadId],
   );
@@ -126,8 +132,7 @@ export function LeadDetailView({ workspace, leadId }: { workspace: Workspace; le
   function reassigned(lead: Lead) {
     // Reassigned out of the workspace being viewed (a user's, or one's own): it lives in the
     // new owner's workspace now, so this page can't show it any more.
-    const workspaceOwner = workspace.kind === "user" ? workspace.userId : workspace.kind === "self" ? viewer?.id : null;
-    if (workspaceOwner && lead.owner.id !== workspaceOwner) {
+    if (movedOutOf(workspace, lead, viewer?.id)) {
       movedOut.current = true;
       setFlash(`${lead.display_name} was reassigned to ${lead.owner.full_name}. It now appears in their workspace.`);
       router.push(workspaceHref(workspace, "leads"));
@@ -266,6 +271,11 @@ export function LeadDetailView({ workspace, leadId }: { workspace: Workspace; le
               <p className="text-sm text-slate-400">No description</p>
             )}
           </Section>
+          <Timeline
+            workspace={workspace}
+            subject={{ kind: "lead", id: lead.id }}
+            composer={canEdit ? <NoteComposer workspace={workspace} link={{ lead: lead.id }} /> : null}
+          />
         </div>
         <div className="space-y-4">
           <Section title="Sales information">
@@ -279,12 +289,7 @@ export function LeadDetailView({ workspace, leadId }: { workspace: Workspace; le
             />
           </Section>
           <LeadOpportunities workspace={workspace} leadId={lead.id} canCreate={permissions.canWrite && !archived} />
-          <Section title="Activity">
-            <div className="flex flex-col items-center gap-2 py-6 text-center">
-              <CalendarClock aria-hidden="true" className="size-5 text-slate-400" />
-              <p className="text-sm text-slate-500">Activities will appear here.</p>
-            </div>
-          </Section>
+          <CurrentWork workspace={workspace} target={{ lead: lead.id }} label={lead.display_name} canWrite={canEdit} />
           <Section title="Record details">
             <Fields
               items={[

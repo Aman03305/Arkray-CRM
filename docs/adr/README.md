@@ -25,6 +25,8 @@ and update the old one's status line.
 | [0017](0017-in-transaction-domain-events.md) | In-transaction domain events for cross-module reactions |
 | [0018](0018-pipeline-integrity-by-composite-keys.md) | Pipeline integrity by composite foreign keys (status = stage category; open owner = lead owner); one lock order |
 | [0019](0019-lead-conversion.md) | Lead conversion creates an opportunity; "Converted" requires one |
+| [0020](0020-activity-integrity.md) | Activities: lead-bound, owned by the lead's owner while current, guarded by composite keys |
+| [0021](0021-materialized-timeline.md) | The timeline is an append-only table written in-transaction; visibility is decided when read |
 
 Template:
 

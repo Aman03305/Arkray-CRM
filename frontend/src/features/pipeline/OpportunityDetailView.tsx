@@ -10,6 +10,8 @@ import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { NotFoundView } from "@/components/ui/NotFoundView";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { CurrentWork } from "@/features/activities/CurrentWork";
+import { NoteComposer, Timeline } from "@/features/activities/Timeline";
 import { cursorOf } from "@/features/leads/api";
 import { PersonName } from "@/features/leads/LeadBits";
 import { describeError, isApiError } from "@/lib/api/errors";
@@ -129,6 +131,8 @@ export function OpportunityDetailView({ workspace, opportunityId }: { workspace:
 
   const archived = opportunity.archived_at !== null;
   const canChange = permissions.canWrite && !archived;
+  // New work on an opportunity belongs to its lead's owner: only while the lead is here.
+  const canAddWork = canChange && !opportunity.lead.restricted;
   const open = opportunity.status === "open";
   const stages = pipelines.data?.results.find((p) => p.id === opportunity.pipeline.id)?.stages ?? [opportunity.stage];
   const won = stages.find((s) => s.category === "won" && s.is_active);
@@ -257,6 +261,11 @@ export function OpportunityDetailView({ workspace, opportunityId }: { workspace:
               <p className="text-sm text-slate-400">No description</p>
             )}
           </Section>
+          <Timeline
+            workspace={workspace}
+            subject={{ kind: "opportunity", id: opportunity.id }}
+            composer={canAddWork ? <NoteComposer workspace={workspace} link={{ opportunity: opportunity.id }} /> : null}
+          />
           <StageHistory workspace={workspace} opportunityId={opportunity.id} version={opportunity.version} />
         </div>
         <div className="space-y-4">
@@ -277,6 +286,14 @@ export function OpportunityDetailView({ workspace, opportunityId }: { workspace:
               </p>
             )}
           </Section>
+          {opportunity.lead.restricted ? null : (
+            <CurrentWork
+              workspace={workspace}
+              target={{ opportunity: opportunity.id }}
+              label={opportunity.title}
+              canWrite={canAddWork}
+            />
+          )}
           <Section title="Record details">
             <Fields
               items={[

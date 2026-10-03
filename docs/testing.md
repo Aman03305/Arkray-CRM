@@ -83,6 +83,74 @@ architecture test fails if a route is missing from the matrix.
 - **Frontend states:** every data view tests loading (skeleton), empty, error (with retry)
   and populated states, plus permission-driven visibility.
 
+## What exists after Phase 4
+
+- **Backend (2,677 tests, 98 % coverage of `arkray/`)**, adding for Activities:
+  every database invariant proven with raw SQL (each type's columns and statuses, NULL-safe
+  CHECKs, visible text in titles and notes, the 24-hour meeting limit under a
+  daylight-saving session time zone, current work owned by its lead's owner through the
+  deferred composite key, the opportunity of the same lead, timeline entries bound to their
+  activity's lead, opportunity and type, the append-only timeline refusing UPDATE/DELETE),
+  the services (create, edit, complete/cancel/reopen with no-op repeats, archive/restore,
+  the archived-lead policy, authorship and historical attribution through reassignments),
+  last contact (completed meetings only, MAX semantics, version bump, audit), reassignment
+  propagation (current work and notes follow, closed work stays, atomic rollback with a
+  failing subscriber, constant queries), timelines (every kind, snapshots, visibility per
+  entry, restricted opportunities, keyset pages, the backfill from Phase 2–3 history and its
+  equivalence with what the live subscribers record), the HTTP API (strict input per type,
+  every system field refused, explicit action endpoints taking exactly a version, filters
+  and their contradictions, every ordering, cursors), the summary (business-day boundaries
+  at 00:15 IST, scope, each figure equal to the list its shortcut opens), exact query counts
+  at 10 and 100 rows for every endpoint (also organisation-wide cursor pages), real-thread
+  races and lock-order storms, query-plan shapes for every list, summary and timeline shape
+  (`tests/performance/test_activity_query_plans.py`), migrations lifting the statement
+  timeout, Redis and broker outages, and the **cross-user suites**
+  `tests/security/test_activities_cross_user.py` (131 cases, both directions),
+  `test_activities_api_surface.py` (167: every route 404 for other users, mass assignment,
+  action bodies, link schemes, cursor hygiene, canonical ids),
+  `test_activities_reassignment_flows.py`, `test_activities_oracles.py` and
+  `test_phase4_review_regressions.py`.
+- **Frontend (454 tests):** the Activities page (tabs, filters as allowlisted
+  parameters, shortcuts, table and cards, row actions with versions, 409s, empty and error
+  states), the task and meeting dialog (India-time inputs, idempotency key reuse, conflict
+  merge, a meeting's end following its start, discard confirmation), the activity page
+  (actions, meeting links, note editing by its author only, conflicts), timelines and the
+  note box, open work on lead and opportunity pages, no stale data between Rahul's and
+  Priya's workspaces (also Back and failed refetches), and
+  `features/activities/review-regressions.test.tsx` (22).
+- **Adversarial review:** four independent reviewers (backend/domain, API/security,
+  frontend, performance) found **one P1** (performance: one owner's newest-first list could
+  walk the whole organisation's index, 48 ms at 403k and up to 500 ms at 2M activities), P2s
+  (a meeting link with an upper-case `HTTPS://` scheme passed validation but failed the
+  database CHECK: a 500; stale cached list versions causing false conflicts; focus lost
+  after in-page actions; text typed during a note save lost; the summary's cost growing
+  with all history; an organisation-wide lead filter walking the schedule index; the
+  timeline backfill able to hit the 10 s statement timeout) and P3s (the previous owner
+  able to learn whether the new owner archived a lead; timeline entries not tied to their
+  activity's opportunity and type; the 24-hour limit following daylight-saving rules;
+  whitespace-only titles; a creation racing a reassignment answering 422 instead of 404,
+  revealing the reassignment; shortcut lists not matching their counts; ambiguous control
+  names; Complete not offered once a meeting started; typing discarded on Escape; a
+  meeting's end left behind; a descending index bloating; deep pages in large tie groups,
+  timelines of mostly hidden entries, bulk reassignment cost, the archived view by
+  due/start; sequential ids revealing volume). No P0: no IDOR, no timeline or count leak.
+  Every one is fixed and pinned by a regression test except the accepted, documented P3s
+  (R48 sequential ids; R49–R52 performance edges). The archived-lead policy question (D-5)
+  was decided and tested. Re-benchmarking the fixes at 2M activities found one more P2
+  (current work and one type of any status by due/start: 124 ms per owner and 0.5 s
+  organisation-wide), fixed by partial indexes (0.2–0.7 ms), and an extra query per
+  organisation-wide cursor page (P3), fixed and pinned.
+- **Live walkthrough** against the rebuilt containerised stack, headless Chromium:
+  22 checks (admin in Rahul's workspace: create from the Activities page and the
+  lead page, a meeting whose end follows its start, a note, Complete by keyboard, the lead
+  and opportunity timelines, last contact recorded, the discard confirmation, reassignment
+  to Priya with no request where the lead no longer is, current work following the lead and
+  completed work staying with the admin as completer, Rahul → Priya and Back with a DOM
+  observer; Rahul: create, schedule, note, edit then complete from the cached list with no
+  conflict, focus after Complete, every summary figure equal to its list, Priya's records
+  unreachable through UI and API; Priya: only what moved to her, phone and tablet layouts
+  without horizontal scroll). No page errors and no 5xx; the only 4xx were the signed-out session check on the sign-in page and the deliberate 404 for Priya's task. Container logs, audit metadata, timeline snapshots and the outbox were free of note text, titles, names and emails (a marker in a note was found only in its own row). The previous walkthrough's finding (an administrator's lead page refetching its timeline in the workspace the lead had just left: a 404) is fixed and pinned.
+
 ## What exists after Phase 3
 
 - **Backend (1,932 tests, 98 % coverage of `arkray/`)**, adding for the Pipeline: every

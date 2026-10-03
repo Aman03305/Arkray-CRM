@@ -21,10 +21,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from django.db import IntegrityError, transaction
+from django.db.models import F
 from django.utils import timezone
 
 from arkray.audit import services as audit
@@ -374,6 +376,65 @@ def archive_lead(*, actor: User, scope: AccessScope, lead_id: UUID, version: int
             )
         )
     return selectors.lead_by_id(lead.pk)
+
+
+def record_contact(
+    *,
+    actor_id: UUID,
+    lead_id: UUID,
+    contacted_at: datetime,
+    via: str,
+    via_id: UUID,
+    workspace: str,
+) -> bool:
+    """A completed customer interaction took place at `contacted_at` (Phase 4: a completed
+    meeting, at its start time): advance the lead's last contact to it, never backwards.
+    Completing an older interaction after a newer one leaves the newer time in place (MAX
+    semantics, docs/activities.md#last-contacted). Returns whether the lead changed.
+
+    Called by the module that owns the interaction, inside its transaction, after it has
+    authorised the actor and locked the lead (lock order: the lead comes first). The lead
+    is locked again here in the same mode, FOR NO KEY UPDATE: a no-op for that caller (never
+    an upgrade: last_contacted_at is not a key column), and the guarantee for any other.
+    Like every lead change it bumps the version (an edit form opened earlier gets a 409
+    instead of silently overwriting the new contact time), is audited by field name and
+    publishes LeadUpdated. Archived leads are not refused: the interaction did happen.
+    """
+    lead = (
+        Lead.objects.select_for_update(no_key=True)
+        .only("id", "owner_id", "last_contacted_at")
+        .get(pk=lead_id)
+    )
+    if lead.last_contacted_at is not None and lead.last_contacted_at >= contacted_at:
+        return False
+    now = timezone.now()
+    # A queryset update: Lead.save() would recompute the (deferred) phone keys.
+    Lead.objects.filter(pk=lead_id).update(
+        last_contacted_at=contacted_at, version=F("version") + 1, updated_at=now
+    )
+    audit.record(
+        AUDIT_LEAD_UPDATED,
+        actor_id=actor_id,
+        target_type="lead",
+        target_id=lead_id,
+        subject_user_id=lead.owner_id if lead.owner_id != actor_id else None,
+        metadata={
+            "workspace": workspace,
+            "fields": ["last_contacted_at"],
+            "via": via,
+            "via_id": str(via_id),
+        },
+    )
+    publish(
+        events.LeadUpdated(
+            lead_id=lead_id,
+            owner_id=lead.owner_id,
+            actor_id=actor_id,
+            occurred_at=now,
+            fields=("last_contacted_at",),
+        )
+    )
+    return True
 
 
 def restore_lead(*, actor: User, scope: AccessScope, lead_id: UUID, version: int) -> Lead:

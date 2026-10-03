@@ -104,6 +104,8 @@ def test_the_schema_is_complete_again_afterwards():
             "leads_lead_status",
             "pipeline_opportunity",
             "pipeline_stage_history",
+            "activities_activity",
+            "activities_timeline_entry",
         ):
             cursor.execute("SELECT to_regclass(%s)", [table])
             assert cursor.fetchone() == (table,), table

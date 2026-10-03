@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     "arkray.identity",
     "arkray.leads",
     "arkray.pipeline",
+    "arkray.activities",
 ]
 
 MIDDLEWARE = [
@@ -251,6 +252,10 @@ SPECTACULAR_SETTINGS = {
         "StatusEnum": "arkray.identity.models.UserStatus",
         "CategoryEnum": "arkray.leads.models.StatusCategory",
         "StageCategoryEnum": "arkray.pipeline.models.StageCategory",
+        "ActivityTypeEnum": "arkray.activities.models.ActivityType",
+        "ActivityStatusEnum": "arkray.activities.models.ActivityStatus",
+        "PriorityEnum": "arkray.activities.models.Priority",
+        "TimelineKindEnum": "arkray.activities.models.TimelineKind",
     },
 }
 
