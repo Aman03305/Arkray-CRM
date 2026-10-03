@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     "arkray.leads",
     "arkray.pipeline",
     "arkray.activities",
+    "arkray.dashboard",
 ]
 
 MIDDLEWARE = [
@@ -68,6 +69,10 @@ _db_options: dict[str, Any] = {
             f"-c lock_timeout={env.int('DB_LOCK_TIMEOUT_MS', default=5_000)}",
             "-c idle_in_transaction_session_timeout="
             f"{env.int('DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', default=60_000)}",
+            # Short OLTP statements: JIT compilation only adds latency here (Phase 5 review:
+            # +10-30 ms per dashboard aggregate near the threshold, +290-430 ms above the
+            # inlining threshold, for queries that run in milliseconds without it).
+            "-c jit=off",
         ]
     ),
 }

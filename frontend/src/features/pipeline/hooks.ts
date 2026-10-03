@@ -170,6 +170,15 @@ export function useBoardState(workspaceKey: string) {
   };
 }
 
+/**
+ * Open this workspace's board on its defaults (default pipeline, no filters) the next time
+ * it is shown, replacing what was remembered: how the dashboard's pipeline figures (over all
+ * open opportunities) open a board that isn't narrowed by an earlier filter.
+ */
+export function presetBoard(workspaceKey: string): void {
+  remembered.set(workspaceKey, INITIAL);
+}
+
 /** Tests only. */
 export function forgetBoardState(): void {
   remembered.clear();

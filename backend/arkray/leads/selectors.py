@@ -15,14 +15,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from uuid import UUID
 
-from django.db.models import BooleanField, ExpressionWrapper, Q, QuerySet, Value
+from django.db.models import BooleanField, Count, ExpressionWrapper, Q, QuerySet, Value
 from django.db.models.functions import Lower, Upper
 
 from arkray.core.access import AccessScope
-from arkray.core.business_time import business_midnight
+from arkray.core.business_time import business_midnight, today_bounds
 from arkray.core.errors import InvalidInputError, NotFoundError
 from arkray.core.keyset import KeysetOrdering, SortKey
 from arkray.core.text import TextRejected, clean_line
@@ -34,6 +34,7 @@ from .phones import phone_key, search_digits
 DUPLICATE_LIMIT = 5  # shown
 DUPLICATE_SCAN_LIMIT = 50  # considered (bounded even for a shared switchboard number)
 SEARCH_TERM_MIN_LENGTH = 2
+NEW_LEADS_DEFAULT = 5
 
 ORDERINGS: dict[str, KeysetOrdering] = {
     ordering.name: ordering
@@ -74,6 +75,15 @@ class LeadFilters:
     created_from: date | None = None
     created_to: date | None = None
     archived: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class LeadSummary:
+    """The authoritative lead figures for a scope at one moment (the dashboard shows exactly
+    these; it must not re-derive them)."""
+
+    total: int  # not archived
+    new_today: int  # not archived, created during today's business day
 
 
 def _contains(needle: str) -> Q:
@@ -147,6 +157,41 @@ def lead_list(scope: AccessScope, filters: LeadFilters) -> QuerySet[Lead]:
         "source__key",
         "source__name",
         *_OWNER_FIELDS,
+    )
+
+
+def lead_summary(scope: AccessScope, *, now: datetime) -> LeadSummary:
+    """Total leads and new leads today in `scope`, in one aggregate query: archived leads
+    never count (the Leads list hides them by default, so each figure opens a list of
+    exactly the leads it counts). "Today" is the business day containing `now`
+    (core.business_time). A lead counts for its current owner: one created today and
+    reassigned is the new owner's new lead."""
+    start, end = today_bounds(now)
+    today = Q(created_at__gte=start, created_at__lt=end)
+    # Every column this reads is in leads_owner_created_idx (owner, created_at, id, and the
+    # archive state it carries), so both counts come from an index-only scan.
+    row = scope.apply(Lead.objects.filter(archived_at__isnull=True)).aggregate(
+        total=Count("id"), new_today=Count("id", filter=today)
+    )
+    return LeadSummary(**row)
+
+
+def new_leads_today(
+    scope: AccessScope, *, now: datetime, limit: int = NEW_LEADS_DEFAULT
+) -> list[Lead]:
+    """The newest of today's leads in `scope` (bounded; for the dashboard): exactly the
+    leads `lead_summary` counts as new today, newest first, with their owner joined (one
+    query). Only what a summary row shows is loaded: no contact data."""
+    if not 1 <= limit <= 50:
+        raise ValueError("limit out of range")
+    start, end = today_bounds(now)
+    return list(
+        scope.apply(
+            Lead.objects.filter(archived_at__isnull=True, created_at__gte=start, created_at__lt=end)
+        )
+        .select_related("owner")
+        .only("id", "organization_name", "display_name", "created_at", *_OWNER_FIELDS)
+        .order_by("-created_at", "-id")[:limit]
     )
 
 

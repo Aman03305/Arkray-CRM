@@ -30,6 +30,7 @@ import {
   NO_FILTERS,
   ORDERING_OPTIONS,
   STATUS_OPTIONS,
+  summaryFilters,
   TAB_DEFAULTS,
 } from "./api";
 import { ActivityFormDialog } from "./ActivityFormDialog";
@@ -127,7 +128,7 @@ export function ActivitiesListView({ workspace }: { workspace: Workspace }) {
   const rows = activities.data?.results;
   const error = activities.isError ? describeError(activities.error) : null;
   const filtered = activeFilterCount(list.filters) > 0 || list.filters.status !== TAB_DEFAULTS[list.filters.tab].status;
-  const today = businessToday();
+  const opens = summaryFilters(businessToday());
   const shortcut = (label: string, count: number | undefined, patch: Partial<ActivityFilters>) => (
     <button
       key={label}
@@ -161,11 +162,11 @@ export function ActivitiesListView({ workspace }: { workspace: Workspace }) {
 
       <nav aria-label="Shortcuts" className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
         {/* Each opens a list of exactly what it counts (selectors.activity_summary). */}
-        {shortcut("Open tasks", counts?.open_tasks, { tab: "task", ...TAB_DEFAULTS.task })}
-        {shortcut("Overdue tasks", counts?.overdue_tasks, { tab: "task", status: "overdue", ordering: "scheduled" })}
-        {shortcut("Tasks due today", counts?.tasks_due_today, { tab: "task", status: "open", ordering: "scheduled", dateFrom: today, dateTo: today })}
-        {shortcut("Meetings today", counts?.meetings_today, { tab: "meeting", status: "not_cancelled", ordering: "scheduled", dateFrom: today, dateTo: today })}
-        {shortcut("Upcoming meetings", counts?.upcoming_meetings, { tab: "meeting", status: "upcoming", ordering: "scheduled" })}
+        {shortcut("Open tasks", counts?.open_tasks, opens.open_tasks)}
+        {shortcut("Overdue tasks", counts?.overdue_tasks, opens.overdue_tasks)}
+        {shortcut("Tasks due today", counts?.tasks_due_today, opens.tasks_due_today)}
+        {shortcut("Meetings today", counts?.meetings_today, opens.meetings_today)}
+        {shortcut("Upcoming meetings", counts?.upcoming_meetings, opens.upcoming_meetings)}
       </nav>
 
       <FiltersBar workspace={workspace} list={list} />

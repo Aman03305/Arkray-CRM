@@ -48,6 +48,16 @@ export function useActivityListState(workspaceKey: string) {
   };
 }
 
+/**
+ * Open this workspace's Activities list with these filters (the rest at their defaults) the
+ * next time it is shown, replacing what was remembered: how a dashboard figure opens
+ * exactly the list it counts (the same presets as the page's own shortcuts).
+ */
+export function presetActivityList(workspaceKey: string, filters: Partial<ActivityFilters> = {}): void {
+  const preset = { ...NO_FILTERS, ...filters };
+  remembered.set(workspaceKey, { filters: preset, applied: preset, cursor: null });
+}
+
 /** Tests only. */
 export function forgetActivityListState(): void {
   remembered.clear();

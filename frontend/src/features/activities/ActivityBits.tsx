@@ -88,7 +88,7 @@ export function PriorityLabel({ priority }: { priority: ActivityPriority | null 
 
 /** When it is due / starts: the date and time in the business time zone, or a dash. */
 export function When({ iso, empty = "—" }: { iso: string | null; empty?: string }) {
-  if (!iso) return <span className="text-slate-400">{empty}</span>;
+  if (!iso) return <span className="text-slate-500">{empty}</span>;
   return <time dateTime={iso}>{formatDateTime(iso)}</time>;
 }
 
@@ -100,7 +100,7 @@ export function scheduleOf(activity: { type: ActivityType; due_at: string | null
 
 /** The lead an activity is about: a link, or "in another workspace" (its name isn't sent). */
 export function LeadLink({ workspace, lead }: { workspace: Workspace; lead: ActivityLeadRef }) {
-  if (lead.restricted || !lead.id) return <span className="italic text-slate-400">Lead in another workspace</span>;
+  if (lead.restricted || !lead.id) return <span className="italic text-slate-500">Lead in another workspace</span>;
   return (
     <Link href={leadHref(workspace, lead.id)} className="text-brand-700 hover:underline">
       {lead.display_name}

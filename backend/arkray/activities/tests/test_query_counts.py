@@ -157,7 +157,8 @@ def test_detail(user_a_client, user_a):
 @pytest.mark.parametrize("n", [10, 100])
 def test_summary(user_a_client, user_a, n):
     seed(n, [user_a])
-    assert count(user_a_client, summary_url())[0] == 3  # session, user, one aggregate
+    # session, user, two aggregates (open tasks; meetings from today on: Phase 5 review)
+    assert count(user_a_client, summary_url())[0] == 4
 
 
 @pytest.mark.parametrize("n", [10, 100])

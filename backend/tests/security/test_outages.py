@@ -183,3 +183,43 @@ class TestActivitiesKeepWorking:
 
         monkeypatch.setattr(tasks.process_outbox_event, "apply_async", broker_down)
         self.journey(user_a)
+
+
+class TestDashboardKeepsWorking:
+    """The dashboard reads PostgreSQL only (no analytics cache, no worker, no AI): with Redis
+    or the broker down it still answers, and an administrator's delegated viewing is then
+    audited on every request (the audit window lives in the cache; fail towards more
+    auditing)."""
+
+    def journey(self, owner, admin):
+        from arkray.audit.models import AuditEvent
+        from tests.factories import LeadFactory, OpportunityFactory, TaskFactory
+
+        lead = LeadFactory(owner=owner)
+        OpportunityFactory(lead=lead, stage_key="proposal")
+        TaskFactory(lead=lead)
+        mine = signed_in(owner).get("/api/v1/workspaces/me/dashboard")
+        assert mine.status_code == 200
+        assert mine.json()["pipeline"]["pipeline_value"] == "100000.00"
+        assert mine.json()["activities"]["open_tasks"] == 1
+        admin_client = signed_in(admin)
+        for _ in range(2):
+            for workspace in (str(owner.pk), "all"):
+                response = admin_client.get(f"/api/v1/workspaces/{workspace}/dashboard")
+                assert response.status_code == 200
+                assert response.json()["leads"]["total"] == 1
+        assert not OutboxEvent.objects.exists()
+        return AuditEvent.objects.filter(action="workspace.accessed").count()
+
+    @pytest.mark.usefixtures("redis_down")
+    def test_during_a_redis_outage(self, user_a, admin):
+        started = time.monotonic()
+        assert self.journey(user_a, admin) == 4  # every delegated view audited
+        assert time.monotonic() - started < 10  # fail-fast cache: no multi-second stalls
+
+    def test_during_a_broker_outage(self, user_a, admin, monkeypatch):
+        def broker_down(*args, **kwargs):
+            raise OperationalError("broker unavailable")
+
+        monkeypatch.setattr(tasks.process_outbox_event, "apply_async", broker_down)
+        self.journey(user_a, admin)

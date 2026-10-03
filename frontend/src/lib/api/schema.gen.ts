@@ -455,6 +455,26 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/workspaces/{workspace}/dashboard": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * @description Total leads, new leads today, pipeline value, weighted pipeline, meetings and tasks in
+         *     this workspace, with today's newest leads, the next meetings and the next open tasks.
+         */
+        readonly get: operations["dashboard"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/workspaces/{workspace}/leads": {
         readonly parameters: {
             readonly query?: never;
@@ -1026,6 +1046,53 @@ export interface components {
             readonly lead: components["schemas"]["Lead"];
             readonly opportunity: components["schemas"]["Opportunity"];
         };
+        /** @description The workspace's figures and its short lists, all read at the same moment. */
+        readonly Dashboard: {
+            readonly currency: string;
+            /** @description The business time zone that defines "today". */
+            readonly time_zone: string;
+            /**
+             * Format: date
+             * @description Today in the business time zone.
+             */
+            readonly business_date: string;
+            readonly leads: components["schemas"]["LeadSummary"];
+            readonly pipeline: components["schemas"]["PipelineTotals"];
+            readonly activities: components["schemas"]["ActivitySummary"];
+            /** @description Today's newest leads (at most 5): the ones `leads.new_today` counts. */
+            readonly new_leads: readonly components["schemas"]["DashboardLead"][];
+            /** @description The next scheduled meetings from now on (at most 5). */
+            readonly upcoming_meetings: readonly components["schemas"]["DashboardActivity"][];
+            /** @description Open tasks, soonest due first: overdue ones first (at most 5). */
+            readonly next_tasks: readonly components["schemas"]["DashboardActivity"][];
+        };
+        /** @description A meeting or task in a short list: what it is, when, about which lead, whose. */
+        readonly DashboardActivity: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly type: components["schemas"]["ActivityTypeEnum"];
+            readonly title: string;
+            readonly status: (components["schemas"]["ActivityStatusEnum"] | components["schemas"]["NullEnum"]) | null;
+            /** Format: date-time */
+            readonly due_at: string | null;
+            /** Format: date-time */
+            readonly starts_at: string | null;
+            /** @description An open task past its due time, or a scheduled meeting past its end. */
+            readonly is_overdue: boolean;
+            readonly lead: components["schemas"]["ActivityLeadRef"];
+            readonly owner: components["schemas"]["UserRef"];
+        };
+        /** @description One of today's new leads: its name, who it is assigned to, and when it was created. */
+        readonly DashboardLead: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly display_name: string;
+            readonly organization_name: string;
+            /** @description The assigned user. */
+            readonly owner: components["schemas"]["UserRef"];
+            /** Format: date-time */
+            readonly created_at: string;
+        };
         readonly Detail: {
             readonly detail: string;
         };
@@ -1216,6 +1283,12 @@ export interface components {
             readonly category: components["schemas"]["CategoryEnum"];
             readonly is_active: boolean;
             readonly is_default: boolean;
+        };
+        /** @description Archived leads never count; "today" is the business day in Asia/Kolkata. */
+        readonly LeadSummary: {
+            readonly total: number;
+            /** @description Created during today's business day. */
+            readonly new_today: number;
         };
         readonly LeadVersionRequest: {
             readonly version: number;
@@ -2491,6 +2564,34 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ActivitySummary"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly dashboard: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Dashboard"];
                 };
             };
             /** @description Not found, or outside this workspace. */

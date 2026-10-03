@@ -353,6 +353,12 @@ introduced, this rule is relaxed together with the new scope kind, not before.
   meeting times); titles and note text come from the live, visible record, as previews.
 - **Counts are scoped like rows** for activities too: the activity summary is computed from
   `scope.apply()` first and is identical whether or not other users have records.
+- **The dashboard** (Phase 5) adds no authorization of its own: `GET …/{workspace}/dashboard`
+  resolves the workspace like every CRM route and calls the owning modules' selectors with
+  that scope, so every figure and list is computed from `scope.apply()` first. A sales user
+  sees their own figures; `all` (with `crm.view_all`) is the Admin Home; `{uuid}` (with
+  `workspace.view_any`) is exactly that user's figures, audited once per window like any
+  delegated access ([dashboard.md](dashboard.md#workspaces)).
 
 ## Ask Arkray alignment
 
@@ -386,4 +392,5 @@ See [rag-architecture.md](rag-architecture.md#security-invariant).
 | Opportunity services enforce scope and capabilities for direct callers; ownership follows the lead; the database refuses ownership drift | `arkray/pipeline/tests/test_services.py`, `test_reassignment.py`, `test_models.py` |
 | Cross-user suite for activities and timelines: User A vs User B both ways over lists (every filter, sort and page size), guessed ids, both timelines (bodies and errors identical to missing ids), relationship fields (own task on the other's lead or opportunity: identical 404s), every action, summary counts (unchanged by the other's records), cursors replayed across workspaces, workspace substitution, crafted payloads; admin workspaces scoped to one user | `tests/security/test_activities_cross_user.py` |
 | Activity services enforce scope, capabilities, author-only note edits and lead-owner ownership for direct callers; the database refuses ownership drift and mismatched relationships | `arkray/activities/tests/test_services.py`, `test_reassignment.py`, `test_models.py` |
-| Cross-user suites for later modules | Phases 5–8 ([testing.md](testing.md#critical-cross-user-security-suite)) |
+| Dashboard aggregate isolation: A, B and the admin with distinctive amounts; every figure exact in each workspace; A's whole response byte-identical before and after B's and the admin's records exist; lists only the workspace's records; selected-user dashboards equal the user's own; organisation = the sum; figures follow a reassigned lead; other workspaces 404 like missing ones | `tests/security/test_dashboard_cross_user.py`, `arkray/dashboard/tests/test_api.py` |
+| Cross-user suites for later modules | Phases 6–8 ([testing.md](testing.md#critical-cross-user-security-suite)) |

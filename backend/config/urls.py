@@ -8,6 +8,7 @@ authorization matrix (tests/authz_matrix.py); tests/architecture enforces this.
 from django.urls import URLPattern, URLResolver, include, path
 
 from arkray.activities.api import urls as activities_urls
+from arkray.dashboard.api import urls as dashboard_urls
 from arkray.identity.api import urls as identity_urls
 from arkray.leads.api import urls as leads_urls
 from arkray.pipeline.api import urls as pipeline_urls
@@ -21,6 +22,7 @@ api_v1_patterns: list[URLPattern | URLResolver] = [
     path("workspaces/<str:workspace>/", include(leads_urls.workspace_urlpatterns)),
     path("workspaces/<str:workspace>/", include(pipeline_urls.workspace_urlpatterns)),
     path("workspaces/<str:workspace>/", include(activities_urls.workspace_urlpatterns)),
+    path("workspaces/<str:workspace>/", include(dashboard_urls.workspace_urlpatterns)),
     path("config/", include(leads_urls.config_urlpatterns)),
     path("config/", include(pipeline_urls.config_urlpatterns)),
 ]

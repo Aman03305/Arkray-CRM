@@ -79,3 +79,7 @@ export type TimelineEntry = Schemas["TimelineEntry"];
 export type TimelineActivity = Schemas["TimelineActivity"];
 export type TimelineKind = Schemas["TimelineKindEnum"];
 export type TimelinePage = Schemas["TimelinePage"];
+
+export type Dashboard = Schemas["Dashboard"];
+export type DashboardLead = Schemas["DashboardLead"];
+export type DashboardActivity = Schemas["DashboardActivity"];

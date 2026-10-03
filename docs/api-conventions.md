@@ -34,13 +34,12 @@ frontend's request and response types are generated from it.
 /api/v1/admin/users[/{id}]                        user management (users.manage)
 /api/v1/admin/users/{id}/activate|deactivate|resend-invitation|change-email
 /api/v1/workspaces/{workspace}                    whose workspace this is (audited when delegated)
-/api/v1/admin/overview                            admin-home KPIs (crm.view_all)
 /api/v1/admin/audit-events                        audit log (audit.view)
 /api/v1/config/pipelines                          pipelines with their stages (GET, any user; Phase 3)
 /api/v1/config/lead-options                       statuses, sources, ratings, countries (Phase 2)
 /api/v1/assignees?q=                             users records can be assigned to (crm.assign_any; Phase 2)
 
-/api/v1/workspaces/{workspace}/dashboard
+/api/v1/workspaces/{workspace}/dashboard              (Phase 5; `all` is the Admin Home)
 /api/v1/workspaces/{workspace}/leads[/{id}]            (Phase 2)
 /api/v1/workspaces/{workspace}/leads/duplicates        (Phase 2)
 /api/v1/workspaces/{workspace}/leads/{id}/status | assign | archive | restore   (Phase 2)

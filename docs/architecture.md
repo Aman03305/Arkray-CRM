@@ -73,7 +73,7 @@ flowchart LR
 | `leads` | Leads (the central prospect record; no Company/Product entities), configurable statuses and sources, ownership and reassignment, archive, bounded search, duplicate assistance ([leads.md](leads.md)) | 2 |
 | `pipeline` | Pipelines, configurable stages, opportunities (owned by their lead's owner), the one stage-transition operation, won/lost/reopen, append-only stage history, lead conversion, **the** pipeline value / weighted pipeline definitions, the Kanban board ([pipeline.md](pipeline.md)) | 3 |
 | `activities` | Tasks, meetings, notes (one extensible activity model, every activity about a lead, current work owned by the lead's owner), their lifecycle (complete, cancel, reopen), the lead and opportunity **timeline**, the last-contact rule for completed meetings, **the** activity figures for the dashboard ([activities.md](activities.md)) | 4 |
-| `dashboard` | Read-only aggregates for the user dashboard and admin home | 5 |
+| `dashboard` | The dashboard and Admin Home: a read-only composition of the owning modules' authoritative figures (lead figures, pipeline value and weighted pipeline, task and meeting figures) and short lists, in one snapshot, for any workspace; no tables, cache or formulas of its own ([dashboard.md](dashboard.md)) | 5 |
 | `search` | Scoped global search across leads, opportunities and activities | 7 |
 | `ai` | Ask Arkray: structured tools, semantic retrieval, indexing, LLM adapter | 8 |
 
@@ -107,7 +107,8 @@ flowchart TB
   `LeadReassigned` after the pipeline (current work follows the lead; lock order lead →
   opportunities → activities) and to the lead and opportunity events to write the
   timeline. A completed meeting advances the lead's last contact through
-  `leads.services.record_contact`.
+  `leads.services.record_contact`. Phase 5's `dashboard` only reads: it calls the
+  `leads`, `pipeline` and `activities` selectors and defines no figure itself.
 - `audit` stores actors and targets as plain identifiers, so it sits *below* `identity` and
   its history is independent of the records it describes.
 
@@ -210,7 +211,7 @@ security checks, and a PASS/FAIL report. No phase starts while critical tests fa
 | 2 | (**done**) Leads: configurable statuses/sources, CRUD, assign/reassign, archive, filters/sort/search, keyset pagination, duplicate assistance, admin workspaces, cross-user IDOR suite. Notes and the lead timeline moved to Phase 4; CSV import/export deferred ([leads.md](leads.md)) |
 | 3 | (**done**) Pipeline: configurable pipelines/stages, opportunities, Kanban (drag and drop + keyboard Move menu, stage tabs on phones), one stage-transition operation, won/lost/reopen, append-only stage history, lead conversion, open opportunities following lead reassignment, exact pipeline value / weighted pipeline, cross-user and aggregate-leakage suite, real-concurrency and lock-order tests, 300k-opportunity benchmark ([pipeline.md](pipeline.md)) |
 | 4 | (**done**) Activities: tasks, meetings and notes in one table (CHECK-enforced per type), complete/cancel/reopen as explicit operations, current work following lead reassignment (deferred composite key), immutable authorship, last contact from completed meetings (MAX), the append-only lead/opportunity timeline (backfilled from the audit trail and stage history), the Activities page, the activity figures for Phase 5, cross-user and timeline-leakage suite, real-concurrency and lock-order tests, 403k-activity benchmark ([activities.md](activities.md)) |
-| 5 | Dashboard and admin home aggregates (query-count tests) |
+| 5 | (**done**) Dashboard and Admin Home: total leads, new leads today (Asia/Kolkata business day), pipeline value and weighted pipeline (Phase 3's definitions), meetings and tasks (Phase 4's), today's newest leads with their assigned user, the next meetings and open tasks; own, selected-user and organisation-wide workspaces; one endpoint, six bounded queries in one snapshot, no cache; workspace-isolated frontend; aggregate-leakage suite; 1M-lead / 2M-activity benchmark ([dashboard.md](dashboard.md)) |
 | 6 | Admin user workspace UI end to end (banner with name, per-user stats table) |
 | 7 | Global search (PostgreSQL full-text + trigram, scoped) |
 | 8 | Ask Arkray: tools, pgvector retrieval, indexing pipeline, grounding, adversarial tests |

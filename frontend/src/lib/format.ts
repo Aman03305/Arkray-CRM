@@ -22,6 +22,12 @@ const dateTimeFormat = new Intl.DateTimeFormat(LOCALE, {
   timeZoneName: "short",
 });
 
+const timeFormat = new Intl.DateTimeFormat(LOCALE, {
+  timeZone: BUSINESS_TIME_ZONE,
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
 function parse(iso: string | null | undefined): Date | null {
   if (!iso) return null;
   const date = new Date(iso);
@@ -36,6 +42,12 @@ export function formatDate(iso: string | null | undefined, fallback = "—"): st
 export function formatDateTime(iso: string | null | undefined, fallback = "—"): string {
   const date = parse(iso);
   return date ? dateTimeFormat.format(date) : fallback;
+}
+
+/** "10:42 am": the time of day in the business time zone (for things that happened today). */
+export function formatTime(iso: string | null | undefined, fallback = "—"): string {
+  const date = parse(iso);
+  return date ? timeFormat.format(date) : fallback;
 }
 
 const relative = new Intl.RelativeTimeFormat(LOCALE, { numeric: "auto" });

@@ -306,6 +306,21 @@ analytics and automation subscribe later and enqueue outbox work from their subs
   the user's edits onto what the other person saved and flags fields both changed;
   "Discard my changes" loads the latest.
 
+## Figures (Phase 5)
+
+`selectors.lead_summary(scope, now=…)` is the authoritative definition of the dashboard's
+lead figures, in one aggregate query: **total** = leads in the scope that are not
+archived (any status); **new today** = those created during today's business day in
+Asia/Kolkata (`core.business_time`). Each equals the count of the Leads list it opens
+(default filters; created from/to today), tested in every scope kind.
+`selectors.new_leads_today(scope, now=…, limit=5)` returns the newest of those with their
+owner joined (names only, no contact data). A lead counts for its current owner. The
+figures are an index-only scan of `leads_owner_created_idx`, which carries `archived_at`
+since Phase 5 (migration `leads.0005`); the list is an indexed `LIMIT` on
+`leads_owner_created_idx` (one owner) or `leads_created_idx` (the organisation). Because
+index-only scans rely on the visibility map, `leads_lead` is vacuumed and analysed after
+1 % of it changes (migration `leads.0006`; [dashboard.md](dashboard.md#performance)).
+
 ## Performance
 
 Measured, not assumed. Query counts per request are constant (pinned in

@@ -125,7 +125,7 @@ def page_sql(scope, filters, ordering, cursor=None) -> str:
     queryset = selectors.activity_list(scope, filters, now=NOW)
     sql, params = paginator.window(queryset, cursor)[0].query.sql_with_params()
     with connection.cursor() as c:
-        return c.mogrify(sql, params)
+        return str(c.mogrify(sql, params))
 
 
 def scopes(dataset):
@@ -222,12 +222,16 @@ def test_the_summary_never_scans_one_owners_table_sequentially(dataset, kind):
     scope = scopes(dataset)[kind]
     with CaptureQueriesContext(connection) as queries:
         selectors.activity_summary(scope, now=NOW)
-    (sql,) = [q["sql"] for q in queries.captured_queries]
-    text = plan(sql)
-    if kind == "own":
-        assert "activities_owner_sched_idx" in scans(text), text
-    else:  # organisation-wide: any index path (a sequential scan in production, 34 ms at 403k)
-        assert scans(text) - {"Seq Scan"}, text
+    # Two aggregates, each one bounded range of a schedule index: the open tasks, and the
+    # meetings from today's start on (Phase 5 review: one OR over both read the owner's whole
+    # history, and organisation-wide flipped to a sequential scan as open work grew).
+    tasks, meetings = [q["sql"] for q in queries.captured_queries]
+    prefix = "activities_owner_" if kind == "own" else "activities_"
+    for sql in (tasks, meetings):
+        text = plan(sql)
+        assert "Seq Scan" not in scans(text), text
+        assert any(name.startswith(prefix) for name in scans(text)), text
+    assert prefix + "sched_idx" in scans(plan(tasks)), plan(tasks)
 
 
 def test_everything_about_one_lead_uses_the_lead_index(dataset):

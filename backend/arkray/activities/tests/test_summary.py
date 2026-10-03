@@ -107,3 +107,43 @@ def test_upcoming_meetings_are_the_next_scheduled_ones(user_a):
     assert [m.pk for m in found] == [soon.pk, later.pk]
     with pytest.raises(ValueError, match="range"):
         upcoming_meetings(AccessScope.own(user_a.pk), now=NOW, limit=500)
+
+
+def test_next_open_tasks_are_the_start_of_the_tasks_tab(user_a):
+    """The dashboard's "tasks requiring attention" are the first rows of the Activities
+    page's Tasks tab (open, soonest due first): overdue first, undated last."""
+    from arkray.activities.selectors import ORDERINGS, next_open_tasks
+    from arkray.core.keyset import KeysetPaginator
+
+    lead = LeadFactory(owner=user_a)
+    undated = TaskFactory(lead=lead)
+    later = TaskFactory(lead=lead, due_at=NOW + timedelta(days=3))
+    overdue = TaskFactory(lead=lead, due_at=NOW - timedelta(days=2))
+    today = TaskFactory(lead=lead, due_at=NOW + timedelta(hours=2))
+    TaskFactory(lead=lead, due_at=NOW - timedelta(days=5), status=ActivityStatus.COMPLETED)
+    TaskFactory(lead=lead, due_at=NOW - timedelta(days=6), archived_at=NOW)
+    TaskFactory(lead=LeadFactory(), due_at=NOW - timedelta(days=9))  # someone else's
+    scope = AccessScope.own(user_a.pk)
+
+    found = next_open_tasks(scope, now=NOW, limit=5)
+
+    assert found == [overdue, today, later, undated]
+    tab = KeysetPaginator(ORDERINGS["scheduled"], page_size=3).paginate(
+        activity_list(scope, ActivityFilters(type="task", status="open"), now=NOW), None
+    )
+    assert next_open_tasks(scope, now=NOW, limit=3) == tab.items
+    with pytest.raises(ValueError, match="range"):
+        next_open_tasks(scope, now=NOW, limit=0)
+
+
+def test_next_open_tasks_break_ties_like_the_tasks_tab(user_a):
+    """Undated tasks (and tasks due at the same moment) are ordered by id, as the Tasks tab's
+    keyset ordering (schedule_sort, id) does, so the rows shown are its first rows."""
+    from arkray.activities.selectors import next_open_tasks
+
+    lead = LeadFactory(owner=user_a)
+    undated = [TaskFactory(lead=lead) for _ in range(4)]
+    same_time = [TaskFactory(lead=lead, due_at=NOW + timedelta(hours=1)) for _ in range(3)]
+    found = next_open_tasks(AccessScope.own(user_a.pk), now=NOW, limit=5)
+    by_id = lambda tasks: sorted(tasks, key=lambda t: t.pk)  # noqa: E731
+    assert found == [*by_id(same_time), *by_id(undated)[:2]]

@@ -91,4 +91,7 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     f"{ACTIVITY}/restore": _rule("workspace", "POST"),
     "api/v1/workspaces/<str:workspace>/leads/<uuid:lead_id>/timeline": _rule("workspace", "GET"),
     f"{OPPORTUNITY}/timeline": _rule("workspace", "GET"),
+    # --- dashboard (Phase 5). Read-only: the scope decides which records every figure and
+    # list may include (aggregates are computed from scope.apply() first). -----------------
+    "api/v1/workspaces/<str:workspace>/dashboard": _rule("workspace", "GET"),
 }

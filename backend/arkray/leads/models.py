@@ -261,9 +261,17 @@ class Lead(UUIDPrimaryKeyModel, TimeStampedModel):
         # Owner-leading indexes serve one person's workspace; the others the organisation.
         indexes = [
             # One owner's leads, newest first (the default list), and the access path for
-            # every per-owner filter and search.
+            # every per-owner filter and search. It carries the archive state (Phase 5) so
+            # the dashboard's lead figures (selectors.lead_summary) are counted from the
+            # index alone: without it the heaviest owner's count read every one of their rows
+            # to check it, 93-133 ms at 66,700 leads and 177 ms organisation-wide at
+            # 1,000,000 leads (8 ms and 50 ms with it; docs/dashboard.md#performance).
             models.Index(
-                F("owner"), F("created_at").desc(), F("id").desc(), name="leads_owner_created_idx"
+                F("owner"),
+                F("created_at").desc(),
+                F("id").desc(),
+                name="leads_owner_created_idx",
+                include=["archived_at"],
             ),
             # One owner's leads by "recently updated" and by last contact (both directions:
             # a backward scan gives "longest since contact, never contacted first"). Without

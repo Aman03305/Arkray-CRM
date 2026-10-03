@@ -202,17 +202,19 @@ describe("capability-consistent views (review P3-5, P3-7)", () => {
     const api = mockApi({});
     renderWithProviders(<DashboardView />);
     expect(screen.getByText("Loading")).toBeInTheDocument();
-    expect(screen.queryByText(/isn't available yet/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Key figures")).not.toBeInTheDocument();
     expect(api.calls).toHaveLength(0);
   });
 
-  it("Admin Home loads users only for viewers who may manage them", () => {
+  it("Admin Home loads users only for viewers who may manage them", async () => {
     const api = mockApi({});
     renderWithProviders(<AdminHome />, {
       viewer: makeViewer({ capabilities: ["crm.access_own", "crm.view_all"] }),
     });
+    // The organisation's figures load (Phase 5); the users list never does.
+    await waitFor(() => expect(api.callsTo("GET", "/api/v1/workspaces/all/dashboard")).toHaveLength(1));
     expect(screen.queryByText("Recently added users")).not.toBeInTheDocument();
-    expect(api.calls).toHaveLength(0);
+    expect(api.callsTo("GET", "/api/v1/admin/users")).toHaveLength(0);
   });
 });
 

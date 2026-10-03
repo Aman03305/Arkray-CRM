@@ -113,6 +113,7 @@ root_packages = ["arkray"]
 name = "Modular monolith layering"
 type = "layers"
 layers = [
+    "arkray.dashboard",
     "arkray.activities",
     "arkray.pipeline",
     "arkray.leads",

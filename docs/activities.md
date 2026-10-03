@@ -331,9 +331,11 @@ archived or restored ([rag-architecture.md](rag-architecture.md#indexing-pipelin
 
 ## Dashboard figures (for Phase 5)
 
-`selectors.activity_summary(scope, now=…)` (one aggregate query) and
-`selectors.upcoming_meetings(scope, now=…, limit=5)` are the authoritative definitions;
-Phase 5 must use them, not re-derive them:
+`selectors.activity_summary(scope, now=…)` (two aggregate queries since Phase 5),
+`selectors.upcoming_meetings(scope, now=…, limit=5)` and (added in Phase 5)
+`selectors.next_open_tasks(scope, now=…, limit=5)` (the first rows of the Tasks tab: open,
+soonest due first) are the authoritative definitions; the Phase 5 dashboard uses them
+unchanged ([dashboard.md](dashboard.md)):
 
 | Figure | Definition |
 |---|---|
@@ -413,7 +415,7 @@ Query counts per request are pinned (identical at 10 and 100 rows,
 | list (own / organisation), any filter or sort, following a cursor (both directions) | 3: session, user, activities (lead, opportunity, owner, author joined, text cut to a preview in SQL) |
 | list in a user's workspace | 4 (+ the workspace check) |
 | detail | 3 |
-| summary | 3 (one aggregate) |
+| summary | 4 (two aggregates since Phase 5: open tasks; meetings from today on) |
 | lead timeline | 5: session, user, lead visibility, entries (actor, activity, opportunity joined), the people named in the page (one query for all; 4 when nobody is named) |
 | opportunity timeline | 4 |
 | create a task | 10, whatever else exists |
@@ -438,7 +440,8 @@ reviewer's method for testing growth.
 | completed tasks, notes, archived: newest first | 0.28–1.06 / 0.20–0.56 ms | 0.22–0.52 / 0.21–0.71 ms | 0.28–0.36 / 0.34–1.06 ms |
 | rare or old matches, newest first (cancelled meetings, archived notes, a week 50 days ago) | 0.06–2.46 / 0.04–1.98 ms | 0.03–1.71 / 0.04–1.64 ms | 0.03–0.68 / 0.06–1.52 ms |
 | an administrator's owner filter, newest / oldest | — | — | 0.15–0.27 / 0.29–0.39 ms |
-| summary (one aggregate) | 4.1 / 12.1 ms | 0.9 / 4.0 ms | 25 / 31 ms |
+| summary (one aggregate, Phase 4) | 4.1 / 12.1 ms | 0.9 / 4.0 ms | 25 / 31 ms |
+| summary (two aggregates, Phase 5; 2M) | 0.8 ms | 0.03 ms | 12 ms |
 | upcoming meetings (5) | 0.07 / 0.08 ms | 0.07 ms | 0.11–0.12 ms |
 | deep cursor (3,000 rows in) | 0.40 / 0.49 ms | 0.21–0.23 ms | 2.4–2.5 ms |
 | a lead's activities / its open work / an opportunity's | — | — | 0.04–0.08 / 0.05–0.13 ms |
@@ -478,8 +481,15 @@ which forbids sequential scans and sorts and names the index each shape must use
   open work (25 ms at 403k, 31 ms at 2M, five times the rows). One owner's summary reads
   that owner's entries of `activities_owner_sched_idx` (4 ms / 12 ms for the heaviest).
 
-Accepted (risk R44): the organisation-wide summary (25–31 ms, administrators only, one
-aggregate per page load). Index count: 12 on `activities_activity` besides the primary and
+- **Phase 5 performance review (P2):** the one aggregate over "open task OR meeting from
+  today" still read the heaviest owner's whole history (13–25 ms) and, with 20,000 more
+  open tasks and 20,000 stale scheduled meetings, flipped organisation-wide to a sequential
+  scan (135 ms; 154–243 ms with JIT). It is now two aggregates, open tasks and meetings from
+  today's start on, each an index-only range of the schedule index: 0.8 ms / 12 ms at 2M,
+  4.8 ms / 70 ms on the grown copy, figures identical
+  ([dashboard.md](dashboard.md#what-the-benchmark-and-the-review-changed)).
+
+Risk R44 is resolved by that split. Index count: 12 on `activities_activity` besides the primary and
 timeline keys, nine of them partial (archived rows left out; the current-work ones hold open
 work only). Writes are human-paced, so the extra index maintenance per write is cheap.
 

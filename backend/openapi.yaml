@@ -904,6 +904,31 @@ paths:
           description: ''
         '404':
           description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/dashboard:
+    get:
+      operationId: dashboard
+      description: |-
+        Total leads, new leads today, pipeline value, weighted pipeline, meetings and tasks in
+        this workspace, with today's newest leads, the next meetings and the next open tasks.
+      parameters:
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dashboard'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
   /api/v1/workspaces/{workspace}/leads:
     get:
       operationId: leads_list
@@ -2582,6 +2607,138 @@ components:
       required:
       - lead
       - opportunity
+    Dashboard:
+      type: object
+      description: The workspace's figures and its short lists, all read at the same
+        moment.
+      properties:
+        currency:
+          type: string
+        time_zone:
+          type: string
+          description: The business time zone that defines "today".
+        business_date:
+          type: string
+          format: date
+          description: Today in the business time zone.
+        leads:
+          $ref: '#/components/schemas/LeadSummary'
+        pipeline:
+          $ref: '#/components/schemas/PipelineTotals'
+        activities:
+          $ref: '#/components/schemas/ActivitySummary'
+        new_leads:
+          type: array
+          items:
+            $ref: '#/components/schemas/DashboardLead'
+          description: 'Today''s newest leads (at most 5): the ones `leads.new_today`
+            counts.'
+        upcoming_meetings:
+          type: array
+          items:
+            $ref: '#/components/schemas/DashboardActivity'
+          description: The next scheduled meetings from now on (at most 5).
+        next_tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/DashboardActivity'
+          description: 'Open tasks, soonest due first: overdue ones first (at most
+            5).'
+      required:
+      - activities
+      - business_date
+      - currency
+      - leads
+      - new_leads
+      - next_tasks
+      - pipeline
+      - time_zone
+      - upcoming_meetings
+    DashboardActivity:
+      type: object
+      description: 'A meeting or task in a short list: what it is, when, about which
+        lead, whose.'
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        type:
+          allOf:
+          - $ref: '#/components/schemas/ActivityTypeEnum'
+          readOnly: true
+        title:
+          type: string
+          readOnly: true
+        status:
+          readOnly: true
+          nullable: true
+          oneOf:
+          - $ref: '#/components/schemas/ActivityStatusEnum'
+          - $ref: '#/components/schemas/NullEnum'
+        due_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        starts_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        is_overdue:
+          type: boolean
+          readOnly: true
+          description: An open task past its due time, or a scheduled meeting past
+            its end.
+        lead:
+          allOf:
+          - $ref: '#/components/schemas/ActivityLeadRef'
+          readOnly: true
+        owner:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+      required:
+      - due_at
+      - id
+      - is_overdue
+      - lead
+      - owner
+      - starts_at
+      - status
+      - title
+      - type
+    DashboardLead:
+      type: object
+      description: 'One of today''s new leads: its name, who it is assigned to, and
+        when it was created.'
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        display_name:
+          type: string
+          readOnly: true
+        organization_name:
+          type: string
+          readOnly: true
+        owner:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+          description: The assigned user.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - display_name
+      - id
+      - organization_name
+      - owner
     Detail:
       type: object
       properties:
@@ -3165,6 +3322,18 @@ components:
       - is_default
       - key
       - name
+    LeadSummary:
+      type: object
+      description: Archived leads never count; "today" is the business day in Asia/Kolkata.
+      properties:
+        total:
+          type: integer
+        new_today:
+          type: integer
+          description: Created during today's business day.
+      required:
+      - new_today
+      - total
     LeadVersionRequest:
       type: object
       properties:

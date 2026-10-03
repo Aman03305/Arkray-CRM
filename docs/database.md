@@ -301,7 +301,7 @@ lookups use the composite indexes, and users/statuses/sources are never deleted.
 
 | Index | Query pattern | Measured |
 |---|---|---|
-| `leads_owner_created_idx (owner_id, created_at DESC, id DESC)` | one workspace's list, newest/oldest (backward scan), and the access path for every per-owner filter, search and archived view | 0.1–0.3 ms, deep cursor 0.14 ms |
+| `leads_owner_created_idx (owner_id, created_at DESC, id DESC) INCLUDE (archived_at)` | one workspace's list, newest/oldest (backward scan), and the access path for every per-owner filter, search and archived view; since Phase 5 also the dashboard's lead figures, counted from the index alone (it carries the archive state) | 0.1–0.3 ms, deep cursor 0.14 ms; lead figures 6–9 ms for a 66,700-lead owner and 45–53 ms organisation-wide at 1,000,000 leads (**93–188 ms and 75–177 ms without the INCLUDE**), provided the visibility map is kept fresh (see below) |
 | `leads_owner_updated_idx (owner_id, updated_at DESC, id DESC)` | one workspace, "recently updated" | 0.19 ms (**310 ms without it**: the planner walked the org-wide index for an owner whose leads cluster in time) |
 | `leads_owner_contacted_idx (owner_id, last_contacted_sort DESC, id DESC)` | one workspace, "recently contacted" and (backward) "longest since contact, never contacted first" | 0.1–0.9 ms (27–36 ms without it) |
 | `leads_owner_name_idx (owner_id, display_name, id)` | one workspace sorted by name, including with selective filters or a search | 0.1–8 ms (**136–368 ms without it**: the planner walked the organisation-wide name index filtering by owner; found in review) |
@@ -312,6 +312,14 @@ lookups use the composite indexes, and users/statuses/sources are never deleted.
 | `leads_search_trgm GIN (search_text gin_trgm_ops)` | `q` search (`search_text LIKE '%TERM%'` per term) | rare term 0.07 ms, exact email 12 ms, phone digits 0.7 ms |
 | `leads_email_lower_idx (lower(email)) WHERE email <> ''` | duplicate check by email | combined with the next one: 0.35 ms |
 | `leads_phone_keys_gin GIN (phone_keys)` | duplicate check by phone (`phone_keys && ARRAY[...]`) | (BitmapOr with the email index) |
+
+**Autovacuum (Phase 5, migration `leads.0006`).** `leads_lead` is vacuumed, insert-vacuumed
+and analysed after **1 %** of its rows change (PostgreSQL's defaults: 20 % / 10 %). Every
+lead edit is a non-HOT update (`updated_at` is indexed) that clears two pages'
+all-visible marks; with the defaults the dashboard's index-only lead count fetched most
+heap rows for up to 200,000 edits at 1,000,000 leads (the organisation's figure up to ~1 s;
+performance review, P1). At 1 % the worst case before a run is ~10,000 edits: 11 ms for
+the heaviest owner, 71 ms organisation-wide.
 
 The duplicate check is issued **without** `ORDER BY` so PostgreSQL combines the two
 duplicate indexes (a `BitmapOr`, 0.35 ms) instead of walking a date index until it meets
@@ -534,18 +542,20 @@ UNIQUE `(source_type, source_id, chunk_index)`; btree `(owner_id)`, `(lead_id)`;
 re-verified against the live source table through the caller's scope before any text
 reaches the model ([rag-architecture.md](rag-architecture.md)).
 
-## Aggregate queries (Phase 5)
+## Aggregate queries (built in Phase 5)
 
-Dashboard figures are single aggregate statements, never Python loops over rows. For a
-scope (for example `owner_id = :u`) and `:today_start`/`:today_end` computed in
-`CRM_TIME_ZONE`:
+Dashboard figures are single aggregate statements, never Python loops over rows, each
+owned by its module's selectors ([dashboard.md](dashboard.md)). For a scope (for example
+`owner_id = :u`) and `:today_start`/`:today_end` computed in `CRM_TIME_ZONE`:
 
 ```sql
--- Leads
-SELECT count(*)                                         AS total_leads,
-       count(*) FILTER (WHERE created_at >= :today_start
-                          AND created_at <  :today_end) AS new_leads_today
-FROM leads_lead WHERE owner_id = :u AND archived_at IS NULL;
+-- Leads (leads.selectors.lead_summary). Every column read is in leads_owner_created_idx,
+-- which carries archived_at (INCLUDE): an index-only scan for one owner and for the
+-- organisation.
+SELECT count(id)                                         AS total,
+       count(id) FILTER (WHERE created_at >= :today_start
+                           AND created_at <  :today_end) AS new_today
+FROM leads_lead WHERE owner_id IN (:u) AND archived_at IS NULL;
 
 -- Pipeline (built in Phase 3: pipeline.metrics / selectors.pipeline_totals; the dashboard
 -- calls that, it never re-derives the formula). Exact NUMERIC: a product, not a division
@@ -557,29 +567,40 @@ SELECT coalesce(sum(value), 0.00)                               AS pipeline_valu
 FROM pipeline_opportunity
 WHERE owner_id IN (:u) AND archived_at IS NULL AND status = 'open';
 
--- Activities (built in Phase 4: activities.selectors.activity_summary, one statement; the
--- dashboard calls that). schedule_sort is the due time for tasks ("undated" = 9999-12-31,
--- never due today or overdue) and the start for meetings. task := type 'task' AND status
--- 'open'; meeting := type 'meeting' AND status IN ('scheduled', 'completed').
-SELECT count(*) FILTER (WHERE task)                                       AS open_tasks,
-       count(*) FILTER (WHERE task AND schedule_sort >= :today_start
-                                   AND schedule_sort <  :today_end)       AS tasks_due_today,
-       count(*) FILTER (WHERE task AND schedule_sort < :now)              AS overdue_tasks,
-       count(*) FILTER (WHERE meeting AND schedule_sort >= :today_start
-                                      AND schedule_sort <  :today_end)    AS meetings_today,
-       count(*) FILTER (WHERE type = 'meeting' AND status = 'scheduled'
-                              AND schedule_sort >= :now)                  AS upcoming_meetings
+-- Activities (activities.selectors.activity_summary; the dashboard calls that). Two
+-- statements since Phase 5, each one index-only range of the schedule index (one statement
+-- over "task OR meeting" read an owner's whole history and could flip to a sequential scan
+-- organisation-wide). schedule_sort is the due time for tasks ("undated" = 9999-12-31, never
+-- due today or overdue) and the start for meetings.
+SELECT count(id)                                                AS open_tasks,
+       count(id) FILTER (WHERE schedule_sort >= :today_start
+                           AND schedule_sort <  :today_end)     AS tasks_due_today,
+       count(id) FILTER (WHERE schedule_sort < :now)            AS overdue_tasks
 FROM activities_activity
-WHERE owner_id = :u AND archived_at IS NULL
-  AND (task OR (meeting AND schedule_sort >= :today_start));  -- no past meeting can count
+WHERE owner_id IN (:u) AND archived_at IS NULL AND type = 'task' AND status = 'open';
+
+SELECT count(id) FILTER (WHERE schedule_sort < :today_end)      AS meetings_today,
+       count(id) FILTER (WHERE status = 'scheduled'
+                           AND schedule_sort >= :now)           AS upcoming_meetings
+FROM activities_activity
+WHERE owner_id IN (:u) AND archived_at IS NULL AND type = 'meeting'
+  AND status IN ('scheduled', 'completed')
+  AND schedule_sort >= :today_start;                            -- no past meeting can count
 ```
 
 Worked example from the requirements: one open opportunity of ₹1,000,000 at 50% gives
 `pipeline_value = 1000000.00` and `weighted_pipeline = 500000.00`.
 
-Admin views run the same statements with `GROUP BY owner_id` for one page of users
-(`owner_id = ANY(:page_user_ids)`), so the users table costs a constant number of queries
-per page regardless of how many users or records exist.
+The dashboard also reads three lists of at most five rows (today's newest leads, the next
+meetings, the next open tasks), each one indexed `LIMIT` query with its related records
+joined. The seven statements run in one `REPEATABLE READ, READ ONLY` transaction. Measured
+(1,000,000 leads, 300,000 opportunities, 2,000,000 activities): 18 ms for the heaviest
+owner, 0.6 ms for a typical one, 88 ms organisation-wide
+([dashboard.md](dashboard.md#performance)).
+
+Phase 6's per-user statistics table will run the same statements with `GROUP BY owner_id`
+for one page of users (`owner_id = ANY(:page_user_ids)`), so it costs a constant number of
+queries per page regardless of how many users or records exist.
 
 ## Migrations
 
@@ -593,5 +614,13 @@ per page regardless of how many users or records exist.
   transaction first (`SET LOCAL statement_timeout = 0`; `activities.0003`, `0005`, `0006`,
   `0007`; pinned by `tests/architecture/test_migrations.py`). At 403,000 activities and
   733,000 timeline entries, `activities.0005`–`0007` took 11 s together.
+- Index changes on tables in use are made `CONCURRENTLY` (`leads.0005`, which rebuilds
+  `leads_owner_created_idx` with `INCLUDE (archived_at)`; Phase 5 review): a plain
+  `DROP INDEX` takes ACCESS EXCLUSIVE, so one long reader would stall every request on the
+  table for the 5 s lock timeout and fail the deploy. Such migrations are non-atomic; they
+  lift `statement_timeout` and `lock_timeout` for their session (the concurrent steps only
+  wait, blocking nobody) and restore both at the end, in either direction (pinned by the same
+  test). At 1,000,000 leads, with an 8 s reader open, `leads.0005` took 8 s either way and no
+  lead read waited more than 8 ms.
 - Extensions (`vector`, `pg_trgm`) are created by the migration of the module that needs
   them. Both are "trusted" extensions installable by the database owner role.

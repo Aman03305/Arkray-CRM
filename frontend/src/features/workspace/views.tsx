@@ -1,10 +1,9 @@
 "use client";
 
-import { LayoutDashboard } from "lucide-react";
-
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ActivitiesListView } from "@/features/activities/ActivitiesListView";
 import { ActivityDetailView } from "@/features/activities/ActivityDetailView";
+import { WorkspaceDashboard } from "@/features/dashboard/DashboardView";
 import { LeadDetailView } from "@/features/leads/LeadDetailView";
 import { LeadFormView } from "@/features/leads/LeadFormView";
 import { LeadsListView } from "@/features/leads/LeadsListView";
@@ -16,13 +15,10 @@ import { useWorkspace } from "@/lib/use-workspace";
 import { useViewer } from "@/lib/viewer-context";
 import { workspaceApiSegment } from "@/lib/workspace";
 
-import { ModulePlaceholder } from "./ModulePlaceholder";
-
 /*
  * One view per CRM module, rendered unchanged in every workspace (own, organisation, or a
  * user opened by an admin). Views read the workspace from the URL via useWorkspace() and
  * call /api/v1/workspaces/{segment}/...; they never branch on "am I an admin".
- * Each phase replaces a placeholder with the real view in its own feature folder.
  *
  * Until the viewer has loaded, the workspace for top-level routes is unknown ("me" for a
  * sales user, "all" for an admin), so views render a skeleton rather than guess (and never
@@ -38,12 +34,13 @@ function ViewSkeleton() {
     </div>
   );
 }
+// The dashboard is keyed by workspace too: Rahul's figures and lists never carry over into
+// Priya's, and the organisation-wide dashboard is the administrator's home (ADR-0010).
 export function DashboardView() {
-  // The organisation-wide dashboard is the administrator's home (ADR-0010).
   const workspace = useWorkspace();
   if (useViewer() === null) return <ViewSkeleton />;
-  if (workspace.kind === "organization") return <AdminHome />;
-  return <ModulePlaceholder title="Dashboard" icon={LayoutDashboard} />;
+  if (workspace.kind === "organization") return <AdminHome key="all" />;
+  return <WorkspaceDashboard key={workspaceApiSegment(workspace)} workspace={workspace} />;
 }
 
 // Pipeline views are keyed by workspace too: Rahul's board, filters and cards never carry

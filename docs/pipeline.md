@@ -149,7 +149,8 @@ has no parameter for one.
 - These are defined once, in [`pipeline/metrics.py`](../backend/arkray/pipeline/metrics.py)
   (`open_pipeline_totals` applies the OPEN filter itself so no caller can forget it), and
   used through `selectors.pipeline_totals(scope, filters)`, which applies the scope first.
-  **Phase 5's dashboard uses this; it must not re-derive the formula.**
+  **Phase 5's dashboard uses this; it must not re-derive the formula** (it doesn't:
+  [dashboard.md](dashboard.md) calls `selectors.pipeline_totals` over all pipelines).
 - Worked example (tested end to end): A ₹10,00,000 at 50 % open, B ₹5,00,000 at 80 % open,
   C ₹2,00,000 won → pipeline value ₹15,00,000.00, weighted pipeline ₹9,00,000.00.
 - The browser never does arithmetic on amounts: [`lib/money.ts`](../frontend/src/lib/money.ts)

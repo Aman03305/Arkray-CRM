@@ -43,6 +43,15 @@ export function useLeadListState(workspaceKey: string) {
   };
 }
 
+/**
+ * Open this workspace's Leads list with these filters (the rest at their defaults) the next
+ * time it is shown, replacing what was remembered: how a dashboard figure opens exactly the
+ * list it counts ("New leads today": created today) without putting filters in the URL.
+ */
+export function presetLeadList(workspaceKey: string, filters: Partial<LeadFilters> = {}): void {
+  remembered.set(workspaceKey, { filters: { ...NO_FILTERS, ...filters }, cursor: null });
+}
+
 /** Tests only. */
 export function forgetLeadListState(): void {
   remembered.clear();

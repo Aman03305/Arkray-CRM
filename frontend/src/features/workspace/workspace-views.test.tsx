@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { adminViewer, makeAdminUser, RAHUL_ID, salesViewer } from "@/test/fixtures";
 import { asListItem, makeActivity, page, SUMMARY } from "@/test/activity-fixtures";
+import { makeDashboard } from "@/test/dashboard-fixtures";
 import { makeBoard, PIPELINES } from "@/test/pipeline-fixtures";
 import { apiError, mockApi, renderWithProviders } from "@/test/render";
 
@@ -20,26 +21,39 @@ beforeEach(() => {
 });
 
 describe("Dashboard", () => {
-  it("is the Admin Home for administrators: real users, no invented figures", async () => {
-    mockApi({
+  it("is the Admin Home for administrators: the organisation's figures and the newest users", async () => {
+    const api = mockApi({
       "GET /api/v1/admin/users": { status: 200, body: { results: [makeAdminUser()], next: null, previous: null } },
+      "GET /api/v1/workspaces/all/dashboard": { status: 200, body: makeDashboard() },
     });
     renderWithProviders(<DashboardView />, { viewer: adminViewer });
     expect(screen.getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
-    expect(screen.getByText("No figures yet")).toBeInTheDocument();
+    expect(screen.getByText("Organization overview")).toBeInTheDocument();
+    expect(await screen.findByText("₹15,00,000")).toBeInTheDocument();
     expect(await screen.findByRole("link", { name: "Rahul Sharma" })).toHaveAttribute(
       "href",
       `/admin/users/${RAHUL_ID}/dashboard`,
     );
     expect(screen.getByRole("link", { name: "Manage users" })).toHaveAttribute("href", "/admin/users");
-    expect(document.body.textContent).not.toMatch(/₹|\d+ leads|pipeline value/i);
+    expect(api.calls.every((c) => !c.path.includes("/workspaces/me"))).toBe(true);
   });
 
-  it("is an honest empty state for sales users (their dashboard arrives with Phase 5)", () => {
-    const api = mockApi({});
+  it("is a salesperson's own dashboard (no organisation or admin data is requested)", async () => {
+    const api = mockApi({ "GET /api/v1/workspaces/me/dashboard": { status: 200, body: makeDashboard() } });
     renderWithProviders(<DashboardView />, { viewer: salesViewer });
-    expect(screen.getByText("Dashboard isn't available yet")).toBeInTheDocument();
-    expect(api.calls).toHaveLength(0); // no admin data is even requested
+    expect(await screen.findByText("Your records")).toBeInTheDocument();
+    expect(await screen.findByText("₹15,00,000")).toBeInTheDocument();
+    expect(api.calls.map((c) => c.path)).toEqual(["/api/v1/workspaces/me/dashboard"]);
+  });
+
+  it("in another user's workspace, loads that user's dashboard only", async () => {
+    navigation.pathname = `/admin/users/${RAHUL_ID}/dashboard`;
+    const api = mockApi({ [`GET /api/v1/workspaces/${RAHUL_ID}/dashboard`]: { status: 200, body: makeDashboard() } });
+    renderWithProviders(<DashboardView />, { viewer: adminViewer });
+    expect(await screen.findByText("Selected user's records")).toBeInTheDocument();
+    expect(await screen.findByText("₹15,00,000")).toBeInTheDocument();
+    expect(api.calls.every((c) => !c.path.includes("/workspaces/all") && !c.path.includes("/workspaces/me"))).toBe(true);
+    expect(screen.queryByText("Recently added users")).not.toBeInTheDocument();
   });
 });
 

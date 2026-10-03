@@ -33,6 +33,7 @@ from .timeline import USER_KEYS
 
 PREVIEW_LENGTH = 240  # characters of a note (or description) shown in lists and timelines
 UPCOMING_MEETINGS_DEFAULT = 5
+NEXT_TASKS_DEFAULT = 5
 
 ORDERINGS: dict[str, KeysetOrdering] = {
     ordering.name: ordering
@@ -231,34 +232,34 @@ def activity_by_id(activity_id: UUID) -> Activity:
 
 def activity_summary(scope: AccessScope, *, now: datetime) -> ActivitySummary:
     """Open tasks, tasks due today, overdue tasks, today's meetings and upcoming meetings in
-    `scope`, in one aggregate query over the authoritative table. "Today" is the business
-    day containing `now` (core.business_time); archived activities never count."""
+    `scope`, from the authoritative table. "Today" is the business day containing `now`
+    (core.business_time); archived activities never count.
+
+    Two aggregate queries, each one bounded index range: the open tasks, and the meetings
+    from today's start on (a past meeting can't be today's or upcoming). One query over
+    "open task OR meeting from today" (Phase 4) read the owner's whole history when the
+    planner served the OR from the owner's index (13-25 ms for the heaviest owner at 2M
+    activities), and organisation-wide flipped to a sequential scan of every activity as open
+    work grew (154-243 ms; Phase 5 performance review, P2). Split, each part reads only what
+    it counts (index-only for one owner or the organisation)."""
     start, end = today_bounds(now)
-    today = Q(schedule_sort__gte=start, schedule_sort__lt=end)
-    task = Q(type=ActivityType.TASK, status=ActivityStatus.OPEN)
-    meeting = Q(
+    live = scope.apply(Activity.objects.filter(archived_at__isnull=True))
+    tasks = live.filter(type=ActivityType.TASK, status=ActivityStatus.OPEN).aggregate(
+        open_tasks=Count("id"),
+        tasks_due_today=Count("id", filter=Q(schedule_sort__gte=start, schedule_sort__lt=end)),
+        overdue_tasks=Count("id", filter=Q(schedule_sort__lt=now)),
+    )
+    meetings = live.filter(
         type=ActivityType.MEETING,
         status__in=[ActivityStatus.SCHEDULED, ActivityStatus.COMPLETED],
+        schedule_sort__gte=start,
+    ).aggregate(
+        meetings_today=Count("id", filter=Q(schedule_sort__lt=end)),
+        upcoming_meetings=Count(
+            "id", filter=Q(status=ActivityStatus.SCHEDULED, schedule_sort__gte=now)
+        ),
     )
-    # Only meetings from today's start on can count (today's or upcoming): stating it keeps
-    # past meetings out of the organisation-wide scan, which then follows open work rather
-    # than all history (Phase 4 review: a sequential scan before; 37 ms at 2M activities).
-    row = (
-        scope.apply(Activity.objects.filter(archived_at__isnull=True))
-        .filter(task | (meeting & Q(schedule_sort__gte=start)))
-        .aggregate(
-            open_tasks=Count("id", filter=task),
-            tasks_due_today=Count("id", filter=task & today),
-            overdue_tasks=Count("id", filter=task & Q(schedule_sort__lt=now)),
-            meetings_today=Count("id", filter=meeting & today),
-            upcoming_meetings=Count(
-                "id",
-                filter=Q(type=ActivityType.MEETING, status=ActivityStatus.SCHEDULED)
-                & Q(schedule_sort__gte=now),
-            ),
-        )
-    )
-    return ActivitySummary(**row)
+    return ActivitySummary(**tasks, **meetings)
 
 
 def upcoming_meetings(
@@ -275,6 +276,21 @@ def upcoming_meetings(
         )
         .filter(schedule_sort__gte=now)
         .order_by("schedule_sort", "id")[:limit]
+    )
+
+
+def next_open_tasks(
+    scope: AccessScope, *, now: datetime, limit: int = NEXT_TASKS_DEFAULT
+) -> list[Activity]:
+    """The first open tasks in `scope` by due time (bounded; for Phase 5): the start of the
+    Activities page's Tasks tab (open, soonest due first), so overdue tasks come first,
+    then today's, then later ones, and undated tasks last."""
+    if not 1 <= limit <= 50:
+        raise ValueError("limit out of range")
+    return list(
+        activity_list(
+            scope, ActivityFilters(type=ActivityType.TASK, status=ActivityStatus.OPEN), now=now
+        ).order_by("schedule_sort", "id")[:limit]
     )
 
 

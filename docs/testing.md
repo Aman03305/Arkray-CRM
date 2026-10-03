@@ -83,6 +83,77 @@ architecture test fails if a route is missing from the matrix.
 - **Frontend states:** every data view tests loading (skeleton), empty, error (with retry)
   and populated states, plus permission-driven visibility.
 
+## What exists after Phase 5
+
+- **Backend (2,764 tests, 98 % coverage of `arkray/`)**, adding for the Dashboard:
+  the figure definitions (`arkray/dashboard/tests/test_figures.py`: the brief's ₹15,00,000 /
+  ₹9,00,000 example with won, lost and archived excluded; exact decimal strings rounded
+  once, 25 × the maximum value; equality with the pipeline's own summary over 60 random
+  opportunities; Phase 4 task and meeting semantics on fixtures in every state; lead figures
+  at the 00:00 IST boundary and both ends of the day; every pipeline counted; `business_date`
+  from the request's clock; bounded lists, newest/soonest first, ties; no contact data; a
+  new user's zeros; each figure equal to its owning module's selector in all three scope
+  kinds), the lead figures equal to the Leads list they open
+  (`arkray/leads/tests/test_summary.py`), the next open tasks equal to the Tasks tab's first
+  rows, the API (identical 404s for other workspaces and 11 odd spellings, 401, strict
+  parameters, read-only methods, no-store, audit once per window and none for one's own
+  dashboard, no CRM data in the logs, one clock read), freshness through the real write APIs
+  (create lead, opportunity, stage move, Won, task, complete, meeting, cancel, archive),
+  exact query counts (own 9, selected user 10, organisation 9; production +1 for the
+  snapshot, verified in a transactional test) at 10× the records and 5× the users, the
+  **aggregate-isolation suite** `tests/security/test_dashboard_cross_user.py` (A, B and the
+  administrator with distinctive amounts: exact figures per workspace, nothing of the other
+  user anywhere in the response, A's response byte-identical before and after B's records
+  exist, selected-user dashboards identical to the user's own, the organisation = the sum,
+  figures following a reassigned lead), Redis and broker outages, query plans
+  (`tests/performance/test_dashboard_query_plans.py`), the concurrent-migration guard and
+  `tests/security/test_phase5_review_regressions.py`.
+- **Frontend (479 tests):** the dashboard (`features/dashboard/dashboard.test.tsx`, 24):
+  the six figures as the server sent them, money beyond `Number` precision and wrapping only
+  at commas, skeleton (never zeros) with one persistent live region, real zeros and empty
+  states, 500/403/404/network/offline, a refresh marked "Updating…" and a failed one removing
+  the figures, the refresh at the business-day change, rows naming owners organisation-wide
+  only, card and footer targets in the same workspace with their list presets (and none for
+  new-tab clicks; the board unfiltered), distinct link names, Rahul → Priya slow/failing,
+  Back, A → B → A, a new signed-in user on the same page, the cache key, accessibility.
+- **Adversarial review:** four independent reviewers (API security and aggregate leakage,
+  backend domain with 25 in-memory mutations, frontend, performance at 1,000,000 leads and
+  2,000,000 activities). No P0: no aggregate leak, no IDOR, isolation held under rapid
+  switching, StrictMode and failing refreshes. **One P1** (performance: the index-only lead
+  count depends on the visibility map, which ordinary lead edits erode; with default
+  autovacuum the organisation's figure degraded to ~1 s): fixed by autovacuum thresholds of
+  1 % on `leads_lead` (migration `leads.0006`, reproduced and verified). P2s: the index
+  migration blocking lead reads (dropped first, then still ACCESS EXCLUSIVE for the drop)
+  → `CONCURRENTLY`, non-atomic, timeouts lifted and restored both ways; the activity summary
+  reading an owner's whole history and flipping to a sequential scan as open work grew → two
+  bounded aggregates; card clicks with modifiers wiping this tab's list filters → presets on
+  `onNavigate` only; pipeline cards opening a board narrowed by earlier filters → board
+  preset. P3s: activity rows sending previews and authors (slim rows), JIT, the reverse
+  migration's timeout, undefined colour tokens, two `h1`s on 404, ambiguous link names,
+  stale figures unmarked during a failing refresh, an endless skeleton offline, the day
+  boundary, truncated owners, amounts breaking mid-group, the loading announcement,
+  contrast, a query-count test failing just after midnight IST, untested upper bounds and
+  ties, stale docs. All fixed and pinned by tests, except the accepted, documented R53
+  (organisation-wide dashboard cost), R54 (a dev-only `braces` advisory with no fix) and the
+  pre-existing R56 (some Phase 2 per-owner list shapes at 1,000,000 leads).
+- **Benchmark** (`tests/performance/bench_dashboard.py`, with `--grow` and `--churn`): per
+  owner 18 ms of SQL for a 66,700-lead owner and 0.6 ms typical, 88 ms organisation-wide
+  at 1,000,000 leads / 300,000 opportunities / 2,000,000 activities / 501 users
+  ([dashboard.md](dashboard.md#performance)).
+- **Live walkthrough** against the rebuilt containerised stack, headless Chromium: 66
+  checks (the stack's sessions with JIT off and the autovacuum settings applied; Rahul: the
+  six cards equal to the API and to the selectors computed independently, a new lead, an
+  opportunity at ₹1,11,111, a stage move and Won with exact paise arithmetic, a task and a
+  meeting moving their figures, slim activity rows, the Tasks card opening his Tasks tab,
+  phone and tablet layouts; the administrator: Admin Home equal to the organisation's
+  figures and to Rahul + Priya, new leads naming their assigned user, `/admin` → Admin Home,
+  Rahul's dashboard equal to his own, Pipeline/Leads/Activities staying in his workspace
+  under the banner, his Tasks card opening his Activities, Rahul → Priya and Back (twice)
+  with a DOM observer proving no figure or record of the other user was ever drawn, 320,
+  375, 768 and 1440 px layouts without horizontal scroll). No page errors and no 5xx; the
+  only 4xx were the signed-out session check on the sign-in page. Container logs (37
+  dashboard requests) and audit metadata held no names, titles, amounts or emails.
+
 ## What exists after Phase 4
 
 - **Backend (2,677 tests, 98 % coverage of `arkray/`)**, adding for Activities:

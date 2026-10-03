@@ -70,6 +70,21 @@ export const TAB_DEFAULTS: Record<ActivityTab, Pick<ActivityFilters, "status" | 
   note: { status: "", ordering: "-created_at" },
 };
 
+/**
+ * The list each summary figure opens: exactly the activities it counts
+ * (selectors.activity_summary; tested figure by figure in test_summary.py). Used by the
+ * Activities page's shortcuts and the dashboard's cards. `today` is the business date.
+ */
+export function summaryFilters(today: string): Record<keyof ActivitySummary, Partial<ActivityFilters>> {
+  return {
+    open_tasks: { tab: "task", ...TAB_DEFAULTS.task },
+    overdue_tasks: { tab: "task", status: "overdue", ordering: "scheduled" },
+    tasks_due_today: { tab: "task", status: "open", ordering: "scheduled", dateFrom: today, dateTo: today },
+    meetings_today: { tab: "meeting", status: "not_cancelled", ordering: "scheduled", dateFrom: today, dateTo: today },
+    upcoming_meetings: { tab: "meeting", status: "upcoming", ordering: "scheduled" },
+  };
+}
+
 export const STATUS_OPTIONS: Record<ActivityTab, readonly { value: ActivityFilters["status"]; label: string }[]> = {
   all: [
     { value: "", label: "Any status" },
