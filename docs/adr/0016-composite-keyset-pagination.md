@@ -23,7 +23,9 @@ forged cursor must never cause a 500 or widen visibility.
 - Sort keys that hold personal data (names) are **private**: the cursor carries the
   boundary row's id instead, and the value is re-read from that row (by id, signed, used only
   as a position) when the next page is requested. Cursors in URLs never contain names and
-  stay short in any script (both found in the Phase 2 review).
+  stay short in any script (both found in the Phase 2 review). The re-read is restricted to
+  the rows the caller may list (Phase 6 review, P1): a position is still a measurement, so
+  a boundary outside the caller's scope invalidates the cursor.
 - Sorts over nullable columns should use a NOT NULL generated sort column (e.g.
   `last_contacted_sort`) so the cursor can bound the index scan; the NULL-aware predicates
   remain for correctness but can't bound a scan by themselves (review: deep pages 35–145 ms).

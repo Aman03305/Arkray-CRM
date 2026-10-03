@@ -159,7 +159,10 @@ sequenceDiagram
 - **The URL is the source of truth for the workspace** ([ADR-0010](adr/0010-frontend-workspace-routing.md)):
   `/leads` is the viewer's own workspace (organisation-wide for admins), while
   `/admin/users/{id}/leads` is that user's. The same module views render in every workspace
-  and only change the API path (`/api/v1/workspaces/{me|all|id}/...`).
+  and only change the API path (`/api/v1/workspaces/{me|all|id}/...`). A path below
+  `/admin/users/` whose id is not a user id names no workspace, so it renders "not found",
+  never a fallback to other records. The selected-user frame renders a page only when the
+  URL's user and the layout's user agree ([admin-user-workspace.md](admin-user-workspace.md)).
 - The UI decides what to *show* from the viewer's capability list. The API enforces
   everything again; hiding a button is never the security control.
 
@@ -167,7 +170,7 @@ sequenceDiagram
 
 | Concern | Where |
 |---|---|
-| Authentication, authorization, admin workspace | [authorization.md](authorization.md) |
+| Authentication, authorization, admin workspace | [authorization.md](authorization.md), [admin-user-workspace.md](admin-user-workspace.md) |
 | Background work, retries, timeouts, degradation | [reliability.md](reliability.md) |
 | Logging, correlation, health, metrics, tracing | [observability.md](observability.md) |
 | Threats and controls | [security.md](security.md) |
@@ -212,7 +215,7 @@ security checks, and a PASS/FAIL report. No phase starts while critical tests fa
 | 3 | (**done**) Pipeline: configurable pipelines/stages, opportunities, Kanban (drag and drop + keyboard Move menu, stage tabs on phones), one stage-transition operation, won/lost/reopen, append-only stage history, lead conversion, open opportunities following lead reassignment, exact pipeline value / weighted pipeline, cross-user and aggregate-leakage suite, real-concurrency and lock-order tests, 300k-opportunity benchmark ([pipeline.md](pipeline.md)) |
 | 4 | (**done**) Activities: tasks, meetings and notes in one table (CHECK-enforced per type), complete/cancel/reopen as explicit operations, current work following lead reassignment (deferred composite key), immutable authorship, last contact from completed meetings (MAX), the append-only lead/opportunity timeline (backfilled from the audit trail and stage history), the Activities page, the activity figures for Phase 5, cross-user and timeline-leakage suite, real-concurrency and lock-order tests, 403k-activity benchmark ([activities.md](activities.md)) |
 | 5 | (**done**) Dashboard and Admin Home: total leads, new leads today (Asia/Kolkata business day), pipeline value and weighted pipeline (Phase 3's definitions), meetings and tasks (Phase 4's), today's newest leads with their assigned user, the next meetings and open tasks; own, selected-user and organisation-wide workspaces; one endpoint, six bounded queries in one snapshot, no cache; workspace-isolated frontend; aggregate-leakage suite; 1M-lead / 2M-activity benchmark ([dashboard.md](dashboard.md)) |
-| 6 | Admin user workspace UI end to end (banner with name, per-user stats table) |
+| 6 | (**done**) Admin user workspace end to end: a user's name opens their Dashboard; Pipeline, Leads and Activities (lists, details, create and edit) in their workspace through the same views and API; a banner naming the subject, their status and the signed-in actor; workspace-aware navigation and "not found" links; fail-closed URL parsing and canonical workspace URLs; deactivated and invited users read-only for new work; cache isolation, slow-response, Back/Forward and failure suites with marked records; selected-user authorization matrix, object substitution, actor-vs-subject and audit-window tests. A per-user statistics table on the Users page was deliberately not built (per-user CRM figures would cost a query per row; the Dashboard is one click away) ([admin-user-workspace.md](admin-user-workspace.md)) |
 | 7 | Global search (PostgreSQL full-text + trigram, scoped) |
 | 8 | Ask Arkray: tools, pgvector retrieval, indexing pipeline, grounding, adversarial tests |
 | 9 | Security and audit hardening: CSP, audit viewer, rate-limit tuning, threat-model review |

@@ -15,7 +15,7 @@ import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
 import type { Activity } from "@/lib/api/types";
 import { formatDateTime, formatRelative } from "@/lib/format";
 import { useViewer } from "@/lib/viewer-context";
-import { type Workspace, workspaceHref } from "@/lib/workspace";
+import { sectionBack, type Workspace, workspaceHref } from "@/lib/workspace";
 
 import { activitiesApi, activityKeys, type LifecycleAction } from "./api";
 import { LeadLink, OpportunityLink, PriorityLabel, StatusBadge, TypeLabel, typeLabel } from "./ActivityBits";
@@ -107,7 +107,7 @@ export function ActivityDetailView({ workspace, activityId }: { workspace: Works
     </Link>
   );
 
-  if (isApiError(detail.error, 404)) return <NotFoundView />;
+  if (isApiError(detail.error, 404)) return <NotFoundView back={sectionBack(workspace, "activities")} />;
   // A refusal (403) removes what was shown: the server no longer lets this viewer see it.
   if (detail.isError && (!detail.data || isApiError(detail.error, 403))) {
     const { message, requestId } = describeError(detail.error);

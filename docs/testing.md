@@ -83,6 +83,104 @@ architecture test fails if a route is missing from the matrix.
 - **Frontend states:** every data view tests loading (skeleton), empty, error (with retry)
   and populated states, plus permission-driven visibility.
 
+## What exists after Phase 6
+
+- **Backend (3,022 tests, 98 % coverage of `arkray/`)**, adding for the admin
+  user workspace ([admin-user-workspace.md](admin-user-workspace.md)):
+  `tests/security/test_admin_workspace.py` (229) and `test_admin_workspace_races.py` (20).
+  - **Authorization matrix:** every workspace route × {anonymous, another sales user, the
+    user themselves, admin}. The admin also hits every route with a user who doesn't exist,
+    and the bodies for missing and forbidden users are identical. Malformed and ambiguous
+    segments are 404.
+  - **Marked records:** 21 reads across all four modules return nothing of the other user's,
+    in both directions, and the figures are exact.
+  - **Object substitution:** every record route × method with another workspace's lead,
+    opportunity or activity matches a missing record exactly and changes nothing. All three
+    activity kinds × every action; new work linked to the other user's records is refused.
+  - **Actor vs subject:** lead create and edit, opportunity create and stage move, task,
+    meeting and note writes are all the admin's, with the subject in the audit trail and stage
+    history. No payload field moves a write out of the URL's workspace.
+  - **Deactivated users:** readable, refused new work. A threaded race of 8 write kinds
+    against a deactivation in both orders, plus bursts: nothing given to a deactivated user,
+    no partial writes, no deadlocks.
+  - **Audit and sessions:** one `workspace.accessed` row per user per window across 63
+    requests. No impersonation route, and the session stays the admin's.
+  - **Query counts:** pinned per selected-user request, constant in records; the Users list
+    stays at 3.
+  - **Admin-facing messages:** delegated workspaces point to the organisation-wide view
+    instead of "Ask an administrator".
+  - **Review regressions:** `tests/security/test_phase6_review_regressions.py` (8).
+- **Frontend (547 tests):** `features/workspace/admin-user-workspace.test.tsx` (60) runs
+  against a fake backend of marked records (`src/test/workspace-world.ts`).
+  - **Entry and frame:** the name link and its capability gate; the banner, its actor line
+    and the sidebar label on all 13 workspace pages, with one `h1` and one current page;
+    every link on every page stays in the workspace and every request goes to that
+    workspace only.
+  - **Create and edit:** lead and opportunity flows land back in the workspace; task
+    creation scoped to the user's leads; the deactivated user's New lead.
+  - **Isolation:** Rahul → Priya in all four modules with a `MutationObserver` recording
+    every frame; Rahul's late answer after Priya's; rapid Rahul → Priya → Rahul with answers
+    reversed; Priya's request failing (no fallback to `all` or `me`).
+  - **Navigation:** Back/Forward across both users; deep links; no browser storage; two tabs.
+  - **URL canonicalisation:** encoded and upper-case ids, mismatched users, malformed ids
+    (the P1 below: the tests fail on the old code).
+  - **Frame states:** 404 and failure; a view-only manager; the frame's live announcement.
+  - **Caches:** a mutation in Rahul's workspace leaves Priya's cached entries byte-identical.
+  - **Review regressions:** a notice bound to its destination; a reassignment finishing
+    after its page was left; the banner refreshed after user management; `h1`s; the encoded
+    section name.
+  - **Elsewhere:** `src/lib/workspace.test.ts` covers parsing, decoding and canonical paths;
+    the banner tests cover status, actor and "(you)".
+- **The P1 found while building the phase:** a percent-encoded user id put Rahul's banner
+  over the organisation's records. Reproduced on the Phase 5 build in a real browser,
+  fixed (fail-closed parsing, a frame that renders only when the URL's and the layout's user
+  agree, canonical URLs), and pinned. The 7 tests fail when the old behaviour is restored.
+- **Adversarial review:** three independent reviewers (API security, frontend leakage,
+  backend domain/concurrency/audit/performance), each reproducing what it reported.
+  - **P0:** none. Workspace and object substitution, aggregates, mass assignment, actor
+    spoofing, idempotency across workspaces, audit bypass, outages and query counts all
+    held.
+  - **P1 (two):** page cursors measuring hidden rows (pre-existing since Phases 2–3: a
+    replayed or harvested cursor binary-searched another user's deal amount or lead name
+    through the unscoped boundary re-read), fixed by re-reading the boundary only within the
+    caller's scope. And, under the brief's one-frame rule, a navigation notice naming
+    Rahul's record that could surface under Priya's banner after an abandoned navigation,
+    fixed by binding notices to their destination.
+  - **P2s:** the pipeline's reopen and restore revealing another workspace's archive state;
+    a late reassignment caching a moved lead under the old workspace.
+  - **P3s:** restoring open work for a deactivated owner; "Ask an administrator" shown to
+    administrators; a stale banner status after same-tab user management; two states
+    without an `h1`; switches between users not announced; an encoded section name; the
+    audit-burst docs; a sequential "race" test.
+  - Every finding is fixed and pinned, and each regression test fails when its fix is
+    reverted.
+- **Live walkthrough** on the rebuilt containerised stack, headless Chromium: **141
+  checks**.
+  - **Setup:** Rahul and Priya create marked records in their own workspaces.
+  - **Admin journey:** Anita: Admin Home, then Users, then Rahul's name opens his Dashboard.
+    The banner shows status and actor, the sidebar labels the modules, and the six figures
+    equal the API's and Rahul's own. Pipeline → opportunity → edit → stage move → back;
+    Leads → new → edit → note → back; Activities → task and meeting → complete both
+    (completed and held by Anita, last contact set). Every request stays in Rahul's
+    workspace.
+  - **Audit trail:** actor Anita and subject Rahul on every write, nothing by Rahul, no note
+    text.
+  - **Switching:** all modules again; Back to Users → Priya, with a DOM observer proving
+    nothing of Rahul's ever drew; Back ×5 and Forward ×3 with URL, banner and data agreeing
+    at every step.
+  - **Deep links and tabs:** refresh and deep links; two tabs with no browser storage.
+  - **Security:** object substitution for lead, opportunity, task, meeting and note;
+    encoded and upper-case ids canonicalised with no organisation request; six malformed
+    workspaces and an unknown id (not found, no request); the deactivated user (readable,
+    the form explains, the API refuses); the stale-response race; Rahul typing Priya's URLs
+    and API.
+  - **Responsive:** 320, 375 and 768 px (compact banner, no horizontal scroll, the drawer
+    labelled and staying in the workspace, Escape returning focus).
+  - **Logs and audit:** one `workspace.accessed` row per user for the whole walkthrough;
+    container logs carry the selected user as `subject_user_id` on delegated requests and
+    none on own requests, with no note text and no errors.
+  - **Browser:** no console or page errors and no unexpected HTTP errors.
+
 ## What exists after Phase 5
 
 - **Backend (2,764 tests, 98 % coverage of `arkray/`)**, adding for the Dashboard:

@@ -13,14 +13,14 @@ import { NotFoundView } from "@/components/ui/NotFoundView";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useFocusFirstInvalid } from "@/components/ui/useFocusFirstInvalid";
-import { apiFetch } from "@/lib/api/client";
 import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
-import type { Lead, LeadCreateRequest, WorkspaceDto } from "@/lib/api/types";
+import { receivesNewWork, selectedUserId, useWorkspaceSubject } from "@/features/workspace/api";
+import type { Lead, LeadCreateRequest } from "@/lib/api/types";
 import { setFlash } from "@/lib/flash";
 import { fromBusinessDateTimeInput, toBusinessDateTimeInput } from "@/lib/format";
 import { randomUuid } from "@/lib/random";
 import { useViewer } from "@/lib/viewer-context";
-import { leadHref, type Workspace, workspaceHref } from "@/lib/workspace";
+import { leadHref, sectionBack, type Workspace, workspaceHref } from "@/lib/workspace";
 
 import { leadKeys, leadsApi } from "./api";
 import {
@@ -86,15 +86,30 @@ export function LeadFormView({ workspace, mode }: { workspace: Workspace; mode: 
   });
   const viewer = useViewer();
   const permissions = leadPermissions(viewer, workspace);
+  const subject = useWorkspaceSubject(selectedUserId(workspace));
+  const back = sectionBack(workspace, "leads");
 
   if (mode.kind === "create") {
-    if (!permissions.canCreate) return <NotFoundView />;
+    if (!permissions.canCreate) return <NotFoundView back={back} />;
+    if (workspace.kind === "user" && subject.data === undefined) return <FormSkeleton />;
+    // A deactivated (or not yet activated) user can't be given new leads; say so up front
+    // instead of letting the form fail on save. The API refuses either way.
+    if (!receivesNewWork(subject.data)) {
+      return (
+        <>
+          <PageHeader title="New lead" />
+          <Alert tone="info" title="New leads can't be added for this user" action={<Link href={back.href} className="font-medium underline">{back.label}</Link>}>
+            {subject.data?.full_name}&apos;s account is {subject.data?.status === "invited" ? "not activated yet" : "deactivated"}. Their existing leads stay available; reassign them to an active user to continue the work.
+          </Alert>
+        </>
+      );
+    }
     return <LeadForm workspace={workspace} lead={null} />;
   }
   // Data first: once the form is open, a failed background reload must never replace it
   // (and the user's unsaved edits) with an error page (Phase 2 review).
   if (lead.data) {
-    if (!permissions.canWrite) return <NotFoundView />;
+    if (!permissions.canWrite) return <NotFoundView back={back} />;
     if (lead.data.archived_at) {
       return (
         <Alert tone="info" title="This lead is archived" action={<Link href={leadHref(workspace, lead.data.id)} className="font-medium underline">Back to the lead</Link>}>
@@ -105,7 +120,7 @@ export function LeadFormView({ workspace, mode }: { workspace: Workspace; mode: 
     // Keyed by id: a different lead starts a fresh form.
     return <LeadForm key={lead.data.id} workspace={workspace} lead={lead.data} />;
   }
-  if (isApiError(lead.error, 404)) return <NotFoundView />;
+  if (isApiError(lead.error, 404)) return <NotFoundView back={back} />;
   if (lead.isError) {
     const { message, requestId } = describeError(lead.error);
     return (
@@ -123,6 +138,10 @@ export function LeadFormView({ workspace, mode }: { workspace: Workspace; mode: 
       </Alert>
     );
   }
+  return <FormSkeleton />;
+}
+
+function FormSkeleton() {
   return (
     <div aria-busy="true" className="space-y-4">
       <Skeleton className="h-7 w-56" />
@@ -164,11 +183,7 @@ function LeadForm({ workspace, lead }: { workspace: Workspace; lead: Lead | null
   };
   const sync = useLeadWriteSync(workspace);
 
-  const subject = useQuery({
-    queryKey: ["workspace", workspace.kind === "user" ? workspace.userId : ""],
-    queryFn: () => apiFetch<WorkspaceDto>(`/api/v1/workspaces/${workspace.kind === "user" ? encodeURIComponent(workspace.userId) : "me"}`),
-    enabled: workspace.kind === "user",
-  });
+  const subject = useWorkspaceSubject(selectedUserId(workspace));
 
   const defaultStatus = options.data?.statuses.find((s) => s.is_default)?.key ?? "";
   const chosenStatus = status || defaultStatus;
@@ -250,8 +265,9 @@ function LeadForm({ workspace, lead }: { workspace: Workspace; lead: Lead | null
     setReloadFailed(false);
     save.mutate(undefined, {
       onSuccess: (saved) => {
-        setFlash(lead ? "Changes saved." : "Lead created.");
-        router.push(leadHref(workspace, saved.id));
+        const page = leadHref(workspace, saved.id);
+        setFlash(lead ? "Changes saved." : "Lead created.", page);
+        router.push(page);
       },
     });
   };
@@ -423,7 +439,7 @@ function LeadForm({ workspace, lead }: { workspace: Workspace; lead: Lead | null
             <p className="text-sm text-slate-600 sm:col-span-2">
               Owner:{" "}
               <strong className="font-medium text-slate-900">
-                {workspace.kind === "user" ? (subject.data?.subject?.full_name ?? "this user") : "you"}
+                {workspace.kind === "user" ? (subject.data?.full_name ?? "this user") : "you"}
               </strong>
               {errors.owner?.length ? (
                 // No owner field to attach this to here: announce it instead.

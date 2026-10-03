@@ -89,6 +89,12 @@ LEAD_ELSEWHERE = (
     "This opportunity's lead now belongs to someone else, so activities can't be added "
     "here. Ask an administrator."
 )
+# The same rules for an administrator in a user's workspace (Phase 6): the organisation-wide
+# view, whose scope includes the lead's new owner, is where they can do it.
+LEAD_ELSEWHERE_DELEGATED = (
+    "This opportunity's lead now belongs to someone else, so activities can't be added in "
+    "this user's workspace. Add them from the organisation-wide view."
+)
 OWNER_NOT_ASSIGNABLE = (
     "This lead's owner is deactivated. Reassign the lead to an active user first."
 )
@@ -199,7 +205,9 @@ def _lock_link(
     if not scope.permits_owner(lead.owner_id):
         # A closed opportunity kept by its closer after the lead moved on: new work on it
         # would belong to the lead's current owner, outside this workspace.
-        raise BusinessRuleViolation(LEAD_ELSEWHERE)
+        raise BusinessRuleViolation(
+            LEAD_ELSEWHERE_DELEGATED if scope.is_delegated else LEAD_ELSEWHERE
+        )
     return lead, opportunity
 
 
@@ -513,9 +521,14 @@ def reopen_activity(
         # Whether the lead lives elsewhere is checked first: its archive state is then the
         # other workspace's business and must not be revealed (review, an oracle).
         if lead.owner_id != previous_owner and not scope.permits_owner(lead.owner_id):
+            where = (
+                "in this user's workspace. Reopen it from the organisation-wide Activities."
+                if scope.is_delegated
+                else "here. Ask an administrator to reopen it."
+            )
             raise BusinessRuleViolation(
                 f"This {_noun(activity)}'s lead now belongs to someone else, so it can't be "
-                "reopened here. Ask an administrator to reopen it."
+                f"reopened {where}"
             )
         if lead.archived_at is not None:
             raise BusinessRuleViolation(LEAD_ARCHIVED_REOPEN)
@@ -621,6 +634,10 @@ def restore_activity(
         # the lead's state belongs to the other workspace and isn't revealed (review).
         if lead.archived_at is not None and scope.permits_owner(lead.owner_id):
             raise BusinessRuleViolation(LEAD_ARCHIVED_RESTORE)
+        if activity.status in CURRENT_STATUSES:
+            # A restored open task or scheduled meeting is current work again: like creating
+            # or reopening it, never for a deactivated owner (Phase 6 review).
+            _require_assignable(activity.owner_id)
         now = timezone.now()
         activity.archived_at = None
         activity.version += 1

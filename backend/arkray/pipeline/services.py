@@ -89,6 +89,12 @@ REOPEN_ELSEWHERE = (
     "This opportunity's lead now belongs to someone else, so it can't be reopened here. "
     "Ask an administrator to reopen it."
 )
+# The same rule for an administrator in a user's workspace (Phase 6): they are the
+# administrator, and the organisation-wide view (whose scope includes the new owner) can.
+REOPEN_ELSEWHERE_DELEGATED = (
+    "This opportunity's lead now belongs to someone else, so it can't be reopened in this "
+    "user's workspace. Reopen it from the organisation-wide Pipeline."
+)
 CLOSED_PROBABILITY = (
     "Won opportunities are 100% and lost ones 0%; the probability can't be changed."
 )
@@ -637,14 +643,18 @@ def move_opportunity(
         was_open = opportunity.is_open
         if not was_open and target.is_closed:
             raise BusinessRuleViolation(CLOSED_TO_CLOSED)
-        if not was_open and lead.archived_at is not None:
-            # Reopening adds open pipeline to the lead, like creating an opportunity would.
-            raise BusinessRuleViolation(LEAD_ARCHIVED_REOPEN)
 
         previous_owner = opportunity.owner_id
         if not was_open:  # reopening: open again means owned by the lead's (active) owner
+            # Whether the lead lives elsewhere is checked first: its archive state is then the
+            # other workspace's business and must not be revealed (Phase 6 review, an oracle).
             if lead.owner_id != previous_owner and not scope.permits_owner(lead.owner_id):
-                raise BusinessRuleViolation(REOPEN_ELSEWHERE)
+                raise BusinessRuleViolation(
+                    REOPEN_ELSEWHERE_DELEGATED if scope.is_delegated else REOPEN_ELSEWHERE
+                )
+            if lead.archived_at is not None:
+                # Reopening adds open pipeline to the lead, like creating an opportunity would.
+                raise BusinessRuleViolation(LEAD_ARCHIVED_REOPEN)
             _require_assignable(lead.owner_id)
             opportunity.owner_id = lead.owner_id
 
@@ -794,8 +804,15 @@ def restore_opportunity(
         if opportunity.archived_at is None:
             return selectors.opportunity_by_id(opportunity.pk)
         _require_version(opportunity, version)
-        if lead.archived_at is not None:  # an archived lead is read-only, its pipeline too
+        # An archived lead is read-only, its pipeline too, in a workspace that holds the
+        # lead. A closed deal its closer kept after the lead moved on is theirs to restore:
+        # the lead's state belongs to the other workspace and isn't revealed (Phase 6 review).
+        if lead.archived_at is not None and scope.permits_owner(lead.owner_id):
             raise BusinessRuleViolation(LEAD_ARCHIVED_RESTORE)
+        if opportunity.is_open:
+            # Restored open pipeline is current work again: like creating or reopening it,
+            # never for a deactivated owner (Phase 6 review).
+            _require_assignable(opportunity.owner_id)
         opportunity.archived_at = None
         opportunity.version += 1
         opportunity.save(update_fields=["archived_at", "version", "updated_at"])

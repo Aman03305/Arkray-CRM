@@ -184,7 +184,11 @@ class OpportunityListView(ApiView):
         paginator = KeysetPaginator(
             selectors.ORDERINGS[params["ordering"]], page_size=params["page_size"]
         )
-        page = paginator.paginate(selectors.opportunity_list(scope, filters), params.get("cursor"))
+        page = paginator.paginate(
+            selectors.opportunity_list(scope, filters),
+            params.get("cursor"),
+            visible=selectors.listable(scope),
+        )
         return Response(
             {
                 "results": s.OpportunityCardSerializer(

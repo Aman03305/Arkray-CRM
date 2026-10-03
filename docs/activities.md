@@ -156,6 +156,9 @@ work, and the lead's own history; A keeps seeing the meetings A completed (the l
   lead's new owner, so the closer is refused (422 "…ask an administrator").
 - Open work on an open opportunity follows the lead with it: never "lead B, open
   opportunity B, open task A".
+- A deactivated owner takes no new, reopened or restored current work: restoring an
+  archived open task or scheduled meeting is refused (422) like creating one (Phase 6
+  review). Closed work stays restorable.
 - An archived lead or opportunity takes no new, reopened or restored work (422). Its open
   tasks and meetings can still be edited, completed or cancelled, like its open
   opportunities: archiving a lead doesn't strand work someone is finishing (decided in the

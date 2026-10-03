@@ -5,10 +5,13 @@ import { makeViewer } from "@/test/fixtures";
 import type { Viewer } from "./viewer";
 import {
   activeSection,
+  canonicalUserPath,
   leadHref,
   newLeadHref,
   workspaceApiPath,
   workspaceFromPathname,
+  userIdFromPathname,
+  userWorkspaceHref,
   workspaceHref,
   type Workspace,
 } from "./workspace";
@@ -31,9 +34,39 @@ describe("workspaceFromPathname", () => {
     expect(workspaceFromPathname(`/admin/users/${RAHUL}`, admin)).toEqual({ kind: "user", userId: RAHUL });
   });
 
-  it("ignores malformed user ids rather than building API paths from them", () => {
-    expect(workspaceFromPathname("/admin/users/../../etc/leads", admin)).toEqual({ kind: "organization" });
-    expect(workspaceFromPathname("/admin/users/not-a-uuid/leads", salesUser)).toEqual({ kind: "self" });
+  it("a malformed user id names no workspace: never the viewer's own or the organisation's", () => {
+    for (const path of [
+      "/admin/users/../../etc/leads",
+      "/admin/users/not-a-uuid/leads",
+      `/admin/users/${RAHUL}x/leads`,
+      `/admin/users/${RAHUL.replace("-", "%2F")}/leads`,
+      `/admin/users/%25${RAHUL.slice(1)}/leads`, // double encoding is decoded once only
+      "/admin/users/%E0%A4%A/leads", // malformed percent-encoding
+      "/admin/users/me/leads",
+      "/admin/users/all/leads",
+    ]) {
+      expect(workspaceFromPathname(path, admin)).toBeNull();
+      expect(workspaceFromPathname(path, salesUser)).toBeNull();
+      expect(workspaceFromPathname(path, null)).toBeNull();
+    }
+  });
+
+  it("decodes the user id once, exactly as the route's param is decoded (one user, one workspace)", () => {
+    const spellings = [
+      RAHUL,
+      RAHUL.toUpperCase(),
+      `%${RAHUL.charCodeAt(0).toString(16)}${RAHUL.slice(1)}`,
+      RAHUL.replace("-", "%2D"),
+      RAHUL.replace("-", "%2d"),
+    ];
+    for (const spelling of spellings) {
+      expect(workspaceFromPathname(`/admin/users/${spelling}/leads`, admin)).toEqual({ kind: "user", userId: RAHUL });
+    }
+  });
+
+  it("the Users page itself is not a workspace path", () => {
+    expect(workspaceFromPathname("/admin/users", admin)).toEqual({ kind: "organization" });
+    expect(workspaceFromPathname("/admin/users/", admin)).toEqual({ kind: "organization" });
   });
 
   it("defaults to the own workspace while the viewer is still loading", () => {
@@ -95,5 +128,30 @@ describe("lead links stay inside their workspace", () => {
   it("the Leads section stays active on lead pages", () => {
     expect(activeSection(`/leads/${id}`)).toBe("leads");
     expect(activeSection(`/admin/users/${user}/leads/${id}/edit`)).toBe("leads");
+  });
+});
+
+describe("canonical user-workspace URLs", () => {
+  it("rewrites other spellings of the id to the one canonical URL, keeping the rest of the path", () => {
+    expect(canonicalUserPath(`/admin/users/${RAHUL.toUpperCase()}/leads/new`)).toBe(`/admin/users/${RAHUL}/leads/new`);
+    expect(canonicalUserPath(`/admin/users/${RAHUL.replace("-", "%2D")}`)).toBe(`/admin/users/${RAHUL}`);
+  });
+
+  it("leaves canonical, malformed and non-workspace paths alone", () => {
+    expect(canonicalUserPath(`/admin/users/${RAHUL}/leads`)).toBeNull();
+    expect(canonicalUserPath("/admin/users/not-a-uuid/leads")).toBeNull();
+    expect(canonicalUserPath("/admin/users")).toBeNull();
+    expect(canonicalUserPath("/leads")).toBeNull();
+  });
+
+  it("userIdFromPathname tells 'not a user path' (undefined) from 'not a user id' (null)", () => {
+    expect(userIdFromPathname("/leads")).toBeUndefined();
+    expect(userIdFromPathname("/admin/users/x/leads")).toBeNull();
+    expect(userIdFromPathname(`/admin/users/${RAHUL}`)).toBe(RAHUL);
+  });
+
+  it("builds every selected-user link from the one route builder", () => {
+    expect(userWorkspaceHref(RAHUL.toUpperCase())).toBe(`/admin/users/${RAHUL}/dashboard`);
+    expect(userWorkspaceHref(RAHUL, "pipeline")).toBe(`/admin/users/${RAHUL}/pipeline`);
   });
 });

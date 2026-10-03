@@ -8,6 +8,7 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { workspaceKeys } from "@/features/workspace/api";
 import { describeError, isApiError } from "@/lib/api/errors";
 import type { AdminUser } from "@/lib/api/types";
 import { VIEWER_QUERY_KEY } from "@/lib/query-client";
@@ -76,6 +77,8 @@ export function UsersPage() {
     setDialog(null);
     setNotice(message);
     void queryClient.invalidateQueries({ queryKey: USERS_QUERY_KEY });
+    // Their workspace banner shows their name and status (deactivated, reactivated, renamed).
+    void queryClient.invalidateQueries({ queryKey: workspaceKeys.subject(user.id) });
     // Edited yourself: the sidebar and Settings show your details too.
     if (user.id === viewer?.id) void queryClient.invalidateQueries({ queryKey: VIEWER_QUERY_KEY });
   };

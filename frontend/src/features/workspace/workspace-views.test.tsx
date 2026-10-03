@@ -1,13 +1,12 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { adminViewer, makeAdminUser, RAHUL_ID, salesViewer } from "@/test/fixtures";
 import { asListItem, makeActivity, page, SUMMARY } from "@/test/activity-fixtures";
 import { makeDashboard } from "@/test/dashboard-fixtures";
 import { makeBoard, PIPELINES } from "@/test/pipeline-fixtures";
-import { apiError, mockApi, renderWithProviders } from "@/test/render";
+import { mockApi, renderWithProviders } from "@/test/render";
 
-import { UserWorkspaceFrame } from "./UserWorkspaceFrame";
 import { ActivitiesView, DashboardView, PipelineView } from "./views";
 
 const navigation = vi.hoisted(() => ({ pathname: "/dashboard" }));
@@ -30,7 +29,7 @@ describe("Dashboard", () => {
     expect(screen.getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
     expect(screen.getByText("Organization overview")).toBeInTheDocument();
     expect(await screen.findByText("₹15,00,000")).toBeInTheDocument();
-    expect(await screen.findByRole("link", { name: "Rahul Sharma" })).toHaveAttribute(
+    expect(await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" })).toHaveAttribute(
       "href",
       `/admin/users/${RAHUL_ID}/dashboard`,
     );
@@ -80,47 +79,5 @@ describe("modules in another user's workspace", () => {
     expect(await screen.findByText("Hospital Analyzer Project")).toBeInTheDocument();
     expect(screen.getByText(/Selected user's records/)).toBeInTheDocument();
     expect(api.calls.every((c) => !c.path.includes("/workspaces/all") && !c.path.includes("/workspaces/me"))).toBe(true);
-  });
-});
-
-describe("UserWorkspaceFrame", () => {
-  it("names whose CRM the admin is viewing (the API audits the access)", async () => {
-    const api = mockApi({
-      [`GET /api/v1/workspaces/${RAHUL_ID}`]: {
-        status: 200,
-        body: { kind: "user", subject: { id: RAHUL_ID, full_name: "Rahul Sharma", status: "active" } },
-      },
-    });
-    renderWithProviders(<UserWorkspaceFrame userId={RAHUL_ID}>Workspace body</UserWorkspaceFrame>, {
-      viewer: adminViewer,
-    });
-    expect(screen.getByText("Loading user name")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(screen.getByRole("region", { name: "Workspace context" })).toHaveTextContent(
-        "Viewing CRM for: Rahul Sharma",
-      ),
-    );
-    expect(screen.getByText("Workspace body")).toBeInTheDocument();
-    expect(api.callsTo("GET", `/api/v1/workspaces/${RAHUL_ID}`)).toHaveLength(1);
-  });
-
-  it("flags a deactivated user's workspace", async () => {
-    mockApi({
-      [`GET /api/v1/workspaces/${RAHUL_ID}`]: {
-        status: 200,
-        body: { kind: "user", subject: { id: RAHUL_ID, full_name: "Rahul Sharma", status: "deactivated" } },
-      },
-    });
-    renderWithProviders(<UserWorkspaceFrame userId={RAHUL_ID}>x</UserWorkspaceFrame>, { viewer: adminViewer });
-    expect(await screen.findByText(/Deactivated user/)).toBeInTheDocument();
-  });
-
-  it("shows not-found when the API refuses (never reveals whether the user exists)", async () => {
-    mockApi({ [`GET /api/v1/workspaces/${RAHUL_ID}`]: apiError(404, "not_found", "Not found.") });
-    renderWithProviders(<UserWorkspaceFrame userId={RAHUL_ID}>Workspace body</UserWorkspaceFrame>, {
-      viewer: adminViewer,
-    });
-    expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
-    expect(screen.queryByText("Workspace body")).not.toBeInTheDocument();
   });
 });

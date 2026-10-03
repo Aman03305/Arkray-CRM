@@ -58,6 +58,10 @@ AUDIT_LEAD_RESTORED = "lead.restored"
 IDEMPOTENT_CREATE = "leads.create"
 ARCHIVED_READ_ONLY = "This lead is archived. Restore it to make changes."
 OWNER_NOT_ASSIGNABLE = "Choose an active user."
+# In a selected user's workspace nobody chooses the owner, so "choose" would mislead (Phase 6).
+SUBJECT_NOT_ASSIGNABLE = (
+    "This user's account isn't active, so new leads can't be added to their workspace."
+)
 OWNER_IS_SELF_ONLY = "Leads you create in your own workspace are owned by you."
 OWNER_IS_SUBJECT_ONLY = "Leads created in this workspace belong to the user whose workspace it is."
 OWNER_REQUIRED = "Choose who owns this lead."
@@ -141,14 +145,14 @@ def _owner_for_new_lead(actor: User, scope: AccessScope, requested: UUID | None)
         assert subject is not None  # noqa: S101 — AccessScope invariant for USER scopes
         if requested is not None and requested != subject:
             raise InvalidInputError(details={"owner": [OWNER_IS_SUBJECT_ONLY]})
-        owner = subject
-    else:
-        if requested is None:
-            raise InvalidInputError(details={"owner": [OWNER_REQUIRED]})
-        owner = requested
-    if not lock_assignable_user(owner):
+        if not lock_assignable_user(subject):
+            raise InvalidInputError(details={"owner": [SUBJECT_NOT_ASSIGNABLE]})
+        return subject
+    if requested is None:
+        raise InvalidInputError(details={"owner": [OWNER_REQUIRED]})
+    if not lock_assignable_user(requested):
         raise InvalidInputError(details={"owner": [OWNER_NOT_ASSIGNABLE]})
-    return owner
+    return requested
 
 
 # --- create ----------------------------------------------------------------------------------

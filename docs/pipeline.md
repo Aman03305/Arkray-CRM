@@ -201,6 +201,10 @@ view) and **all totals**; the detail page still opens them, read-only (422 on ed
 move). An **archived lead** gets no new pipeline: creating, converting, reopening a closed
 opportunity and restoring an archived one are refused (422, "restore the lead first");
 its open opportunities can still be moved and closed. **Closed is not archived**: a won deal stays on the Won column and in history.
+A won or lost deal its closer kept after the lead was reassigned: reopening it is refused
+because the lead lives elsewhere. Restoring it is allowed, and neither reveals whether the
+new owner archived the lead (Phase 6 review). Restoring an archived *open* deal is refused
+while its owner is deactivated (422), like creating or reopening one.
 Archived *open* opportunities still follow their lead on reassignment (the ownership key
 covers them).
 
@@ -317,7 +321,9 @@ bumps the versions of the opportunities it moves.
   `-updated_at`, `-closed_at`) and keyset pagination (1-100 per page). Unknown parameters
   are a 400. **Amounts never travel in cursors**: the value sorts use a private sort key
   (like the Leads name sort), so a page link holds the boundary row's id and the amount is
-  re-read from it (review: deal values were readable in URLs).
+  re-read from it (review: deal values were readable in URLs). The re-read goes only
+  through the caller's scope (Phase 6 review, P1). A replayed cursor of someone else's, or one
+  whose deal moved to another workspace, is a 400 and positions nothing.
 
 ## Frontend
 

@@ -20,7 +20,7 @@ import type { Lead } from "@/lib/api/types";
 import { setFlash, useFlash } from "@/lib/flash";
 import { formatDateTime, formatRelative } from "@/lib/format";
 import { useViewer } from "@/lib/viewer-context";
-import { leadHref, opportunityHref, type Workspace, workspaceHref } from "@/lib/workspace";
+import { leadHref, opportunityHref, sectionBack, type Workspace, workspaceHref } from "@/lib/workspace";
 
 import { leadKeys, leadsApi } from "./api";
 import { countryName, leadPermissions, leftBehind, movedOutOf, useLeadOptions, useLeadWriteSync } from "./hooks";
@@ -134,8 +134,9 @@ export function LeadDetailView({ workspace, leadId }: { workspace: Workspace; le
     // new owner's workspace now, so this page can't show it any more.
     if (movedOutOf(workspace, lead, viewer?.id)) {
       movedOut.current = true;
-      setFlash(`${lead.display_name} was reassigned to ${lead.owner.full_name}. It now appears in their workspace.`);
-      router.push(workspaceHref(workspace, "leads"));
+      const leads = workspaceHref(workspace, "leads");
+      setFlash(`${lead.display_name} was reassigned to ${lead.owner.full_name}. It now appears in their workspace.`, leads);
+      router.push(leads);
       return;
     }
     done(`Reassigned to ${lead.owner.full_name}.`);
@@ -148,7 +149,7 @@ export function LeadDetailView({ workspace, leadId }: { workspace: Workspace; le
     </Link>
   );
 
-  if (isApiError(detail.error, 404)) return <NotFoundView />;
+  if (isApiError(detail.error, 404)) return <NotFoundView back={sectionBack(workspace, "leads")} />;
   if (detail.isError) {
     const { message, requestId } = describeError(detail.error);
     return (
@@ -317,8 +318,9 @@ export function LeadDetailView({ workspace, leadId }: { workspace: Workspace; le
           lead={lead}
           onClose={() => setDialog(null)}
           onConverted={(result) => {
-            setFlash(`${result.lead.display_name} was converted. This is the new opportunity.`);
-            router.push(opportunityHref(workspace, result.opportunity.id));
+            const created = opportunityHref(workspace, result.opportunity.id);
+            setFlash(`${result.lead.display_name} was converted. This is the new opportunity.`, created);
+            router.push(created);
           }}
         />
       ) : null}

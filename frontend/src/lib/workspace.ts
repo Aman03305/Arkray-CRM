@@ -10,11 +10,22 @@
  *
  * The same page components render in every workspace; only the API path differs
  * (/api/v1/workspaces/{me|all|userId}/...). The backend resolves and authorises the segment.
+ *
+ * Every path below /admin/users/{segment}/ is a user workspace. If the segment is not a user
+ * id, the path names no workspace at all (null): it never falls back to the viewer's own or
+ * the organisation's records, which would put other data under the selected user's banner.
  */
 import { hasCapability, type Viewer } from "./viewer";
 
 export const WORKSPACE_SECTIONS = ["dashboard", "pipeline", "leads", "activities"] as const;
 export type WorkspaceSection = (typeof WORKSPACE_SECTIONS)[number];
+
+export const SECTION_LABELS: Record<WorkspaceSection, string> = {
+  dashboard: "Dashboard",
+  pipeline: "Pipeline",
+  leads: "Leads",
+  activities: "Activities",
+};
 
 export type Workspace =
   | { kind: "self" }
@@ -28,18 +39,57 @@ export function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value);
 }
 
-export function workspaceFromPathname(pathname: string, viewer: Viewer | null): Workspace {
+/**
+ * The selected user's id in a /admin/users/{segment}/... path: undefined when the path is not
+ * below a user, null when the segment is not a user id. The segment is percent-decoded
+ * exactly once, as Next.js decodes the route's `userId` param, so "%66..." and "f..." name
+ * the same user here and in the layout (and never "this user's banner, the organisation's
+ * data").
+ */
+export function userIdFromPathname(pathname: string): string | null | undefined {
   const match = ADMIN_USER_PATH.exec(pathname);
-  if (match && isUuid(match[1]!)) {
-    return { kind: "user", userId: match[1]!.toLowerCase() };
+  if (!match) return undefined;
+  let segment: string;
+  try {
+    segment = decodeURIComponent(match[1]!);
+  } catch {
+    return null; // malformed percent-encoding
   }
+  return isUuid(segment) ? segment.toLowerCase() : null;
+}
+
+export function workspaceFromPathname(pathname: string, viewer: Viewer | null): Workspace | null {
+  const userId = userIdFromPathname(pathname);
+  if (userId === null) return null;
+  if (userId !== undefined) return { kind: "user", userId };
   return hasCapability(viewer, "crm.view_all") ? { kind: "organization" } : { kind: "self" };
+}
+
+/**
+ * The canonical spelling of a user-workspace path (lower-case id, no percent-encoding in the
+ * id), or null when `pathname` already is canonical or is not a user-workspace path.
+ */
+export function canonicalUserPath(pathname: string): string | null {
+  const match = ADMIN_USER_PATH.exec(pathname);
+  const userId = userIdFromPathname(pathname);
+  if (!match || !userId || match[1] === userId) return null;
+  return `/admin/users/${userId}${pathname.slice(`/admin/users/${match[1]}`.length)}`;
 }
 
 export function workspaceHref(workspace: Workspace, section: WorkspaceSection): string {
   return workspace.kind === "user"
     ? `/admin/users/${workspace.userId}/${section}`
     : `/${section}`;
+}
+
+/** The way back to a module of this workspace, e.g. from a lead that isn't found. */
+export function sectionBack(workspace: Workspace, section: WorkspaceSection): { href: string; label: string } {
+  return { href: workspaceHref(workspace, section), label: `Back to ${SECTION_LABELS[section]}` };
+}
+
+/** A user's CRM workspace, opened by an administrator (their Dashboard unless stated). */
+export function userWorkspaceHref(userId: string, section: WorkspaceSection = "dashboard"): string {
+  return workspaceHref({ kind: "user", userId: userId.toLowerCase() }, section);
 }
 
 /** A lead's page in this workspace, e.g. /leads/{id} or /admin/users/{userId}/leads/{id}. */
@@ -67,10 +117,14 @@ export function workspaceApiPath(workspace: Workspace, resource: string): string
 }
 
 export function activeSection(pathname: string): WorkspaceSection | null {
-  const segment = pathname.replace(/^\/admin\/users\/[^/]+/, "").split("/")[1];
-  return (WORKSPACE_SECTIONS as readonly string[]).includes(segment ?? "")
-    ? (segment as WorkspaceSection)
-    : null;
+  const raw = pathname.replace(/^\/admin\/users\/[^/]+/, "").split("/")[1] ?? "";
+  let segment: string;
+  try {
+    segment = decodeURIComponent(raw); // as Next.js decodes the [section] param
+  } catch {
+    return null;
+  }
+  return (WORKSPACE_SECTIONS as readonly string[]).includes(segment) ? (segment as WorkspaceSection) : null;
 }
 
 export function describeWorkspace(workspace: Workspace): string {

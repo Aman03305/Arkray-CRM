@@ -232,7 +232,7 @@ Background jobs are the only unscoped readers. They act as the *system*, load re
 id, and never serve responses to users. An Ask Arkray tool is **not** a background job: it
 always receives the requesting user's scope.
 
-## Admin → User Workspace (built: resolution, banner endpoint; Leads views in Phase 2)
+## Admin → User Workspace (built: resolution and banner endpoint in Phase 0; module views in Phases 2–5; completed in Phase 6)
 
 Requirement: an admin clicks a user's name, lands on `/admin/users/{id}/dashboard`, and
 navigates that user's Dashboard, Pipeline, Leads and Activities, with a persistent
@@ -265,7 +265,16 @@ navigates that user's Dashboard, Pipeline, Leads and Activities, with a persiste
   frontend uses for the "Viewing CRM for" banner. Anything the caller may not open is 404.
 - **Frontend reuse.** The same page components render at `/leads` and
   `/admin/users/{id}/leads`; the workspace comes from the URL
-  ([ADR-0010](adr/0010-frontend-workspace-routing.md)).
+  ([ADR-0010](adr/0010-frontend-workspace-routing.md)). The URL is parsed once, the way
+  Next.js decodes the route param, and fails closed. The frame renders a page only when the
+  URL's user and the layout's user are the same user. User names link to a workspace only for
+  viewers with `workspace.view_any`.
+- **Deactivated and invited users** stay viewable; new current work can't be given to them
+  (lead create: *"This user's account isn't active, so new leads can't be added to their
+  workspace."*; opportunities and activities: the deactivated-owner rule). Nothing is
+  reactivated or reassigned automatically.
+- The whole journey, actor vs subject, cache isolation, errors and query counts:
+  [admin-user-workspace.md](admin-user-workspace.md).
 
 ## Object-level and mutation rules (built for leads in Phase 2, opportunities in Phase 3 and activities in Phase 4)
 
@@ -393,4 +402,6 @@ See [rag-architecture.md](rag-architecture.md#security-invariant).
 | Cross-user suite for activities and timelines: User A vs User B both ways over lists (every filter, sort and page size), guessed ids, both timelines (bodies and errors identical to missing ids), relationship fields (own task on the other's lead or opportunity: identical 404s), every action, summary counts (unchanged by the other's records), cursors replayed across workspaces, workspace substitution, crafted payloads; admin workspaces scoped to one user | `tests/security/test_activities_cross_user.py` |
 | Activity services enforce scope, capabilities, author-only note edits and lead-owner ownership for direct callers; the database refuses ownership drift and mismatched relationships | `arkray/activities/tests/test_services.py`, `test_reassignment.py`, `test_models.py` |
 | Dashboard aggregate isolation: A, B and the admin with distinctive amounts; every figure exact in each workspace; A's whole response byte-identical before and after B's and the admin's records exist; lists only the workspace's records; selected-user dashboards equal the user's own; organisation = the sum; figures follow a reassigned lead; other workspaces 404 like missing ones | `tests/security/test_dashboard_cross_user.py`, `arkray/dashboard/tests/test_api.py` |
-| Cross-user suites for later modules | Phases 6–8 ([testing.md](testing.md#critical-cross-user-security-suite)) |
+| Selected-user workspace (Phase 6): every workspace route × {anonymous, another sales user, the user, admin} and admin × a missing user (identical bodies); malformed segments; marked records across 21 reads per workspace; object substitution on every record route and method; actor vs subject in every write and the audit trail; payloads can't move writes out of the URL's workspace; deactivation race; one `workspace.accessed` row per user per window across four modules; no impersonation route or session change; query counts | `tests/security/test_admin_workspace.py` |
+| Selected-user workspace UI: fail-closed URL parsing, canonical URLs, banner and sidebar context, links never leaving the workspace, cache isolation under switches, slow responses, failures and Back/Forward | `frontend/src/features/workspace/admin-user-workspace.test.tsx`, `frontend/src/lib/workspace.test.ts` |
+| Cross-user suites for later modules | Phases 7–8 ([testing.md](testing.md#critical-cross-user-security-suite)) |

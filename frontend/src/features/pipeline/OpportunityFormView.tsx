@@ -20,7 +20,7 @@ import { setFlash } from "@/lib/flash";
 import { formatPercent } from "@/lib/money";
 import { randomUuid } from "@/lib/random";
 import { useViewer } from "@/lib/viewer-context";
-import { opportunityHref, type Workspace, workspaceHref } from "@/lib/workspace";
+import { opportunityHref, sectionBack, type Workspace, workspaceHref } from "@/lib/workspace";
 
 import { pipelineApi, pipelineKeys } from "./api";
 import {
@@ -50,7 +50,7 @@ export function OpportunityFormView({ workspace, mode }: { workspace: Workspace;
     queryFn: () => pipelineApi.get(workspace, mode.kind === "edit" ? mode.opportunityId : ""),
     enabled: mode.kind === "edit",
   });
-  if (!permissions.canWrite) return <NotFoundView />;
+  if (!permissions.canWrite) return <NotFoundView back={sectionBack(workspace, "pipeline")} />;
   if (mode.kind === "create") return <OpportunityForm workspace={workspace} opportunity={null} leadId={mode.leadId} />;
   // Data first: once the form is open, a failed background reload never replaces it.
   if (existing.data) {
@@ -71,7 +71,7 @@ export function OpportunityFormView({ workspace, mode }: { workspace: Workspace;
     }
     return <OpportunityForm key={existing.data.id} workspace={workspace} opportunity={existing.data} />;
   }
-  if (isApiError(existing.error, 404)) return <NotFoundView />;
+  if (isApiError(existing.error, 404)) return <NotFoundView back={sectionBack(workspace, "pipeline")} />;
   if (existing.isError) {
     const { message, requestId } = describeError(existing.error);
     return (
@@ -219,8 +219,9 @@ function OpportunityForm({ workspace, opportunity, leadId }: { workspace: Worksp
     setReloadFailed(false);
     save.mutate(undefined, {
       onSuccess: (saved) => {
-        setFlash(opportunity ? "Changes saved." : "Opportunity created.");
-        router.push(opportunityHref(workspace, saved.id));
+        const page = opportunityHref(workspace, saved.id);
+        setFlash(opportunity ? "Changes saved." : "Opportunity created.", page);
+        router.push(page);
       },
     });
   };

@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 
 import { hasCapability, type Viewer } from "./viewer";
-import { type Workspace, type WorkspaceSection, workspaceHref } from "./workspace";
+import { SECTION_LABELS, type Workspace, WORKSPACE_SECTIONS, type WorkspaceSection, workspaceHref } from "./workspace";
 
 export interface NavItem {
   key: string;
@@ -22,19 +22,20 @@ export interface NavItem {
   icon: LucideIcon;
 }
 
-const SECTION_META: Record<WorkspaceSection, { label: string; icon: LucideIcon }> = {
-  dashboard: { label: "Dashboard", icon: LayoutDashboard },
-  pipeline: { label: "Pipeline", icon: SquareKanban },
-  leads: { label: "Leads", icon: Contact },
-  activities: { label: "Activities", icon: CalendarCheck },
+const SECTION_ICONS: Record<WorkspaceSection, LucideIcon> = {
+  dashboard: LayoutDashboard,
+  pipeline: SquareKanban,
+  leads: Contact,
+  activities: CalendarCheck,
 };
 
+/** The four modules, every link inside `workspace` (a selected user's stay under their URL). */
 export function workspaceNavigation(workspace: Workspace): NavItem[] {
-  return (Object.keys(SECTION_META) as WorkspaceSection[]).map((section) => ({
+  return WORKSPACE_SECTIONS.map((section) => ({
     key: section,
-    label: SECTION_META[section].label,
+    label: SECTION_LABELS[section],
     href: workspaceHref(workspace, section),
-    icon: SECTION_META[section].icon,
+    icon: SECTION_ICONS[section],
   }));
 }
 

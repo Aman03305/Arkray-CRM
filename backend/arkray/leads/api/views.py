@@ -91,7 +91,7 @@ class LeadListView(ApiView):
         paginator = KeysetPaginator(
             selectors.ORDERINGS[params["ordering"]], page_size=params["page_size"]
         )
-        page = paginator.paginate(leads, params.get("cursor"))
+        page = paginator.paginate(leads, params.get("cursor"), visible=selectors.listable(scope))
         return Response(
             {
                 "results": s.LeadListItemSerializer(page.items, many=True).data,

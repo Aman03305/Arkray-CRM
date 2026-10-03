@@ -314,16 +314,18 @@ describe("F9: dialogs start focus in the right place", () => {
 
 describe("F10: owner errors are announced and focused", () => {
   it("in a user's workspace the owner error is an alert", async () => {
+    // The user was active when the form opened and was deactivated before it was saved.
     nav.pathname = `/admin/users/${RAHUL_ID}/leads/new`;
+    const message = "This user's account isn't active, so new leads can't be added to their workspace.";
     mockApi({
       ...OPTIONS,
       [`GET /api/v1/workspaces/${RAHUL_ID}`]: {
         status: 200,
-        body: { kind: "user", subject: { id: RAHUL_ID, full_name: "Rahul Sharma", status: "deactivated" } },
+        body: { kind: "user", subject: { id: RAHUL_ID, full_name: "Rahul Sharma", status: "active" } },
       },
       [`GET /api/v1/workspaces/${RAHUL_ID}/leads/duplicates`]: { status: 200, body: { results: [] } },
       [`POST /api/v1/workspaces/${RAHUL_ID}/leads`]: apiError(400, "validation_error", "Some fields are invalid.", {
-        owner: ["Choose an active user."],
+        owner: [message],
       }),
     });
     renderWithProviders(<NewLeadView />, { viewer: adminViewer });
@@ -331,7 +333,7 @@ describe("F10: owner errors are announced and focused", () => {
     const user = userEvent.setup();
     await user.type(screen.getByLabelText("First name"), "Asha");
     await user.click(screen.getByRole("button", { name: "Create lead" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Choose an active user.");
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
   });
 
   it("reassigning without a choice focuses the picker", async () => {

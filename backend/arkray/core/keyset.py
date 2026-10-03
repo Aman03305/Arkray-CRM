@@ -20,14 +20,20 @@ Cursors are signed (django.core.signing), bound to the ordering they were issued
 carry sort values only: a forged, stale or cross-ordering cursor is a clean 400, never a
 500, and never widens what the caller may see (the queryset is scoped before paginating).
 
-Sort keys holding personal data (a lead's or a user's name) are `private`: their value is
-**not** written into the cursor, which ends up in URLs and possibly proxy logs. The cursor
-holds the boundary row's primary key instead, and its private values are re-read from that
-row when the next page is requested (one indexed lookup). Signing means only ids the server
-issued can be used, and the values only position the page; they are never returned. If the
-boundary row was renamed meanwhile, the page continues from its new name. This also keeps
-cursors short whatever the script of the name (Phase 2 review: a 200-character Devanagari
-name produced a cursor longer than the server accepts).
+Sort keys holding personal or business-sensitive data (a lead's or a user's name, a deal's
+amount) are `private`: their value is **not** written into the cursor, which ends up in URLs
+and possibly proxy logs. The cursor holds the boundary row's primary key instead, and its
+private values are re-read from that row when the next page is requested (one indexed
+lookup). If the boundary row was renamed meanwhile, the page continues from its new name.
+This also keeps cursors short whatever the script of the name (Phase 2 review: a
+200-character Devanagari name produced a cursor longer than the server accepts).
+
+The re-read goes **through what the caller may list** (`visible`, by default the very
+queryset being paged), never the whole table. The values only position the page, but a
+position is still a measurement: replaying someone else's cursor (or one harvested before
+the row moved to another workspace) while moving one's own record across the boundary
+would otherwise binary-search a hidden amount or name (Phase 6 review, P1). A boundary row
+the caller can't see makes the cursor invalid (400).
 """
 
 from __future__ import annotations
@@ -169,19 +175,17 @@ class KeysetPaginator:
         ]
         return signing.dumps({"o": self.ordering.name, "d": direction, "v": values}, salt=_SALT)
 
-    def _private_values(self, model: type[models.Model], boundary: Any) -> dict[str, Any]:
-        """The boundary row's current values for the private keys (re-read by its id)."""
+    def _private_values(self, visible: QuerySet[Any], boundary: Any) -> dict[str, Any]:
+        """The boundary row's current values for the private keys, re-read by its id among
+        the rows the caller may list (see the module docstring)."""
         fields = [key.field for key in self.ordering.keys if key.private]
-        row = (
-            model._default_manager.filter(**{self.ordering.keys[-1].field: boundary})
-            .values(*fields)
-            .first()
-        )
+        row = visible.filter(**{self.ordering.keys[-1].field: boundary}).values(*fields).first()
         if row is None:
-            raise ValueError("The page boundary no longer exists.")
-        return row
+            raise ValueError("The page boundary is gone or outside the caller's scope.")
+        return dict(row)
 
-    def _decode(self, model: type[models.Model], cursor: str) -> tuple[str, list[Any]]:
+    def _decode(self, visible: QuerySet[Any], cursor: str) -> tuple[str, list[Any]]:
+        model = visible.model
         try:
             if len(cursor) > MAX_CURSOR_LENGTH:
                 raise ValueError
@@ -211,7 +215,7 @@ class KeysetPaginator:
                     raise ValueError
                 values.append(value)
             if any(key.private for key in self.ordering.keys):
-                current = self._private_values(model, values[-1])
+                current = self._private_values(visible, values[-1])
                 values = [
                     current[key.field] if key.private else value
                     for key, value in zip(self.ordering.keys, values, strict=True)
@@ -220,21 +224,29 @@ class KeysetPaginator:
             raise InvalidInputError(INVALID_CURSOR, details={"cursor": [INVALID_CURSOR]}) from None
         return payload["d"], values
 
-    def window(self, queryset: QuerySet[M], cursor: str | None) -> tuple[QuerySet[M], str]:
+    def window(
+        self, queryset: QuerySet[M], cursor: str | None, *, visible: QuerySet[M] | None = None
+    ) -> tuple[QuerySet[M], str]:
         """The one query a page runs (page_size + 1 rows, to see whether more follow) and
-        its direction. Exposed so tests can EXPLAIN exactly what production executes."""
+        its direction. Exposed so tests can EXPLAIN exactly what production executes.
+
+        `visible`: the rows the caller may list whatever the filters (their scope), where a
+        cursor's boundary row is looked up for private keys; without it, `queryset` itself
+        (a boundary row that no longer matches the filters then invalidates the cursor)."""
         if not cursor:
             keys, direction = self.ordering.keys, "next"
             filtered = queryset
         else:
-            direction, values = self._decode(queryset.model, cursor)
+            direction, values = self._decode(queryset if visible is None else visible, cursor)
             keys = self.ordering.keys if direction == "next" else self.ordering.reversed()
             filtered = queryset.filter(_after(keys, values))
         ordered = filtered.order_by(*(k.order_by() for k in keys))
         return ordered[: self.page_size + 1], direction
 
-    def paginate(self, queryset: QuerySet[M], cursor: str | None) -> KeysetPage[M]:
-        window, direction = self.window(queryset, cursor)
+    def paginate(
+        self, queryset: QuerySet[M], cursor: str | None, *, visible: QuerySet[M] | None = None
+    ) -> KeysetPage[M]:
+        window, direction = self.window(queryset, cursor, visible=visible)
         return self.page(list(window), cursor, direction)
 
     def page(self, rows: list[M], cursor: str | None, direction: str) -> KeysetPage[M]:

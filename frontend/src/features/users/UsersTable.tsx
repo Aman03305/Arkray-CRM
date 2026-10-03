@@ -1,12 +1,10 @@
 "use client";
 
-import Link from "next/link";
-
 import { ActionMenu, type MenuAction } from "@/components/ui/ActionMenu";
 import { Skeleton } from "@/components/ui/Skeleton";
 import type { AdminUser } from "@/lib/api/types";
 import { formatDate, formatDateTime, formatRelative } from "@/lib/format";
-import { workspaceHref } from "@/lib/workspace";
+import { UserWorkspaceLink } from "@/features/workspace/UserWorkspaceLink";
 
 import { UserStatus } from "./UserStatus";
 
@@ -76,12 +74,7 @@ export function UsersTable({ users, loading, viewerId, onAction }: UsersTablePro
                 return (
                   <tr key={user.id} className="hover:bg-slate-50/60">
                     <td className="whitespace-nowrap px-4 py-3">
-                      <Link
-                        href={workspaceHref({ kind: "user", userId: user.id }, "dashboard")}
-                        className="font-medium text-slate-900 hover:text-brand-700 hover:underline"
-                      >
-                        {user.full_name}
-                      </Link>
+                      <UserWorkspaceLink user={user} />
                       {isSelf ? <span className="ml-1.5 text-xs text-slate-400">(you)</span> : null}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-slate-600">{user.email}</td>

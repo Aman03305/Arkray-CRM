@@ -116,6 +116,13 @@ def _searched(queryset: QuerySet[Lead], q: str) -> QuerySet[Lead]:
     return queryset
 
 
+def listable(scope: AccessScope) -> QuerySet[Lead]:
+    """Every lead the scope may list, archived or not, whatever the filters: where a page
+    cursor's boundary lead is re-read (core.keyset), so a cursor can never measure a lead
+    outside the scope."""
+    return scope.apply(Lead.objects.all())
+
+
 def lead_list(scope: AccessScope, filters: LeadFilters) -> QuerySet[Lead]:
     """The scoped, filtered leads for a list page (ordered and paginated by the caller)."""
     queryset = scope.apply(Lead.objects.all())

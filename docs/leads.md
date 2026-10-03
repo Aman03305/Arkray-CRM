@@ -233,6 +233,9 @@ the workspace always comes from the URL, so a cursor can't widen what anyone see
 - **Names never travel in cursors** (they end up in URLs and possibly proxy logs): the name
   sort is a *private* key, so its cursor holds the boundary lead's id, and the name is re-read
   from that lead when the next page is requested. Cursors stay short whatever the script.
+  The re-read is scoped (Phase 6 review, P1): only a lead in the caller's own scope can
+  position a page. Someone else's cursor, or one whose lead has since been reassigned away,
+  is a 400, so page positions can't be used to read a hidden name.
 - The last-contact sorts use `last_contacted_sort` (a generated, NOT NULL copy with "never"
   as the oldest date), so a cursor bounds the index scan and a page 250,000 rows deep costs
   the same as the first.

@@ -15,6 +15,7 @@ from arkray.leads.services import (
     OWNER_IS_SUBJECT_ONLY,
     OWNER_NOT_ASSIGNABLE,
     OWNER_REQUIRED,
+    SUBJECT_NOT_ASSIGNABLE,
 )
 from tests.factories import AdminFactory, InvitedUserFactory, LeadFactory, UserFactory
 from tests.helpers import signed_in
@@ -81,10 +82,16 @@ class TestCreateOwnership:
         )
         assert owner_error(response) == [OWNER_IS_SUBJECT_ONLY]
 
-    def test_leads_cannot_be_created_for_a_deactivated_user(self, admin_client):
-        gone = UserFactory(is_active=False)
-        response = admin_client.post(leads_url(str(gone.pk)), {"first_name": "R"}, format="json")
-        assert owner_error(response) == [OWNER_NOT_ASSIGNABLE]
+    @pytest.mark.parametrize(
+        "make_subject", [lambda: UserFactory(is_active=False), InvitedUserFactory]
+    )
+    def test_leads_cannot_be_created_for_a_user_who_is_not_active(self, admin_client, make_subject):
+        """Their workspace stays viewable, but it can't receive new work; the message says
+        why instead of asking the admin to choose an owner they can't choose here."""
+        subject = make_subject()
+        response = admin_client.post(leads_url(str(subject.pk)), {"first_name": "R"}, format="json")
+        assert owner_error(response) == [SUBJECT_NOT_ASSIGNABLE]
+        assert not Lead.objects.exists()
 
     def test_organisation_wide_creation_needs_an_explicit_owner(self, admin_client):
         response = admin_client.post(leads_url("all"), {"first_name": "R"}, format="json")

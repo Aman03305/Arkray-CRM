@@ -20,7 +20,7 @@ import { useFlash } from "@/lib/flash";
 import { businessToday, formatDateTime, formatRelative } from "@/lib/format";
 import { formatPercent } from "@/lib/money";
 import { useViewer } from "@/lib/viewer-context";
-import { leadHref, opportunityHref, type Workspace, workspaceHref } from "@/lib/workspace";
+import { leadHref, opportunityHref, sectionBack, type Workspace, workspaceHref } from "@/lib/workspace";
 
 import { pipelineApi, pipelineKeys } from "./api";
 import { pipelinePermissions, useOpportunityWriteSync, usePipelines } from "./hooks";
@@ -94,7 +94,7 @@ export function OpportunityDetailView({ workspace, opportunityId }: { workspace:
     </Link>
   );
 
-  if (isApiError(detail.error, 404)) return <NotFoundView />;
+  if (isApiError(detail.error, 404)) return <NotFoundView back={sectionBack(workspace, "pipeline")} />;
   if (detail.isError && !detail.data) {
     const { message, requestId } = describeError(detail.error);
     return (

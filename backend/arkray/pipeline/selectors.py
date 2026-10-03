@@ -157,6 +157,13 @@ def pipeline_for_board(pipeline_id: UUID | None) -> Pipeline:
 
 
 # --- opportunities -----------------------------------------------------------------------------
+def listable(scope: AccessScope) -> QuerySet[Opportunity]:
+    """Every opportunity the scope may list, whatever the filters: where a page cursor's
+    boundary opportunity is re-read (core.keyset), so a cursor can never measure an amount
+    outside the scope."""
+    return scope.apply(Opportunity.objects.all())
+
+
 def _filtered(scope: AccessScope, filters: OpportunityFilters) -> QuerySet[Opportunity]:
     queryset = scope.apply(Opportunity.objects.all())
     queryset = queryset.filter(archived_at__isnull=not filters.archived)

@@ -30,16 +30,26 @@ export function useLeadOptions() {
  * A reassignment out of the workspace being viewed (`viewerId`: whose "self" workspace it
  * is) leaves the lead's own timeline and open work under that workspace alone: the page
  * still showing them would refetch them where the lead no longer is (a 404 flashing up as
- * an error while the page moves away). The lead page drops them once it is gone.
+ * an error while the page moves away). The lead page drops them once it is gone. If the
+ * write only finishes after its page was left (Back pressed during the request), nothing
+ * is showing them: they are dropped now, never cached as this workspace's fresh copy of a
+ * lead that lives elsewhere (Phase 6 review).
  */
 export function syncAfterLeadWrite(queryClient: QueryClient, workspace: Workspace, lead: Lead, viewerId?: string): void {
   const key = leadKeys.detail(workspace, lead.id);
-  queryClient.setQueryData(key, lead);
+  const moved = movedOutOf(workspace, lead, viewerId);
+  const shown = (queryClient.getQueryCache().find({ queryKey: key, exact: true })?.getObserversCount() ?? 0) > 0;
+  if (moved && !shown) {
+    const gone = [JSON.stringify(key), ...leftBehind(workspace, lead.id)];
+    queryClient.removeQueries({ predicate: (query) => gone.includes(JSON.stringify(query.queryKey)) });
+  } else {
+    queryClient.setQueryData(key, lead);
+  }
   void queryClient.invalidateQueries({
     queryKey: leadKeys.all,
     predicate: (query) => JSON.stringify(query.queryKey) !== JSON.stringify(key),
   });
-  const left = movedOutOf(workspace, lead, viewerId) ? leftBehind(workspace, lead.id) : [];
+  const left = moved ? leftBehind(workspace, lead.id) : [];
   const keep = (queryKey: readonly unknown[]) => !left.includes(JSON.stringify(queryKey));
   void queryClient.invalidateQueries({ queryKey: pipelineKeys.all });
   void queryClient.invalidateQueries({ queryKey: activityKeys.all, predicate: (query) => keep(query.queryKey) });

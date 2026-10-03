@@ -12,11 +12,12 @@ import { DashboardContent } from "@/features/dashboard/DashboardView";
 import { describeError } from "@/lib/api/errors";
 import { hasCapability } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
-import { type Workspace, workspaceHref } from "@/lib/workspace";
-
-const ORGANIZATION: Workspace = { kind: "organization" };
+import { UserWorkspaceLink } from "@/features/workspace/UserWorkspaceLink";
+import type { Workspace } from "@/lib/workspace";
 
 import { NO_FILTERS, USERS_QUERY_KEY, usersApi } from "./api";
+
+const ORGANIZATION: Workspace = { kind: "organization" };
 import { UserStatus } from "./UserStatus";
 
 const RECENT = 5;
@@ -60,12 +61,7 @@ function RecentUsers() {
       {users.data.results.map((user) => (
         <li key={user.id} className="flex items-center justify-between gap-4 py-3">
           <div className="min-w-0">
-            <Link
-              href={workspaceHref({ kind: "user", userId: user.id }, "dashboard")}
-              className="block truncate text-sm font-medium text-slate-900 hover:text-brand-700 hover:underline"
-            >
-              {user.full_name}
-            </Link>
+            <UserWorkspaceLink user={user} className="block truncate text-sm" />
             <span className="block truncate text-xs text-slate-500">
               {user.email} · {user.role_label}
             </span>

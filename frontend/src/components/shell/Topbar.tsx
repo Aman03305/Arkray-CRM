@@ -1,6 +1,6 @@
 "use client";
 
-import { Menu, Plus, Search } from "lucide-react";
+import { Menu, Search } from "lucide-react";
 
 export function Topbar({ onMenuClick }: { onMenuClick: () => void }) {
   return (
@@ -24,18 +24,6 @@ export function Topbar({ onMenuClick }: { onMenuClick: () => void }) {
           aria-label="Search"
           className="h-9 w-full rounded-md border border-slate-200 bg-slate-50 pl-9 pr-3 text-sm placeholder:text-slate-400 disabled:cursor-not-allowed"
         />
-      </div>
-
-      <div className="ml-auto">
-        {/* Record creation arrives with the Leads module (Phase 2). */}
-        <button
-          type="button"
-          disabled
-          className="inline-flex h-9 items-center gap-1.5 rounded-md bg-brand-600 px-3 text-sm font-medium text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <Plus aria-hidden="true" className="size-4" />
-          New
-        </button>
       </div>
     </header>
   );

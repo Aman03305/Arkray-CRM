@@ -52,15 +52,15 @@ describe("UsersPage: states", () => {
     renderPage();
     expect(screen.getByRole("table", { name: /users \(loading\)/i })).toHaveAttribute("aria-busy", "true");
 
-    const row = (await screen.findByRole("link", { name: "Rahul Sharma" })).closest("tr")!;
+    const row = (await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" })).closest("tr")!;
     expect(within(row).getByText("rahul@example.test")).toBeInTheDocument();
     expect(within(row).getByText("User")).toBeInTheDocument();
     expect(within(row).getByText("Active")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Rahul Sharma" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Rahul Sharma, open CRM workspace" })).toHaveAttribute(
       "href",
       `/admin/users/${rahul.id}/dashboard`,
     );
-    const invitedRow = screen.getByRole("link", { name: "Neha Verma" }).closest("tr")!;
+    const invitedRow = screen.getByRole("link", { name: "Neha Verma, open CRM workspace" }).closest("tr")!;
     expect(within(invitedRow).getByText("Invited")).toBeInTheDocument();
     expect(within(invitedRow).getByText(/Link expires/)).toBeInTheDocument();
     expect(within(invitedRow).getByText("Never")).toBeInTheDocument();
@@ -70,7 +70,7 @@ describe("UsersPage: states", () => {
   it("shows the table columns the brief asks for, and no invented CRM metrics", async () => {
     mockApi({ [LIST]: page([rahul]) });
     renderPage();
-    await screen.findByRole("link", { name: "Rahul Sharma" });
+    await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" });
     const headers = screen.getAllByRole("columnheader").map((h) => h.textContent);
     expect(headers).toEqual(["Name", "Email", "Role", "Status", "Last login", "Created", "Actions"]);
     expect(screen.queryByText(/pipeline value|active leads/i)).not.toBeInTheDocument();
@@ -85,12 +85,12 @@ describe("UsersPage: states", () => {
   it("offers to clear filters when nothing matches", async () => {
     const api = mockApi({ [LIST]: (call: RecordedCall) => page(call.query.get("status") ? [] : [rahul]) });
     renderPage();
-    await screen.findByRole("link", { name: "Rahul Sharma" });
+    await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" });
     const user = userEvent.setup();
     await user.selectOptions(screen.getByLabelText("Filter by status"), "deactivated");
     expect(await screen.findByText("No users match your filters")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Clear filters" }));
-    expect(await screen.findByRole("link", { name: "Rahul Sharma" })).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" })).toBeInTheDocument();
     expect(api.calls.at(-1)!.query.get("status")).toBeNull();
   });
 
@@ -108,7 +108,7 @@ describe("UsersPage: states", () => {
     expect(alert).toHaveTextContent("Reference: req-test-1");
     expect(alert).not.toHaveTextContent("Boom");
     await userEvent.setup().click(within(alert).getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("link", { name: "Rahul Sharma" })).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" })).toBeInTheDocument();
   });
 
   it("explains an authorization error", async () => {
@@ -122,7 +122,7 @@ describe("UsersPage: search, filters and pagination", () => {
   it("sends allowlisted filters, debounces search and ignores 1-character searches", async () => {
     const api = mockApi({ [LIST]: page([rahul]) });
     renderPage();
-    await screen.findByRole("link", { name: "Rahul Sharma" });
+    await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" });
     const user = userEvent.setup();
 
     await user.type(screen.getByLabelText("Search users"), "r");
@@ -144,11 +144,11 @@ describe("UsersPage: search, filters and pagination", () => {
           : page([rahul], "http://backend:8000/api/v1/admin/users?cursor=page2"),
     });
     renderPage();
-    await screen.findByRole("link", { name: "Rahul Sharma" });
+    await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" });
     const user = userEvent.setup();
     expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Next" }));
-    expect(await screen.findByRole("link", { name: "Neha Verma" })).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: "Neha Verma, open CRM workspace" })).toBeInTheDocument();
     expect(api.fetchMock.mock.calls.every(([url]) => String(url).startsWith("/api/"))).toBe(true);
     expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
   });
