@@ -1,0 +1,143 @@
+# Arkray CRM — local development stack.
+#
+#   docker compose up -d                 # infrastructure only: postgres, redis, mailpit
+#   docker compose --profile app up -d   # + containerised backend, worker, beat, frontend
+#
+# All ports bind to 127.0.0.1 only. Host ports are configurable in .env.
+name: arkray
+
+x-backend-env: &backend-env
+  DJANGO_SETTINGS_MODULE: config.settings.production
+  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
+  DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,backend
+  DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-http://localhost:3000}
+  # Local containers serve plain HTTP on localhost; production terminates TLS at the proxy.
+  # Production settings refuse these without the explicit opt-in below.
+  DJANGO_ALLOW_INSECURE_LOCAL_HTTP: "true"
+  DJANGO_SECURE_COOKIES: "false"
+  DJANGO_SECURE_SSL_REDIRECT: "false"
+  DJANGO_HSTS_SECONDS: "0"
+  TRUSTED_PROXY_COUNT: "0"
+  # Base URL for links in invitation and password-reset emails (Mailpit captures them).
+  APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+  DATABASE_URL: postgres://${POSTGRES_USER:-arkray}:${POSTGRES_PASSWORD:-arkray_dev_only_password}@postgres:5432/${POSTGRES_DB:-arkray}
+  CELERY_BROKER_URL: redis://redis:6379/0
+  REDIS_CACHE_URL: redis://redis:6379/1
+  EMAIL_URL: smtp://mailpit:1025
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_FORMAT: json
+  CRM_TIME_ZONE: ${CRM_TIME_ZONE:-Asia/Kolkata}
+  CRM_CURRENCY: ${CRM_CURRENCY:-INR}
+  AI_ENABLED: ${AI_ENABLED:-false}
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.6-pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-arkray}
+      POSTGRES_USER: ${POSTGRES_USER:-arkray}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-arkray_dev_only_password}
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-55432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    # The broker must never silently drop messages, so eviction is disabled.
+    # (Production runs the broker and the cache on separate Redis instances.)
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT:-56379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  mailpit:
+    # Captures all outgoing email in development (invitations, password resets).
+    image: axllent/mailpit:v1.31
+    ports:
+      - "127.0.0.1:${MAILPIT_SMTP_HOST_PORT:-51025}:1025"
+      - "127.0.0.1:${MAILPIT_UI_HOST_PORT:-58025}:8025"
+    restart: unless-stopped
+
+  migrate:
+    profiles: ["app"]
+    build: ./backend
+    environment: *backend-env
+    command: ["python", "manage.py", "migrate", "--noinput"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  backend:
+    profiles: ["app"]
+    build: ./backend
+    environment: *backend-env
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health/live', timeout=2).status == 200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    profiles: ["app"]
+    build: ./backend
+    environment:
+      <<: *backend-env
+      DB_STATEMENT_TIMEOUT_MS: "60000"
+    command: ["celery", "-A", "config", "worker", "--queues", "outbox,default,email,ai", "--concurrency", "2", "--loglevel", "INFO"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  beat:
+    profiles: ["app"]
+    build: ./backend
+    environment: *backend-env
+    command: ["celery", "-A", "config", "beat", "--loglevel", "INFO", "--schedule", "/tmp/celerybeat-schedule"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    profiles: ["app"]
+    build:
+      context: ./frontend
+      args:
+        API_ORIGIN: http://backend:8000
+    ports:
+      - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:

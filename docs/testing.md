@@ -1,0 +1,234 @@
+# Testing strategy
+
+Tests are part of every phase's definition of done. A phase does not pass while critical
+tests fail.
+
+## Layers
+
+| Layer | Backend | Frontend |
+|---|---|---|
+| Unit | pure logic: `AccessScope`, capability policy, backoff, metadata sanitising, formatters | pure logic: workspace resolution, navigation model, API client |
+| Integration (real PostgreSQL) | services and selectors with constraints, triggers, `SKIP LOCKED`, pgvector | — |
+| API | DRF test client: status codes, envelopes, CSRF, throttles | — |
+| Authorization | route matrix and cross-user suite (below) | permission-driven rendering (for example, Users link only with `users.manage`) |
+| Component / interaction | — | Vitest + Testing Library: shell, banner, forms; loading, empty and error states |
+| Architecture guards | deny-by-default, route inventory, no floats, UUID keys, append-only triggers, production-settings safety, import-linter layering | — |
+| E2E (Phase 11) | Playwright against `docker compose --profile app` | |
+| RAG | deterministic fake model + golden dataset; opt-in live eval | |
+
+**Backend tests always run against real PostgreSQL** (the Compose service). SQLite would
+silently skip exactly the behaviour we rely on: CHECK/partial-unique constraints, triggers,
+`SELECT … FOR UPDATE SKIP LOCKED`, `NUMERIC` arithmetic and pgvector.
+
+## Tooling
+
+- Backend: `pytest`, `pytest-django`, `factory_boy` (`tests/factories.py`), `pytest-cov`.
+  Coverage in Phase 0: 96 % of `arkray/`. Coverage is monitored, not gamed; services and
+  selectors are expected to be near-fully covered.
+- Frontend: `vitest` + `jsdom` + Testing Library (`@testing-library/react`, `user-event`,
+  `jest-dom`). API calls are mocked with a small typed fetch router (`src/test/render.tsx`:
+  routes keyed `"METHOD /path"`, every call recorded with its query, body and headers)
+  rather than MSW: it runs in jsdom without a service worker, and tests assert the exact
+  requests sent (for example, the CSRF header and allowlisted filters).
+- Real concurrency: `@pytest.mark.django_db(transaction=True)` plus
+  `tests.helpers.run_concurrently` (each call in its own thread and database connection,
+  released by a barrier).
+- Static gates: `ruff` (lint, format, bandit rules), `mypy --strict` (tests relaxed),
+  `lint-imports`, `pip-audit`; `eslint`, `tsc --noEmit`, `next build`.
+- Everything runs via [`scripts/check.sh`](../scripts/check.sh) and CI
+  (`.github/workflows/ci.yml`).
+
+## Critical cross-user security suite
+
+Built incrementally in Phases 2–8. Fixtures: **User A**, **User B** (sales users) and
+**Admin**, each with leads, opportunities, tasks, meetings and notes. User A must not obtain
+User B's data through any channel:
+
+| Channel | Assertion |
+|---|---|
+| List endpoints | A's lists contain only A's records |
+| Retrieve / update / action by ID | B's IDs → **404** for A (never 403, never 200) |
+| Workspace segment | A requesting `/workspaces/{B-id}/…` or `/workspaces/all/…` → 404 |
+| Filters and ordering | `?owner=B`, unknown or ORM-style parameters → 400, never B's data |
+| Search | B's unique names or terms return nothing for A |
+| Dashboard | A's totals equal A's fixtures exactly (B's records don't change A's numbers) |
+| Pipeline board | only A's opportunities; moving B's → 404 |
+| Activities and timelines | only A's; B's lead timeline → 404 |
+| Embedded related records | a related record A can't see renders as `restricted` |
+| Ask Arkray | A's golden answers exact; questions naming B's records → "not found" |
+| Vector retrieval | B's semantically identical note never returned; stale chunks dropped by re-verification |
+
+Then the same suite runs as **Admin**: `/workspaces/{A-id}` and `/workspaces/{B-id}` return
+the respective data, `all` returns both, and each delegated access is audited.
+
+The authorization matrix (`tests/authz_matrix.py`) lists every route with its rule; a
+parametrised test generates `route × {anonymous, A, B, admin} × {own, other}` cases, and the
+architecture test fails if a route is missing from the matrix.
+
+## Specific test types
+
+- **Constraint tests:** each CHECK and UNIQUE rule is proven by writing invalid data
+  (including via raw SQL where the ORM would block it first).
+- **Money:** Decimal inputs and outputs as strings, rounding rules, rejection of floats,
+  negatives and excess precision; the aggregate example (₹1,000,000 × 50 % = ₹500,000.00)
+  checked exactly.
+- **Time:** "today" boundaries in `CRM_TIME_ZONE` around midnight IST vs UTC.
+- **Concurrency** (`transaction=True`, threads): two simultaneous stage moves give
+  consistent history; concurrent reassignments serialise; outbox claims never double-process.
+- **Query counts:** `django_assert_max_num_queries` on every list, dashboard and admin-users
+  endpoint (N+1 guard), with data volume varied to prove the count is constant.
+- **Failure modes:** cache outage (fast misses; audit fails toward more auditing), AI
+  provider errors (breaker opens, CRM unaffected), outbox retry, dead-lettering and lease
+  recovery.
+- **Frontend states:** every data view tests loading (skeleton), empty, error (with retry)
+  and populated states, plus permission-driven visibility.
+
+## What exists after Phase 3
+
+- **Backend (1,932 tests, 98 % coverage of `arkray/`)**, adding for the Pipeline: every
+  database invariant proven with raw SQL (status = stage category and the pipeline = the
+  stage's pipeline through the composite key; an open opportunity owned by its lead's
+  owner through the deferred composite key, including a lead reassigned alone; won 100 %,
+  lost 0 %, closed_at, lost reason and override rules; value, probability and date
+  ranges; append-only history refusing UPDATE/DELETE from raw SQL; seeded pipeline and
+  stage constraints including deferred position swaps), the financial rules
+  (`test_metrics.py`: the brief's ₹15,00,000 / ₹9,00,000 example, zero, 25 × the maximum
+  value, paise, rounding boundaries, "rounded once" vs per-row rounding, 1,000 random
+  amounts SQL = Python, floats refused, filters narrowing totals), the services (create,
+  edit, probability override and reset, every transition incl. won/lost/reopen and
+  closed→closed, history, audit and events, archive/restore), conversion (atomic under a
+  forced mid-way failure and a failing subscriber, idempotent, no double conversion,
+  "Converted needs an opportunity" for the status endpoint and lead creation),
+  reassignment propagation (the brief's two-open/one-won/one-lost scenario, archived open
+  ones, rollback, historical attribution unchanged), the HTTP API (strict decimal input,
+  system fields refused, board shape and bounds, card order, filters, every ordering,
+  pagination, admin workspaces), exact query counts for every endpoint at 10 and 100
+  opportunities, real-thread races and lock-order interleavings that deadlock on a wrong
+  order (a deliberate mutation proved it), keyset pagination of every ordering walked
+  against PostgreSQL both ways (56 cases), query-plan shapes
+  (`tests/performance/test_pipeline_query_plans.py`), the **cross-user suite**
+  `tests/security/test_pipeline_cross_user.py` (170 cases, both directions, including
+  aggregate leakage), and `tests/security/test_phase3_review_regressions.py`.
+- **Frontend (399 tests):** exact INR formatting and parsing on decimal strings (no
+  `Number()`), date-only formatting, the board (stage order, exact totals, cards, overdue in
+  words, restricted leads, empty and error states, "View all" paging), moving by drag and
+  drop and by the keyboard Move menu (one API, the card's version, optimistic placement,
+  rollback on 409/404/500/network, focus kept on the card), won/lost/reopen confirmations,
+  no stale data between Rahul's and Priya's pipelines (also Back), phone stage tabs,
+  filters, the opportunity page, the create/edit form (exact amounts, idempotency key
+  reuse, manual probability, conflict merge), the lead page's Opportunities section and
+  Convert dialog, and `features/pipeline/review-regressions.test.tsx`.
+- **Adversarial review:** three independent reviewers reproduced 1 P1 (found by two of
+  them independently: opportunity writes also locked the shared stage row, so different
+  users moving cards in opposite directions deadlocked; 23 of 80 HTTP moves returned 500),
+  2 frontend P1s (an optimistic rollback restoring the wrong cache when filters changed
+  mid-move; a conflict merge silently resetting someone else's manual probability), and
+  P2/P3s (in-flight conversion retries answered 409, board figures from different
+  snapshots, reopen/restore on archived leads, a lost reason silently dropped, N+1 audit
+  inserts on reassignment, legacy Converted leads, the Converted veto revealing a hidden
+  deal, deal values readable in cursors, `cards_per_stage=0` columns without `next`, stale
+  versions after moves, stage-list cursors surviving filter changes, focus loss after
+  moves and dialogs, misplaced commas in amounts, inverted date ranges). No P0: no IDOR, no
+  aggregate leak. Every one is fixed and pinned by a regression test.
+- **Live walkthrough** against the rebuilt containerised stack (Django + Celery + Next.js),
+  headless Chromium: 23 checks (admin: Users → Rahul → Pipeline under the banner, create
+  for Rahul with exact amounts checked in paise, drag and drop, keyboard Move with focus
+  kept, edit, won, reopen, lost with a reason, closed→closed refused without a request,
+  the lead page's opportunities, conversion (and no second one), reassignment moving the
+  open opportunity, Rahul → Priya and Back with a DOM observer proving no Rahul card ever
+  appears under Priya's banner, 1440 px layout, organisation-wide board; Rahul: own board,
+  create and drag, Priya's URLs and APIs 404 with bodies identical to a missing record,
+  phone layout with stage tabs; Priya: only her records and totals). It found three issues
+  unit tests missed (focus lost after a keyboard move, a stale-version 409 after changing an
+  opportunity on its own page, and screen-reader-only text widening the whole page at
+  1440 px), all fixed. No console errors, no unexpected API responses, container logs and
+  audit metadata free of titles, names, emails, amounts and lost reasons. It also exposed a
+  latent Phase 1 test-isolation defect (the identity migration test left `leads`/`pipeline`
+  unapplied for later transactional tests), fixed and pinned.
+
+## What exists after Phase 2
+
+- **Backend (1283 tests, 98 % coverage of `arkray/`)**, adding for Leads:
+  field rules (names in many scripts, NFC, refused control and bidi characters, emails,
+  international phone numbers and their canonical keys, postal codes, countries, last
+  contact bounds), every database constraint proven with raw SQL (including the generated
+  `display_name`/`search_text` columns and FK-protected configuration), the API (create,
+  read, edit with versions and no-ops, status, archive/restore, options, allowlisted and
+  invalid parameters, search across names/organisation/email/phone digits, every ordering,
+  pagination links, invalid cursors), idempotent create (replay, key reuse, per-user keys,
+  failed requests), ownership per workspace and reassignment, admin workspaces and their
+  audit, the assignees directory, capability separation (`crm.manage_any`,
+  `crm.assign_any`), audit events and domain events per operation (including rollback on a
+  failing subscriber), no queued work, no personal data in logs or audit, exact query
+  counts at 10 and 100 rows for every endpoint, real-thread races (reassign × reassign,
+  edit × edit, archive × edit, status × reassign, reassign × deactivation, idempotent
+  double create), keyset pagination walked against PostgreSQL's own ordering for every sort
+  and several page sizes (ties, NULLs, backwards, inserts and archiving between pages,
+  forged cursors), query-plan shapes (`tests/performance/`), and the **cross-user suite**
+  `tests/security/test_leads_cross_user.py` (User A vs User B and the reverse over every
+  channel, including metadata and error-body equality).
+- **Frontend (250 tests):** the Leads list (own, organisation-wide and a selected
+  user's workspace; table and phone cards; empty, filtered-empty and error states; search
+  debounce; allowlisted filters and sorting; archived view; cursor paging; row actions;
+  in-memory list state that never leaks between workspaces or into URLs/storage; no stale
+  rows from another user's workspace while loading), lead detail (sections, reserved
+  activity area, status change, 409 handling, archived state, reassignment out of a user's
+  workspace, 404 for foreign leads), the form (sections, client and server validation with
+  focus, owner rules per workspace, idempotency keys reused only for identical retries,
+  double-submit, duplicate assistance, edit conflict recovery by re-applying changes or
+  discarding them), and pure helpers (draft/merge rules, list URLs, IST datetime inputs,
+  lead links).
+- **Adversarial review:** three independent reviewers (API security, backend domain/concurrency/performance, frontend) reproduced 1 P1 (a request-body decompression bomb via `charset=zlib`, present since Phase 1), 7 P2 and 20+ P3 findings, plus two self-found issues and two found by the live walkthrough (a 404 refetch after reassignment; sign-out reloading its own page, from Phase 1). Every one is fixed and pinned by `tests/security/test_phase2_review_regressions.py`, `frontend/src/features/leads/review-regressions.test.tsx`, `src/app/providers.test.tsx` and `src/features/auth/useSignOut.test.tsx`.
+- **Live walkthrough** against the containerised stack (Django + Celery + Next.js), headless
+  Chromium: 35 checks (admin: Users → Rahul → Leads, create for Rahul, edit, search by name and phone digits, filter, reassign to Priya, back to Users → Priya; organisation-wide list; Rahul on a phone-sized screen: own leads as cards, duplicate assistance that doesn't reveal Priya's lead, create, status, edit, search, filter, Priya's lead and workspace URLs → not found, identical API 404s; Priya in the same browser after Rahul signs out: only her lead, no carried-over filters, Back never shows Rahul's data), with no console errors, no unexpected requests, and container logs free of passwords, contact data, search terms and tracebacks.
+
+## What exists after Phase 1
+
+- **Backend (585 tests, 97 % coverage of `arkray/`):** sign-in (identical failures incl. hasher-call
+  counting for timing, fixation, CSRF, trusted-browser throttling, per-IP limits, lockout
+  expiry, bounded query cost, index use), sessions (idle and absolute limits, malformed
+  timestamps, revocation on deactivation, reactivation, email change and password change,
+  demotion), invitation and reset lifecycles end to end through the real outbox relay and
+  email job (single use, expiry, supersession, purpose separation, mail outage and retry,
+  digest-only storage, idempotent redelivery), admin user management (list, search via
+  trigram indexes, filters, strict query parameters, cursor pagination, a constant query
+  count, create, edit with versions, email change, lifecycle actions, self-protection,
+  last-administrator invariant), the workspace endpoint (audited, enumeration-safe, no
+  impersonation), DB constraints proven with raw SQL, real-thread race tests, a
+  route × {anonymous, sales user, admin} authorization matrix, CSRF on every unsafe route,
+  secret-hygiene scans of logs, audit, outbox, tokens and responses, Redis, broker and mail
+  outages, the OpenAPI contract (valid, warning-free, committed), and migration
+  forward/backward on Phase 0-shaped data.
+- **Frontend (177 tests):** the API client (CSRF bootstrap and a single
+  retry, Retry-After), the post-login redirect sanitiser (open-redirect cases), business
+  time zone formatting, error presentation (no raw exceptions), the query client (no
+  retries on 4xx; 401 → sign-in once, never on public pages), sign-in, forgot, reset and
+  activation pages (all states, double-submit prevention, reasons), the session gate and
+  capability guard, the Users area (loading, empty, filtered-empty, error, 403, search
+  debounce and allowlisted parameters, cursor paging on the same origin, create, edit, 409,
+  email change, confirmations, self-protection, keyboard menu), Admin Home (no invented
+  figures), workspace banner and 404, profile (change password, sign-out), and the dialog
+  focus trap.
+
+- **Adversarial review regressions:** `tests/security/test_review_regressions.py`,
+  `frontend/src/features/review-regressions.test.tsx` and `src/app/providers.test.tsx` pin
+  every defect the Phase 1 review confirmed, so none can silently return.
+- **Live end-to-end walkthrough** (35 checks, run against the real Django + Celery + Next.js
+  + Mailpit stack through the Next.js proxy) plus headless-Chrome repro scripts for the
+  open-redirect, back/forward-cache, cross-tab and focus findings. These are manual Phase 1
+  verification tools; the Playwright E2E suite arrives in Phase 11.
+
+## What exists after Phase 0
+
+- Backend: 147 tests (96 % coverage) covering outbox (enqueue atomicity, coalescing including
+  a threaded pre-commit locking test, relay caps, broker failure, claim tokens and stale
+  messages, retries, dead-lettering, crash loops, lease recovery with duplicates, relay
+  routing, Celery wiring), audit
+  (append-only at ORM and DB-trigger level, redaction), identity (email normalisation and
+  constraints, capability matrix, workspace resolution and auditing), request context,
+  health, error envelope, fail-fast cache, and architecture guards.
+- Frontend: 44 tests covering workspace resolution, navigation (no Companies or Products;
+  Users only for admins), sidebar context persistence in admin workspaces, banner, shell
+  (including keyboard dismissal of the mobile drawer),
+  and the API client (CSRF, same-origin enforcement, error envelope, timeouts, network
+  errors).

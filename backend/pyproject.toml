@@ -1,0 +1,121 @@
+[project]
+name = "arkray-crm-backend"
+version = "0.1.0"
+description = "Arkray CRM API — Django modular monolith"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "django>=5.2.17,<5.3",          # 5.2 is the LTS line (security support until April 2028)
+    "djangorestframework>=3.16,<4",
+    "drf-spectacular>=0.28",        # OpenAPI schema -> generated frontend types
+    "psycopg[binary,pool]>=3.2,<4",
+    "django-environ>=0.12",
+    "django-redis>=5.4",
+    "redis>=5",
+    "celery>=5.5,<6",
+    "argon2-cffi>=23.1",
+    "gunicorn>=23",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-django>=4.9",
+    "pytest-cov>=5",
+    "factory-boy>=3.3",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "django-stubs[compatible-mypy]>=5.2,<5.3",
+    "djangorestframework-stubs>=3.15",
+    "celery-types>=0.22",
+    "import-linter>=2.1",
+    "pip-audit>=2.7",
+]
+
+[tool.uv]
+package = false
+
+# ---------------------------------------------------------------------------------------
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings.test"
+testpaths = ["arkray", "tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers --strict-config"
+filterwarnings = ["error::RuntimeWarning"]
+
+[tool.coverage.run]
+source = ["arkray"]
+omit = ["*/migrations/*", "*/tests/*"]
+
+# ---------------------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["*/migrations/*"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F",   # pycodestyle / pyflakes
+    "I",             # isort
+    "B",             # bugbear
+    "UP",            # pyupgrade
+    "S",             # bandit (security)
+    "DJ",            # django
+    "DTZ",           # timezone-aware datetimes only
+    "SIM", "C4", "RUF", "PT", "N",
+    "T20",           # no print()
+    "BLE",           # no blind `except Exception` without intent
+]
+ignore = [
+    "RUF012",  # mutable class attributes are idiomatic in Django/DRF
+    "N818",    # exceptions are named for what they mean (e.g. BusinessRuleViolation)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101", "S105", "S106", "S311", "BLE001"]
+"tests/**" = ["S101", "S105", "S106", "S311", "BLE001"]
+"conftest.py" = ["S101"]
+
+# ---------------------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+plugins = ["mypy_django_plugin.main", "mypy_drf_plugin.main"]
+strict = true
+warn_unreachable = true
+exclude = ["/migrations/"]
+
+[[tool.mypy.overrides]]
+# Tests are unannotated by convention; production code stays fully strict.
+module = ["tests.*", "arkray.*.tests.*", "conftest"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+check_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = ["environ.*", "django_redis.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["factory.*"]
+implicit_reexport = true
+
+[tool.django-stubs]
+django_settings_module = "config.settings.test"
+
+# ---------------------------------------------------------------------------------------
+# Module boundaries (see docs/architecture.md). Each phase extends the layer list as new
+# modules are introduced. Higher layers may import lower layers, never the reverse.
+[tool.importlinter]
+root_packages = ["arkray"]
+
+[[tool.importlinter.contracts]]
+name = "Modular monolith layering"
+type = "layers"
+layers = [
+    "arkray.pipeline",
+    "arkray.leads",
+    "arkray.identity",
+    "arkray.audit",
+    "arkray.core",
+]

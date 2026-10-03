@@ -1,0 +1,235 @@
+"""Identity serializers.
+
+Output serializers list their fields explicitly: password hashes, token digests, session
+epochs and other security metadata are never serialised. Input serializers are strict:
+undeclared keys (`is_superuser`, `capabilities`, `status`, ...) are rejected with a 400,
+and only the fields a given operation may change are declared at all.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from django.utils import timezone
+from drf_spectacular.utils import extend_schema_field
+from rest_framework import serializers
+
+from arkray.core.api import StrictInputSerializer
+
+from ..emails import validate_ascii_email
+from ..models import NAME_MAX_LENGTH, Role, User, UserStatus
+from ..policy import capabilities_for
+
+EMAIL_MAX_LENGTH = 254
+# Generous parse limit; the password policy itself caps new passwords at 128 characters.
+PASSWORD_INPUT_MAX_LENGTH = 1024
+TOKEN_INPUT_MAX_LENGTH = 128
+
+
+def _password_field() -> serializers.CharField:
+    # Never trim: leading/trailing spaces are part of a password.
+    return serializers.CharField(
+        max_length=PASSWORD_INPUT_MAX_LENGTH,
+        trim_whitespace=False,
+        style={"input_type": "password"},
+    )
+
+
+def _email_field() -> serializers.EmailField:
+    return serializers.EmailField(max_length=EMAIL_MAX_LENGTH, validators=[validate_ascii_email])
+
+
+# --- output -----------------------------------------------------------------------------------
+class ViewerSerializer(serializers.ModelSerializer[User]):
+    """The signed-in user (GET /auth/me and the sign-in response)."""
+
+    full_name = serializers.CharField(read_only=True)
+    role_label = serializers.CharField(source="get_role_display", read_only=True)
+    capabilities = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "email",
+            "first_name",
+            "last_name",
+            "full_name",
+            "role",
+            "role_label",
+            "capabilities",
+        ]
+        read_only_fields = fields
+
+    @extend_schema_field(serializers.ListField(child=serializers.CharField()))
+    def get_capabilities(self, user: User) -> list[str]:
+        return sorted(capability.value for capability in capabilities_for(user))
+
+
+class InvitationStateSerializer(serializers.Serializer[Any]):
+    expires_at = serializers.DateTimeField()
+    sent_at = serializers.DateTimeField(allow_null=True)
+    expired = serializers.BooleanField()
+
+
+class AdminUserSerializer(serializers.ModelSerializer[User]):
+    """A user as administrators see it. Expects selectors.admin_user_* querysets."""
+
+    full_name = serializers.CharField(read_only=True)
+    role_label = serializers.CharField(source="get_role_display", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    invitation = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "email",
+            "first_name",
+            "last_name",
+            "full_name",
+            "role",
+            "role_label",
+            "status",
+            "status_label",
+            "last_login",
+            "created_at",
+            "activated_at",
+            "deactivated_at",
+            "invitation",
+            "version",
+        ]
+        read_only_fields = fields
+
+    @extend_schema_field(InvitationStateSerializer(allow_null=True))
+    def get_invitation(self, user: User) -> dict[str, Any] | None:
+        expires_at = getattr(user, "invitation_expires_at", None)
+        if user.status != UserStatus.INVITED or expires_at is None:
+            return None
+        return InvitationStateSerializer(
+            {
+                "expires_at": expires_at,
+                "sent_at": getattr(user, "invitation_sent_at", None),
+                "expired": expires_at <= timezone.now(),
+            }
+        ).data
+
+
+class AdminUserPageSerializer(serializers.Serializer[Any]):
+    """One keyset-paginated page of users (follow `next` / `previous` as given)."""
+
+    results = AdminUserSerializer(many=True)
+    next = serializers.CharField(allow_null=True)
+    previous = serializers.CharField(allow_null=True)
+
+
+class WorkspaceSubjectSerializer(serializers.ModelSerializer[User]):
+    full_name = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = User
+        fields = ["id", "full_name", "status"]
+        read_only_fields = fields
+
+
+class WorkspaceSerializer(serializers.Serializer[Any]):
+    kind = serializers.ChoiceField(choices=["self", "user", "organization"])
+    subject = WorkspaceSubjectSerializer(allow_null=True)
+
+
+class AssigneeSerializer(serializers.ModelSerializer[User]):
+    """A user CRM records can be assigned to (for owner pickers)."""
+
+    full_name = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = User
+        fields = ["id", "full_name", "email"]
+        read_only_fields = fields
+
+
+class AssigneePageSerializer(serializers.Serializer[Any]):
+    results = AssigneeSerializer(many=True)
+    next = serializers.CharField(allow_null=True)
+    previous = serializers.CharField(allow_null=True)
+
+
+class InvitationPreviewSerializer(serializers.Serializer[Any]):
+    email = serializers.EmailField()
+    first_name = serializers.CharField()
+
+
+class DetailSerializer(serializers.Serializer[Any]):
+    detail = serializers.CharField()
+
+
+# --- input ------------------------------------------------------------------------------------
+class LoginSerializer(StrictInputSerializer):
+    # Not an EmailField: a malformed address must fail exactly like an unknown one.
+    email = serializers.CharField(max_length=EMAIL_MAX_LENGTH)
+    password = _password_field()
+
+
+class PasswordChangeSerializer(StrictInputSerializer):
+    current_password = _password_field()
+    new_password = _password_field()
+
+
+class PasswordResetRequestSerializer(StrictInputSerializer):
+    email = serializers.CharField(max_length=EMAIL_MAX_LENGTH)
+
+
+class PasswordResetConfirmSerializer(StrictInputSerializer):
+    token = serializers.CharField(max_length=TOKEN_INPUT_MAX_LENGTH)
+    new_password = _password_field()
+
+
+class InvitationTokenSerializer(StrictInputSerializer):
+    token = serializers.CharField(max_length=TOKEN_INPUT_MAX_LENGTH)
+
+
+class InvitationAcceptSerializer(StrictInputSerializer):
+    token = serializers.CharField(max_length=TOKEN_INPUT_MAX_LENGTH)
+    password = _password_field()
+
+
+class UserListQuerySerializer(StrictInputSerializer):
+    q = serializers.CharField(max_length=100, min_length=2, required=False, allow_blank=True)
+    status = serializers.ChoiceField(choices=UserStatus.choices, required=False)
+    role = serializers.ChoiceField(choices=Role.choices, required=False)
+    cursor = serializers.CharField(max_length=500, required=False)
+    page_size = serializers.IntegerField(min_value=1, max_value=100, required=False)
+
+
+class AssigneeQuerySerializer(StrictInputSerializer):
+    q = serializers.CharField(max_length=100, min_length=2, required=False, allow_blank=True)
+    cursor = serializers.CharField(max_length=1000, required=False)
+    page_size = serializers.IntegerField(min_value=1, max_value=100, required=False, default=100)
+
+
+class UserCreateSerializer(StrictInputSerializer):
+    first_name = serializers.CharField(max_length=NAME_MAX_LENGTH)
+    last_name = serializers.CharField(
+        max_length=NAME_MAX_LENGTH, required=False, allow_blank=True, default=""
+    )
+    email = _email_field()
+    role = serializers.ChoiceField(choices=Role.choices)
+
+
+class UserUpdateSerializer(StrictInputSerializer):
+    first_name = serializers.CharField(max_length=NAME_MAX_LENGTH, required=False)
+    last_name = serializers.CharField(max_length=NAME_MAX_LENGTH, required=False, allow_blank=True)
+    role = serializers.ChoiceField(choices=Role.choices, required=False)
+    version = serializers.IntegerField(min_value=1)
+
+
+class EmailChangeSerializer(StrictInputSerializer):
+    email = _email_field()
+    version = serializers.IntegerField(min_value=1)
+    # Required only to change one's own email (re-authentication).
+    current_password = serializers.CharField(
+        max_length=PASSWORD_INPUT_MAX_LENGTH,
+        trim_whitespace=False,
+        required=False,
+        style={"input_type": "password"},
+    )
