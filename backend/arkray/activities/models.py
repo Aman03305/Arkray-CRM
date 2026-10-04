@@ -24,9 +24,10 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db import models
 from django.db.models import Case, ExpressionWrapper, F, Func, Q, Value, When
-from django.db.models.functions import Coalesce, Length
+from django.db.models.functions import Coalesce, Concat, Length, Upper
 from django.db.models.lookups import LessThanOrEqual
 from django.utils import timezone
 
@@ -100,6 +101,19 @@ SCHEDULE_SORT = Case(
     default=F("created_at"),
     output_field=models.DateTimeField(),
 )
+
+
+# What global search matches in each type (docs/search.md#activities), upper-cased like every
+# search text so PostgreSQL folds both sides alike; each type's trigram index is built on
+# exactly its expression. A task's title; a meeting's title and location (a space between
+# them, and search words never contain one, so no word matches across the two); a note's
+# body. Not a task's description or a meeting's agenda, and never the lead's name (a closed
+# task's lead may since belong to someone else, and is then shown as "restricted").
+SEARCH_TEXT = {
+    ActivityType.TASK: Upper("title"),
+    ActivityType.MEETING: Upper(Concat("title", Value(" "), "location")),
+    ActivityType.NOTE: Upper("description"),
+}
 
 
 def _set_exactly_when(status: ActivityStatus, at: str, by: str) -> Q:
@@ -280,6 +294,23 @@ class Activity(UUIDPrimaryKeyModel, TimeStampedModel):
                 F("id").desc(),
                 name="activities_opportunity_idx",
                 condition=Q(opportunity__isnull=False),
+            ),
+            # Global search (Phase 7): one trigram index per type, on exactly that type's
+            # search text (SEARCH_TEXT), so a task search never reads a note's postings.
+            # Without them an organisation-wide search read every activity (0.3-2 s at
+            # 2,000,000) and the heaviest owner's walked 137,000 of them (60-200 ms). The
+            # owner comes first (btree_gin), so a search in one person's workspace looks up
+            # only their records: with the trigrams alone it rechecked every owner's
+            # candidates (260-460 ms for a word with common trigrams; 19-51 ms now; review,
+            # P2). docs/search.md#indexes.
+            *(
+                GinIndex(
+                    F("owner"),
+                    OpClass(SEARCH_TEXT[kind], name="gin_trgm_ops"),
+                    name=f"activities_{kind}_search_trgm",
+                    condition=Q(type=kind, archived_at__isnull=True),
+                )
+                for kind in (ActivityType.TASK, ActivityType.MEETING, ActivityType.NOTE)
             ),
         ]
         constraints = [

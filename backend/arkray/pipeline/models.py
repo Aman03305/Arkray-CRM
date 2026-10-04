@@ -20,9 +20,10 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
+from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db import models
 from django.db.models import Case, F, Q, Value, When
-from django.db.models.functions import Coalesce, Lower
+from django.db.models.functions import Coalesce, Lower, Upper
 from django.utils import timezone
 
 from arkray.core.models import AppendOnlyModel, TimeStampedModel, UUIDPrimaryKeyModel
@@ -171,6 +172,11 @@ class Stage(UUIDPrimaryKeyModel, TimeStampedModel):
 OPEN_OWNER = Case(When(status=StageCategory.OPEN, then=F("owner_id")), default=None)
 EXPECTED_CLOSE_SORT = Coalesce(F("expected_close_date"), Value(UNDATED))
 CLOSED_SORT = Coalesce(F("closed_at"), Value(NEVER_CLOSED))
+# What global search matches (docs/search.md#opportunities): the title only, upper-cased like
+# every search text so PostgreSQL folds both sides alike. Not the lead's name: a closed
+# opportunity's lead may since belong to someone else, and its name is then shown to the
+# opportunity's owner as "restricted" (matching on it would reveal it). Not amounts.
+SEARCH_TEXT = Upper("title")
 
 
 class Opportunity(UUIDPrimaryKeyModel, TimeStampedModel):
@@ -270,6 +276,17 @@ class Opportunity(UUIDPrimaryKeyModel, TimeStampedModel):
                 name="pipeline_opp_owner_created_idx",
             ),
             models.Index(F("created_at").desc(), F("id").desc(), name="pipeline_opp_created_idx"),
+            # Global search (Phase 7): a title substring, in any workspace. Without it an
+            # organisation-wide search read every opportunity (100-150 ms at 300,000) and one
+            # owner's walked all of theirs (30 ms at 20,000). Trigrams only: titles are short,
+            # so rechecking every owner's candidates costs little, and with the owner first
+            # (as the activity indexes) PostgreSQL also chose it for 17 pipeline list and
+            # board queries; docs/search.md#database-and-indexes.
+            GinIndex(
+                OpClass(SEARCH_TEXT, name="gin_trgm_ops"),
+                name="pipeline_opp_search_trgm",
+                condition=Q(archived_at__isnull=True),
+            ),
         ]
         constraints = [
             models.CheckConstraint(condition=~Q(title=""), name="pipeline_opp_title_present"),

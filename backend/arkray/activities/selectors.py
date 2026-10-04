@@ -17,21 +17,32 @@ from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from django.db.models import Count, Q, QuerySet
-from django.db.models.functions import Substr
+from django.db.models import Count, Q, QuerySet, Value
+from django.db.models.functions import Greatest, StrIndex, Substr, Upper
 
 from arkray.core.access import AccessScope
 from arkray.core.business_time import business_midnight, today_bounds
 from arkray.core.errors import NotFoundError
 from arkray.core.keyset import KeysetOrdering, SortKey
+from arkray.core.ranking import Matches, SearchQuery, top_matches
 from arkray.identity.models import User
 from arkray.leads import selectors as lead_selectors
 from arkray.pipeline import selectors as pipeline_selectors
 
-from .models import CURRENT_STATUSES, Activity, ActivityStatus, ActivityType, TimelineEntry
+from .models import (
+    CURRENT_STATUSES,
+    SEARCH_TEXT,
+    Activity,
+    ActivityStatus,
+    ActivityType,
+    TimelineEntry,
+)
 from .timeline import USER_KEYS
 
 PREVIEW_LENGTH = 240  # characters of a note (or description) shown in lists and timelines
+# A note found by search shows the same bounded preview, starting this many characters
+# before the first search word, so the match is in view (docs/search.md#notes).
+PREVIEW_CONTEXT = 60
 UPCOMING_MEETINGS_DEFAULT = 5
 NEXT_TASKS_DEFAULT = 5
 
@@ -228,6 +239,76 @@ def activity_detail(scope: AccessScope, activity_id: UUID) -> Activity:
 def activity_by_id(activity_id: UUID) -> Activity:
     """Unscoped: only for services returning a record the actor has just changed."""
     return _with_relations(Activity.objects.filter(pk=activity_id)).get()
+
+
+# What a global search result shows of a task, meeting or note: type, title, status, when,
+# the lead (only if visible in the scope; the serializer decides) and the owner. A note only
+# as a bounded preview, cut in PostgreSQL: the whole body never leaves the database.
+_SEARCH_RESULT_FIELDS = (
+    "id",
+    "type",
+    "title",
+    "status",
+    "priority",
+    "due_at",
+    "starts_at",
+    "ends_at",
+    "location",
+    "archived_at",
+    "created_at",
+    "lead__id",
+    "lead__first_name",
+    "lead__last_name",
+    "lead__organization_name",
+    "lead__display_name",
+    "lead__owner_id",
+    *(f"owner__{f}" for f in _PERSON),
+)
+
+
+def search(
+    scope: AccessScope, query: SearchQuery, activity_type: ActivityType, *, limit: int
+) -> Matches[Activity]:
+    """Global search's tasks, meetings or notes: every search word occurs in the type's search
+    text (models.SEARCH_TEXT, case-insensitive substring), over the activities `scope` may
+    list, archived ones left out; completed and cancelled work alike (it is history). Ranked
+    by core.ranking against the title (a note's body), then by the activity's own date, the
+    latest first: a task's due date (undated tasks first: 9999-12-31), a meeting's start, a
+    note's creation (`schedule_sort`). That order is served for one type by the type's own
+    schedule indexes (per owner and organisation-wide), so the recent pass reads exactly
+    that type's newest records however rare the type is (a created-order walk of all
+    activities would read every other type's rows to find them; Phase 7 review).
+
+    A note's body is returned only as `text_preview`: PREVIEW_LENGTH (+1, to tell whether it
+    was cut) characters starting PREVIEW_CONTEXT before the first search word, and
+    `preview_start`, where it starts (1 = the beginning)."""
+    scoped = scope.apply(
+        Activity.objects.filter(type=activity_type, archived_at__isnull=True)
+    ).annotate(search_text=SEARCH_TEXT[activity_type])
+    newest = ("-schedule_sort", "-id")
+    is_note = activity_type == ActivityType.NOTE
+
+    def shape(found: QuerySet[Activity]) -> QuerySet[Activity]:
+        found = found.select_related("lead", "owner").only(*_SEARCH_RESULT_FIELDS)
+        if not is_note:
+            return found
+        start = Greatest(
+            StrIndex(Upper("description"), Upper(Value(query.terms[0]))) - PREVIEW_CONTEXT, 1
+        )
+        return found.annotate(
+            preview_start=start,
+            text_preview=Substr("description", start, PREVIEW_LENGTH + 1),
+        )
+
+    return top_matches(
+        scoped,
+        text="search_text",
+        query=query,
+        label="description" if is_note else "title",
+        newest=newest,
+        limit=limit,
+        shape=shape,
+    )
 
 
 def activity_summary(scope: AccessScope, *, now: datetime) -> ActivitySummary:

@@ -3,9 +3,10 @@ unscoped reader here except `lead_by_id`, which services use after a write the a
 already authorised to make.
 
 Search, filters and sorts are allowlisted and bounded (docs/leads.md#search-filters-sorting):
-- `q`: 2-100 characters, at most 5 whitespace-separated terms; every term must occur in the
-  lead's names, organisation, email or phone digits (case-insensitive substring, served by
-  one trigram index). Phone-like terms ("98765-43210") are reduced to digits first.
+- `q`: 2-100 characters, at most 5 searched words (core.text's search-input rules, shared
+  with global search); every word must occur in the lead's names, organisation, email or
+  phone digits (case-insensitive substring, served by one trigram index; `matching`).
+  Phone-like words ("98765-43210") are reduced to digits first.
 - filters: status, source, rating, owner (organisation-wide workspace only; it can only
   narrow the scope), created date range in the business time zone, archived.
 - sorts: see ORDERINGS. Every ordering ends in the primary key, so keyset cursors are exact.
@@ -25,15 +26,14 @@ from arkray.core.access import AccessScope
 from arkray.core.business_time import business_midnight, today_bounds
 from arkray.core.errors import InvalidInputError, NotFoundError
 from arkray.core.keyset import KeysetOrdering, SortKey
-from arkray.core.text import TextRejected, clean_line
-from arkray.identity.selectors import search_terms
+from arkray.core.ranking import Matches, SearchQuery, top_matches
+from arkray.core.text import TextRejected, clean_line, search_needles
 
 from .models import Lead, LeadSource, LeadStatus, StatusCategory
 from .phones import phone_key, search_digits
 
 DUPLICATE_LIMIT = 5  # shown
 DUPLICATE_SCAN_LIMIT = 50  # considered (bounded even for a shared switchboard number)
-SEARCH_TERM_MIN_LENGTH = 2
 NEW_LEADS_DEFAULT = 5
 
 ORDERINGS: dict[str, KeysetOrdering] = {
@@ -91,29 +91,36 @@ def _contains(needle: str) -> Q:
     return Q(search_text__contains=Upper(Value(needle)))
 
 
-def search_needles(q: str) -> list[str]:
-    """The terms of `q` that are searched: cleaned, at least 2 characters, at most 5."""
-    needles = []
-    for term in search_terms(q):
-        try:
-            needle = clean_line(term)
-        except TextRejected as exc:
-            raise InvalidInputError(details={"q": [str(exc)]}) from None
-        if len(needle) >= SEARCH_TERM_MIN_LENGTH:
-            needles.append(needle)
-    return needles
+def needles(q: str) -> list[str]:
+    """The words of `q` that are searched (core.text.search_needles); 400 for characters no
+    stored text can contain (the API's validation refuses them first)."""
+    try:
+        return search_needles(q)
+    except TextRejected as exc:
+        raise InvalidInputError(details={"q": [str(exc)]}) from None
+
+
+def match_condition(terms: Sequence[str]) -> Q:
+    """**The** lead search rule, for the Leads list and global search alike: every term must
+    occur in the lead's names, organisation, email or phone digits. A phone-like term
+    ("98765-43210") matches phone digits or the text as typed ("1-800 Flowers",
+    "Expo 2024-25")."""
+    condition = Q()
+    for needle in terms:
+        term = _contains(needle)
+        digits = search_digits(needle)
+        if digits is not None and digits != needle:
+            term |= _contains(digits)
+        condition &= term
+    return condition
+
+
+def matching(queryset: QuerySet[Lead], terms: Sequence[str]) -> QuerySet[Lead]:
+    return queryset.filter(match_condition(terms))
 
 
 def _searched(queryset: QuerySet[Lead], q: str) -> QuerySet[Lead]:
-    """Every term must match. A phone-like term ("98765-43210") matches phone digits or the
-    text as typed ("1-800 Flowers", "Expo 2024-25")."""
-    for needle in search_needles(q):
-        condition = _contains(needle)
-        digits = search_digits(needle)
-        if digits is not None and digits != needle:
-            condition |= _contains(digits)
-        queryset = queryset.filter(condition)
-    return queryset
+    return matching(queryset, needles(q))
 
 
 def listable(scope: AccessScope) -> QuerySet[Lead]:
@@ -164,6 +171,37 @@ def lead_list(scope: AccessScope, filters: LeadFilters) -> QuerySet[Lead]:
         "source__key",
         "source__name",
         *_OWNER_FIELDS,
+    )
+
+
+# What a global search result shows of a lead (docs/search.md#results): its name,
+# organisation, status and owner. No contact data, even when the search matched it.
+_SEARCH_RESULT_FIELDS = (
+    "id",
+    "display_name",
+    "organization_name",
+    "created_at",
+    "status__key",
+    "status__name",
+    "status__category",
+    *_OWNER_FIELDS,
+)
+
+
+def search(scope: AccessScope, query: SearchQuery, *, limit: int) -> Matches[Lead]:
+    """Global search's leads: the Leads list's own search rule (`match_condition`) over the
+    leads `scope` may list, archived ones left out, ranked by core.ranking against the
+    display name, newest first among equals. The scope is applied before anything is
+    matched."""
+    return top_matches(
+        scope.apply(Lead.objects.filter(archived_at__isnull=True)),
+        text="search_text",
+        condition=match_condition(query.terms),
+        query=query,
+        label="display_name",
+        newest=("-created_at", "-id"),
+        limit=limit,
+        shape=lambda leads: leads.select_related("owner", "status").only(*_SEARCH_RESULT_FIELDS),
     )
 
 

@@ -5,6 +5,12 @@ import { type RefObject, useEffect, useRef } from "react";
 export const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+/** Elements Tab can reach: focusable and not taken out of the tab order (`tabindex="-1"`,
+ * e.g. combobox options, which focus never moves to). */
+function tabbable(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.tabIndex >= 0);
+}
+
 /** Make everything outside `element` inert (not focusable, hidden from assistive tech). */
 function inertOutside(element: HTMLElement): () => void {
   const changed: HTMLElement[] = [];
@@ -46,19 +52,19 @@ export function useModalFocus(
     const overlay = boundary.current ?? root;
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     // A disabled element can't take focus: skip it rather than leave focus behind the modal.
-    const first =
-      root.querySelector<HTMLElement>("[data-autofocus]:not(:disabled)") ?? root.querySelector<HTMLElement>(FOCUSABLE);
+    const first = root.querySelector<HTMLElement>("[data-autofocus]:not(:disabled)") ?? tabbable(root)[0];
     (first ?? root).focus();
     const restoreInert = inertOutside(overlay);
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (event.isComposing) return; // the input method cancels its own composition
         event.stopPropagation();
         onEscapeRef.current();
         return;
       }
       if (event.key !== "Tab") return;
-      const focusable = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE));
+      const focusable = tabbable(root);
       if (focusable.length === 0) {
         event.preventDefault();
         root.focus();

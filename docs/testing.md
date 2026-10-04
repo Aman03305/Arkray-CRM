@@ -50,7 +50,7 @@ User B's data through any channel:
 | Retrieve / update / action by ID | B's IDs → **404** for A (never 403, never 200) |
 | Workspace segment | A requesting `/workspaces/{B-id}/…` or `/workspaces/all/…` → 404 |
 | Filters and ordering | `?owner=B`, unknown or ORM-style parameters → 400, never B's data |
-| Search | B's unique names or terms return nothing for A |
+| Search | B's unique names or terms return nothing for A: the Leads list (P2) and global search over every kind of record (P7: `tests/security/test_search_cross_user.py`; B's exact note secret gives the same response as a secret nobody has) |
 | Dashboard | A's totals equal A's fixtures exactly (B's records don't change A's numbers) |
 | Pipeline board | only A's opportunities; moving B's → 404 |
 | Activities and timelines | only A's; B's lead timeline → 404 |
@@ -82,6 +82,98 @@ architecture test fails if a route is missing from the matrix.
   recovery.
 - **Frontend states:** every data view tests loading (skeleton), empty, error (with retry)
   and populated states, plus permission-driven visibility.
+
+## What exists after Phase 7
+
+- **Backend (3,369 tests, 98 % coverage of `arkray/`)**, adding 303 for global search
+  ([search.md](search.md)):
+  - **Cross-user** (`tests/security/test_search_cross_user.py`, 27): marked records
+    (`RAHUL-OMEGA-*`, `PRIYA-ZETA-*`) of every kind searched from Rahul's, Priya's, the
+    organisation's and each selected workspace: exact results, and no byte of the other
+    user's records in the response. Another workspace's exact secret gives the same body,
+    size and flags as a secret nobody has. Other users' records never move a workspace's
+    results, window or flags. Scope-widening attempts; 404s identical for missing and
+    forbidden users.
+  - **API, input, privacy, ranking, query counts** (`arkray/search/tests`, 131; and
+    `core/tests/test_ranking.py`, 14): restricted leads, results
+    re-authorised when opened, deactivated users' workspaces; input bounds, encodings,
+    surrogates, bidi and control characters, every script, SQL and regex syntax, wildcards;
+    read-only (a write inside the transaction fails), nothing logged or audited (every log
+    record checked for 200, 400, 404 and a real statement timeout), no AI or network
+    imports; query counts pinned per workspace (own 8, selected user 9, organisation 8;
+    7 / 8 / 7 inside test transactions) at 3 and 30 records per kind and 2 and 12 users.
+  - **Window equivalence** (`test_window.py`, 65): the ranked window against a brute-force
+    reference that models the gate, for 8 window sizes × 8 queries, and the composed SQL
+    holding no searched text.
+  - **Query shapes** (`tests/performance/test_search_query_plans.py`, 6): each pass's index
+    in every scope, never a sort of records, the gate's one-time filter, owner-first
+    activity trigram lookups. At 1M leads / 2M activities `bench_search.py --check-plans`
+    checks 4 scopes × 26 queries × 5 groups: PASS; and the Activities, pipeline and
+    dashboard benchmarks use the same indexes as without Phase 7.
+  - **Review regressions** (`tests/security/test_phase7_review_regressions.py`, 58): words
+    an index can't look up (punctuation, symbols, generic combining marks: 400), PostgreSQL's
+    word table against `[[:alnum:]]` for every character, the gate (words PostgreSQL can't
+    narrow by; fragments the index would return), one read of each recent text, length
+    after NFC, repeated words, messages, cluster-safe previews, activity recency.
+  - **Outages** (`test_outages.py::TestSearchKeepsWorking`): Redis and the broker down.
+- **Frontend (623 tests)**: `features/search/search.test.tsx` and
+  `review-regressions.test.tsx` (75): the entry and its shortcut rules, debounce and IME,
+  grouping, keyboard (combobox, listbox, focus trap), states, links in all three
+  workspaces, the slow-response race and workspace switch (a `MutationObserver` records
+  every frame), workspace-keyed cache, no storage, XSS payloads, highlighting, the client's
+  query rules (including the word rule), layout. The Leads and Activities lists also pin
+  their positioned scroll containers (below).
+- **Benchmark** (`bench_search.py` on `arkray_bench_search`: 1M leads, 300k
+  opportunities, 2M activities with realistic text): ordinary searches 24-30 ms (typical
+  owner), 81-120 ms (heavy owner, admin in their workspace), 53-119 ms (organisation),
+  wall clock; per-group SQL and every review shape in
+  [search.md](search.md#performance).
+- **Adversarial review:** four independent reviewers (API security, frontend, backend
+  domain, PostgreSQL performance), each reproducing what it reported.
+  - **P0:** none. No record of another workspace was returned, ranked by or shown, no
+    SQL injection, no way to read a note's body beyond its preview.
+  - **P1 (one):** words pg_trgm can't index (punctuation, symbols, "a-b") made the older
+    pass read every record (1-19 s, 500s at the statement timeout); only words with 3
+    letters or digits in a row are searched now.
+  - **P2s:** a combining mark letting a 2-letter word through (0.8-1.9 s); user workspaces
+    rechecking every owner's candidates (260-460 ms; owner-first activity indexes); the recent pass
+    reading long notes once per word (up to 2.4 s); Enter opening a result of the previous
+    query; the focus trap leaking. Re-measuring after the fixes found one more P2: a rare
+    word whose trigrams aren't ("the-") still read nearly every note (1.2 s); the gate now
+    counts what the index would return.
+  - **P3s:** words in PostgreSQL's log after a failed statement (documented, R63); the
+    length limit before NFC; messages; repeated words; preview clusters; activity recency;
+    strict mypy; eight frontend accessibility, rule and layout issues; understated costs
+    (no HOT updates, GIN churn: R64).
+  - Every finding is fixed (or, for R63, documented with the production settings it needs)
+    and pinned; reverting each backend fix fails its test (12 of 12), and the frontend
+    review's 13 of 13.
+- **Live walkthrough** on the rebuilt containerised stack, headless Chromium: **114
+  checks**.
+  - **Anita (admin):** Ctrl+K and the shortcut hint; the organisation's search for the
+    markers (both users' records, owners named, organisation links, the note preview);
+    Rahul's workspace (five groups, every link inside it, Priya's exact secret simply no
+    match, nothing hinting at hidden results); every one of the five results opened, then
+    Arrow/Enter; Back, Forward and refresh (nothing kept, nothing in storage or the URL);
+    the slow-response race inside one document (Rahul's held answer released after the
+    switch never draws, and Priya's search starts empty and finds no OMEGA); Priya's
+    workspace; two tabs; a deactivated user's workspace; a malformed workspace (search
+    disabled).
+  - **Rahul (sales):** his own five records, own-workspace links, each `PRIYA-ZETA-*`
+    marker no match; XSS records and a hostile query rendered as text; the note privacy
+    marker in the preview and on the note's page; the API by hand (other workspaces 404,
+    invalid input 400, SQL-looking input harmless); sign-out then Priya signing in to an
+    empty search with nothing of Rahul's in the page.
+  - **Responsive:** 320, 375, 768 and 1280 px: the entry tappable, the dialog fitting,
+    no horizontal scroll even with hostile long strings. The 1280 px check found a
+    pre-existing defect (since Phases 2 and 4): a Leads or Activities table wide enough to
+    scroll made the whole page scroll sideways (its hidden "Actions" label escaped the
+    scroll container); fixed and pinned.
+  - **Logs and audit:** backend, PostgreSQL, frontend and worker logs since the walkthrough
+    began hold no searched text, note body or `search?q=`; the audit trail gained only
+    sign-ins, sign-outs and workspace visits, none holding a query or note text.
+  - **Browser:** no console or page errors; the only 4xx responses were the walkthrough's
+    own probes and the login page's viewer check.
 
 ## What exists after Phase 6
 

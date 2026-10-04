@@ -27,6 +27,7 @@ and update the old one's status line.
 | [0019](0019-lead-conversion.md) | Lead conversion creates an opportunity; "Converted" requires one |
 | [0020](0020-activity-integrity.md) | Activities: lead-bound, owned by the lead's owner while current, guarded by composite keys |
 | [0021](0021-materialized-timeline.md) | The timeline is an append-only table written in-transaction; visibility is decided when read |
+| [0022](0022-global-search.md) | Global search: authorised, grouped lexical search with a bounded two-pass window |
 
 Template:
 

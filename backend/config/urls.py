@@ -12,6 +12,7 @@ from arkray.dashboard.api import urls as dashboard_urls
 from arkray.identity.api import urls as identity_urls
 from arkray.leads.api import urls as leads_urls
 from arkray.pipeline.api import urls as pipeline_urls
+from arkray.search.api import urls as search_urls
 
 # Module routers are added here phase by phase.
 api_v1_patterns: list[URLPattern | URLResolver] = [
@@ -23,6 +24,7 @@ api_v1_patterns: list[URLPattern | URLResolver] = [
     path("workspaces/<str:workspace>/", include(pipeline_urls.workspace_urlpatterns)),
     path("workspaces/<str:workspace>/", include(activities_urls.workspace_urlpatterns)),
     path("workspaces/<str:workspace>/", include(dashboard_urls.workspace_urlpatterns)),
+    path("workspaces/<str:workspace>/", include(search_urls.workspace_urlpatterns)),
     path("config/", include(leads_urls.config_urlpatterns)),
     path("config/", include(pipeline_urls.config_urlpatterns)),
 ]

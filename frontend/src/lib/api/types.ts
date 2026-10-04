@@ -83,3 +83,10 @@ export type TimelinePage = Schemas["TimelinePage"];
 export type Dashboard = Schemas["Dashboard"];
 export type DashboardLead = Schemas["DashboardLead"];
 export type DashboardActivity = Schemas["DashboardActivity"];
+
+export type SearchResults = Schemas["SearchResults"];
+export type SearchLead = Schemas["SearchLead"];
+export type SearchOpportunity = Schemas["SearchOpportunity"];
+export type SearchTask = Schemas["SearchTask"];
+export type SearchMeeting = Schemas["SearchMeeting"];
+export type SearchNote = Schemas["SearchNote"];

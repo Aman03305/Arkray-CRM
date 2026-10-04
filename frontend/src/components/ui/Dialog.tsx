@@ -6,6 +6,8 @@ import { createPortal } from "react-dom";
 
 import { useModalFocus } from "./useModalFocus";
 
+const SIZES = { sm: "max-w-md", md: "max-w-lg", lg: "max-w-2xl" } as const;
+
 interface DialogProps {
   open: boolean;
   title: string;
@@ -15,7 +17,7 @@ interface DialogProps {
   /** While an action runs the dialog cannot be dismissed (no half-finished actions). */
   busy?: boolean;
   children: ReactNode;
-  size?: "sm" | "md";
+  size?: "sm" | "md" | "lg";
   /** "alertdialog" for confirmations of consequential actions. */
   role?: "dialog" | "alertdialog";
 }
@@ -83,10 +85,10 @@ export function Dialog({
         aria-describedby={description ? descriptionId : undefined}
         aria-busy={busy || undefined}
         tabIndex={-1}
-        className={`relative w-full rounded-lg bg-white shadow-xl focus:outline-none ${size === "sm" ? "max-w-md" : "max-w-lg"}`}
+        className={`relative w-full rounded-lg bg-white shadow-xl focus:outline-none ${SIZES[size]}`}
       >
         <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
-          <div>
+          <div className="min-w-0 [overflow-wrap:anywhere]">
             <h2 id={titleId} className="text-base font-semibold text-slate-900">
               {title}
             </h2>

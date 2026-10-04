@@ -1,6 +1,8 @@
 "use client";
 
-import { Menu, Search } from "lucide-react";
+import { Menu } from "lucide-react";
+
+import { SearchLauncher } from "@/features/search/SearchLauncher";
 
 export function Topbar({ onMenuClick }: { onMenuClick: () => void }) {
   return (
@@ -14,17 +16,8 @@ export function Topbar({ onMenuClick }: { onMenuClick: () => void }) {
         <Menu aria-hidden="true" className="size-5" />
       </button>
 
-      {/* Global search is wired to /workspaces/{workspace}/search in Phase 7. */}
-      <div className="relative max-w-md flex-1">
-        <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
-        <input
-          type="search"
-          disabled
-          placeholder="Search leads, opportunities, activities"
-          aria-label="Search"
-          className="h-9 w-full rounded-md border border-slate-200 bg-slate-50 pl-9 pr-3 text-sm placeholder:text-slate-400 disabled:cursor-not-allowed"
-        />
-      </div>
+      {/* Global search of this page's workspace (/workspaces/{workspace}/search). */}
+      <SearchLauncher />
     </header>
   );
 }

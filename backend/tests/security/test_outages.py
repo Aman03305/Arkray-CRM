@@ -223,3 +223,44 @@ class TestDashboardKeepsWorking:
 
         monkeypatch.setattr(tasks.process_outbox_event, "apply_async", broker_down)
         self.journey(user_a, admin)
+
+
+class TestSearchKeepsWorking:
+    """Global search reads PostgreSQL only (no search cache, no worker, no AI or embedding
+    provider): with Redis or the broker down it still answers, with the same results, and
+    an administrator's delegated searching is then audited on every request (the audit window
+    lives in the cache; fail towards more auditing)."""
+
+    def journey(self, owner, admin):
+        from arkray.audit.models import AuditEvent
+        from tests.factories import LeadFactory, NoteFactory, OpportunityFactory, TaskFactory
+
+        lead = LeadFactory(owner=owner, first_name="Outage", last_name="Lead")
+        OpportunityFactory(lead=lead, title="Outage deal")
+        TaskFactory(lead=lead, title="Outage task")
+        NoteFactory(lead=lead, description="Outage note")
+        mine = signed_in(owner).get("/api/v1/workspaces/me/search?q=outage")
+        assert mine.status_code == 200
+        groups = ("leads", "opportunities", "tasks", "notes")
+        assert all(len(mine.json()[g]["results"]) == 1 for g in groups)
+        admin_client = signed_in(admin)
+        for _ in range(2):
+            for workspace in (str(owner.pk), "all"):
+                response = admin_client.get(f"/api/v1/workspaces/{workspace}/search?q=outage")
+                assert response.status_code == 200
+                assert len(response.json()["leads"]["results"]) == 1
+        assert not OutboxEvent.objects.exists()
+        return AuditEvent.objects.filter(action="workspace.accessed").count()
+
+    @pytest.mark.usefixtures("redis_down")
+    def test_during_a_redis_outage(self, user_a, admin):
+        started = time.monotonic()
+        assert self.journey(user_a, admin) == 4  # every delegated search audited
+        assert time.monotonic() - started < 10  # fail-fast cache: no multi-second stalls
+
+    def test_during_a_broker_outage(self, user_a, admin, monkeypatch):
+        def broker_down(*args, **kwargs):
+            raise OperationalError("broker unavailable")
+
+        monkeypatch.setattr(tasks.process_outbox_event, "apply_async", broker_down)
+        self.journey(user_a, admin)

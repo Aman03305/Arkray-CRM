@@ -67,14 +67,14 @@ flowchart LR
 
 | Module | Responsibility | Phase |
 |---|---|---|
-| `core` | Shared kernel: base models, `AccessScope`, transactional outbox, in-transaction domain events, keyset pagination, idempotency records, text normalisation, business days, request context, structured logging, error envelope, health probes, fail-fast cache connections | 0 (2: events, keyset, idempotency, text; 4: business days) |
+| `core` | Shared kernel: base models, `AccessScope`, transactional outbox, in-transaction domain events, keyset pagination, idempotency records, text normalisation and search-input rules, search ranking (the bounded two-pass window), business days, request context, structured logging, error envelope, health probes, fail-fast cache connections | 0 (2: events, keyset, idempotency, text; 4: business days; 7: ranking) |
 | `audit` | Append-only security/compliance audit trail | 0 |
 | `identity` | Users, roles → capabilities, authentication, invitations, admin user management, **workspace resolution** | 0 (model, policy, workspaces) / 1 |
 | `leads` | Leads (the central prospect record; no Company/Product entities), configurable statuses and sources, ownership and reassignment, archive, bounded search, duplicate assistance ([leads.md](leads.md)) | 2 |
 | `pipeline` | Pipelines, configurable stages, opportunities (owned by their lead's owner), the one stage-transition operation, won/lost/reopen, append-only stage history, lead conversion, **the** pipeline value / weighted pipeline definitions, the Kanban board ([pipeline.md](pipeline.md)) | 3 |
 | `activities` | Tasks, meetings, notes (one extensible activity model, every activity about a lead, current work owned by the lead's owner), their lifecycle (complete, cancel, reopen), the lead and opportunity **timeline**, the last-contact rule for completed meetings, **the** activity figures for the dashboard ([activities.md](activities.md)) | 4 |
 | `dashboard` | The dashboard and Admin Home: a read-only composition of the owning modules' authoritative figures (lead figures, pipeline value and weighted pipeline, task and meeting figures) and short lists, in one snapshot, for any workspace; no tables, cache or formulas of its own ([dashboard.md](dashboard.md)) | 5 |
-| `search` | Scoped global search across leads, opportunities and activities | 7 |
+| `search` | Global search: one bounded, read-only search of a workspace's leads, opportunities, tasks, meetings and notes, composed from each module's own `selectors.search` (the scope applied before any word is matched), grouped by kind; no tables of its own ([search.md](search.md)) | 7 |
 | `ai` | Ask Arkray: structured tools, semantic retrieval, indexing, LLM adapter | 8 |
 
 The suggested separate `users` module was folded into `identity`: user management and
@@ -108,7 +108,10 @@ flowchart TB
   opportunities → activities) and to the lead and opportunity events to write the
   timeline. A completed meeting advances the lead's last contact through
   `leads.services.record_contact`. Phase 5's `dashboard` only reads: it calls the
-  `leads`, `pipeline` and `activities` selectors and defines no figure itself.
+  `leads`, `pipeline` and `activities` selectors and defines no figure itself. Phase 7's
+  `search` sits beside it (independent siblings in the import-linter contract): each
+  module decides what of its own records is searched (`selectors.search`, ranked by
+  `core.ranking`), and `search` only composes them.
 - `audit` stores actors and targets as plain identifiers, so it sits *below* `identity` and
   its history is independent of the records it describes.
 
@@ -201,6 +204,7 @@ sequenceDiagram
 | [0019](adr/0019-lead-conversion.md) | Lead conversion creates an opportunity; "Converted" requires one |
 | [0020](adr/0020-activity-integrity.md) | Activities: lead-bound, owned by the lead's owner while current, guarded by composite keys |
 | [0021](adr/0021-materialized-timeline.md) | The timeline is an append-only table written in-transaction; visibility is decided when read |
+| [0022](adr/0022-global-search.md) | Global search: authorised, grouped lexical search with a bounded two-pass window |
 
 ## Delivery phases
 
@@ -216,7 +220,7 @@ security checks, and a PASS/FAIL report. No phase starts while critical tests fa
 | 4 | (**done**) Activities: tasks, meetings and notes in one table (CHECK-enforced per type), complete/cancel/reopen as explicit operations, current work following lead reassignment (deferred composite key), immutable authorship, last contact from completed meetings (MAX), the append-only lead/opportunity timeline (backfilled from the audit trail and stage history), the Activities page, the activity figures for Phase 5, cross-user and timeline-leakage suite, real-concurrency and lock-order tests, 403k-activity benchmark ([activities.md](activities.md)) |
 | 5 | (**done**) Dashboard and Admin Home: total leads, new leads today (Asia/Kolkata business day), pipeline value and weighted pipeline (Phase 3's definitions), meetings and tasks (Phase 4's), today's newest leads with their assigned user, the next meetings and open tasks; own, selected-user and organisation-wide workspaces; one endpoint, six bounded queries in one snapshot, no cache; workspace-isolated frontend; aggregate-leakage suite; 1M-lead / 2M-activity benchmark ([dashboard.md](dashboard.md)) |
 | 6 | (**done**) Admin user workspace end to end: a user's name opens their Dashboard; Pipeline, Leads and Activities (lists, details, create and edit) in their workspace through the same views and API; a banner naming the subject, their status and the signed-in actor; workspace-aware navigation and "not found" links; fail-closed URL parsing and canonical workspace URLs; deactivated and invited users read-only for new work; cache isolation, slow-response, Back/Forward and failure suites with marked records; selected-user authorization matrix, object substitution, actor-vs-subject and audit-window tests. A per-user statistics table on the Users page was deliberately not built (per-user CRM figures would cost a query per row; the Dashboard is one click away) ([admin-user-workspace.md](admin-user-workspace.md)) |
-| 7 | Global search (PostgreSQL full-text + trigram, scoped) |
+| 7 | (**done**) Global search: one endpoint per workspace (`/workspaces/{ws}/search`), leads, opportunities, tasks, meetings and notes matched by trigram-indexed substrings inside the scope (authorization before matching), grouped results ranked by match tier then recency, at most 5 per kind, a bounded two-pass window (recent pass + gated older pass), read-only, nothing logged or stored; shell search dialog (Ctrl/⌘K, accessible combobox, workspace-keyed cache, results that stay in the workspace); cross-user marker suite; 1M-lead / 2M-activity benchmark ([search.md](search.md)) |
 | 8 | Ask Arkray: tools, pgvector retrieval, indexing pipeline, grounding, adversarial tests |
 | 9 | Security and audit hardening: CSP, audit viewer, rate-limit tuning, threat-model review |
 | 10 | Performance, reliability, observability: metrics, tracing, load tests, alerting |

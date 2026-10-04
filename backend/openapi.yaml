@@ -1970,6 +1970,40 @@ paths:
           description: ''
         '404':
           description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/search:
+    get:
+      operationId: search
+      description: Leads, opportunities, tasks, meetings and notes in this workspace
+        that match `q`.
+      parameters:
+      - in: query
+        name: q
+        schema:
+          type: string
+          minLength: 2
+          maxLength: 100
+        description: 2-100 characters. Every word with 3 letters or digits in a row
+          must match (the first 5 different such words are searched; other words only
+          rank); case-insensitive; wildcards are literal.
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResults'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
 components:
   schemas:
     Activity:
@@ -4001,6 +4035,316 @@ components:
       description: |-
         * `admin` - Admin
         * `sales_user` - User
+    SearchLead:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        display_name:
+          type: string
+          readOnly: true
+        organization_name:
+          type: string
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/StatusRef'
+          readOnly: true
+        owner:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+          description: The assigned user.
+      required:
+      - display_name
+      - id
+      - organization_name
+      - owner
+      - status
+    SearchLeadGroup:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchLead'
+        has_more:
+          type: boolean
+          description: More leads matched than are shown.
+      required:
+      - has_more
+      - results
+    SearchMeeting:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        title:
+          type: string
+          readOnly: true
+        status:
+          readOnly: true
+          nullable: true
+          oneOf:
+          - $ref: '#/components/schemas/ActivityStatusEnum'
+          - $ref: '#/components/schemas/NullEnum'
+        starts_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        ends_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        location:
+          type: string
+          readOnly: true
+        is_overdue:
+          type: boolean
+          readOnly: true
+          description: An open task past its due time, or a scheduled meeting past
+            its end.
+        lead:
+          allOf:
+          - $ref: '#/components/schemas/ActivityLeadRef'
+          readOnly: true
+        owner:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+      required:
+      - ends_at
+      - id
+      - is_overdue
+      - lead
+      - location
+      - owner
+      - starts_at
+      - status
+      - title
+    SearchMeetingGroup:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchMeeting'
+        has_more:
+          type: boolean
+          description: More meetings matched than are shown.
+      required:
+      - has_more
+      - results
+    SearchNote:
+      type: object
+      description: |-
+        A note found by search: a bounded preview of its text, never the whole note, and no
+        author (the workspace's owner didn't necessarily write it; the note's page says who did).
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        preview:
+          type: string
+          readOnly: true
+          description: At most 240 characters of the note, starting shortly before
+            the first search word.
+        preview_truncated:
+          type: boolean
+          readOnly: true
+          description: More text follows.
+        preview_starts_mid_text:
+          type: boolean
+          readOnly: true
+          description: The preview doesn't start at the beginning of the note.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        lead:
+          allOf:
+          - $ref: '#/components/schemas/ActivityLeadRef'
+          readOnly: true
+      required:
+      - created_at
+      - id
+      - lead
+      - preview
+      - preview_starts_mid_text
+      - preview_truncated
+    SearchNoteGroup:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchNote'
+        has_more:
+          type: boolean
+          description: More notes matched than are shown.
+      required:
+      - has_more
+      - results
+    SearchOpportunity:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        title:
+          type: string
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/StageCategoryEnum'
+          readOnly: true
+        stage:
+          allOf:
+          - $ref: '#/components/schemas/SearchStage'
+          readOnly: true
+        lead:
+          allOf:
+          - $ref: '#/components/schemas/LeadRef'
+          readOnly: true
+        owner:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+      required:
+      - id
+      - lead
+      - owner
+      - stage
+      - status
+      - title
+    SearchOpportunityGroup:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchOpportunity'
+        has_more:
+          type: boolean
+          description: More opportunities matched than are shown.
+      required:
+      - has_more
+      - results
+    SearchResults:
+      type: object
+      description: |-
+        At most 5 results of each kind, best match first (docs/search.md#ranking). Archived
+        records are left out. No counts.
+      properties:
+        query:
+          type: string
+          description: The query as searched (cleaned).
+        terms:
+          type: array
+          items:
+            type: string
+          description: The words searched; each one matched.
+        leads:
+          $ref: '#/components/schemas/SearchLeadGroup'
+        opportunities:
+          $ref: '#/components/schemas/SearchOpportunityGroup'
+        tasks:
+          $ref: '#/components/schemas/SearchTaskGroup'
+        meetings:
+          $ref: '#/components/schemas/SearchMeetingGroup'
+        notes:
+          $ref: '#/components/schemas/SearchNoteGroup'
+      required:
+      - leads
+      - meetings
+      - notes
+      - opportunities
+      - query
+      - tasks
+      - terms
+    SearchStage:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          readOnly: true
+      required:
+      - id
+      - name
+    SearchTask:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        title:
+          type: string
+          readOnly: true
+        status:
+          readOnly: true
+          nullable: true
+          oneOf:
+          - $ref: '#/components/schemas/ActivityStatusEnum'
+          - $ref: '#/components/schemas/NullEnum'
+        priority:
+          readOnly: true
+          nullable: true
+          oneOf:
+          - $ref: '#/components/schemas/PriorityEnum'
+          - $ref: '#/components/schemas/NullEnum'
+        due_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        is_overdue:
+          type: boolean
+          readOnly: true
+          description: An open task past its due time, or a scheduled meeting past
+            its end.
+        lead:
+          allOf:
+          - $ref: '#/components/schemas/ActivityLeadRef'
+          readOnly: true
+        owner:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+      required:
+      - due_at
+      - id
+      - is_overdue
+      - lead
+      - owner
+      - priority
+      - status
+      - title
+    SearchTaskGroup:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchTask'
+        has_more:
+          type: boolean
+          description: More tasks matched than are shown.
+      required:
+      - has_more
+      - results
     SourceRef:
       type: object
       properties:

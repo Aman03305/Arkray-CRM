@@ -2,7 +2,13 @@ import unicodedata
 
 import pytest
 
-from arkray.core.text import TextRejected, clean_line, clean_multiline
+from arkray.core.text import (
+    TextRejected,
+    clean_line,
+    clean_multiline,
+    clean_search_query,
+    search_needles,
+)
 
 ZWJ, ZWNJ = chr(0x200D), chr(0x200C)
 
@@ -91,3 +97,44 @@ class TestCleanMultiline:
     def test_other_invisible_characters_are_refused(self, char):
         with pytest.raises(TextRejected):
             clean_multiline(f"text{char}more")
+
+
+class TestSearchInput:
+    """One set of search-input rules for the Leads list and global search (Phase 7)."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("  Rahul   Sharma ", "Rahul Sharma"),
+            ("Jose" + chr(0x301), "Jos" + chr(0xE9)),  # NFD typed, NFC searched
+            ("a b Rahul", "a b Rahul"),  # short words are kept in the text, skipped as terms
+            ("", ""),
+        ],
+    )
+    def test_queries_are_cleaned_like_stored_text(self, raw, expected):
+        assert clean_search_query(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["a", "a b c", "x " * 20])
+    def test_a_query_of_only_one_letter_words_is_refused(self, raw):
+        with pytest.raises(ValueError, match="at least 2 characters"):
+            clean_search_query(raw)
+
+    @pytest.mark.parametrize("char", REFUSED)
+    def test_invisible_and_control_characters_are_refused(self, char):
+        with pytest.raises(TextRejected):
+            clean_search_query(f"Rahul{char}Sharma")
+
+    def test_short_words_are_skipped_before_the_five_word_cap(self):
+        """Phase 7 fix: "a b c d e Rahul" used to search the first five words, all of them too
+        short, so nothing at all (the Leads list then showed every lead)."""
+        assert search_needles("a b c d e Rahul") == ["Rahul"]
+        assert search_needles("one two three four five six") == [
+            "one",
+            "two",
+            "three",
+            "four",
+            "five",
+        ]
+
+    def test_needles_keep_joiners_and_scripts(self):
+        assert search_needles("क्" + ZWNJ + "ष राहुल") == ["क्" + ZWNJ + "ष", "राहुल"]

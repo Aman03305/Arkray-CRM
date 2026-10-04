@@ -24,7 +24,11 @@ TABLE_WIDE = [
     "activities.0006_review_performance",
     "activities.0007_current_work_indexes",
 ]
-CONCURRENT = ["leads.0005_owner_index_covers_archive"]  # Phase 5
+CONCURRENT = [
+    "leads.0005_owner_index_covers_archive",  # Phase 5
+    "pipeline.0005_search_indexes",  # Phase 7
+    "activities.0008_search_indexes",  # Phase 7
+]
 
 LIFT = "SET statement_timeout = 0; SET lock_timeout = 0;"
 RESTORE = "RESET statement_timeout; RESET lock_timeout;"

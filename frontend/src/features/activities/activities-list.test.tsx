@@ -46,6 +46,8 @@ describe("the Activities page", () => {
     });
     renderWithProviders(<ActivitiesView />, { viewer: salesViewer });
     const table = await screen.findByRole("table", { name: "Activities" });
+    // Positioned, so the hidden "Actions" label can't widen the page (Phase 7 walkthrough).
+    expect(table.parentElement).toHaveClass("relative", "overflow-x-auto");
     expect(within(table).getAllByText("Task").length).toBeGreaterThan(0);
     expect(within(table).getByText("Meeting")).toBeInTheDocument();
     expect(within(table).getByText("Note")).toBeInTheDocument();

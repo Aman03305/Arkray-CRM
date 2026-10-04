@@ -18,14 +18,17 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from arkray.core.api import AwareDateTimeField, StrictInputSerializer
-from arkray.core.text import TextRejected, clean_line
+from arkray.core.text import (
+    SEARCH_MAX_LENGTH,
+    SEARCH_MIN_LENGTH,
+    clean_search_query,
+)
 from arkray.identity.models import User
 
 from .. import models as m
 from ..phones import PHONE_MAX_LENGTH
-from ..selectors import DEFAULT_ORDERING, ORDERINGS, SEARCH_TERM_MIN_LENGTH
+from ..selectors import DEFAULT_ORDERING, ORDERINGS
 
-SEARCH_MIN_LENGTH, SEARCH_MAX_LENGTH = 2, 100
 EARLIEST_DATE, LATEST_DATE = date(2000, 1, 1), date(2999, 12, 31)
 
 
@@ -246,14 +249,9 @@ class LeadListQuerySerializer(StrictInputSerializer):
 
     def validate_q(self, value: str) -> str:
         try:
-            value = clean_line(value)
-        except TextRejected as exc:
+            return clean_search_query(value)
+        except ValueError as exc:  # TextRejected included
             raise serializers.ValidationError(str(exc)) from None
-        if value and all(len(term) < SEARCH_TERM_MIN_LENGTH for term in value.split()):
-            raise serializers.ValidationError(
-                f"Use at least {SEARCH_TERM_MIN_LENGTH} characters in a search word."
-            )
-        return value
 
     def _bounded(self, value: date) -> date:
         if not EARLIEST_DATE <= value <= LATEST_DATE:

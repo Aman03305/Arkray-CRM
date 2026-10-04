@@ -10,13 +10,10 @@ from django.db.models import F, FilteredRelation, Q, QuerySet
 
 from arkray.core.access import AccessScope
 from arkray.core.errors import NotFoundError
+from arkray.core.text import search_terms
 
 from .models import Role, TokenPurpose, TokenStatus, User, UserStatus
 from .policy import Capability, roles_with
-
-SEARCH_MIN_LENGTH = 2
-SEARCH_MAX_LENGTH = 100
-SEARCH_MAX_TERMS = 5
 
 
 def _with_pending_invitation(queryset: QuerySet[User]) -> QuerySet[User]:
@@ -32,11 +29,6 @@ def _with_pending_invitation(queryset: QuerySet[User]) -> QuerySet[User]:
         invitation_expires_at=F("pending_invitation__expires_at"),
         invitation_sent_at=F("pending_invitation__sent_at"),
     )
-
-
-def search_terms(q: str) -> list[str]:
-    """`q` split into at most SEARCH_MAX_TERMS terms; every term must match."""
-    return q.split()[:SEARCH_MAX_TERMS]
 
 
 def admin_user_list(

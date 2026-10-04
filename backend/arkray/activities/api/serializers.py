@@ -15,6 +15,7 @@ Which of the type-specific fields a request may carry depends on its type (valid
 
 from __future__ import annotations
 
+import unicodedata
 from datetime import date
 from typing import Any
 
@@ -73,10 +74,32 @@ def opportunity_ref(opportunity: Opportunity | None, scope: AccessScope) -> dict
     }
 
 
-def preview(text: str | None) -> tuple[str, bool]:
-    """A bounded preview: at most PREVIEW_LENGTH characters, and whether text was cut."""
+_JOINERS = frozenset({chr(0x200C), chr(0x200D)})
+
+
+def _continues(char: str) -> bool:
+    """Does `char` belong to the character before it (a combining mark, a joiner)?"""
+    return char in _JOINERS or unicodedata.category(char).startswith("M")
+
+
+def preview(text: str | None, *, starts_mid_text: bool = False) -> tuple[str, bool]:
+    """A bounded preview: at most PREVIEW_LENGTH characters, and whether text was cut. A cut
+    never splits a character from its combining marks (a Devanagari vowel sign shown on its
+    own, Phase 7 review): the end steps back to a whole character, and a preview that
+    starts mid-text drops marks left over from the character before it."""
     text = text or ""
-    return text[:PREVIEW_LENGTH], len(text) > PREVIEW_LENGTH
+    truncated = len(text) > PREVIEW_LENGTH
+    if starts_mid_text:
+        while text and _continues(text[0]):
+            text = text[1:]
+    if len(text) <= PREVIEW_LENGTH and not truncated:
+        return text, False
+    end = min(len(text), PREVIEW_LENGTH)
+    while 0 < end < len(text) and _continues(text[end]):
+        end -= 1
+    while end > 0 and text[end - 1] in _JOINERS:
+        end -= 1
+    return text[:end], truncated
 
 
 # --- activities --------------------------------------------------------------------------------

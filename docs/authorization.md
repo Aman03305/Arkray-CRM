@@ -369,6 +369,26 @@ introduced, this rule is relaxed together with the new scope kind, not before.
   `workspace.view_any`) is exactly that user's figures, audited once per window like any
   delegated access ([dashboard.md](dashboard.md#workspaces)).
 
+### Global search (Phase 7)
+
+`GET /api/v1/workspaces/{workspace}/search?q=` follows the same rule as every read
+([search.md](search.md#workspaces-and-authorization)):
+
+- **Authorization before matching.** The workspace resolves to an `AccessScope` before the
+  query is even validated (an unopenable workspace is 404 for any query). Each module's
+  `selectors.search` applies `scope.apply()` to its records and only then matches words, in
+  both passes of the window, so a record outside the scope is never matched, counted,
+  ranked or read; results, `has_more`, sizes and ordering are identical whether or not other
+  users' records match.
+- **The selected workspace decides**: an administrator in Rahul's workspace finds only
+  Rahul's records. Opening the workspace is audited as before; searches aren't, and the
+  query never reaches the audit trail or logs.
+- **Related records** follow the rules above: an opportunity's or activity's lead is shown
+  only if visible in the same workspace, and nothing is matched by a related record's text
+  (a kept closed deal must not be findable by its moved lead's name).
+- **Results grant nothing**: opening one re-authorises. A per-user scoped throttle
+  (120/min) bounds runaway clients.
+
 ## Ask Arkray alignment
 
 Ask Arkray gets the same `AccessScope` as the page it is asked from, and its tools call the
@@ -404,4 +424,6 @@ See [rag-architecture.md](rag-architecture.md#security-invariant).
 | Dashboard aggregate isolation: A, B and the admin with distinctive amounts; every figure exact in each workspace; A's whole response byte-identical before and after B's and the admin's records exist; lists only the workspace's records; selected-user dashboards equal the user's own; organisation = the sum; figures follow a reassigned lead; other workspaces 404 like missing ones | `tests/security/test_dashboard_cross_user.py`, `arkray/dashboard/tests/test_api.py` |
 | Selected-user workspace (Phase 6): every workspace route × {anonymous, another sales user, the user, admin} and admin × a missing user (identical bodies); malformed segments; marked records across 21 reads per workspace; object substitution on every record route and method; actor vs subject in every write and the audit trail; payloads can't move writes out of the URL's workspace; deactivation race; one `workspace.accessed` row per user per window across four modules; no impersonation route or session change; query counts | `tests/security/test_admin_workspace.py` |
 | Selected-user workspace UI: fail-closed URL parsing, canonical URLs, banner and sidebar context, links never leaving the workspace, cache isolation under switches, slow responses, failures and Back/Forward | `frontend/src/features/workspace/admin-user-workspace.test.tsx`, `frontend/src/lib/workspace.test.ts` |
-| Cross-user suites for later modules | Phases 7–8 ([testing.md](testing.md#critical-cross-user-security-suite)) |
+| Global search (Phase 7): marked records of every kind searched from Rahul's, Priya's, the organisation's and each selected workspace (exact results, no trace of the other user in the bytes); another workspace's exact secret indistinguishable from a missing one (body, size, flags); other users' records never move a workspace's results; scope widening; restricted leads neither shown nor matched; results re-authorise; deactivated workspaces; 404 before 400 | `tests/security/test_search_cross_user.py`, `arkray/search/tests/test_api.py` |
+| Global search UI: links stay in the workspace, workspace-keyed cache, a late Rahul answer never under Priya, switch clears the dialog | `frontend/src/features/search/search.test.tsx` |
+| Cross-user suites for later modules | Phase 8 ([testing.md](testing.md#critical-cross-user-security-suite)) |

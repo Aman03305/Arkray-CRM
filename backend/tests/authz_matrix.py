@@ -94,4 +94,7 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     # --- dashboard (Phase 5). Read-only: the scope decides which records every figure and
     # list may include (aggregates are computed from scope.apply() first). -----------------
     "api/v1/workspaces/<str:workspace>/dashboard": _rule("workspace", "GET"),
+    # --- global search (Phase 7). Read-only: every kind of record is searched inside the
+    # scope (scope.apply() before any word is matched); the query is never stored. ---------
+    "api/v1/workspaces/<str:workspace>/search": _rule("workspace", "GET"),
 }

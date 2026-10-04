@@ -51,7 +51,7 @@ frontend's request and response types are generated from it.
 /api/v1/workspaces/{workspace}/opportunities/{id}/timeline  (Phase 4)
 /api/v1/workspaces/{workspace}/activities[/{id}]      ?type=task|meeting|note
 /api/v1/workspaces/{workspace}/activities/{id}/complete | cancel
-/api/v1/workspaces/{workspace}/search?q=
+/api/v1/workspaces/{workspace}/search?q=            (Phase 7)
 /api/v1/workspaces/{workspace}/ask
 ```
 
@@ -120,9 +120,13 @@ Every error, from DRF, from domain services or from Django's 404/500 handlers, h
   accepted.
 - `ordering` accepts only listed values (leads: `-created_at`, `created_at`, `name`,
   `-updated_at`, `-last_contacted_at`, `last_contacted_at`), each backed by an index.
-- `q` search: 2–100 characters, up to 5 terms that must all match, scoped like everything
-  else. Module lists search their own fields (leads: names, organisation, email, phone
-  digits via a trigram index); global search across modules is Phase 7.
+- `q` search: 2–100 characters, cleaned like stored text (invisible and control characters
+  are a 400), up to 5 terms that must all match, scoped like everything else. Module lists
+  search their own fields (leads: names, organisation, email, phone digits via a trigram
+  index; words of 2+ characters). Global search (`/workspaces/{workspace}/search`, Phase 7)
+  searches every kind of record with the same rules, except that only words of 3+
+  characters narrow it, returns at most 5 results per kind and no counts
+  ([search.md](search.md)).
 
 ## Data formats
 
@@ -155,7 +159,7 @@ the current stage is a no-op).
 ## Rate limits
 
 Defaults: anonymous 60/min, authenticated 600/min. Scoped: login and password reset
-(strict, PostgreSQL-backed for login), `search` 60/min, `ask` 20/min and 300/day, import
+(strict, PostgreSQL-backed for login), `search` 120/min ([search.md](search.md#reliability)), `ask` 20/min and 300/day, import
 10/hour.
 
 ## Checklist for a new endpoint

@@ -44,6 +44,15 @@ describe("a salesperson's Leads", () => {
     expect(api.callsTo("GET", "/api/v1/workspaces/me/leads")[0]!.query.get("page_size")).toBe("25");
   });
 
+  it("keeps the table's hidden labels inside its scroll container (no page-wide scroll)", async () => {
+    // Layout isn't computed in jsdom: the container must be positioned, or the absolutely
+    // positioned "Actions" label escapes it and widens the page (Phase 7 walkthrough, 1024-1440 px).
+    mockApi({ ...OPTIONS, "GET /api/v1/workspaces/me/leads": page([makeLeadListItem()]) });
+    renderWithProviders(<LeadsView />, { viewer: salesViewer });
+    const table = await screen.findByRole("table", { name: "Leads" });
+    expect(table.parentElement).toHaveClass("relative", "overflow-x-auto");
+  });
+
   it("offers a card list on phones with the same links", async () => {
     mockApi({ ...OPTIONS, "GET /api/v1/workspaces/me/leads": page([makeLeadListItem()]) });
     renderWithProviders(<LeadsView />, { viewer: salesViewer });

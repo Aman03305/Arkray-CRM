@@ -96,7 +96,10 @@ export function ActivityTable({ activities, loading, workspace, showOwner, canWr
 
   return (
     <>
-      <div className="hidden overflow-x-auto rounded-lg border border-slate-200 bg-white md:block">
+      {/* Positioned, so its screen-reader-only labels (absolutely positioned) scroll and clip
+          with the table: otherwise "Actions" sat beyond the scroll container and made the
+          whole page scroll sideways at desktop widths (found in the Phase 7 walkthrough). */}
+      <div className="relative hidden overflow-x-auto rounded-lg border border-slate-200 bg-white md:block">
         <table className="min-w-full divide-y divide-slate-200 text-sm">
           <caption className="sr-only">Activities</caption>
           <thead className="bg-slate-50">

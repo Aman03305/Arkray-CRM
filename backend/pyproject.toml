@@ -113,7 +113,9 @@ root_packages = ["arkray"]
 name = "Modular monolith layering"
 type = "layers"
 layers = [
-    "arkray.dashboard",
+    # Independent siblings (`|`): read-only compositions over the CRM modules, which never
+    # import each other (Phase 5 dashboard, Phase 7 global search).
+    "arkray.dashboard | arkray.search",
     "arkray.activities",
     "arkray.pipeline",
     "arkray.leads",

@@ -795,6 +795,23 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/workspaces/{workspace}/search": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** @description Leads, opportunities, tasks, meetings and notes in this workspace that match `q`. */
+        readonly get: operations["search"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1574,6 +1591,114 @@ export interface components {
          * @enum {string}
          */
         readonly RoleEnum: "admin" | "sales_user";
+        readonly SearchLead: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly display_name: string;
+            readonly organization_name: string;
+            readonly status: components["schemas"]["StatusRef"];
+            /** @description The assigned user. */
+            readonly owner: components["schemas"]["UserRef"];
+        };
+        readonly SearchLeadGroup: {
+            readonly results: readonly components["schemas"]["SearchLead"][];
+            /** @description More leads matched than are shown. */
+            readonly has_more: boolean;
+        };
+        readonly SearchMeeting: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly title: string;
+            readonly status: (components["schemas"]["ActivityStatusEnum"] | components["schemas"]["NullEnum"]) | null;
+            /** Format: date-time */
+            readonly starts_at: string | null;
+            /** Format: date-time */
+            readonly ends_at: string | null;
+            readonly location: string;
+            /** @description An open task past its due time, or a scheduled meeting past its end. */
+            readonly is_overdue: boolean;
+            readonly lead: components["schemas"]["ActivityLeadRef"];
+            readonly owner: components["schemas"]["UserRef"];
+        };
+        readonly SearchMeetingGroup: {
+            readonly results: readonly components["schemas"]["SearchMeeting"][];
+            /** @description More meetings matched than are shown. */
+            readonly has_more: boolean;
+        };
+        /**
+         * @description A note found by search: a bounded preview of its text, never the whole note, and no
+         *     author (the workspace's owner didn't necessarily write it; the note's page says who did).
+         */
+        readonly SearchNote: {
+            /** Format: uuid */
+            readonly id: string;
+            /** @description At most 240 characters of the note, starting shortly before the first search word. */
+            readonly preview: string;
+            /** @description More text follows. */
+            readonly preview_truncated: boolean;
+            /** @description The preview doesn't start at the beginning of the note. */
+            readonly preview_starts_mid_text: boolean;
+            /** Format: date-time */
+            readonly created_at: string;
+            readonly lead: components["schemas"]["ActivityLeadRef"];
+        };
+        readonly SearchNoteGroup: {
+            readonly results: readonly components["schemas"]["SearchNote"][];
+            /** @description More notes matched than are shown. */
+            readonly has_more: boolean;
+        };
+        readonly SearchOpportunity: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly title: string;
+            readonly status: components["schemas"]["StageCategoryEnum"];
+            readonly stage: components["schemas"]["SearchStage"];
+            readonly lead: components["schemas"]["LeadRef"];
+            readonly owner: components["schemas"]["UserRef"];
+        };
+        readonly SearchOpportunityGroup: {
+            readonly results: readonly components["schemas"]["SearchOpportunity"][];
+            /** @description More opportunities matched than are shown. */
+            readonly has_more: boolean;
+        };
+        /**
+         * @description At most 5 results of each kind, best match first (docs/search.md#ranking). Archived
+         *     records are left out. No counts.
+         */
+        readonly SearchResults: {
+            /** @description The query as searched (cleaned). */
+            readonly query: string;
+            /** @description The words searched; each one matched. */
+            readonly terms: readonly string[];
+            readonly leads: components["schemas"]["SearchLeadGroup"];
+            readonly opportunities: components["schemas"]["SearchOpportunityGroup"];
+            readonly tasks: components["schemas"]["SearchTaskGroup"];
+            readonly meetings: components["schemas"]["SearchMeetingGroup"];
+            readonly notes: components["schemas"]["SearchNoteGroup"];
+        };
+        readonly SearchStage: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly name: string;
+        };
+        readonly SearchTask: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly title: string;
+            readonly status: (components["schemas"]["ActivityStatusEnum"] | components["schemas"]["NullEnum"]) | null;
+            readonly priority: (components["schemas"]["PriorityEnum"] | components["schemas"]["NullEnum"]) | null;
+            /** Format: date-time */
+            readonly due_at: string | null;
+            /** @description An open task past its due time, or a scheduled meeting past its end. */
+            readonly is_overdue: boolean;
+            readonly lead: components["schemas"]["ActivityLeadRef"];
+            readonly owner: components["schemas"]["UserRef"];
+        };
+        readonly SearchTaskGroup: {
+            readonly results: readonly components["schemas"]["SearchTask"][];
+            /** @description More tasks matched than are shown. */
+            readonly has_more: boolean;
+        };
         readonly SourceRef: {
             readonly key: string;
             readonly name: string;
@@ -3378,6 +3503,37 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["PipelineSummary"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly search: {
+        readonly parameters: {
+            readonly query: {
+                /** @description 2-100 characters. Every word with 3 letters or digits in a row must match (the first 5 different such words are searched; other words only rank); case-insensitive; wildcards are literal. */
+                readonly q: string;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SearchResults"];
                 };
             };
             /** @description Not found, or outside this workspace. */

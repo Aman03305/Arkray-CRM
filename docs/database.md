@@ -309,7 +309,7 @@ lookups use the composite indexes, and users/statuses/sources are never deleted.
 | `leads_name_idx (display_name, id)` | organisation-wide (and per-owner) sort by name | 0.14 ms, deep cursor 1.2 ms |
 | `leads_updated_idx (updated_at DESC, id DESC)` | organisation-wide "recently updated" | 0.18 ms |
 | `leads_contacted_idx (last_contacted_sort DESC, id DESC)` | organisation-wide last-contact sorts (both directions), any depth | 0.1–0.2 ms, also 250,000 rows deep (**150–166 ms seq scan + sort without it**; 35–145 ms deep pages while the key was NULL-able) |
-| `leads_search_trgm GIN (search_text gin_trgm_ops)` | `q` search (`search_text LIKE '%TERM%'` per term) | rare term 0.07 ms, exact email 12 ms, phone digits 0.7 ms |
+| `leads_search_trgm GIN (search_text gin_trgm_ops)` | `q` search (`search_text LIKE '%TERM%'` per term); global search's older pass for leads (Phase 7) | rare term 0.07 ms, exact email 12 ms, phone digits 0.7 ms; global search 2-17 ms at 1,000,000 leads |
 | `leads_email_lower_idx (lower(email)) WHERE email <> ''` | duplicate check by email | combined with the next one: 0.35 ms |
 | `leads_phone_keys_gin GIN (phone_keys)` | duplicate check by phone (`phone_keys && ARRAY[...]`) | (BitmapOr with the email index) |
 
@@ -395,7 +395,8 @@ Default FK indexes are disabled (`db_index=False`): nothing queries those column
 | `pipeline_opp_closed_idx (stage_id, closed_sort DESC, id DESC) WHERE status<>'open' AND archived_at IS NULL` | organisation-wide Won/Lost columns and stage lists | 0.1 ms | 10 MB |
 | `pipeline_opp_lead_idx (lead_id, created_at DESC, id DESC)` | a lead's opportunities (lead page); the reassignment subscriber's lock query; the conversion guard; the ownership FK's lookup when a lead's owner changes | 0.01-0.05 ms | 21 MB |
 | `pipeline_opp_owner_created_idx (owner_id, created_at DESC, id DESC)` | one owner's default list (newest/oldest), archived view, per-stage aggregates (bitmap), other per-owner sorts (bitmap + sort) | 0.1-9 ms | 30 MB |
-| `pipeline_opp_created_idx (created_at DESC, id DESC)` | organisation-wide default list and archived view | 0.14-0.2 ms | 12 MB |
+| `pipeline_opp_created_idx (created_at DESC, id DESC)` | organisation-wide default list and archived view; global search's recent pass organisation-wide (Phase 7) | 0.14-0.2 ms | 12 MB |
+| `pipeline_opp_search_trgm GIN (upper(title) gin_trgm_ops) WHERE archived_at IS NULL` (Phase 7, `pipeline.0005`) | global search's older pass: title substrings ([search.md](search.md#database-and-indexes)); trigrams only, so no list or board query can choose it | 4-8 ms per search at 300,000 (100-150 ms of sequential scan without it) | 17 MB |
 
 The board's partial indexes cover one status each, so the board's per-stage query and a
 stage-filtered list state the stage's category as the status (always equal, database-
@@ -497,6 +498,17 @@ table. Times are the heaviest owner's or the organisation's, at 403k / 2M:
 | `activities_created_idx (created_sort, id)` | organisation-wide newest/oldest (no owner, lead or opportunity filter), archived view; ascending (rows arrive newest last), read backwards for newest first | 0.26–1.5 ms |
 | `activities_lead_idx (lead_id, schedule_sort, id)` | a lead's activities and open work; the reassignment lock query; the ownership key's lookups when a lead's owner changes | 0.02–0.48 ms |
 | `activities_opportunity_idx (opportunity_id, created_at DESC, id DESC) WHERE opportunity_id IS NOT NULL` | an opportunity's activities | 0.07–0.13 ms |
+| `activities_task_search_trgm GIN (owner_id, upper(title) gin_trgm_ops) WHERE type='task' AND archived_at IS NULL` (Phase 7, `activities.0008`; `btree_gin` for the owner) | global search's older pass for tasks, with the owner in one user's workspace (no activity list or dashboard query chooses it: 86 + 7 compared at 2M) | 47 MB at 900,000 tasks |
+| `activities_meeting_search_trgm GIN (owner_id, upper(title \|\| ' ' \|\| location) gin_trgm_ops) WHERE type='meeting' AND archived_at IS NULL` (Phase 7) | the same for meetings (title and location) | 36 MB at 600,000 meetings |
+| `activities_note_search_trgm GIN (owner_id, upper(description) gin_trgm_ops) WHERE type='note' AND archived_at IS NULL` (Phase 7) | the same for note bodies | 119 MB at 500,000 notes |
+
+Global search (Phase 7) reads the type's schedule indexes `activities_owner_type_when_idx` /
+`activities_type_when_idx` for its recent pass and the three trigram indexes for its older
+pass: 4-30 ms per kind at 2M activities, where without them an organisation-wide search
+read every activity (0.3-2 s) ([search.md](search.md#performance); `bench_search.py
+--check-plans`, `tests/performance/test_search_query_plans.py`). The trigram indexes make
+`description` and `location` edits non-HOT for every activity type and grow under churn
+(R64).
 
 Known slower shape (administrators only; risk R44): the organisation-wide summary (25 ms at
 403k, 31 ms at 2M; one aggregate per page load).
@@ -622,5 +634,12 @@ queries per page regardless of how many users or records exist.
   wait, blocking nobody) and restore both at the end, in either direction (pinned by the same
   test). At 1,000,000 leads, with an 8 s reader open, `leads.0005` took 8 s either way and no
   lead read waited more than 8 ms.
-- Extensions (`vector`, `pg_trgm`) are created by the migration of the module that needs
-  them. Both are "trusted" extensions installable by the database owner role.
+- Phase 7's search indexes (`pipeline.0005`, `activities.0008`) are built `CONCURRENTLY` the
+  same way: at 300,000 opportunities 4.1-4.5 s, at 2,000,000 activities 46-73 s for the
+  three (four runs); a probe writing to both tables every 100 ms throughout saw p50
+  2.3-2.6 ms and waited only on CPU or WAL flushes, never a lock (a few commits waited
+  0.1-1.5 s for the WAL flush while the note index was written out). A concurrent build
+  waits for older transactions (a long dump delays it). A failed concurrent build leaves an
+  INVALID index, still maintained on writes: drop it and rerun.
+- Extensions (`vector`, `pg_trgm`, `btree_gin`) are created by the migration of the module
+  that needs them. All are "trusted" extensions installable by the database owner role.

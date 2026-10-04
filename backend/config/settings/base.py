@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     "arkray.pipeline",
     "arkray.activities",
     "arkray.dashboard",
+    "arkray.search",
 ]
 
 MIDDLEWARE = [
@@ -237,6 +238,9 @@ REST_FRAMEWORK = {
         "user": env("API_THROTTLE_USER", default="600/min"),
         # Public authentication endpoints (on top of the durable login throttle).
         "auth": env("API_THROTTLE_AUTH", default="20/min"),
+        # Global search: the most expensive read per request, sent as people type (a
+        # 250 ms debounce): about two searches a second sustained per user (docs/search.md).
+        "search": env("API_THROTTLE_SEARCH", default="120/min"),
     },
     "NUM_PROXIES": TRUSTED_PROXY_COUNT,
     "COERCE_DECIMAL_TO_STRING": True,  # money is serialised as strings, never floats

@@ -21,9 +21,10 @@ from django.db.models import Count, Prefetch, QuerySet
 from arkray.core.access import AccessScope
 from arkray.core.errors import InvalidInputError, NotFoundError
 from arkray.core.keyset import KeysetOrdering, KeysetPage, KeysetPaginator, SortKey
+from arkray.core.ranking import Matches, SearchQuery, top_matches
 
 from . import metrics
-from .models import Opportunity, Pipeline, Stage, StageCategory, StageHistory
+from .models import SEARCH_TEXT, Opportunity, Pipeline, Stage, StageCategory, StageHistory
 
 INVALID_PIPELINE = "Choose a pipeline from the list."
 BOARD_CARDS_DEFAULT, BOARD_CARDS_MAX = 20, 50
@@ -207,6 +208,46 @@ def opportunity_list(scope: AccessScope, filters: OpportunityFilters) -> QuerySe
         category = Stage.objects.filter(pk=filters.stage_id).values_list("category", flat=True)
         filters = replace(filters, status=category.first())
     return _cards(_filtered(scope, filters))
+
+
+# What a global search result shows of an opportunity: title, status, stage, the lead (only
+# if visible in the scope; the serializer decides) and the owner. No amounts.
+_SEARCH_RESULT_FIELDS = (
+    "id",
+    "title",
+    "status",
+    "created_at",
+    "stage__id",
+    "stage__name",
+    "lead__id",
+    "lead__first_name",
+    "lead__last_name",
+    "lead__organization_name",
+    "lead__display_name",
+    "lead__owner_id",
+    *(f"owner__{f}" for f in _PERSON),
+)
+
+
+def search(scope: AccessScope, query: SearchQuery, *, limit: int) -> Matches[Opportunity]:
+    """Global search's opportunities: every search word occurs in the title (models.SEARCH_TEXT,
+    case-insensitive substring), over the opportunities `scope` may list, archived ones left
+    out; open, won and lost alike (closed deals are history people look for). Ranked by
+    core.ranking against the title, newest first among equals."""
+    scoped = scope.apply(Opportunity.objects.filter(archived_at__isnull=True)).annotate(
+        search_text=SEARCH_TEXT
+    )
+    return top_matches(
+        scoped,
+        text="search_text",
+        query=query,
+        label="title",
+        newest=("-created_at", "-id"),
+        limit=limit,
+        shape=lambda found: found.select_related("lead", "owner", "stage").only(
+            *_SEARCH_RESULT_FIELDS
+        ),
+    )
 
 
 def _with_relations(queryset: QuerySet[Opportunity]) -> QuerySet[Opportunity]:

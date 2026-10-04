@@ -15,6 +15,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from arkray.core.api import StrictInputSerializer
+from arkray.core.text import SEARCH_MAX_LENGTH, SEARCH_MIN_LENGTH
 
 from ..emails import validate_ascii_email
 from ..models import NAME_MAX_LENGTH, Role, User, UserStatus
@@ -194,7 +195,9 @@ class InvitationAcceptSerializer(StrictInputSerializer):
 
 
 class UserListQuerySerializer(StrictInputSerializer):
-    q = serializers.CharField(max_length=100, min_length=2, required=False, allow_blank=True)
+    q = serializers.CharField(
+        max_length=SEARCH_MAX_LENGTH, min_length=SEARCH_MIN_LENGTH, required=False, allow_blank=True
+    )
     status = serializers.ChoiceField(choices=UserStatus.choices, required=False)
     role = serializers.ChoiceField(choices=Role.choices, required=False)
     cursor = serializers.CharField(max_length=500, required=False)
@@ -202,7 +205,9 @@ class UserListQuerySerializer(StrictInputSerializer):
 
 
 class AssigneeQuerySerializer(StrictInputSerializer):
-    q = serializers.CharField(max_length=100, min_length=2, required=False, allow_blank=True)
+    q = serializers.CharField(
+        max_length=SEARCH_MAX_LENGTH, min_length=SEARCH_MIN_LENGTH, required=False, allow_blank=True
+    )
     cursor = serializers.CharField(max_length=1000, required=False)
     page_size = serializers.IntegerField(min_value=1, max_value=100, required=False, default=100)
 
