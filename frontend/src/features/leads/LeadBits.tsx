@@ -22,7 +22,7 @@ const RATINGS: Record<Rating, { label: string; icon: typeof Flame; className: st
 };
 
 export function RatingLabel({ rating }: { rating: Rating | null | undefined }) {
-  if (!rating) return <span className="text-slate-400">—</span>;
+  if (!rating) return <span className="text-slate-500">—</span>;
   const known = RATINGS[rating] as (typeof RATINGS)[Rating] | undefined;
   if (!known) return <>{rating}</>; // a rating added on the server later: show it as text
   const { label, icon: Icon, className } = known;
@@ -55,10 +55,20 @@ export function telHref(value: string): string {
   return `tel:${number}${match ? `;ext=${match[1]}` : ""}`;
 }
 
+/**
+ * A mailto: link that opens a draft to this one address and nothing else. Characters that
+ * delimit mailto headers are encoded (RFC 6068), so a stored address such as
+ * "x?bcc=spy@evil.example&body=..." can't add recipients or text (Phase 9 review; the API
+ * also refuses such addresses now, this covers ones stored before).
+ */
+export function mailtoHref(email: string): string {
+  return `mailto:${email.replace(/[%?&=#,;\s"<>\\]/g, (char) => encodeURIComponent(char))}`;
+}
+
 export function primaryPhone(lead: { phone: string; mobile: string }): string {
   return lead.phone || lead.mobile;
 }
 
 export function Muted({ children }: { children?: string | null }) {
-  return children ? <>{children}</> : <span className="text-slate-400">—</span>;
+  return children ? <>{children}</> : <span className="text-slate-500">—</span>;
 }

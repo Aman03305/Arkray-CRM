@@ -81,7 +81,7 @@ stateDiagram-v2
     deactivated --> invited: admin reactivates (never activated; new invitation sent)
 ```
 
-Every rule is a CHECK constraint on `identity_user` ([database.md](database.md#identity_user)).
+Every rule is a CHECK constraint on `identity_user` ([database.md](database.md#identity_user-built-lifecycle-added-in-phase-1)).
 Users are **never deleted**: foreign keys are `PROTECT`, and history and ownership
 references stay intact.
 
@@ -255,11 +255,18 @@ navigates that user's Dashboard, Pipeline, Leads and Activities, with a persiste
   `actor` (and `created_by`) and the viewed user as `subject_user_id` in the audit log.
   Records the admin creates in Rahul's workspace are owned by Rahul.
 - **Audit.** Viewing another user's workspace (or `all`) writes a `workspace.accessed`
-  audit event at least once per actor/workspace per 15 minutes, and every write is audited
-  individually. The window marker is set only **after the audit row commits**, so a request
-  that rolls back never suppresses auditing. If the cache that implements the window is
-  unavailable, **every** access is audited: the system fails toward more auditing, never less. Every access-log line
-  for the request also carries `subject_user_id`.
+  audit event once per actor/workspace per 15-minute window, and every write is audited
+  individually. Since Phase 9 the window is a PostgreSQL row
+  (`identity_workspace_access_window`) inserted with `ON CONFLICT DO NOTHING` **in the audit
+  row's own transaction**: a request that rolls back leaves neither, requests opening a window
+  at once write exactly one row (R58), and nothing outside the database can suppress auditing
+  (the window used to be a cache key: a write to Redis hid an admin's access indefinitely, and
+  a Redis outage audited every request). Every access-log line for the request also carries
+  `subject_user_id`.
+- **Known limit: reading through `all`.** An administrator reading one user's records
+  organisation-wide (`/workspaces/all/leads?owner=…`, a record opened there) is audited as
+  access to `all`, not to that user: the trail shows when an administrator had the whole
+  organisation open, not which owner's records they looked at (Phase 9 review; R73).
 - **Opening a workspace.** `GET /api/v1/workspaces/{workspace}` resolves the segment (and
   audits delegated access) and returns `{kind, subject: {id, full_name, status}}`, which the
   frontend uses for the "Viewing CRM for" banner. Anything the caller may not open is 404.
@@ -284,7 +291,9 @@ navigates that user's Dashboard, Pipeline, Leads and Activities, with a persiste
   Being able to *view* a workspace (`workspace.view_any`, `crm.view_all`) never implies
   being able to change it, so a future read-only role (an auditor, a manager who only
   watches) needs no endpoint changes. Refusal is 403: the caller can already see the
-  workspace, so nothing is revealed.
+  workspace, so nothing is revealed. Since Phase 9 the views also call it for every unsafe
+  method **before reading the body** (a viewer's malformed write was a 400, not a 403), and
+  the matrix runs every route as such a view-only role (below).
 - Services receive the `AccessScope` and apply it themselves (lookups, locks), so a
   direct service call (a future import, an Ask Arkray tool) is exactly as constrained
   as an HTTP request (tested).
@@ -389,11 +398,24 @@ introduced, this rule is relaxed together with the new scope kind, not before.
 - **Results grant nothing**: opening one re-authorises. A per-user scoped throttle
   (120/min) bounds runaway clients.
 
-## Ask Arkray alignment
+## Ask Arkray (Phase 8)
+
+`/api/v1/workspaces/{workspace}/ask…` requires the `ai.query` capability (sales users and
+admins hold it), then resolves the workspace exactly like every CRM route (404 for a
+workspace the caller may not open). Questions and conversations are then looked up among
+**the caller's own conversations in that workspace**: another person's question id, or the
+caller's own id from another workspace, is a 404 identical to a missing one. A conversation
+is bound to (actor, workspace kind, subject) by a CHECK constraint and never crosses
+workspaces.
 
 Ask Arkray gets the same `AccessScope` as the page it is asked from, and its tools call the
-same scoped selectors. The model never receives a scope parameter it could alter, and
-retrieved vector hits are re-verified through `scope.apply()` before their text is used.
+same scoped selectors. The model never receives a scope parameter it could alter (no tool
+has one); the organisation-only tool is absent from other scopes' tool lists; retrieved
+vector hits are re-read through the owning module's scoped `knowledge_documents` and
+hash-checked before their text is used. The ai worker re-resolves the workspace for the
+actor when it answers (a deactivated user or a demoted admin gets `not_permitted`). An Ask
+Arkray tool is a scoped reader, not a background job: it never uses the unscoped
+`*_for_indexing` selectors, which only the indexer calls.
 See [rag-architecture.md](rag-architecture.md#security-invariant).
 
 ## How this is verified
@@ -403,10 +425,11 @@ See [rag-architecture.md](rag-architecture.md#security-invariant).
 | DRF default permission is `DenyAll` | `tests/architecture/test_authorization_baseline.py` |
 | Every `/api/` route is in the authorization matrix (and no stale entries) | same file + `tests/authz_matrix.py` |
 | Role → capability matrix is exact; unknown roles and inactive users get nothing | `identity/tests/test_policy.py` |
-| Workspace resolution: own, other, `all`, malformed, enumeration-safe, audited, cache-outage behaviour, deactivated users | `identity/tests/test_workspaces.py` |
+| Workspace resolution: own, other, `all`, malformed, enumeration-safe, audited (one row per window; the cache plays no part), deactivated users | `identity/tests/test_workspaces.py`; concurrency: `tests/security/test_phase9_review_regressions.py` |
 | `AccessScope` invariants and filtering against a real table | `core/tests/test_access.py`, `tests/integration/test_scope_filtering.py` |
 | Each view declares exactly the permission and methods its matrix rule states, and derives from the CSRF-enforcing `ApiView` | `tests/architecture/test_authorization_baseline.py` |
-| Every route × {anonymous, sales user, admin}; 403 without enumeration; CSRF on every unsafe route; self-escalation and mass assignment | `tests/security/test_authz_matrix.py` |
+| Every route × {anonymous, sales user, admin, a view-only role (in another user's workspace and in `all`: reads pass, writes 403, or 404 for a missing record), a deactivated user's open session (401 everywhere)}; 403 without enumeration; CSRF on every unsafe route; self-escalation and mass assignment | `tests/security/test_authz_matrix.py` |
+| List page links (Phase 9): a cursor continues only its own list, for the same user, workspace and filters, before it expires; sealed (unreadable); every list including the board's columns and the user table | `tests/security/test_cursor_binding.py`, `tests/architecture/test_cursor_binding.py` |
 | Sign-in: identical failures (incl. timing), fixation, CSRF, throttling (trusted browsers, per IP, expiry, bounded cost) | `identity/tests/test_login.py`, `test_throttling.py` |
 | Sessions: idle/absolute limits, revocation on deactivation/reactivation/email/password change, logout | `identity/tests/test_sessions.py` |
 | Invitation and reset lifecycles: single use, expiry, supersession, purpose separation, mail outage, digest-only storage | `identity/tests/test_invitations.py`, `test_password_reset.py` |
@@ -426,4 +449,6 @@ See [rag-architecture.md](rag-architecture.md#security-invariant).
 | Selected-user workspace UI: fail-closed URL parsing, canonical URLs, banner and sidebar context, links never leaving the workspace, cache isolation under switches, slow responses, failures and Back/Forward | `frontend/src/features/workspace/admin-user-workspace.test.tsx`, `frontend/src/lib/workspace.test.ts` |
 | Global search (Phase 7): marked records of every kind searched from Rahul's, Priya's, the organisation's and each selected workspace (exact results, no trace of the other user in the bytes); another workspace's exact secret indistinguishable from a missing one (body, size, flags); other users' records never move a workspace's results; scope widening; restricted leads neither shown nor matched; results re-authorise; deactivated workspaces; 404 before 400 | `tests/security/test_search_cross_user.py`, `arkray/search/tests/test_api.py` |
 | Global search UI: links stay in the workspace, workspace-keyed cache, a late Rahul answer never under Priya, switch clears the dialog | `frontend/src/features/search/search.test.tsx` |
+| Ask Arkray (Phase 8): the Rahul/Priya secret matrix from 5 viewpoints (Rahul, Priya, organisation, Admin in Rahul's, Admin in Priya's) × 4 questions without a model, and with an adversarial scripted model that sends every known record id to every tool: the other workspace's text never reaches the provider or the answer; injection notes change nothing; stale vectors after reassignment refused; history can't be supplied; tools refuse foreign refs exactly like missing ones; conversations and questions 404 across users and workspaces; the worker re-authorises | `tests/security/test_rag_cross_workspace.py`, `arkray/ai/tests/test_retrieval.py`, `test_tools.py`, `test_api.py`, `test_service.py` |
+| Ask Arkray UI: answers' links stay in the workspace; a late Rahul answer or poll never renders under Priya; the page and the sidebar entry only with the capability and the feature on | `frontend/src/features/ask/ask.test.tsx` |
 | Cross-user suites for later modules | Phase 8 ([testing.md](testing.md#critical-cross-user-security-suite)) |

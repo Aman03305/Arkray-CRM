@@ -28,6 +28,8 @@ CONCURRENT = [
     "leads.0005_owner_index_covers_archive",  # Phase 5
     "pipeline.0005_search_indexes",  # Phase 7
     "activities.0008_search_indexes",  # Phase 7
+    "core.0005_outbox_dead_index",  # Phase 10
+    "ai.0003_question_finished_index",  # Phase 10 review
 ]
 
 LIFT = "SET statement_timeout = 0; SET lock_timeout = 0;"
@@ -71,3 +73,20 @@ def test_concurrent_index_migrations_lift_and_restore_the_timeouts_both_ways(nam
         assert not isinstance(
             operation, migrations.AddIndex | migrations.RemoveIndex
         ) or isinstance(operation, AddIndexConcurrently | RemoveIndexConcurrently), operation
+
+
+def test_every_concurrent_index_migration_is_held_to_those_rules():
+    """Phase 10 review: core.0005 built an index concurrently without lifting the timeouts
+    and wasn't in the list above, so nothing checked it."""
+    from django.db.migrations.loader import MigrationLoader
+
+    found = {
+        f"{app}.{name}"
+        for (app, name), migration in MigrationLoader(None).disk_migrations.items()
+        if app in {"core", "identity", "audit", "leads", "pipeline", "activities", "ai"}
+        and any(
+            isinstance(operation, AddIndexConcurrently | RemoveIndexConcurrently)
+            for operation in migration.operations
+        )
+    }
+    assert found == set(CONCURRENT)

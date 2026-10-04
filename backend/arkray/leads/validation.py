@@ -55,6 +55,12 @@ def _text(max_length: int) -> Callable[[Any], str]:
     return clean
 
 
+# Characters the email standard allows before the "@" but that delimit a mailto link's
+# headers: "x?bcc=spy@evil.example&body=..." would open a draft copying a third party
+# (Phase 9 review). Real addresses don't use them.
+_MAILTO_DELIMITERS = frozenset('?&=%#"<>\\')
+
+
 def _email(value: Any) -> str:
     email = _text(m.EMAIL_MAX_LENGTH)(value)
     if email:
@@ -62,6 +68,8 @@ def _email(value: Any) -> str:
             _email_syntax(email)
         except ValidationError:
             raise ValueError("Enter a valid email address.") from None
+        if any(char in _MAILTO_DELIMITERS for char in email):
+            raise ValueError("Enter a valid email address.")
     return email
 
 

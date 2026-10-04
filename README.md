@@ -9,22 +9,21 @@ additionally manage **Users** and can open any user's CRM workspace
 (`/admin/users/{id}/dashboard`), with every such access authorised and audited server-side.
 **Ask Arkray** answers questions about CRM data strictly within the asker's permissions.
 
-> Status: **Phase 3 — Pipeline** complete (pipelines and configurable stages,
-> opportunities owned by their lead's owner, a Kanban board with drag and drop and a
-> keyboard Move menu, won/lost/reopen, append-only stage history, lead conversion, exact
-> pipeline value and weighted pipeline; see [docs/pipeline.md](docs/pipeline.md)), on top
-> of Phase 2 (Leads, [docs/leads.md](docs/leads.md)) and Phase 1 (identity, sessions,
-> throttling, invitations, password reset, admin Users area).
-> See [docs/architecture.md](docs/architecture.md#delivery-phases) for the phase plan.
+> Status: **all eleven phases built** (identity and users, leads, pipeline, activities,
+> dashboards, the admin user workspace, global search, Ask Arkray, security hardening,
+> performance and reliability, production readiness). The release candidate awaits
+> approval; see [docs/architecture.md](docs/architecture.md#delivery-phases) for the phase
+> plan and [docs/testing.md](docs/testing.md) for what each phase verified.
 
 ## Repository layout
 
 ```
 backend/          Django API (config/, arkray/<module>/, tests/)
 frontend/         Next.js app (src/app, src/components, src/features, src/lib)
-infrastructure/   deployment notes and (later) production manifests
+infrastructure/   the edge proxy, database roles, a production-shaped Compose stack
 docs/             architecture, database, authorization, RAG, security, ... + ADRs
-scripts/          init-env.sh (create .env), check.sh (all quality gates)
+scripts/          init-env.sh (create .env), check.sh (all quality gates),
+                  backup.sh, restore.sh
 docker-compose.yml
 ```
 
@@ -64,6 +63,7 @@ scripts/check.sh      # backend: ruff, mypy (strict), import contracts, pytest, 
 | System design, module boundaries, phases | [architecture.md](docs/architecture.md) |
 | Leads: model, ownership, statuses, search, concurrency | [leads.md](docs/leads.md) |
 | Pipeline: stages, opportunities, transitions, conversion, money, lock order | [pipeline.md](docs/pipeline.md) |
+| Activities: tasks, meetings, notes, the timeline | [activities.md](docs/activities.md) |
 | Schema, ERD, constraints, indexes | [database.md](docs/database.md) |
 | Authentication, authorization, admin workspace | [authorization.md](docs/authorization.md) |
 | Ask Arkray (RAG) | [rag-architecture.md](docs/rag-architecture.md) |
@@ -73,6 +73,12 @@ scripts/check.sh      # backend: ruff, mypy (strict), import contracts, pytest, 
 | API conventions | [api-conventions.md](docs/api-conventions.md) |
 | Test strategy | [testing.md](docs/testing.md) |
 | Architectural risks and their resolutions | [risk-register.md](docs/risk-register.md) |
-| Deployment | [deployment.md](docs/deployment.md) |
+| Global search | [search.md](docs/search.md) |
+| Dashboards, admin user workspace | [dashboard.md](docs/dashboard.md), [admin-user-workspace.md](docs/admin-user-workspace.md) |
+| Deployment: topology, proxy, configuration, database, backups | [deployment.md](docs/deployment.md) |
+| Go-live and release checklist | [production-checklist.md](docs/production-checklist.md) |
+| Runbooks: alerts, restores, secret rotation, erasure | [runbooks.md](docs/runbooks.md) |
+| Personal data, retention, access and erasure requests | [privacy.md](docs/privacy.md) |
+| Operations: the RAG index, the embedding model | [operations.md](docs/operations.md) |
 | Local development | [development.md](docs/development.md) |
 | Decision records | [docs/adr/](docs/adr/) |

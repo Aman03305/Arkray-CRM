@@ -114,6 +114,10 @@ class OutboxEvent(models.Model):
                 condition=Q(status=OutboxStatus.IN_FLIGHT),
                 name="outbox_in_flight_idx",
             ),
+            # The metrics endpoint counts dead events per queue on every scrape (Phase 10).
+            models.Index(
+                fields=["queue"], condition=Q(status=OutboxStatus.DEAD), name="outbox_dead_idx"
+            ),
             models.Index(
                 fields=["topic", "dedupe_key"],
                 condition=Q(status=OutboxStatus.PENDING, attempts=0) & ~Q(dedupe_key=""),

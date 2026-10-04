@@ -115,7 +115,7 @@ def test_the_boards_cards_come_from_the_board_indexes(dataset, kind, suffix):
     _, _, pipeline = dataset
     scope = scopes(dataset)[kind]
     _aggregates, _totals, cards = captured(
-        lambda: selectors.board(scope, pipeline, OpportunityFilters())
+        lambda: selectors.board(scope, pipeline, OpportunityFilters(), binding_for=None)
     )
     text = plan(cards, "enable_sort")
     assert {f"pipeline_opp_{suffix}open_idx", f"pipeline_opp_{suffix}closed_idx"} <= scans(text)
@@ -135,7 +135,7 @@ def test_a_stage_list_uses_the_board_indexes(dataset, kind, suffix, stage_key):
     _, _, pipeline = dataset
     scope = scopes(dataset)[kind]
     stage = pipeline.stages.get(key=stage_key)
-    paginator = KeysetPaginator(BOARD_ORDERING[stage.category], page_size=25)
+    paginator = KeysetPaginator(BOARD_ORDERING[stage.category], page_size=25, binding=None)
     first = paginator.paginate(
         selectors.opportunity_list(scope, OpportunityFilters(stage_id=stage.pk)), None
     )
@@ -158,7 +158,7 @@ def test_a_stage_list_uses_the_board_indexes(dataset, kind, suffix, stage_key):
 @pytest.mark.parametrize("archived", [False, True])
 def test_default_lists_use_the_created_indexes(dataset, kind, index, ordering, archived):
     scope = scopes(dataset)[kind]
-    paginator = KeysetPaginator(ORDERINGS[ordering], page_size=25)
+    paginator = KeysetPaginator(ORDERINGS[ordering], page_size=25, binding=None)
     queryset = selectors.opportunity_list(scope, OpportunityFilters(archived=archived))
     sql, params = paginator.window(queryset, None)[0].query.sql_with_params()
     with connection.cursor() as c:
@@ -171,7 +171,7 @@ def test_everything_about_one_lead_uses_the_lead_index(dataset):
     owner_id = Lead.objects.values_list("owner_id", flat=True).get(pk=lead_id)
     shapes = [
         *captured(
-            lambda: KeysetPaginator(ORDERINGS["-created_at"], page_size=25).paginate(
+            lambda: KeysetPaginator(ORDERINGS["-created_at"], page_size=25, binding=None).paginate(
                 selectors.opportunity_list(
                     AccessScope.own(owner_id), OpportunityFilters(lead_id=lead_id)
                 ),

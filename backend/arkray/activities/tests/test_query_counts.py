@@ -87,7 +87,9 @@ def test_list_in_a_users_workspace(admin_client, user_a, n, django_capture_on_co
     seed(n, [user_a])
     with django_capture_on_commit_callbacks(execute=True):
         warm_up(admin_client, activities_url(str(user_a.pk)))
-    assert count(admin_client, activities_url(str(user_a.pk)), {"page_size": 100})[0] == 4
+    assert (
+        count(admin_client, activities_url(str(user_a.pk)), {"page_size": 100})[0] == 5
+    )  # + the audit window check (PostgreSQL since Phase 9)
 
 
 @pytest.mark.parametrize("n", [10, 100])
@@ -99,7 +101,7 @@ def test_list_organisation_wide_with_many_owners(
         warm_up(admin_client, activities_url("all"))
     queries, body = count(admin_client, activities_url("all"), {"page_size": 100})
     assert len(body["results"]) == min(n, 100)
-    assert queries == 3
+    assert queries == 4  # + the audit window check (PostgreSQL since Phase 9)
 
 
 @pytest.mark.parametrize(
@@ -142,10 +144,10 @@ def test_organisation_wide_cursors_cost_nothing_extra(
         warm_up(admin_client, activities_url("all"))
     params = {"page_size": 10, "ordering": ordering}
     queries, first = count(admin_client, activities_url("all"), params)
-    assert queries == 3
+    assert queries == 4  # + the audit window check (PostgreSQL since Phase 9)
     with CaptureQueriesContext(connection) as captured:
         middle = admin_client.get(first["next"]).json()
-    assert (len(captured), bool(middle["previous"]), bool(middle["next"])) == (3, True, True)
+    assert (len(captured), bool(middle["previous"]), bool(middle["next"])) == (4, True, True)
 
 
 def test_detail(user_a_client, user_a):

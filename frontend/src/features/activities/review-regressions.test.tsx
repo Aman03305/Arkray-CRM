@@ -234,8 +234,8 @@ describe("focus stays on the page after in-page actions (P2-2)", () => {
       [`GET ${LIST}`]: { status: 200, body: page([]) },
       [`GET ${ME}/leads/${LEAD_ID}/timeline`]: (call: RecordedCall) =>
         call.query.get("cursor")
-          ? { status: 200, body: page([makeEntry({ id: 1 })]) }
-          : { status: 200, body: page([makeEntry({ id: 2, kind: "lead.archived", details: {} })], `http://testserver${ME}/leads/${LEAD_ID}/timeline?cursor=abc`) },
+          ? { status: 200, body: page([makeEntry({ id: "e1" })]) }
+          : { status: 200, body: page([makeEntry({ id: "e2", kind: "lead.archived", details: {} })], `http://testserver${ME}/leads/${LEAD_ID}/timeline?cursor=abc`) },
     });
     renderWithProviders(<LeadView leadId={LEAD_ID} />, { viewer: SALES });
     const user = userEvent.setup();

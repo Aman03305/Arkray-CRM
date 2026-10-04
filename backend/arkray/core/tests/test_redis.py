@@ -57,6 +57,53 @@ def test_connection_class_matches_the_url_scheme(url, expected):
     assert type(pool.make_connection()).__name__ == expected
 
 
+def expire(breaker):
+    breaker._open_until = time.monotonic() - 1
+
+
+def test_the_cooldown_doubles_while_the_outage_lasts_and_resets_on_success():
+    """Phase 10 drill: each probe of a stopped Redis stalled its request about 4 s (DNS),
+    once per process per cool-down; at a fixed 15 s that was a quarter of each process's
+    time for the whole outage. Now 15, 30, 60, 120, 120 s; the first success restores 15."""
+    cooldowns = []
+    for _ in range(5):
+        cache_breaker.trip()
+        cooldowns.append(cache_breaker._cooldown)
+        expire(cache_breaker)
+    assert cooldowns == [15.0, 30.0, 60.0, 120.0, 120.0]
+    cache_breaker.succeeded()
+    cache_breaker.trip()
+    assert cache_breaker._cooldown == 15.0
+
+
+def test_an_outage_of_any_length_keeps_the_maximum_cooldown():
+    """Phase 10 review, P2: the exponent kept growing at the cap; 2**1024 can't become a
+    float, so after ~34 hours of outage every trip (every cache call) raised OverflowError."""
+    for _ in range(2_000):
+        cache_breaker.trip()
+        expire(cache_breaker)
+    assert cache_breaker._cooldown == 120.0
+    cache_breaker.trip()
+    assert cache_breaker.is_open()
+
+
+def test_trips_while_open_do_not_escalate_the_cooldown():
+    for _ in range(10):
+        cache_breaker.trip()
+    assert cache_breaker._cooldown == 15.0
+
+
+def test_a_successful_connection_resets_the_back_off(monkeypatch):
+    cache_breaker.trip()
+    expire(cache_breaker)
+    cache_breaker.trip()
+    expire(cache_breaker)
+    monkeypatch.setattr(Connection, "connect", lambda self: None)
+    FailFastConnection(host="redis.invalid", port=6379).connect()
+    cache_breaker.trip()
+    assert cache_breaker._cooldown == 15.0
+
+
 def test_an_outage_logs_once_per_cooldown_not_per_operation(caplog):
     with caplog.at_level(logging.WARNING, logger="arkray.core.redis"):
         for _ in range(10):

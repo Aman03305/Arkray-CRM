@@ -77,7 +77,7 @@ export function LeadFiltersBar({ filters, options, showOwnerFilter, onChange, on
           <label htmlFor={ids.search} className="sr-only">
             Search leads
           </label>
-          <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
+          <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-500" />
           <input
             ref={searchInput}
             id={ids.search}

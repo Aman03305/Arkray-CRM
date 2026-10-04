@@ -114,7 +114,7 @@ Sources: Website, Referral, Campaign, Cold Call, Email, Event, Partner, Other.
 
 Every lead has exactly one owner. The same endpoints serve every workspace; the
 workspace in the URL decides whose leads exist
-([authorization.md](authorization.md#admin--user-workspace-built-resolution-banner-endpoint-module-views-from-phase-2)):
+([authorization.md](authorization.md#admin--user-workspace-built-resolution-and-banner-endpoint-in-phase-0-module-views-in-phases-25-completed-in-phase-6)):
 
 | Workspace | Who | Reads | New lead's owner | Writes need |
 |---|---|---|---|---|
@@ -334,7 +334,7 @@ Following a name-sorted cursor adds one indexed lookup (the boundary lead's name
 
 Timings from a 300,000-lead benchmark (60 owners, one with 20,000 leads; PostgreSQL 16,
 EXPLAIN ANALYZE of the exact SQL the API runs, after the review fixes); the index behind
-each is in [database.md](database.md#leads_lead):
+each is in [database.md](database.md#leads_lead-built-phase-2):
 
 | Query | Time |
 |---|---|

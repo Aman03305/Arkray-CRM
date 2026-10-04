@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { connection } from "next/server";
 import type { ReactNode } from "react";
 
 import { Providers } from "./providers";
@@ -11,7 +12,10 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
-export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
+export default async function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
+  // Render per request: the Content-Security-Policy nonce (src/proxy.ts) can only be put on
+  // Next.js's scripts at request time, never into prerendered HTML.
+  await connection();
   return (
     <html lang="en">
       <body>

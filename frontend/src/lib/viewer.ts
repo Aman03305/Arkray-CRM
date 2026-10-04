@@ -30,6 +30,8 @@ export interface Viewer {
   fullName: string;
   roleLabel: string;
   capabilities: readonly Capability[];
+  /** Deployment-wide features (configuration, not permissions): Ask Arkray turned on. */
+  features: { ask: boolean };
 }
 
 function isCapability(value: string): value is Capability {
@@ -45,7 +47,14 @@ export function toViewer(dto: ViewerDto): Viewer {
     fullName: dto.full_name,
     roleLabel: dto.role_label,
     capabilities: dto.capabilities.filter(isCapability), // unknown strings grant nothing
+    // A response without the field (an older backend) offers no optional features.
+    features: { ask: (dto.features as ViewerDto["features"] | undefined)?.ask === true },
   };
+}
+
+/** Ask Arkray is shown when the CRM has it turned on and the viewer may use it. */
+export function canAsk(viewer: Viewer | null | undefined): boolean {
+  return viewer?.features.ask === true && hasCapability(viewer, "ai.query");
 }
 
 export function hasCapability(viewer: Viewer | null | undefined, capability: Capability): boolean {

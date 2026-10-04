@@ -7,4 +7,4 @@ class CoreConfig(AppConfig):
     verbose_name = "Core"
 
     def ready(self) -> None:
-        from . import schema  # noqa: F401 — registers OpenAPI extensions
+        from . import checks, schema  # noqa: F401 — registers checks, OpenAPI extensions

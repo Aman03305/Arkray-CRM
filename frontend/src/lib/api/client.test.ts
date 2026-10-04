@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, apiFetch, readCookie } from "./client";
+import { ApiError, apiFetch, readCookie, readCsrfToken } from "./client";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -152,5 +152,21 @@ describe("CSRF handling", () => {
       ),
     );
     await expect(apiFetch("/api/v1/x")).rejects.toMatchObject({ code: "rate_limited", retryAfterSeconds: 90 });
+  });
+});
+
+describe("readCsrfToken (Phase 9 cookie prefixes)", () => {
+  it("prefers the HTTPS __Host- cookie over a plain one (a sibling subdomain could set the plain name)", () => {
+    expect(readCsrfToken("arkray_csrftoken=planted; __Host-arkray_csrftoken=real")).toBe("real");
+    expect(readCsrfToken("__Host-arkray_csrftoken=real; arkray_csrftoken=planted")).toBe("real");
+  });
+
+  it("falls back to the plain name on a plain-HTTP local stack", () => {
+    expect(readCsrfToken("other=1; arkray_csrftoken=local")).toBe("local");
+  });
+
+  it("is null when neither exists (the client then fetches one)", () => {
+    expect(readCsrfToken("other=1")).toBeNull();
+    expect(readCsrfToken("")).toBeNull();
   });
 });

@@ -19,6 +19,7 @@ from django.core import signing
 from django.utils import timezone
 
 from arkray.activities.models import Activity
+from arkray.core import keyset
 from tests.factories import (
     LeadFactory,
     MeetingFactory,
@@ -346,11 +347,11 @@ class TestListAndCursors:
             cursor = cursor_of(
                 client.get(f"{ME}/activities", {"page_size": 1, "ordering": ordering}).json()
             )
-            # Cursors are signed, not encrypted: anyone can read the payload.
-            payload = cursor.split(":")[0]
-            decoded = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+            # Sealed since Phase 9 (R48): unreadable without the server's key.
+            decoded = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
             assert b"Secret" not in decoded
-            assert signing.loads(cursor, salt="arkray.core.keyset")["o"] == ordering
+            assert ordering.encode() not in decoded
+            assert keyset._open(cursor)["o"] == ordering
 
     def test_a_cursor_is_refused_by_another_endpoint_or_ordering(self, user_a):
         lead = LeadFactory(owner=user_a)

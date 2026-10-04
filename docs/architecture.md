@@ -48,17 +48,23 @@ flowchart LR
     api --> cache[(Redis<br/>cache)]
     api -->|enqueue in txn| pg
     beat[Celery beat] -->|relay tick| broker[(Redis<br/>broker)]
-    broker --> worker[Celery workers<br/>queues: default, email, ai]
+    broker --> worker[Celery workers<br/>queues: outbox, default, email]
+    broker --> idx[Indexing workers<br/>queue: ai_index]
+    broker --> aiw[Ask Arkray workers<br/>queue: ai]
+    api -->|Ask Arkray question| broker
     worker --> pg
+    aiw --> pg
+    idx --> pg
     worker --> smtp[SMTP provider]
-    worker --> llm[Anthropic API<br/>Claude]
-    worker --> emb[Embeddings API]
-    api -->|Ask Arkray, sync| llm
+    aiw -->|optional| llm[Anthropic API<br/>Claude]
 ```
 
 - The browser talks to **one origin**. `/api/*` and `/health/*` go to Django, everything
   else to Next.js. Session cookies are therefore first-party and no CORS is configured.
 - Only Django and the Celery workers hold database credentials. Next.js holds no secrets.
+- Ask Arkray's embeddings are computed inside the deployment (a pinned open model in the
+  workers); the only external AI service is the optional language model, called only from the
+  `ai` workers, never from a web request ([ADR-0023](adr/0023-ask-arkray-implementation.md)).
 - Redis plays two separate roles: an optional **cache** (failure-tolerant) and the Celery
   **broker** (failure means background work waits in PostgreSQL). Production runs them as
   separate instances.
@@ -75,7 +81,8 @@ flowchart LR
 | `activities` | Tasks, meetings, notes (one extensible activity model, every activity about a lead, current work owned by the lead's owner), their lifecycle (complete, cancel, reopen), the lead and opportunity **timeline**, the last-contact rule for completed meetings, **the** activity figures for the dashboard ([activities.md](activities.md)) | 4 |
 | `dashboard` | The dashboard and Admin Home: a read-only composition of the owning modules' authoritative figures (lead figures, pipeline value and weighted pipeline, task and meeting figures) and short lists, in one snapshot, for any workspace; no tables, cache or formulas of its own ([dashboard.md](dashboard.md)) | 5 |
 | `search` | Global search: one bounded, read-only search of a workspace's leads, opportunities, tasks, meetings and notes, composed from each module's own `selectors.search` (the scope applied before any word is matched), grouped by kind; no tables of its own ([search.md](search.md)) | 7 |
-| `ai` | Ask Arkray: structured tools, semantic retrieval, indexing, LLM adapter | 8 |
+| `ai` | Ask Arkray: the deterministic router, scope-bound read-only tools over the modules' selectors, authorised semantic retrieval (pgvector, owner pre-filter, live re-verification), outbox-driven indexing of each module's knowledge documents, the bounded Claude tool loop on its own queue, answer assembly with numeric grounding, conversations ([rag-architecture.md](rag-architecture.md)) | 8 |
+| `privacy` | Personal-data operations an administrator runs on request: erasure of a lead (`manage.py erase_lead`) across every module and Ask Arkray's derived data, in one transaction ([privacy.md](privacy.md)); no tables, no API | 11 |
 
 The suggested separate `users` module was folded into `identity`: user management and
 authentication share one model and one policy, and splitting them would create two owners
@@ -85,7 +92,8 @@ of the `User` table.
 
 ```mermaid
 flowchart TB
-    ai --> dashboard & search
+    privacy --> ai
+    ai --> search
     dashboard --> activities
     search --> activities
     activities --> pipeline --> leads --> identity --> audit --> core
@@ -95,7 +103,15 @@ flowchart TB
   This is enforced by `import-linter` (`uv run lint-imports`); each phase adds its module to
   the contract in `backend/pyproject.toml`.
 - Cross-module calls go through the target module's **`selectors`** (reads) and
-  **`services`** (writes). Never write another module's tables directly.
+  **`services`** (writes). Never write another module's tables directly. One documented
+  exception: `privacy`'s erasure redacts the lead's, opportunities' and activities' text
+  and deletes Ask Arkray's derived rows itself, in one transaction, because no service may
+  edit archived records and the redaction must be atomic across modules. It still publishes
+  `LeadArchived` (the timeline entry, re-indexing) like an archive, and it holds the
+  erasure lock Ask Arkray stores answers under (the whole-software audit found both gaps).
+  Within the layers, nothing yet *enforces* "selectors and services only" (for example
+  `ai.tools` reads `Lead` for the organisation's breakdown): import-linter checks the layer
+  order, a narrower contract is future work.
 - Lower modules never import upper ones. When an upper module must react to a lower
   one's change, it subscribes to the lower module's **domain events**, which run inside
   the same transaction ([ADR-0017](adr/0017-in-transaction-domain-events.md)); slow or
@@ -111,7 +127,10 @@ flowchart TB
   `leads`, `pipeline` and `activities` selectors and defines no figure itself. Phase 7's
   `search` sits beside it (independent siblings in the import-linter contract): each
   module decides what of its own records is searched (`selectors.search`, ranked by
-  `core.ranking`), and `search` only composes them.
+  `core.ranking`), and `search` only composes them. Phase 8's `ai` sits on top: it reads
+  through every module's selectors (each module also decides what of its records may be
+  embedded: `selectors.knowledge_documents`), and reacts to their domain events only by
+  writing outbox work (`ai.subscribers`); nothing imports `ai`.
 - `audit` stores actors and targets as plain identifiers, so it sits *below* `identity` and
   its history is independent of the records it describes.
 
@@ -205,6 +224,7 @@ sequenceDiagram
 | [0020](adr/0020-activity-integrity.md) | Activities: lead-bound, owned by the lead's owner while current, guarded by composite keys |
 | [0021](adr/0021-materialized-timeline.md) | The timeline is an append-only table written in-transaction; visibility is decided when read |
 | [0022](adr/0022-global-search.md) | Global search: authorised, grouped lexical search with a bounded two-pass window |
+| [0023](adr/0023-ask-arkray-implementation.md) | Ask Arkray as built: local embeddings, answers on their own queue, a deterministic fast path |
 
 ## Delivery phases
 
@@ -221,7 +241,7 @@ security checks, and a PASS/FAIL report. No phase starts while critical tests fa
 | 5 | (**done**) Dashboard and Admin Home: total leads, new leads today (Asia/Kolkata business day), pipeline value and weighted pipeline (Phase 3's definitions), meetings and tasks (Phase 4's), today's newest leads with their assigned user, the next meetings and open tasks; own, selected-user and organisation-wide workspaces; one endpoint, six bounded queries in one snapshot, no cache; workspace-isolated frontend; aggregate-leakage suite; 1M-lead / 2M-activity benchmark ([dashboard.md](dashboard.md)) |
 | 6 | (**done**) Admin user workspace end to end: a user's name opens their Dashboard; Pipeline, Leads and Activities (lists, details, create and edit) in their workspace through the same views and API; a banner naming the subject, their status and the signed-in actor; workspace-aware navigation and "not found" links; fail-closed URL parsing and canonical workspace URLs; deactivated and invited users read-only for new work; cache isolation, slow-response, Back/Forward and failure suites with marked records; selected-user authorization matrix, object substitution, actor-vs-subject and audit-window tests. A per-user statistics table on the Users page was deliberately not built (per-user CRM figures would cost a query per row; the Dashboard is one click away) ([admin-user-workspace.md](admin-user-workspace.md)) |
 | 7 | (**done**) Global search: one endpoint per workspace (`/workspaces/{ws}/search`), leads, opportunities, tasks, meetings and notes matched by trigram-indexed substrings inside the scope (authorization before matching), grouped results ranked by match tier then recency, at most 5 per kind, a bounded two-pass window (recent pass + gated older pass), read-only, nothing logged or stored; shell search dialog (Ctrl/⌘K, accessible combobox, workspace-keyed cache, results that stay in the workspace); cross-user marker suite; 1M-lead / 2M-activity benchmark ([search.md](search.md)) |
-| 8 | Ask Arkray: tools, pgvector retrieval, indexing pipeline, grounding, adversarial tests |
+| 8 | (**done**) Ask Arkray: a deterministic router for structured questions; 11 scope-bound read-only tools over the modules' selectors; authorised semantic retrieval (pgvector, owner pre-filter, live re-verification, hash check; chunks store no text); local embeddings (bge-small-en-v1.5, pinned and verified); outbox-driven, idempotent, rebuildable indexing with reconciliation; questions answered on their own Celery queue with a bounded Claude tool loop, circuit breaker and retrieval fallback; numeric grounding and safe typed answers; actor-and-workspace-bound conversations; the Rahul/Priya secret suite, prompt-injection, stale-vector and outage tests; Ask Arkray page with workspace-isolated state ([rag-architecture.md](rag-architecture.md), [ADR-0023](adr/0023-ask-arkray-implementation.md)) |
 | 9 | Security and audit hardening: CSP, audit viewer, rate-limit tuning, threat-model review |
 | 10 | Performance, reliability, observability: metrics, tracing, load tests, alerting |
 | 11 | Production readiness: manifests, backups/DR drill, runbooks, E2E suite |

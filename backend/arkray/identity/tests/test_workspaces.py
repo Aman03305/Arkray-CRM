@@ -104,9 +104,14 @@ class TestAdmin:
             resolve_workspace(admin, str(user_a.pk))
         assert access_events().count() == 1
 
-    def test_cache_outage_fails_towards_more_auditing(
+    def test_the_cache_plays_no_part_in_auditing(
         self, admin, user_a, monkeypatch, django_capture_on_commit_callbacks
     ):
+        """Phase 9 review: the window was a cache key, so a write to Redis could hide an
+        admin's access indefinitely. It is a database row now: Redis down, or a planted
+        marker under the old key, changes nothing."""
+        cache.set(f"audit:workspace-access:{admin.pk}:{user_a.pk}", 1, timeout=None)
+
         def unavailable(*args, **kwargs):
             raise ConnectionError("redis down")
 
@@ -115,7 +120,7 @@ class TestAdmin:
         for _ in range(3):
             with django_capture_on_commit_callbacks(execute=True):
                 resolve_workspace(admin, str(user_a.pk))
-        assert access_events().count() == 3
+        assert access_events().count() == 1  # once per window, as always
 
     def test_organization_scope_is_audited(self, admin):
         scope = resolve_workspace(admin, WORKSPACE_ORGANIZATION)

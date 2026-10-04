@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   amountInputValue,
   formatInr,
-  formatInrCompact,
   formatPercent,
   groupIndian,
   parseAmountInput,
@@ -45,7 +44,6 @@ describe("formatting amounts exactly", () => {
     const toNumber = vi.spyOn(globalThis, "Number");
     const parse = vi.spyOn(globalThis, "parseFloat");
     formatInr("9007199254740993.01");
-    formatInrCompact("9007199254740993.01");
     parseAmountInput("90,07,19,92,54,74");
     expect(toNumber).not.toHaveBeenCalled();
     expect(parse).not.toHaveBeenCalled();
@@ -58,17 +56,6 @@ describe("formatting amounts exactly", () => {
     expect(groupIndian("12345")).toBe("12,345");
     expect(groupIndian("123456")).toBe("1,23,456");
     expect(groupIndian("0001234")).toBe("1,234");
-  });
-
-  it.each([
-    ["75000.00", "₹75,000"],
-    ["125000.00", "₹1.2 L"],
-    ["1250000.00", "₹12.5 L"],
-    ["10000000.00", "₹1 Cr"],
-    ["32999999.99", "₹3.2 Cr"], // truncated, never rounded up to 3.3
-    ["1234567890000.00", "₹1,23,456.7 Cr"],
-  ])("compact %s -> %s", (value, shown) => {
-    expect(formatInrCompact(value)).toBe(shown);
   });
 });
 

@@ -18,9 +18,14 @@ from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle, User
 
 from arkray.core.api import ApiView
 from arkray.core.errors import InvalidInputError, PermissionDeniedError
-from arkray.core.keyset import KeysetOrdering, KeysetPaginator, SortKey, page_links
+from arkray.core.keyset import (
+    CursorBinding,
+    KeysetOrdering,
+    KeysetPaginator,
+    SortKey,
+    page_links,
+)
 from arkray.core.middleware import client_ip
-from arkray.core.pagination import DefaultCursorPagination
 
 from .. import authentication, selectors, services, throttling
 from ..models import Role, User, UserStatus
@@ -74,7 +79,9 @@ class LoginView(ApiView):
         data = _validated(s.LoginSerializer, request.data)
         result = authentication.sign_in(request._request, data["email"], data["password"])
         response = Response(s.ViewerSerializer(result.user).data)
-        throttling.remember_device(response, result.identifier, result.device_id)
+        throttling.remember_device(
+            response, result.identifier, result.device_id, result.device_trust
+        )
         return response
 
 
@@ -166,6 +173,12 @@ class InvitationAcceptView(ApiView):
 
 
 # --- user administration (users.manage) -----------------------------------------------------
+ADMIN_USER_ORDERING = KeysetOrdering(
+    "-created_at", (SortKey("created_at", descending=True), SortKey("id", descending=True))
+)
+ADMIN_USER_PAGE_SIZE = 25
+
+
 class AdminUserListView(ApiView):
     permission_classes = [requires(Capability.USERS_MANAGE)]
     query_param_methods = frozenset({"GET"})
@@ -182,9 +195,19 @@ class AdminUserListView(ApiView):
             status=UserStatus(params["status"]) if "status" in params else None,
             role=Role(params["role"]) if "role" in params else None,
         )
-        paginator = DefaultCursorPagination()
-        page = paginator.paginate_queryset(users, request, view=self)
-        return paginator.get_paginated_response(s.AdminUserSerializer(page, many=True).data)
+        # Signed, bound and expiring page links like every other list (Phase 9 review: DRF's
+        # cursor was readable, unbound and never expired).
+        page = KeysetPaginator(
+            ADMIN_USER_ORDERING,
+            page_size=params.get("page_size", ADMIN_USER_PAGE_SIZE),
+            binding=CursorBinding.of("users.admin_list", params, actor_id=_actor(request).pk),
+        ).paginate(users, params.get("cursor"))
+        return Response(
+            {
+                "results": s.AdminUserSerializer(page.items, many=True).data,
+                **page_links(request, page),
+            }
+        )
 
     @extend_schema(request=s.UserCreateSerializer, responses={201: s.AdminUserSerializer})
     def post(self, request: Request) -> Response:
@@ -226,10 +249,20 @@ class AdminUserEmailView(ApiView):
                 message = "Enter your current password to change your own email."
                 raise InvalidInputError(message, details={"current_password": [message]})
             authentication.verify_current_password(request._request, data["current_password"])
+        own = user_id == actor.pk
         user = services.change_user_email(
-            actor_id=actor.pk, user_id=user_id, version=data["version"], email=data["email"]
+            actor_id=actor.pk,
+            user_id=user_id,
+            version=data["version"],
+            email=data["email"],
+            # Your own identity: refused if this session ended meanwhile (a reset, say).
+            still_signed_in=(
+                (lambda locked: authentication.session_still_current(request._request, locked))
+                if own
+                else None
+            ),
         )
-        if user.pk == actor.pk:
+        if own:
             # Changing your own email ends your other sessions but keeps this one.
             update_session_auth_hash(request._request, user)
         return Response(s.AdminUserSerializer(user).data)
@@ -284,9 +317,10 @@ class AssigneeListView(ApiView):
     def get(self, request: Request) -> Response:
         params = _validated(s.AssigneeQuerySerializer, request.query_params)
         users = selectors.assignable_users(q=params.get("q", ""))
-        page = KeysetPaginator(ASSIGNEE_ORDERING, page_size=params["page_size"]).paginate(
-            users, params.get("cursor")
-        )
+        binding = CursorBinding.of("users.assignees", params, actor_id=_actor(request).pk)
+        page = KeysetPaginator(
+            ASSIGNEE_ORDERING, page_size=params["page_size"], binding=binding
+        ).paginate(users, params.get("cursor"))
         return Response(
             {
                 "results": s.AssigneeSerializer(page.items, many=True).data,

@@ -369,3 +369,31 @@ class AuthThrottleEvent(models.Model):
 
     def __str__(self) -> str:
         return f"AuthThrottleEvent({self.kind}, {self.occurred_at:%Y-%m-%d %H:%M:%S})"
+
+
+class WorkspaceAccessWindow(models.Model):
+    """That an actor's viewing of a workspace (a user's, or "all") has been audited in one
+    window of WORKSPACE_ACCESS_AUDIT_WINDOW_S (identity.workspaces).
+
+    In PostgreSQL, written in the audit row's own transaction: a rolled-back request leaves
+    neither, concurrent first requests write exactly one audit row (the unique constraint),
+    and nothing outside the database can suppress auditing (Phase 9 review: the marker was
+    a cache key, and a write to Redis hid access indefinitely). Purged hourly."""
+
+    id = models.BigAutoField(primary_key=True)
+    actor_id = models.UUIDField()
+    workspace = models.CharField(max_length=36)  # a user id, or "all"
+    window_start = models.DateTimeField()
+
+    class Meta:
+        db_table = "identity_workspace_access_window"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["actor_id", "workspace", "window_start"],
+                name="workspace_access_window_unique",
+            )
+        ]
+        indexes = [models.Index(fields=["window_start"], name="workspace_access_window_idx")]
+
+    def __str__(self) -> str:
+        return f"WorkspaceAccessWindow({self.workspace}, {self.window_start:%Y-%m-%d %H:%M})"

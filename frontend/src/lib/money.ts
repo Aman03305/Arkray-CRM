@@ -8,8 +8,6 @@
  * 2^53, or display differently from what the server stored.
  */
 
-/** Organisation currency (settings.CRM_CURRENCY; the API echoes it in aggregate payloads). */
-export const CURRENCY = "INR";
 export const MAX_WHOLE_DIGITS = 12; // NUMERIC(14, 2): up to 999,999,999,999.99
 
 const DECIMAL = /^(-?)(\d+)(?:\.(\d+))?$/;
@@ -37,20 +35,6 @@ export function formatInr(value: string | null | undefined, { paise = "auto" }: 
   const cents = (fraction + "00").slice(0, 2); // the API always sends two places
   const showPaise = paise === "always" || /[1-9]/.test(cents);
   return `${sign}₹${groupIndian(whole!)}${showPaise ? `.${cents}` : ""}`;
-}
-
-/** A compact label for tight spaces: "₹12.5 L", "₹3.2 Cr", "₹75,000". Display only. */
-export function formatInrCompact(value: string | null | undefined): string {
-  if (value === null || value === undefined) return "—";
-  const match = DECIMAL.exec(value.trim());
-  if (!match) return "—";
-  const whole = match[2]!.replace(/^0+(?=\d)/, "");
-  const unit = whole.length > 7 ? { size: 7, label: "Cr" } : whole.length > 5 ? { size: 5, label: "L" } : null;
-  if (!unit) return formatInr(value);
-  // Truncate (never round up) to one decimal of the unit, from the digits themselves.
-  const head = whole.slice(0, whole.length - unit.size);
-  const tenth = whole.charAt(whole.length - unit.size);
-  return `${match[1]}₹${groupIndian(head)}${tenth === "0" ? "" : `.${tenth}`} ${unit.label}`;
 }
 
 /** "75.00" -> "75%", "62.50" -> "62.5%", "33.33" -> "33.33%". */

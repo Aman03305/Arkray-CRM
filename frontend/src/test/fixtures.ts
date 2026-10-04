@@ -26,6 +26,7 @@ export function makeViewer(overrides: Partial<Viewer> = {}): Viewer {
     fullName: `${firstName} ${lastName}`.trim(),
     roleLabel: "User",
     capabilities: ["crm.access_own", "ai.query"],
+    features: { ask: false },
     ...overrides,
   };
 }

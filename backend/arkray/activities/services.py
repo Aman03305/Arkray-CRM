@@ -105,6 +105,10 @@ NOT_STARTED = (
 )
 LEAD_ARCHIVED_REOPEN = "This lead is archived. Restore the lead before reopening its activities."
 LEAD_ARCHIVED_RESTORE = "This lead is archived. Restore the lead first."
+OPPORTUNITY_ARCHIVED_REOPEN = (
+    "This opportunity is archived. Restore the opportunity before reopening its activities."
+)
+OPPORTUNITY_ARCHIVED_RESTORE = "This opportunity is archived. Restore the opportunity first."
 ALREADY_CREATED_ELSEWHERE = (
     "This was already created by an earlier request and has since left this workspace."
 )
@@ -226,6 +230,13 @@ def _require_not_archived(activity: Activity) -> None:
 def _require_assignable(owner_id: UUID) -> None:
     if not lock_assignable_user(owner_id):
         raise BusinessRuleViolation(OWNER_NOT_ASSIGNABLE)
+
+
+def _opportunity_archived(activity: Activity) -> bool:
+    """Read under the lead's lock, which every opportunity archive and restore takes."""
+    return activity.opportunity_id is not None and pipeline_selectors.opportunity_is_archived(
+        activity.opportunity_id
+    )
 
 
 def _lifecycle(activity: Activity) -> TypeSpec:
@@ -532,6 +543,8 @@ def reopen_activity(
             )
         if lead.archived_at is not None:
             raise BusinessRuleViolation(LEAD_ARCHIVED_REOPEN)
+        if _opportunity_archived(activity):
+            raise BusinessRuleViolation(OPPORTUNITY_ARCHIVED_REOPEN)
         _require_assignable(lead.owner_id)
         now = timezone.now()
         previous = str(activity.status)
@@ -634,6 +647,8 @@ def restore_activity(
         # the lead's state belongs to the other workspace and isn't revealed (review).
         if lead.archived_at is not None and scope.permits_owner(lead.owner_id):
             raise BusinessRuleViolation(LEAD_ARCHIVED_RESTORE)
+        if _opportunity_archived(activity) and scope.permits_owner(lead.owner_id):
+            raise BusinessRuleViolation(OPPORTUNITY_ARCHIVED_RESTORE)
         if activity.status in CURRENT_STATUSES:
             # A restored open task or scheduled meeting is current work again: like creating
             # or reopening it, never for a deactivated owner (Phase 6 review).

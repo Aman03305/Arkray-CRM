@@ -17,19 +17,20 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
 from django.conf import settings
-from django.core.cache import cache
-from django.db import transaction
+from django.db import connection, transaction
+from django.utils import timezone
 
 from arkray.audit import services as audit
 from arkray.core.access import AccessScope, ScopeKind
 from arkray.core.context import update_context
 from arkray.core.errors import NotFoundError, PermissionDeniedError
 
-from .models import User
+from .models import User, WorkspaceAccessWindow
 from .policy import Capability, has_capability
 
 logger = logging.getLogger(__name__)
@@ -113,35 +114,42 @@ def authorize_write(actor: _Actor, scope: AccessScope) -> None:
 
 
 def _record_delegated_access(scope: AccessScope) -> None:
-    """Audit access to other users' data: at least once per actor/workspace per window.
+    """Audit access to other users' data: once per actor/workspace per window.
 
     Writes inside the workspace are audited individually by the services performing them;
-    this records the *viewing*. The window marker is set only after the audit row has
-    committed, so a rolled-back request never suppresses auditing. If the cache is
-    unavailable, every access is audited: we fail towards more auditing, never less.
+    this records the *viewing*. The window's marker is a database row inserted in the same
+    transaction as the audit row (identity.models.WorkspaceAccessWindow): a rolled-back
+    request leaves neither, so it never suppresses auditing, and of several requests
+    opening a window at once exactly one writes the row.
     """
     subject = str(scope.subject_user_id) if scope.subject_user_id else WORKSPACE_ORGANIZATION
     update_context(subject_user_id=subject)
-    key = f"audit:workspace-access:{scope.actor_id}:{subject}"
-    try:
-        audited_in_window = cache.get(key) is not None
-    except Exception:  # noqa: BLE001 — cache trouble must never skip auditing
-        audited_in_window = False
-    if audited_in_window:
-        return
-    audit.record(
-        AUDIT_ACTION_WORKSPACE_ACCESSED,
-        actor_id=scope.actor_id,
-        target_type="workspace",
-        target_id=subject,
-        subject_user_id=scope.subject_user_id,
-        metadata={"scope": scope.kind.value},
-    )
-    transaction.on_commit(lambda: _mark_audited(key))
+    window = settings.WORKSPACE_ACCESS_AUDIT_WINDOW_S
+    epoch = int(timezone.now().timestamp())
+    window_start = datetime.fromtimestamp(epoch - epoch % window, tz=UTC)
+    marker = {"actor_id": scope.actor_id, "workspace": subject, "window_start": window_start}
+    if WorkspaceAccessWindow.objects.filter(**marker).exists():
+        return  # already audited in this window: one read, no write
+    with transaction.atomic(), connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO identity_workspace_access_window (actor_id, workspace, window_start)"
+            " VALUES (%s, %s, %s) ON CONFLICT DO NOTHING RETURNING id",
+            [scope.actor_id, subject, window_start],
+        )
+        if cursor.fetchone() is None:
+            return  # already audited in this window
+        audit.record(
+            AUDIT_ACTION_WORKSPACE_ACCESSED,
+            actor_id=scope.actor_id,
+            target_type="workspace",
+            target_id=subject,
+            subject_user_id=scope.subject_user_id,
+            metadata={"scope": scope.kind.value},
+        )
 
 
-def _mark_audited(key: str) -> None:
-    try:
-        cache.set(key, 1, timeout=settings.WORKSPACE_ACCESS_AUDIT_WINDOW_S)
-    except Exception:  # noqa: BLE001 — worst case the next access is audited again
-        logger.warning("workspace_audit_window_not_recorded")
+def purge_access_windows(now: datetime) -> int:
+    """Hourly: windows that ended are no longer needed."""
+    ended = now - timedelta(seconds=2 * settings.WORKSPACE_ACCESS_AUDIT_WINDOW_S)
+    deleted, _ = WorkspaceAccessWindow.objects.filter(window_start__lt=ended).delete()
+    return deleted

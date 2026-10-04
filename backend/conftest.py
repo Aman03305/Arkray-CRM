@@ -6,6 +6,7 @@ import pytest
 from django.core.cache import cache
 from rest_framework.test import APIClient
 
+from tests.ai_fixtures import ai_on, golden, scripted  # noqa: F401 — shared fixtures
 from tests.factories import (
     AdminFactory,
     UserFactory,

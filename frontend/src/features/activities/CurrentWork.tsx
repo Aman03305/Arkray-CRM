@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { describeError, isApiError } from "@/lib/api/errors";
 import type { ActivityListItem } from "@/lib/api/types";
-import { activityHref, type Workspace, workspaceHref } from "@/lib/workspace";
+import { activityHref, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
 
 import { activitiesApi, activityKeys, type CurrentWorkTarget } from "./api";
 import { TypeLabel, When } from "./ActivityBits";
@@ -18,6 +18,7 @@ import { ActivityFormDialog } from "./ActivityFormDialog";
 import { canComplete, useClock } from "./clock";
 import type { FormKind } from "./draft";
 import { useActivityAction } from "./hooks";
+import { presetActivityList } from "./list-state";
 
 /**
  * A lead's or an opportunity's open tasks and scheduled meetings, soonest first, with
@@ -147,7 +148,20 @@ export function CurrentWork({
       )}
       {work.data?.next ? (
         <p className="mt-3 text-xs">
-          <Link href={workspaceHref(workspace, "activities")} className="font-medium text-brand-700 hover:underline">
+          <Link
+            href={workspaceHref(workspace, "activities")}
+            // The rest of *this* record's current work, not the whole workspace's newest
+            // activities (whole-software audit). onNavigate: same-tab navigations only.
+            onNavigate={() =>
+              presetActivityList(
+                workspaceApiSegment(workspace),
+                target.opportunity
+                  ? { status: "current", ordering: "scheduled", opportunity: target.opportunity }
+                  : { status: "current", ordering: "scheduled", lead: target.lead ?? "", leadLabel: label },
+              )
+            }
+            className="font-medium text-brand-700 hover:underline"
+          >
             More in Activities
           </Link>
         </p>

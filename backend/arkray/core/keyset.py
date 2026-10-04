@@ -15,10 +15,23 @@ Here the cursor carries the full sort key of the boundary row, and the next page
 with explicit NULL placement per key, so pages never overlap and never skip rows, and a
 row inserted meanwhile appears exactly once, in its sorted place. The last key must be
 unique and non-null (the primary key), which makes the order total and the cursor exact.
+When every key is NOT NULL and they all sort one way, the same condition is also written
+as one row comparison, `ROW(a, b, id) > ROW(va, vb, vid)`, which PostgreSQL can start an
+index scan at exactly (Phase 10, R49: a page deep inside a large group of equal leading
+values otherwise re-read the group from its start); other orderings bound the scan by
+their leading key.
 
 Cursors are signed (django.core.signing), bound to the ordering they were issued for, and
 carry sort values only: a forged, stale or cross-ordering cursor is a clean 400, never a
 500, and never widens what the caller may see (the queryset is scoped before paginating).
+
+Since Phase 9 a cursor is also bound to what it continues (`CursorBinding`): the list (its
+purpose, including the record whose timeline or history it pages), the signed-in user, the
+workspace and the filters. It carries an HMAC of these, never the values themselves, so a
+cursor replayed by another user, in another workspace, on another list or with other
+filters is refused like a forged one. It also expires (`KEYSET_CURSOR_MAX_AGE_S`, the
+longest a session can last). Neither ever widened access (see below); they remove a
+cursor's use as a portable token and bound how long a leaked URL stays meaningful.
 
 Sort keys holding personal or business-sensitive data (a lead's or a user's name, a deal's
 amount) are `private`: their value is **not** written into the cursor, which ends up in URLs
@@ -38,28 +51,128 @@ the caller can't see makes the cursor invalid (400).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import base64
+import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from functools import lru_cache
 from typing import Any, TypeVar
 from uuid import UUID
 
-from django.core import signing
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
+from django.conf import settings
 from django.core.exceptions import FieldDoesNotExist, ValidationError
 from django.db import models
-from django.db.models import F, Q, QuerySet
+from django.db.models import F, Func, Q, QuerySet, Value
 from django.db.models.expressions import OrderBy
+from django.db.models.lookups import GreaterThan, LessThan
+from django.utils.crypto import salted_hmac
 from rest_framework.request import Request
 from rest_framework.utils.urls import replace_query_param
 
+from .access import AccessScope
 from .errors import InvalidInputError
 
 M = TypeVar("M", bound=models.Model)
 
-_SALT = "arkray.core.keyset"
+_CIPHER_SALT = "arkray.core.keyset.cipher"
+
+
+def _fernet(key: str) -> Fernet:
+    digest = salted_hmac(_CIPHER_SALT, "cursor", secret=key, algorithm="sha256").digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+@lru_cache(maxsize=4)
+def _cipher(keys: tuple[str, ...]) -> MultiFernet:
+    """Authenticated encryption for cursors, keyed from SECRET_KEY and then its fallbacks
+    (rotation keeps open page links working; new cursors use the current key)."""
+    return MultiFernet([_fernet(key) for key in keys])
+
+
+def _keys() -> tuple[str, ...]:
+    return (settings.SECRET_KEY, *settings.SECRET_KEY_FALLBACKS)
+
+
+def _seal(payload: dict[str, Any]) -> str:
+    """A cursor: the payload encrypted and authenticated (Fernet), never just signed. Its
+    sort values and row ids are unreadable (R48: a sequential id read from one's own cursor
+    measured how many events were written organisation-wide)."""
+    token = _cipher(_keys()).encrypt(json.dumps(payload, separators=(",", ":")).encode())
+    return token.decode("ascii")
+
+
+def _open(cursor: str) -> Any:
+    """The payload of a cursor this server sealed, if it is younger than
+    KEYSET_CURSOR_MAX_AGE_S (InvalidToken otherwise)."""
+    data = _cipher(_keys()).decrypt(cursor.encode("ascii"), ttl=settings.KEYSET_CURSOR_MAX_AGE_S)
+    return json.loads(data)
+
+
 MAX_CURSOR_LENGTH = 1000
 INVALID_CURSOR = "This page link is invalid or has expired. Start from the first page."
+_BINDING_SALT = "arkray.core.keyset.binding"
+# Not part of a binding: the cursor itself, and the page size (a client may change it
+# between pages; it never changes which rows come next).
+_UNBOUND_PARAMS = frozenset({"cursor", "page_size"})
+
+
+def _canonical(value: Any) -> Any:
+    if isinstance(value, set | frozenset):
+        return sorted(str(item) for item in value)
+    if isinstance(value, list | tuple):
+        return [_canonical(item) for item in value]
+    if isinstance(value, bool | int) or value is None:
+        return value
+    return str(value)  # dates, UUIDs, decimals, choices: their exact text
+
+
+@dataclass(frozen=True, slots=True)
+class CursorBinding:
+    """What a cursor may continue: `purpose` (the list, and the record whose timeline or
+    history it pages), the signed-in user, the workspace (by scope, so `me` and one's own id
+    are the same workspace) and the validated filters and ordering."""
+
+    purpose: str
+    actor_id: UUID
+    workspace: str
+    shape: str
+
+    @classmethod
+    def of(
+        cls,
+        purpose: str,
+        params: Mapping[str, Any],
+        *,
+        actor_id: UUID,
+        scope: AccessScope | None = None,
+    ) -> CursorBinding:
+        workspace = (
+            "-"
+            if scope is None
+            else f"{scope.kind}:{','.join(sorted(str(o) for o in scope.owner_ids))}"
+        )
+        shape = {
+            key: _canonical(value)
+            for key, value in params.items()
+            if key not in _UNBOUND_PARAMS and value is not None and value != ""
+        }
+        return cls(
+            purpose, actor_id, workspace, json.dumps(shape, sort_keys=True, separators=(",", ":"))
+        )
+
+    def digest(self, secret: str | None = None) -> str:
+        message = "\n".join((self.purpose, str(self.actor_id), self.workspace, self.shape))
+        mac = salted_hmac(_BINDING_SALT, message, secret=secret, algorithm="sha256")
+        return mac.hexdigest()[:32]
+
+    def digests(self) -> frozenset[str]:
+        """Under the current key and any fallback keys: rotating SECRET_KEY keeps page links
+        working, as the signature itself does (Phase 9 review)."""
+        keys = [settings.SECRET_KEY, *settings.SECRET_KEY_FALLBACKS]
+        return frozenset(self.digest(key) for key in keys)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,8 +254,26 @@ def _after(keys: Sequence[SortKey], values: Sequence[Any]) -> Q:
     combined = alternatives[0]
     for alternative in alternatives[1:]:
         combined |= alternative
-    bound = keys[0].bound(values[0])
+    bound = _row_bound(keys, values) or keys[0].bound(values[0])
     return combined & bound if bound is not None else combined
+
+
+def _row_bound(keys: Sequence[SortKey], values: Sequence[Any]) -> Q | None:
+    """`ROW(k1, …, kn) > ROW(v1, …, vn)` (or `<` descending): the same rows as the expansion
+    above, as one comparison PostgreSQL can start an index scan at, exactly at the cursor,
+    instead of at the leading key's value (R49: a page deep inside a large group of equal
+    leading values re-read the group from its start, e.g. 18,182 undated open tasks). Only
+    when every key is NOT NULL and they all sort one way: a row comparison can't express
+    NULL placement or mixed directions, which keep the leading-key bound."""
+    pairs = zip(keys, values, strict=True)
+    if len(keys) < 2 or any(key.nullable or value is None for key, value in pairs):
+        return None
+    if len({key.descending for key in keys}) != 1:
+        return None
+    row = Func(*(F(key.field) for key in keys), function="ROW", output_field=models.Field())
+    cursor = Func(*(Value(value) for value in values), function="ROW", output_field=models.Field())
+    comparison = LessThan if keys[0].descending else GreaterThan
+    return Q(comparison(row, cursor))
 
 
 def _encode(value: Any) -> Any:
@@ -165,15 +296,26 @@ def _decode_field(model: type[models.Model], name: str) -> models.Field[Any, Any
 
 
 class KeysetPaginator:
-    def __init__(self, ordering: KeysetOrdering, *, page_size: int) -> None:
+    """`binding`: what the cursors may continue (required of every API list; None only for
+    internal callers such as benchmarks and the pagination tests, whose cursors never leave
+    the process)."""
+
+    def __init__(
+        self, ordering: KeysetOrdering, *, page_size: int, binding: CursorBinding | None
+    ) -> None:
         self.ordering = ordering
         self.page_size = page_size
+        self.binding = None if binding is None else binding.digest()
+        self._accepted: frozenset[str | None] = (
+            frozenset({None}) if binding is None else frozenset(binding.digests())
+        )
 
     def _cursor(self, row: models.Model, direction: str) -> str:
         values = [
             None if key.private else _encode(getattr(row, key.field)) for key in self.ordering.keys
         ]
-        return signing.dumps({"o": self.ordering.name, "d": direction, "v": values}, salt=_SALT)
+        payload = {"o": self.ordering.name, "d": direction, "v": values, "b": self.binding}
+        return _seal(payload)
 
     def _private_values(self, visible: QuerySet[Any], boundary: Any) -> dict[str, Any]:
         """The boundary row's current values for the private keys, re-read by its id among
@@ -189,9 +331,11 @@ class KeysetPaginator:
         try:
             if len(cursor) > MAX_CURSOR_LENGTH:
                 raise ValueError
-            payload = signing.loads(cursor, salt=_SALT)
+            # Expired, forged and tampered cursors all fail to open.
+            payload = _open(cursor)
             if (
                 not isinstance(payload, dict)
+                or payload.get("b") not in self._accepted
                 or payload.get("o") != self.ordering.name
                 or payload.get("d") not in ("next", "prev")
                 or not isinstance(payload.get("v"), list)
@@ -220,7 +364,7 @@ class KeysetPaginator:
                     current[key.field] if key.private else value
                     for key, value in zip(self.ordering.keys, values, strict=True)
                 ]
-        except (signing.BadSignature, ValidationError, ValueError, TypeError, FieldDoesNotExist):
+        except (InvalidToken, ValidationError, ValueError, TypeError, FieldDoesNotExist):
             raise InvalidInputError(INVALID_CURSOR, details={"cursor": [INVALID_CURSOR]}) from None
         return payload["d"], values
 

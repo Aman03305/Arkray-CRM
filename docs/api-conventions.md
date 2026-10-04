@@ -56,7 +56,7 @@ frontend's request and response types are generated from it.
 ```
 
 `{workspace}` is `me`, `all` or a user UUID. It is resolved and authorised server-side on
-every request ([authorization.md](authorization.md#admin--user-workspace-built-resolution-ui-in-phase-6)).
+every request ([authorization.md](authorization.md#admin--user-workspace-built-resolution-and-banner-endpoint-in-phase-0-module-views-in-phases-25-completed-in-phase-6)).
 Tasks, meetings and notes share the `activities` resource with a `type` discriminator, one
 schema per type in OpenAPI; per-type convenience routes can be added later without new
 business logic.

@@ -15,6 +15,12 @@ dependencies = [
     "celery>=5.5,<6",
     "argon2-cffi>=23.1",
     "gunicorn>=23",
+    "anthropic>=1.11,<2",
+    "pgvector>=0.5,<0.6",
+    "onnxruntime>=1.30,<2",
+    "tokenizers>=0.23,<0.24",
+    "numpy>=2.3,<3",
+    "cryptography>=46",
 ]
 
 [dependency-groups]
@@ -113,6 +119,12 @@ root_packages = ["arkray"]
 name = "Modular monolith layering"
 type = "layers"
 layers = [
+    # Personal-data operations (Phase 11: erasure on request): touch every CRM module and
+    # Ask Arkray's derived data; nothing imports them.
+    "arkray.privacy",
+    # Ask Arkray (Phase 8): consumes every CRM module through its selectors; nothing
+    # imports it (it reacts to changes through domain events and the outbox).
+    "arkray.ai",
     # Independent siblings (`|`): read-only compositions over the CRM modules, which never
     # import each other (Phase 5 dashboard, Phase 7 global search).
     "arkray.dashboard | arkray.search",

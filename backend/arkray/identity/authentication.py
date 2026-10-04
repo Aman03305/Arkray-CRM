@@ -14,11 +14,12 @@ import secrets
 from dataclasses import dataclass
 from functools import lru_cache
 
-from django.contrib.auth import update_session_auth_hash
+from django.contrib.auth import HASH_SESSION_KEY, update_session_auth_hash
 from django.contrib.auth.hashers import check_password, make_password
 from django.db import transaction
 from django.http import HttpRequest
 from django.utils import timezone
+from django.utils.crypto import constant_time_compare
 
 from arkray.audit import services as audit
 from arkray.core.errors import (
@@ -32,6 +33,7 @@ from arkray.core.middleware import client_ip
 from . import throttling
 from .models import AccountToken, TokenPurpose, TokenStatus, User, normalize_email
 from .passwords import check_new_password
+from .services import SESSION_ENDED
 from .sessions import end_session, start_session
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,7 @@ class SignIn:
     user: User
     identifier: str  # for the trusted-device cookie
     device_id: str
+    device_trust: str  # the account's credentials as the cookie trusts them
 
 
 @lru_cache(maxsize=1)
@@ -81,7 +84,7 @@ def _throttled(denied: throttling.Denied) -> RateLimitedError:
 
 def _throttle_for(request: HttpRequest, email: str) -> throttling.LoginThrottle:
     identifiers = throttling.login_identifiers(email)
-    device_id = throttling.read_device(request, identifiers)
+    device_id = throttling.read_device(request, identifiers, email)
     return throttling.LoginThrottle(identifiers, device_id, client_ip(request))
 
 
@@ -114,6 +117,7 @@ def sign_in(request: HttpRequest, email: str, password: str) -> SignIn:
         user=user,
         identifier=throttle.identifier,
         device_id=throttle.device_id or secrets.token_hex(16),
+        device_trust=throttling.device_trust(user.password, user.session_epoch),
     )
 
 
@@ -147,6 +151,16 @@ def verify_current_password(request: HttpRequest, password: str) -> None:
     throttle.succeeded()
 
 
+def session_still_current(request: HttpRequest, user: User) -> bool:
+    """Whether this request's session still belongs to `user` as it is now (read under its
+    row lock). The session hash covers the password and `session_epoch`, so a password reset,
+    a password or email change, or "sign out everywhere" committed while this request was
+    running makes it false (Phase 9 review, P1: a password change in flight must not undo a
+    reset that ended its session)."""
+    stored = request.session.get(HASH_SESSION_KEY)
+    return isinstance(stored, str) and constant_time_compare(stored, user.get_session_auth_hash())
+
+
 def change_password(request: HttpRequest, current_password: str, new_password: str) -> None:
     """Keep this session (with a new key); end every other session of the user; void any
     outstanding password-reset link (it may be why the user is changing the password)."""
@@ -160,6 +174,8 @@ def change_password(request: HttpRequest, current_password: str, new_password: s
         user = User.objects.select_for_update().get(pk=actor.pk)
         if not user.is_active:
             raise PermissionDeniedError()
+        if not session_still_current(request, user):
+            raise PermissionDeniedError(SESSION_ENDED)
         check_new_password(new_password, user, field="new_password")
         user.set_password(new_password)
         user.save(update_fields=["password", "updated_at"])

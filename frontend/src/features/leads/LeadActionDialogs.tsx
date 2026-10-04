@@ -87,7 +87,7 @@ export function ChangeStatusDialog({ workspace, lead, options, onClose, onDone }
                 />
                 <span className="text-sm text-slate-800">
                   {option.name}
-                  {option.is_active ? null : <span className="ml-1 text-xs text-slate-400">(retired)</span>}
+                  {option.is_active ? null : <span className="ml-1 text-xs text-slate-500">(retired)</span>}
                 </span>
               </label>
             ))}

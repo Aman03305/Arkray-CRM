@@ -3,7 +3,11 @@
 No Celery-level retries here — the outbox is the single retry layer.
 """
 
+from datetime import timedelta
+
 from celery import shared_task
+from django.conf import settings
+from django.utils import timezone
 
 from . import idempotency, outbox
 
@@ -21,4 +25,8 @@ def process_outbox_event(event_id: int, claim_token: str) -> None:
 @shared_task(name="core.housekeeping", ignore_result=True)
 def housekeeping() -> dict[str, int]:
     """Hourly; safe to run late or twice."""
-    return {"idempotency_records": idempotency.purge_expired()}
+    retention = timezone.now() - timedelta(days=settings.OUTBOX_DONE_RETENTION_DAYS)
+    return {
+        "idempotency_records": idempotency.purge_expired(),
+        "outbox_events": outbox.purge_done(finished_before=retention),
+    }

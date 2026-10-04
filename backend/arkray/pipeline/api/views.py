@@ -15,6 +15,7 @@ from uuid import UUID
 from django.conf import settings
 from drf_spectacular.utils import extend_schema
 from rest_framework import status as http
+from rest_framework.permissions import SAFE_METHODS
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.utils.urls import replace_query_param
@@ -22,10 +23,10 @@ from rest_framework.utils.urls import replace_query_param
 from arkray.core.access import AccessScope
 from arkray.core.api import ApiView, idempotency_key, validated
 from arkray.core.errors import InvalidInputError, PermissionDeniedError
-from arkray.core.keyset import KeysetPaginator, page_links
+from arkray.core.keyset import CursorBinding, KeysetPaginator, page_links
 from arkray.identity.models import User
 from arkray.identity.permissions import IsActiveUser
-from arkray.identity.workspaces import resolve_workspace, workspace_segment
+from arkray.identity.workspaces import authorize_write, resolve_workspace, workspace_segment
 from arkray.leads.api.views import IDEMPOTENCY_PARAMETER, NOT_FOUND, OWNER_FILTER_ORG_ONLY
 
 from .. import selectors, services
@@ -39,7 +40,12 @@ def _scope(request: Request, workspace: str) -> tuple[User, AccessScope]:
     actor = request.user
     if not isinstance(actor, User):  # unreachable behind the permission classes
         raise PermissionDeniedError()
-    return actor, resolve_workspace(actor, workspace)
+    scope = resolve_workspace(actor, workspace)
+    # Unsafe methods are writes: refused before the body is even read (Phase 9: a viewer's
+    # write with a malformed body got a validation error instead of a 403).
+    if request.method not in SAFE_METHODS:
+        authorize_write(actor, scope)
+    return actor, scope
 
 
 def _filters(params: dict[str, Any], scope: AccessScope, **extra: Any) -> OpportunityFilters:
@@ -74,6 +80,10 @@ class PipelineConfigView(ApiView):
         return Response(s.PipelineListSerializer({"results": selectors.pipelines()}).data)
 
 
+# The opportunities list's cursors, also issued by the board for its columns' `next`.
+OPPORTUNITY_LIST = "opportunities.list"
+
+
 class BoardView(ApiView):
     """The Kanban board: every stage of one pipeline with its count, value, weighted value
     and at most `cards_per_stage` cards, plus the open-pipeline totals. Bounded whatever
@@ -92,7 +102,34 @@ class BoardView(ApiView):
         params = validated(s.BoardQuerySerializer, request.query_params)
         filters = _filters(params, scope)
         pipeline = selectors.pipeline_for_board(params.get("pipeline"))
-        board = selectors.board(scope, pipeline, filters, cards_per_stage=params["cards_per_stage"])
+
+        def continuation(stage_id: UUID, ordering: str) -> dict[str, str]:
+            """The opportunities list request that continues a column."""
+            query = {**request.query_params.dict(), "pipeline": str(pipeline.pk)}
+            query.pop("cards_per_stage", None)
+            query.update(
+                stage=str(stage_id),
+                ordering=ordering,
+                page_size=str(params["cards_per_stage"] or selectors.BOARD_CARDS_DEFAULT),
+            )
+            return query
+
+        def binding_for(stage_id: UUID, ordering: str) -> CursorBinding:
+            # Bound exactly as the opportunities list will check it (same validated filters).
+            list_params = validated(
+                s.OpportunityListQuerySerializer, continuation(stage_id, ordering)
+            )
+            return CursorBinding.of(
+                OPPORTUNITY_LIST, list_params, actor_id=scope.actor_id, scope=scope
+            )
+
+        board = selectors.board(
+            scope,
+            pipeline,
+            filters,
+            cards_per_stage=params["cards_per_stage"],
+            binding_for=binding_for,
+        )
         context = {"scope": scope}
         list_url = request.build_absolute_uri(
             f"/api/v1/workspaces/{workspace_segment(scope)}/opportunities"
@@ -103,13 +140,7 @@ class BoardView(ApiView):
             # More in this stage than the cards shown: the list continues after the last
             # card (or starts at the stage's first page when no cards were asked for).
             if column.page.next_cursor or column.count > len(column.page.items):
-                query = {**request.query_params.dict(), "pipeline": str(pipeline.pk)}
-                query.pop("cards_per_stage", None)
-                query.update(
-                    stage=str(column.stage.pk),
-                    ordering=column.ordering,
-                    page_size=str(params["cards_per_stage"] or selectors.BOARD_CARDS_DEFAULT),
-                )
+                query = continuation(column.stage.pk, column.ordering)
                 if column.page.next_cursor:
                     query["cursor"] = column.page.next_cursor
                 next_url = list_url
@@ -182,7 +213,11 @@ class OpportunityListView(ApiView):
             archived=params["archived"],
         )
         paginator = KeysetPaginator(
-            selectors.ORDERINGS[params["ordering"]], page_size=params["page_size"]
+            selectors.ORDERINGS[params["ordering"]],
+            page_size=params["page_size"],
+            binding=CursorBinding.of(
+                OPPORTUNITY_LIST, params, actor_id=scope.actor_id, scope=scope
+            ),
         )
         page = paginator.paginate(
             selectors.opportunity_list(scope, filters),
@@ -325,7 +360,16 @@ class OpportunityHistoryView(ApiView):
     def get(self, request: Request, workspace: str, opportunity_id: UUID) -> Response:
         _, scope = _scope(request, workspace)
         params = validated(s.HistoryQuerySerializer, request.query_params)
-        paginator = KeysetPaginator(selectors.HISTORY_ORDERING, page_size=params["page_size"])
+        paginator = KeysetPaginator(
+            selectors.HISTORY_ORDERING,
+            page_size=params["page_size"],
+            binding=CursorBinding.of(
+                f"opportunities.history:{opportunity_id}",
+                params,
+                actor_id=scope.actor_id,
+                scope=scope,
+            ),
+        )
         page = paginator.paginate(
             selectors.stage_history(scope, opportunity_id), params.get("cursor")
         )

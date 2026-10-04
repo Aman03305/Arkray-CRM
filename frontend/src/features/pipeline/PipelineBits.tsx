@@ -30,7 +30,7 @@ export function StageName({ stage }: { stage: Pick<Stage, "name" | "category" | 
     <span className="inline-flex items-center gap-1">
       {Icon ? <Icon aria-hidden="true" className="size-3.5 shrink-0" /> : null}
       {stage.name}
-      {stage.is_active ? null : <span className="text-xs font-normal text-slate-400">(retired)</span>}
+      {stage.is_active ? null : <span className="text-xs font-normal text-slate-500">(retired)</span>}
     </span>
   );
 }
@@ -51,14 +51,14 @@ export function Amount({ value, className = "" }: { value: string; className?: s
  */
 export function LeadName({ lead }: { lead: OpportunityLeadRef }) {
   if (lead.restricted || !lead.id) {
-    return <span className="italic text-slate-400">Lead in another workspace</span>;
+    return <span className="italic text-slate-500">Lead in another workspace</span>;
   }
   return <>{lead.display_name}</>;
 }
 
 /** An expected close date; "Overdue" (in words) when an open opportunity's date has passed. */
 export function CloseDate({ date, open, today = businessToday() }: { date: string | null; open: boolean; today?: string }) {
-  if (!date) return <span className="text-slate-400">No close date</span>;
+  if (!date) return <span className="text-slate-500">No close date</span>;
   const overdue = open && date < today;
   return (
     <span className={overdue ? "text-red-700" : undefined}>

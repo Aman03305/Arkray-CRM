@@ -11,12 +11,14 @@ from collections.abc import Callable
 
 from django.conf import settings
 from django.http import HttpRequest, HttpResponse
+from django.utils.functional import SimpleLazyObject, empty
 
 from .context import ExecutionContext, bind_context, reset_context
 
 logger = logging.getLogger("arkray.access")
 
 REQUEST_ID_HEADER = "X-Request-ID"
+API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 # Caller-supplied IDs are considered only if short and boring, so nobody can inject content
 # into logs through this header.
 _VALID_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{8,64}$")
@@ -82,6 +84,9 @@ class RequestContextMiddleware:
         try:
             response = self.get_response(request)
             response[REQUEST_ID_HEADER] = request_id
+            # The API serves JSON only: nothing in a response may run, load or be framed,
+            # even if a browser were tricked into rendering one (Phase 9 review).
+            response.headers.setdefault("Content-Security-Policy", API_CSP)
             self._log(request, response.status_code, started)
             return response
         finally:
@@ -90,6 +95,12 @@ class RequestContextMiddleware:
     @staticmethod
     def _user_id(request: HttpRequest) -> str | None:
         user = getattr(request, "user", None)
+        # Only a user the request already resolved (the API's authentication replaces the
+        # lazy one). Resolving it here, for the log line, read the session store again:
+        # with the database down that was a second connection attempt, doubling every
+        # request's time to its 503 (whole-software audit).
+        if isinstance(user, SimpleLazyObject) and getattr(user, "_wrapped", None) is empty:
+            return None
         try:
             return str(user.pk) if user is not None and user.is_authenticated else None
         except Exception:  # noqa: BLE001 — e.g. the session lookup hits a database that is down

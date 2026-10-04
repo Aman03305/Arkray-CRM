@@ -32,7 +32,9 @@ from tests.helpers import signed_in
 
 from .conftest import NOW, dashboard_url
 
-OWN, USER, ORGANISATION = 9, 10, 9
+# Delegated and organisation-wide requests also read the audit window (PostgreSQL since
+# Phase 9): one more query than the user's own.
+OWN, USER, ORGANISATION = 9, 11, 10
 
 
 @pytest.fixture(autouse=True)

@@ -21,7 +21,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from arkray.core.access import AccessScope
-from arkray.core.api import ExactDecimalField, StrictInputSerializer
+from arkray.core.api import ExactDecimalField, OpaqueIdField, StrictInputSerializer
 from arkray.leads.api.serializers import LeadSerializer, UserRefSerializer
 
 from .. import models as m
@@ -211,6 +211,7 @@ class BoardSerializer(serializers.Serializer[Any]):
 
 
 class StageHistorySerializer(serializers.ModelSerializer[m.StageHistory]):
+    id = OpaqueIdField("stage-history")
     actor = UserRefSerializer(read_only=True)
     value = money()
     probability = percentage()

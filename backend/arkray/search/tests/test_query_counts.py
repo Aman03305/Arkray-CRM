@@ -28,7 +28,9 @@ from tests.helpers import signed_in
 
 from .conftest import GROUPS, search_url
 
-OWN, USER, ORGANISATION = 7, 8, 7
+# Delegated and organisation-wide requests also read the audit window (PostgreSQL since
+# Phase 9): one more query than the user's own.
+OWN, USER, ORGANISATION = 7, 9, 8
 
 
 def seed(n, owners):

@@ -11,7 +11,7 @@ never a whole note.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -24,6 +24,7 @@ from arkray.core.access import AccessScope
 from arkray.core.business_time import business_midnight, today_bounds
 from arkray.core.errors import NotFoundError
 from arkray.core.keyset import KeysetOrdering, SortKey
+from arkray.core.knowledge import KnowledgeDocument, SourceType, compose
 from arkray.core.ranking import Matches, SearchQuery, top_matches
 from arkray.identity.models import User
 from arkray.leads import selectors as lead_selectors
@@ -143,6 +144,12 @@ class ActivitySummary:
 
 
 # --- activities --------------------------------------------------------------------------------
+def listable(scope: AccessScope) -> QuerySet[Activity]:
+    """Every activity the scope may see, archived or not, whatever the filters (for checks
+    such as "is this record still visible to the caller")."""
+    return scope.apply(Activity.objects.all())
+
+
 def _implied_type(filters: ActivityFilters) -> str | None:
     """A status belongs to one type (open: tasks; scheduled: meetings), so does "overdue":
     stating the type lets PostgreSQL use the per-type schedule indexes."""
@@ -343,6 +350,36 @@ def activity_summary(scope: AccessScope, *, now: datetime) -> ActivitySummary:
     return ActivitySummary(**tasks, **meetings)
 
 
+@dataclass(frozen=True, slots=True)
+class OwnerTaskCount:
+    owner_id: UUID
+    open_tasks: int
+    overdue_tasks: int
+
+
+def task_counts_by_owner(scope: AccessScope, *, now: datetime, limit: int) -> list[OwnerTaskCount]:
+    """Open and overdue tasks per owner in `scope` (organisation-wide questions such as "who
+    has the most overdue tasks"), most overdue first, at most `limit` owners. The same
+    definitions as `activity_summary`. One grouped query over the open tasks."""
+    if not 1 <= limit <= 50:
+        raise ValueError("limit out of range")
+    rows = (
+        scope.apply(
+            Activity.objects.filter(
+                archived_at__isnull=True, type=ActivityType.TASK, status=ActivityStatus.OPEN
+            )
+        )
+        .values("owner_id")
+        .order_by()
+        .annotate(
+            open_tasks=Count("id"),
+            overdue_tasks=Count("id", filter=Q(schedule_sort__lt=now)),
+        )
+        .order_by("-overdue_tasks", "-open_tasks", "owner_id")[:limit]
+    )
+    return [OwnerTaskCount(**row) for row in rows]
+
+
 def upcoming_meetings(
     scope: AccessScope, *, now: datetime, limit: int = UPCOMING_MEETINGS_DEFAULT
 ) -> list[Activity]:
@@ -461,3 +498,83 @@ def people_in(entries: Iterable[TimelineEntry]) -> dict[str, User]:
     if not ids:
         return {}
     return {str(user.pk): user for user in User.objects.filter(pk__in=ids).only(*_PERSON)}
+
+
+# --- Ask Arkray's semantic index (Phase 8, docs/rag-architecture.md) -------------------------
+# Notes are embedded; tasks and meetings only when they have a description (a bare title is
+# found by global search). The text is the title and the description, nothing else: never
+# a meeting's link (links often carry passcodes) or location.
+_KNOWLEDGE_FIELDS = (
+    "id",
+    "type",
+    "owner_id",
+    "lead_id",
+    "opportunity_id",
+    "title",
+    "description",
+    "due_at",
+    "starts_at",
+    "created_at",
+    "updated_at",
+)
+_HAS_KNOWLEDGE = Q(archived_at__isnull=True) & ~Q(description="")
+_KNOWLEDGE_LABELS = {
+    ActivityType.TASK: ("Task", SourceType.TASK),
+    ActivityType.MEETING: ("Meeting", SourceType.MEETING),
+    ActivityType.NOTE: ("Note", SourceType.NOTE),
+}
+
+
+def _knowledge(queryset: QuerySet[Activity]) -> list[KnowledgeDocument]:
+    documents = []
+    for activity in queryset.filter(_HAS_KNOWLEDGE).only(*_KNOWLEDGE_FIELDS):
+        kind, source_type = _KNOWLEDGE_LABELS[ActivityType(activity.type)]
+        when = activity.starts_at or activity.due_at or activity.created_at
+        documents.append(
+            KnowledgeDocument(
+                source_type=source_type,
+                source_id=activity.pk,
+                owner_id=activity.owner_id,
+                lead_id=activity.lead_id,
+                opportunity_id=activity.opportunity_id,
+                label=activity.title or kind,
+                text=compose(
+                    (kind, activity.title),
+                    (
+                        "Text" if activity.type == ActivityType.NOTE else "Description",
+                        activity.description,
+                    ),
+                ),
+                occurred_at=when,
+                updated_at=activity.updated_at,
+            )
+        )
+    return documents
+
+
+def knowledge_documents(
+    scope: AccessScope, activity_ids: Collection[UUID]
+) -> list[KnowledgeDocument]:
+    """The embeddable text of the given activities that `scope` may see now (archived ones
+    have none). Retrieval re-reads every hit through this, so a note that followed its lead
+    to a new owner, or was archived, can never surface from a stale vector."""
+    if not activity_ids:
+        return []
+    return _knowledge(scope.apply(Activity.objects.filter(pk__in=list(activity_ids))))
+
+
+def knowledge_documents_for_indexing(
+    activity_ids: Collection[UUID],
+) -> list[KnowledgeDocument]:
+    """Unscoped: only for the indexer (runs as the system)."""
+    if not activity_ids:
+        return []
+    return _knowledge(Activity.objects.filter(pk__in=list(activity_ids)))
+
+
+def knowledge_source_ids(*, after: UUID | None, limit: int) -> list[UUID]:
+    """Ids of activities with a knowledge document, in id order (indexer only)."""
+    queryset = Activity.objects.filter(_HAS_KNOWLEDGE)
+    if after is not None:
+        queryset = queryset.filter(pk__gt=after)
+    return list(queryset.order_by("pk").values_list("pk", flat=True)[:limit])

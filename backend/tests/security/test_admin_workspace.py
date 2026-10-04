@@ -27,6 +27,8 @@ from rest_framework.test import APIClient
 from arkray.activities.models import Activity
 from arkray.audit.models import AuditEvent
 from arkray.identity import services as identity_services
+from arkray.identity.models import Role
+from arkray.identity.policy import ROLE_CAPABILITIES
 from arkray.identity.workspaces import AUDIT_ACTION_WORKSPACE_ACCESSED
 from arkray.leads.models import Lead
 from arkray.leads.services import SUBJECT_NOT_ASSIGNABLE
@@ -48,7 +50,13 @@ pytestmark = pytest.mark.django_db
 API = "/api/v1/workspaces"
 RANDOM_USER = "0b9a4c6e-5d4f-4a3b-9c2d-1e0f2a3b4c5d"  # exists nowhere
 MISSING_RECORD = "5a1e4d2c-0000-4000-8000-00000000abcd"
-RECORD_PARAMS = ("<uuid:lead_id>", "<uuid:opportunity_id>", "<uuid:activity_id>")
+RECORD_PARAMS = (
+    "<uuid:lead_id>",
+    "<uuid:opportunity_id>",
+    "<uuid:activity_id>",
+    "<uuid:question_id>",
+    "<uuid:conversation_id>",
+)
 WORKSPACE_ROUTES = [
     *sorted(
         (route, method)
@@ -69,6 +77,14 @@ def concrete(route: str, workspace: str, record: str = MISSING_RECORD) -> str:
 
 def call(client: APIClient, method: str, path: str, body=None):
     return getattr(client, method.lower())(path, body or {}, format="json")
+
+
+def admin_only(route: str) -> bool:
+    """A capability route sales users can't reach (refused before the workspace is looked
+    at). Ask Arkray's capability, ai.query, is a sales user's own: those routes behave like
+    every other workspace route."""
+    kind, _, capability = AUTHZ_MATRIX[route].access.partition(":")
+    return kind == "capability" and capability not in ROLE_CAPABILITIES[Role.SALES_USER]
 
 
 def has_record(route: str) -> bool:
@@ -170,7 +186,7 @@ def test_another_sales_user_typing_the_url_learns_nothing(route, method, user_a,
     client = signed_in(user_a)
     existing = call(client, method, concrete(route, ws(user_b)))
     missing = call(client, method, concrete(route, RANDOM_USER))
-    if AUTHZ_MATRIX[route].access.startswith("capability:"):
+    if admin_only(route):
         assert existing.status_code == missing.status_code == 403
     else:
         assert existing.status_code == missing.status_code == 404
@@ -180,7 +196,7 @@ def test_another_sales_user_typing_the_url_learns_nothing(route, method, user_a,
 @pytest.mark.parametrize(("route", "method"), WORKSPACE_ROUTES)
 def test_a_user_typing_their_own_id_gets_their_own_workspace(route, method, user_b):
     response = call(signed_in(user_b), method, concrete(route, ws(user_b)))
-    if AUTHZ_MATRIX[route].access.startswith("capability:"):
+    if admin_only(route):
         assert response.status_code == 403
     elif has_record(route):
         # The workspace opened; the (missing) record or the empty body is what's refused.
@@ -664,15 +680,16 @@ def test_there_is_no_route_to_act_as_another_user():
 
 # --- query counts ---------------------------------------------------------------------------------
 # Each request of an admin's visit to Rahul's workspace (the audit window already open, as for
-# every request after the first): session + user (2), the workspace check (1), then the
-# module's own reads: the same as in the user's own workspace plus that one check.
+# every request after the first): session + user (2), the workspace check (1), the audit
+# window check (1: a read; windows live in PostgreSQL since Phase 9), then the module's own
+# reads: the same as in the user's own workspace plus those two checks.
 EXPECTED_QUERIES = {
-    "": 4,  # + the subject's id, name and status
-    "/dashboard": 10,  # + the read-only snapshot and its six figures and three lists
-    "/leads": 4,  # + one keyset page
-    "/pipeline-board": 8,  # + pipeline, stages, totals, columns, cards
-    "/activities": 4,  # + one keyset page
-    "/activity-summary": 5,  # + the counts
+    "": 5,  # + the subject's id, name and status
+    "/dashboard": 11,  # + the read-only snapshot and its six figures and three lists
+    "/leads": 5,  # + one keyset page
+    "/pipeline-board": 9,  # + pipeline, stages, totals, columns, cards
+    "/activities": 5,  # + one keyset page
+    "/activity-summary": 6,  # + the counts
 }
 
 

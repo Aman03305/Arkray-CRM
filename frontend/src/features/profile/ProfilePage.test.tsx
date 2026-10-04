@@ -74,7 +74,7 @@ describe("ProfilePage", () => {
     mockApi({ "POST /api/v1/auth/logout": apiError(503, "service_unavailable", "Down.") });
     renderWithProviders(<ProfilePage />, { viewer: adminViewer });
     await userEvent.setup().click(screen.getByRole("button", { name: "Sign out" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Something went wrong on our side");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Arkray is temporarily unavailable");
     expect(nav.hardNavigate).not.toHaveBeenCalled();
   });
 });

@@ -12,10 +12,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Third-party actions are pinned to a commit (the tag they were taken from in the comment):
+# a moved tag can't change what runs here (Phase 11). Move them deliberately.
+
 jobs:
   backend:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The full suite takes about 8 minutes on a fast workstation; hosted runners are slower.
+    timeout-minutes: 40
     services:
       postgres:
         image: pgvector/pgvector:0.8.6-pg16
@@ -31,11 +35,20 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
       - run: uv sync --frozen
+      # The pinned embedding model (SHA-256 verified), so the real-model tests run here
+      # instead of skipping (backend/arkray/ai/tests/test_local_model.py).
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: backend/.models
+          key: embedding-model-${{ hashFiles('backend/arkray/ai/model_files.py') }}
+      - run: uv run python manage.py ai_fetch_model
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy .
@@ -56,9 +69,9 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version-file: frontend/.node-version
           cache: pnpm
@@ -74,9 +87,38 @@ jobs:
 
   images:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     needs: [backend, frontend]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: docker build -t arkray-backend:ci backend
       - run: docker build --build-arg API_ORIGIN=http://backend:8000 -t arkray-frontend:ci frontend
+      # The images start as production runs them: production settings, a read-only root
+      # filesystem, no capabilities. (No database here: the startup role check only warns
+      # when it can't connect; readiness would report the database.)
+      - name: Smoke-test the images
+        run: |
+          set -euo pipefail
+          prod_env=(
+            -e DJANGO_SECRET_KEY="ci-image-smoke-$(openssl rand -hex 32)"
+            -e DJANGO_ALLOWED_HOSTS=localhost
+            -e DATABASE_URL=postgres://arkray_app:x@127.0.0.1:5432/arkray
+            -e CELERY_BROKER_URL=redis://:x@127.0.0.1:6379/0
+            -e REDIS_CACHE_URL=redis://:x@127.0.0.1:6379/1
+            -e TRUSTED_PROXY_COUNT=1 -e APP_BASE_URL=https://crm.example.com
+            -e EMAIL_URL=smtp+tls://user:x@smtp.example.com:587
+          )
+          hardened=(--read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true)
+          docker run --rm "${prod_env[@]}" "${hardened[@]}" arkray-backend:ci python manage.py check --deploy
+          docker run -d --name api "${prod_env[@]}" "${hardened[@]}" -p 8000:8000 arkray-backend:ci
+          docker run -d --name web "${hardened[@]}" --tmpfs /app/.next/cache:uid=10001,gid=10001 -p 3000:3000 arkray-frontend:ci
+          for i in $(seq 1 30); do curl -fsS http://localhost:8000/health/live && break; sleep 2; done
+          # Outside the loop, whose own status is always the last sleep's: the API is up.
+          curl -fsS http://localhost:8000/health/live
+          curl -fsS -o /dev/null http://localhost:3000/login
+          docker logs api 2>&1 | tail -20
+          # A crash prints a traceback; structured lines carry their level.
+          if docker logs api 2>&1 | grep -E '\[ERROR\]|Traceback|Read-only file system|"level": "(ERROR|CRITICAL)"'; then
+            echo "the API logged errors" >&2
+            exit 1
+          fi

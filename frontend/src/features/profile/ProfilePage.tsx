@@ -104,7 +104,7 @@ export function ProfilePage() {
           <dl className="grid gap-4 sm:grid-cols-3">
             {rows.map(([label, value]) => (
               <div key={label}>
-                <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">{label}</dt>
+                <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</dt>
                 <dd className="mt-1 text-sm text-slate-900">
                   {value ?? (
                     <>

@@ -455,6 +455,76 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/workspaces/{workspace}/ask": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** @description Ask a question about this workspace, or read what Ask Arkray can do right now. */
+        readonly get: operations["ask_status"];
+        readonly put?: never;
+        /** @description Ask a question about this workspace, or read what Ask Arkray can do right now. */
+        readonly post: operations["ask"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/ask/conversations": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** @description The caller's most recent conversations in this workspace (at most 20). */
+        readonly get: operations["ask_conversations"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/ask/conversations/{conversation_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** @description One of the caller's conversations in this workspace, or forget it. */
+        readonly get: operations["ask_conversation"];
+        readonly put?: never;
+        readonly post?: never;
+        /** @description One of the caller's conversations in this workspace, or forget it. */
+        readonly delete: operations["ask_conversation_delete"];
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/ask/questions/{question_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** @description One of the caller's questions in this workspace (poll until answered or failed). */
+        readonly get: operations["ask_question"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/workspaces/{workspace}/dashboard": {
         readonly parameters: {
             readonly query?: never;
@@ -1020,6 +1090,109 @@ export interface components {
             readonly next: string | null;
             readonly previous: string | null;
         };
+        readonly Answer: {
+            readonly blocks: readonly components["schemas"]["AnswerBlock"][];
+            readonly facts: readonly components["schemas"]["AnswerFact"][];
+            readonly sources: readonly components["schemas"]["AnswerSource"][];
+            readonly citations: readonly components["schemas"]["AnswerCitation"][];
+            readonly notices: readonly string[];
+            readonly provenance: components["schemas"]["AnswerProvenance"];
+        };
+        readonly AnswerBlock: {
+            readonly type: components["schemas"]["AskBlockTypeEnum"];
+            readonly parts: readonly components["schemas"]["AnswerPart"][];
+        };
+        readonly AnswerCitation: {
+            readonly ref: string;
+            readonly kind: components["schemas"]["AskRecordKindEnum"];
+            readonly label: string;
+            /** @description Quoted from the record as it is now. */
+            readonly snippet: string;
+            readonly when: string;
+        };
+        readonly AnswerFact: {
+            readonly label: string;
+            /** @description Formatted by the server, e.g. ₹12,50,000. */
+            readonly value: string;
+            readonly kind: components["schemas"]["AskFactKindEnum"];
+            /** @description The exact value: an integer or a decimal string. */
+            readonly raw: string;
+        };
+        readonly AnswerPart: {
+            readonly text?: string;
+            readonly bold?: boolean;
+            /** @description kind:id of a record in `sources`. */
+            readonly ref?: string;
+        };
+        readonly AnswerProvenance: {
+            /**
+             * @description router: CRM figures and a fixed template; llm: written by the AI model from tool results; retrieval: the most relevant records, without a summary.
+             *
+             *     * `router` - router
+             *     * `llm` - llm
+             *     * `retrieval` - retrieval
+             */
+            readonly mode: components["schemas"]["AskAnswerModeEnum"];
+            readonly tools: readonly string[];
+            readonly grounded: boolean;
+            readonly model: string;
+        };
+        readonly AnswerSource: {
+            readonly ref: string;
+            readonly kind: components["schemas"]["AskRecordKindEnum"];
+            /** Format: uuid */
+            readonly id: string;
+            readonly label: string;
+            readonly detail: string;
+        };
+        /**
+         * @description * `router` - router
+         *     * `llm` - llm
+         *     * `retrieval` - retrieval
+         * @enum {string}
+         */
+        readonly AskAnswerModeEnum: "router" | "llm" | "retrieval";
+        /**
+         * @description * `paragraph` - paragraph
+         *     * `bullet` - bullet
+         * @enum {string}
+         */
+        readonly AskBlockTypeEnum: "paragraph" | "bullet";
+        /**
+         * @description * `count` - count
+         *     * `money` - money
+         * @enum {string}
+         */
+        readonly AskFactKindEnum: "count" | "money";
+        readonly AskInputRequest: {
+            /** @description The question, up to 1,000 characters once cleaned. */
+            readonly question: string;
+            /**
+             * Format: uuid
+             * @description Continue this conversation (yours, in this workspace); omit to start one.
+             */
+            readonly conversation_id?: string | null;
+        };
+        /**
+         * @description * `lead` - lead
+         *     * `opportunity` - opportunity
+         *     * `task` - task
+         *     * `meeting` - meeting
+         *     * `note` - note
+         * @enum {string}
+         */
+        readonly AskRecordKindEnum: "lead" | "opportunity" | "task" | "meeting" | "note";
+        readonly AskStatus: {
+            readonly enabled: boolean;
+            /**
+             * @description available: written answers by the AI model; unavailable: temporarily down (answers show records instead); none: this CRM runs without a model.
+             *
+             *     * `available` - available
+             *     * `unavailable` - unavailable
+             *     * `none` - none
+             */
+            readonly summaries: components["schemas"]["SummariesEnum"];
+        };
         /** @description A user CRM records can be assigned to (for owner pickers). */
         readonly Assignee: {
             /** Format: uuid */
@@ -1059,6 +1232,25 @@ export interface components {
          * @enum {string}
          */
         readonly CategoryEnum: "open" | "qualified" | "unqualified" | "converted";
+        readonly Conversation: {
+            /** Format: uuid */
+            readonly id: string;
+            /** Format: date-time */
+            readonly created_at: string;
+            /** Format: date-time */
+            readonly updated_at: string;
+            readonly questions: readonly components["schemas"]["Question"][];
+        };
+        readonly ConversationSummary: {
+            /** Format: uuid */
+            readonly id: string;
+            /** @description The first question, shortened. */
+            readonly title: string;
+            /** Format: date-time */
+            readonly created_at: string;
+            /** Format: date-time */
+            readonly updated_at: string;
+        };
         readonly Conversion: {
             readonly lead: components["schemas"]["Lead"];
             readonly opportunity: components["schemas"]["Opportunity"];
@@ -1574,6 +1766,27 @@ export interface components {
          * @enum {string}
          */
         readonly PriorityEnum: "low" | "normal" | "high";
+        readonly Question: {
+            /** Format: uuid */
+            readonly id: string;
+            /** Format: uuid */
+            readonly conversation_id: string;
+            readonly question: string;
+            readonly status: components["schemas"]["QuestionStatusEnum"];
+            readonly error: string | null;
+            readonly answer: components["schemas"]["Answer"] | null;
+            /** Format: date-time */
+            readonly created_at: string;
+            /** Format: date-time */
+            readonly finished_at: string | null;
+        };
+        /**
+         * @description * `pending` - Pending
+         *     * `answered` - Answered
+         *     * `failed` - Failed
+         * @enum {string}
+         */
+        readonly QuestionStatusEnum: "pending" | "answered" | "failed";
         /**
          * @description * `hot` - Hot
          *     * `warm` - Warm
@@ -1722,7 +1935,8 @@ export interface components {
          */
         readonly StageCategoryEnum: "open" | "won" | "lost";
         readonly StageHistory: {
-            readonly id: number;
+            /** @example 3f9a1c0b7d2e4a6c8e10 */
+            readonly id: string;
             /** Format: uuid */
             readonly from_stage_id: string | null;
             /** Format: uuid */
@@ -1757,6 +1971,13 @@ export interface components {
             readonly name: string;
             readonly category: components["schemas"]["CategoryEnum"];
         };
+        /**
+         * @description * `available` - available
+         *     * `unavailable` - unavailable
+         *     * `none` - none
+         * @enum {string}
+         */
+        readonly SummariesEnum: "available" | "unavailable" | "none";
         readonly TimelineActivity: {
             /** Format: uuid */
             readonly id: string;
@@ -1778,7 +1999,8 @@ export interface components {
          *     activity and opportunity are the live records, shown only because they are visible.
          */
         readonly TimelineEntry: {
-            readonly id: number;
+            /** @example 3f9a1c0b7d2e4a6c8e10 */
+            readonly id: string;
             readonly kind: components["schemas"]["TimelineKindEnum"];
             /** Format: date-time */
             readonly occurred_at: string;
@@ -1845,6 +2067,12 @@ export interface components {
             readonly role: components["schemas"]["RoleEnum"];
             readonly role_label: string;
             readonly capabilities: readonly string[];
+            readonly features: components["schemas"]["ViewerFeatures"];
+        };
+        /** @description Deployment-wide features the UI should offer (configuration, not permissions). */
+        readonly ViewerFeatures: {
+            /** @description Ask Arkray is turned on for this CRM. */
+            readonly ask: boolean;
         };
         readonly Workspace: {
             readonly kind: components["schemas"]["WorkspaceKindEnum"];
@@ -2689,6 +2917,194 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ActivitySummary"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly ask_status: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AskStatus"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly ask: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["AskInputRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Question"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Too many questions, or one is still pending. */
+            readonly 429: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Ask Arkray is turned off or busy. */
+            readonly 503: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly ask_conversations: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": readonly components["schemas"]["ConversationSummary"][];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly ask_conversation: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly conversation_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Conversation"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly ask_conversation_delete: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly conversation_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description No response body */
+            readonly 204: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly ask_question: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly question_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Question"];
                 };
             };
             /** @description Not found, or outside this workspace. */

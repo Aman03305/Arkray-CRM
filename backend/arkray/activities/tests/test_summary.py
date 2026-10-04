@@ -128,7 +128,7 @@ def test_next_open_tasks_are_the_start_of_the_tasks_tab(user_a):
     found = next_open_tasks(scope, now=NOW, limit=5)
 
     assert found == [overdue, today, later, undated]
-    tab = KeysetPaginator(ORDERINGS["scheduled"], page_size=3).paginate(
+    tab = KeysetPaginator(ORDERINGS["scheduled"], page_size=3, binding=None).paginate(
         activity_list(scope, ActivityFilters(type="task", status="open"), now=NOW), None
     )
     assert next_open_tasks(scope, now=NOW, limit=3) == tab.items

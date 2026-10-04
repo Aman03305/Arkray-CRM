@@ -14,6 +14,13 @@ const GENERIC = "Something went wrong. Please try again.";
 
 export function describeError(error: unknown): DisplayError {
   if (!(error instanceof ApiError)) return { message: GENERIC, requestId: null };
+  if (error.status === 503) {
+    const wait = error.retryAfterSeconds;
+    return {
+      message: `Arkray is temporarily unavailable. Please try again ${wait ? `in ${wait} seconds` : "in a moment"}.`,
+      requestId: error.requestId,
+    };
+  }
   if (error.status >= 500) {
     return {
       message: "Something went wrong on our side. Please try again in a moment.",

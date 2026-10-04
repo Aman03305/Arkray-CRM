@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 import pytest
+from celery.schedules import crontab
 from django.conf import settings
 from django.contrib.sessions.backends.db import SessionStore
 from django.contrib.sessions.models import Session
@@ -21,11 +22,17 @@ def test_purges_old_throttle_evidence_and_expired_sessions():
     expired.set_expiry(-1)
     expired.create()
 
-    assert housekeeping() == {"throttle_events": 1, "sessions": 1, "redacted": 0}
+    assert housekeeping() == {
+        "throttle_events": 1,
+        "sessions": 1,
+        "redacted": 0,
+        "access_windows": 0,
+    }
     assert AuthThrottleEvent.objects.count() == 1
     assert list(Session.objects.values_list("session_key", flat=True)) == [live.session_key]
 
 
 def test_is_scheduled_hourly():
     entry = settings.CELERY_BEAT_SCHEDULE["identity-housekeeping"]
-    assert (entry["task"], entry["schedule"]) == ("identity.housekeeping", 3600.0)
+    assert entry["task"] == "identity.housekeeping"
+    assert entry["schedule"] == crontab(minute=15)  # hourly, at a wall-clock time

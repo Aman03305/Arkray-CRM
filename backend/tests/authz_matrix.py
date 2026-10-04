@@ -32,6 +32,8 @@ USERS_MANAGE = "capability:users.manage"
 ASSIGN_ANY = "capability:crm.assign_any"
 OPPORTUNITY = "api/v1/workspaces/<str:workspace>/opportunities/<uuid:opportunity_id>"
 ACTIVITY = "api/v1/workspaces/<str:workspace>/activities/<uuid:activity_id>"
+ASK = "api/v1/workspaces/<str:workspace>/ask"
+AI_QUERY = "capability:ai.query"
 
 # Route pattern (as produced by the URL resolver) -> rule.
 AUTHZ_MATRIX: dict[str, RouteRule] = {
@@ -97,4 +99,11 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     # --- global search (Phase 7). Read-only: every kind of record is searched inside the
     # scope (scope.apply() before any word is matched); the query is never stored. ---------
     "api/v1/workspaces/<str:workspace>/search": _rule("workspace", "GET"),
+    # --- Ask Arkray (Phase 8). The ai.query capability, then the workspace (404 when the
+    # caller may not open it); questions and conversations are the caller's own in that
+    # workspace (404 otherwise). The model only reaches data through scope-bound tools. ------
+    f"{ASK}": _rule(AI_QUERY, "GET", "POST"),
+    f"{ASK}/questions/<uuid:question_id>": _rule(AI_QUERY, "GET"),
+    f"{ASK}/conversations": _rule(AI_QUERY, "GET"),
+    f"{ASK}/conversations/<uuid:conversation_id>": _rule(AI_QUERY, "GET", "DELETE"),
 }

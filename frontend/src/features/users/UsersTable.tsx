@@ -75,7 +75,7 @@ export function UsersTable({ users, loading, viewerId, onAction }: UsersTablePro
                   <tr key={user.id} className="hover:bg-slate-50/60">
                     <td className="whitespace-nowrap px-4 py-3">
                       <UserWorkspaceLink user={user} />
-                      {isSelf ? <span className="ml-1.5 text-xs text-slate-400">(you)</span> : null}
+                      {isSelf ? <span className="ml-1.5 text-xs text-slate-500">(you)</span> : null}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-slate-600">{user.email}</td>
                     <td className="whitespace-nowrap px-4 py-3 text-slate-600">{user.role_label}</td>
@@ -88,7 +88,7 @@ export function UsersTable({ users, loading, viewerId, onAction }: UsersTablePro
                           {formatRelative(user.last_login)}
                         </time>
                       ) : (
-                        <span className="text-slate-400">Never</span>
+                        <span className="text-slate-500">Never</span>
                       )}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-slate-600">

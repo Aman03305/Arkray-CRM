@@ -40,7 +40,7 @@ describe("a salesperson's Leads", () => {
     expect(within(table).getByRole("link", { name: "Asha Mehta" })).toHaveAttribute("href", `/leads/${makeLeadListItem().id}`);
     expect(within(table).getByText("Qualified")).toBeInTheDocument(); // not colour alone
     expect(within(table).queryByRole("columnheader", { name: "Owner" })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "New Lead" })).toHaveAttribute("href", "/leads/new");
+    expect(screen.getByRole("link", { name: "New lead" })).toHaveAttribute("href", "/leads/new");
     expect(api.callsTo("GET", "/api/v1/workspaces/me/leads")[0]!.query.get("page_size")).toBe("25");
   });
 
@@ -202,7 +202,7 @@ describe("administrators", () => {
       "href",
       `/admin/users/${RAHUL_ID}/leads/${makeLeadListItem().id}`,
     );
-    expect(screen.getByRole("link", { name: "New Lead" })).toHaveAttribute("href", `/admin/users/${RAHUL_ID}/leads/new`);
+    expect(screen.getByRole("link", { name: "New lead" })).toHaveAttribute("href", `/admin/users/${RAHUL_ID}/leads/new`);
     expect(api.calls.every((c) => !c.path.includes("/workspaces/all") && !c.path.includes("/workspaces/me"))).toBe(true);
   });
 

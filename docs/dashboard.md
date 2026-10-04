@@ -54,7 +54,7 @@ person's workspace the rows don't repeat their name.
 ## Workspaces
 
 The dashboard follows the existing workspace rules exactly; nothing is dashboard-specific
-([authorization.md](authorization.md#admin--user-workspace-built-resolution-banner-endpoint-leads-views-in-phase-2)):
+([authorization.md](authorization.md#admin--user-workspace-built-resolution-and-banner-endpoint-in-phase-0-module-views-in-phases-25-completed-in-phase-6)):
 
 | URL | Viewer | API workspace | Shows |
 |---|---|---|---|
@@ -302,7 +302,9 @@ of the schedule index). Those tests vacuum their data first, as autovacuum keeps
 - **Accessibility:** one `h1`, an `h2` per section (each a labelled region), cards are
   keyboard-reachable links whose accessible names read in order ("Tasks 9 open 2 due today
   · 1 overdue"), every list link names its list, overdue is written out (not colour alone),
-  times are `<time>` elements, errors use `role="alert"`, secondary text meets AA contrast.
+  times are `<time>` elements, errors use `role="alert"`, secondary text meets AA contrast (slate-500 or darker since the
+  whole-software audit, which measured the earlier slate-400 at 2.63:1; links inside
+  sentences are underlined).
 
 ## Tests
 

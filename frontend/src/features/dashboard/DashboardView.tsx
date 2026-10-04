@@ -125,7 +125,7 @@ function Figure({
             1 overdue", not the words run together. */}
         <div className="flex items-center justify-between gap-2 text-sm font-medium text-slate-600">
           {label}
-          <Icon aria-hidden="true" className="size-4 shrink-0 text-slate-400 group-hover:text-brand-600" />
+          <Icon aria-hidden="true" className="size-4 shrink-0 text-slate-500 group-hover:text-brand-600" />
         </div>
         <div className="mt-2 text-xl font-semibold tracking-tight text-slate-900 tabular-nums [overflow-wrap:anywhere] sm:text-2xl">
           <Grouped text={value} />
@@ -215,7 +215,8 @@ function Panel({ title, footer, children }: { title: string; footer: ReactNode; 
   );
 }
 
-const FOOTER_LINK = "font-medium text-brand-700 hover:underline";
+// Underlined: a link inside a sentence must not rely on colour alone (WCAG 1.4.1; audit).
+const FOOTER_LINK = "font-medium text-brand-700 underline underline-offset-2 hover:text-brand-800";
 const NONE = "py-6 text-center text-sm text-slate-500";
 // Names wrap rather than being cut off: the lists are short, and a truncated row could hide
 // who a lead is assigned to, or that they are deactivated (review).

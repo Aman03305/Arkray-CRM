@@ -102,7 +102,7 @@ export const SUMMARY: ActivitySummary = {
 
 export function makeEntry(overrides: Partial<TimelineEntry> = {}): TimelineEntry {
   const base: TimelineEntry = {
-    id: 1,
+    id: "e1",
     kind: "lead.created",
     occurred_at: "2026-09-20T04:30:00Z",
     actor: RAHUL,
@@ -115,7 +115,7 @@ export function makeEntry(overrides: Partial<TimelineEntry> = {}): TimelineEntry
 
 export function noteEntry(text: string, overrides: Partial<TimelineEntry> = {}): TimelineEntry {
   return makeEntry({
-    id: 2,
+    id: "e2",
     kind: "note.added",
     occurred_at: "2026-10-01T05:00:00Z",
     details: {},

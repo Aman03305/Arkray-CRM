@@ -11,8 +11,9 @@ import { useDebounced } from "./hooks";
 
 const LOOKS_LIKE_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function checkablePhones(phones: readonly string[]): string[] {
-  return phones.map((p) => p.trim()).filter((p) => p.replace(/\D/g, "").length >= 5);
+/** Full-width digits count, as the server reads them (NFKC). */
+export function checkablePhones(phones: readonly string[]): string[] {
+  return phones.map((p) => p.trim()).filter((p) => p.normalize("NFKC").replace(/\D/g, "").length >= 5);
 }
 
 /**

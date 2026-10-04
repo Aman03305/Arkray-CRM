@@ -3,7 +3,7 @@
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 
-import type { Lead, LeadOptions } from "@/lib/api/types";
+import type { Lead } from "@/lib/api/types";
 import { hasCapability, type Viewer } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
 import type { Workspace } from "@/lib/workspace";
@@ -74,10 +74,6 @@ export function useLeadWriteSync(workspace: Workspace) {
   const queryClient = useQueryClient();
   const viewerId = useViewer()?.id;
   return useCallback((lead: Lead) => syncAfterLeadWrite(queryClient, workspace, lead, viewerId), [queryClient, workspace, viewerId]);
-}
-
-export function statusName(options: LeadOptions | undefined, key: string): string {
-  return options?.statuses.find((s) => s.key === key)?.name ?? key;
 }
 
 export interface LeadPermissions {

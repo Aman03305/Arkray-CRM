@@ -103,7 +103,7 @@ export function Dialog({
             onClick={onClose}
             disabled={busy}
             aria-label="Close dialog"
-            className="-mr-1 rounded-md p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
+            className="-mr-1 rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
           >
             <X aria-hidden="true" className="size-4" />
           </button>

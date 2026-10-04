@@ -15,17 +15,18 @@ from uuid import UUID
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework import status as http
+from rest_framework.permissions import SAFE_METHODS
 from rest_framework.request import Request
 from rest_framework.response import Response
 
 from arkray.core.access import AccessScope
 from arkray.core.api import IDEMPOTENCY_HEADER, ApiView, idempotency_key, validated
 from arkray.core.errors import InvalidInputError, PermissionDeniedError
-from arkray.core.keyset import KeysetPaginator, page_links
+from arkray.core.keyset import CursorBinding, KeysetPaginator, page_links
 from arkray.identity.models import User
 from arkray.identity.permissions import IsActiveUser, requires
 from arkray.identity.policy import Capability
-from arkray.identity.workspaces import resolve_workspace, workspace_segment
+from arkray.identity.workspaces import authorize_write, resolve_workspace, workspace_segment
 
 from .. import selectors, services
 from ..countries import COUNTRY_CODES
@@ -54,7 +55,12 @@ def _actor(request: Request) -> User:
 
 def _scope(request: Request, workspace: str) -> tuple[User, AccessScope]:
     actor = _actor(request)
-    return actor, resolve_workspace(actor, workspace)
+    scope = resolve_workspace(actor, workspace)
+    # Unsafe methods are writes: refused before the body is even read (Phase 9: a viewer's
+    # write with a malformed body got a validation error instead of a 403).
+    if request.method not in SAFE_METHODS:
+        authorize_write(actor, scope)
+    return actor, scope
 
 
 def _lead(lead: Any) -> dict[str, Any]:
@@ -89,7 +95,9 @@ class LeadListView(ApiView):
             ),
         )
         paginator = KeysetPaginator(
-            selectors.ORDERINGS[params["ordering"]], page_size=params["page_size"]
+            selectors.ORDERINGS[params["ordering"]],
+            page_size=params["page_size"],
+            binding=CursorBinding.of("leads.list", params, actor_id=scope.actor_id, scope=scope),
         )
         page = paginator.paginate(leads, params.get("cursor"), visible=selectors.listable(scope))
         return Response(

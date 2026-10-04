@@ -102,25 +102,73 @@ class TestCheck:
 
 
 class TestDeviceCookie:
+    EMAIL = "rahul@example.test"
+
+    @pytest.fixture
+    def account(self):
+        from tests.factories import UserFactory
+
+        return UserFactory(email=self.EMAIL)
+
+    def trust(self, user):
+        user.refresh_from_db()
+        return throttling.device_trust(user.password, user.session_epoch)
+
     def request_with(self, value):
         request = RequestFactory().post("/api/v1/auth/login")
         request.COOKIES[settings.LOGIN_DEVICE_COOKIE_NAME] = value
         return request
 
-    def issued_cookie(self, identifier=IDENTIFIER, device="c" * 32):
+    def issued_cookie(self, user, identifier=IDENTIFIER, device="c" * 32):
         response = HttpResponse()
-        throttling.remember_device(response, identifier, device)
+        throttling.remember_device(response, identifier, device, self.trust(user))
         return response.cookies[settings.LOGIN_DEVICE_COOKIE_NAME].value
 
-    def test_round_trip(self):
-        assert (
-            throttling.read_device(self.request_with(self.issued_cookie()), [IDENTIFIER])
-            == "c" * 32
-        )
+    def read(self, value, email=EMAIL):
+        return throttling.read_device(self.request_with(value), [IDENTIFIER], email)
 
-    def test_is_bound_to_one_account(self):
-        cookie = self.issued_cookie(identifier=login_identifier("other@example.test"))
-        assert throttling.read_device(self.request_with(cookie), [IDENTIFIER]) == ""
+    def test_round_trip(self, account):
+        assert self.read(self.issued_cookie(account)) == "c" * 32
+
+    def test_is_bound_to_one_account(self, account):
+        cookie = self.issued_cookie(account, identifier=login_identifier("other@example.test"))
+        assert self.read(cookie) == ""
+
+    def test_is_sent_to_the_api_including_own_account_changes(self, account):
+        """Phase 9 review P3: at /api/v1/auth/ only, the cookie never reached the own-email
+        re-authentication (/api/v1/admin/users/<id>/change-email), so an attacker's lockout
+        refused the owner's trusted browser there."""
+        response = HttpResponse()
+        throttling.remember_device(response, IDENTIFIER, "c" * 32, self.trust(account))
+        morsel = response.cookies[settings.LOGIN_DEVICE_COOKIE_NAME]
+        assert morsel["path"] == "/api/v1/"
+        for path in ("/api/v1/auth/login", "/api/v1/auth/password/change"):
+            assert path.startswith(morsel["path"])
+        assert f"/api/v1/admin/users/{account.pk}/change-email".startswith(morsel["path"])
+        assert (morsel["httponly"], morsel["samesite"]) == (True, "Strict")
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            lambda user: user.set_password("a-reset-passphrase-123"),  # reset or change
+            lambda user: setattr(user, "session_epoch", user.session_epoch + 1),  # sign-out all
+        ],
+    )
+    def test_trust_ends_when_the_accounts_credentials_change(self, account, change):
+        """Phase 9 review P2: cookies harvested by someone who once knew the password kept
+        their own guess budgets (and the per-source exemption) after the owner's reset."""
+        cookie = self.issued_cookie(account)
+        change(account)
+        account.save()
+        assert self.read(cookie) == ""
+        assert self.read(self.issued_cookie(account)) == "c" * 32  # a new sign-in re-earns it
+
+    def test_no_trust_without_an_account(self):
+        from tests.factories import UserFactory
+
+        user = UserFactory(email="someone-else@example.test")
+        cookie = self.issued_cookie(user)
+        assert self.read(cookie, email="nobody@example.test") == ""
 
     @pytest.mark.parametrize(
         "value",
@@ -128,16 +176,20 @@ class TestDeviceCookie:
             "garbage",
             signing.dumps({"i": IDENTIFIER, "d": "c" * 32}, salt="some-other-salt"),
             signing.dumps({"i": IDENTIFIER, "d": "../../etc"}, salt="arkray.identity.login-device"),
+            signing.dumps({"i": IDENTIFIER, "d": "c" * 32}, salt="arkray.identity.login-device"),
+            signing.dumps(
+                {"i": IDENTIFIER, "d": "c" * 32, "t": "0" * 32}, salt="arkray.identity.login-device"
+            ),
             signing.dumps(["not", "a", "dict"], salt="arkray.identity.login-device"),
         ],
     )
-    def test_forged_or_malformed_cookies_are_ignored(self, value):
-        assert throttling.read_device(self.request_with(value), [IDENTIFIER]) == ""
+    def test_forged_or_malformed_cookies_are_ignored(self, account, value):
+        assert self.read(value) == ""
 
-    def test_expired_cookies_are_ignored(self):
-        cookie = self.issued_cookie()
+    def test_expired_cookies_are_ignored(self, account):
+        cookie = self.issued_cookie(account)
         with override_settings(LOGIN_DEVICE_COOKIE_AGE_S=-1):
-            assert throttling.read_device(self.request_with(cookie), [IDENTIFIER]) == ""
+            assert self.read(cookie) == ""
 
 
 class TestResetRequests:

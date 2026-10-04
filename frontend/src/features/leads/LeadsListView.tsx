@@ -103,7 +103,7 @@ export function LeadsListView({ workspace }: { workspace: Workspace }) {
       className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-brand-600 px-3.5 text-sm font-medium text-white hover:bg-brand-700"
     >
       <Plus aria-hidden="true" className="size-4" />
-      New Lead
+      New lead
     </Link>
   ) : null;
 

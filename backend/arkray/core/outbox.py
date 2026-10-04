@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -45,6 +46,7 @@ from django.db.models import F
 from django.utils import timezone
 
 from .context import current_correlation_id, update_context
+from .logging import safe_exception_text
 from .models import OutboxEvent, OutboxStatus
 
 logger = logging.getLogger(__name__)
@@ -210,6 +212,82 @@ def _claim(queue: str, max_in_flight: int, now: datetime) -> list[OutboxEvent]:
         return events
 
 
+@dataclass(frozen=True, slots=True)
+class Requeued:
+    requeued: list[int]
+    superseded: list[int]  # the same work is pending or running again under another event
+    redacted: list[int]  # the payload was blanked after its retention: nothing left to run
+
+
+def requeue_dead(event_ids: list[int]) -> Requeued:
+    """Dead events back to pending, due now, with a fresh attempt budget: an operator's
+    action once the cause is fixed (`manage.py outbox_requeue`; docs/runbooks.md). Safe
+    because handlers are idempotent. The last error is kept until the event runs again."""
+    requeued: list[int] = []
+    superseded: list[int] = []
+    redacted: list[int] = []
+    chosen: set[tuple[str, str]] = set()  # (topic, dedupe key): the newest dead one runs
+    with transaction.atomic():
+        dead = (
+            OutboxEvent.objects.select_for_update()
+            .filter(pk__in=event_ids, status=OutboxStatus.DEAD)
+            .order_by("-pk")
+        )
+        for event in dead:
+            work = (event.topic, event.dedupe_key)
+            if not event.payload:
+                redacted.append(event.pk)
+            elif event.dedupe_key and (
+                work in chosen
+                or OutboxEvent.objects.filter(
+                    topic=event.topic,
+                    dedupe_key=event.dedupe_key,
+                    status__in=[OutboxStatus.PENDING, OutboxStatus.IN_FLIGHT],
+                ).exists()
+            ):
+                superseded.append(event.pk)
+            else:
+                requeued.append(event.pk)
+                chosen.add(work)
+        requeued.sort()
+        OutboxEvent.objects.filter(pk__in=requeued).update(
+            status=OutboxStatus.PENDING,
+            attempts=0,
+            available_at=timezone.now(),
+            locked_until=None,
+            claim_token=None,
+            finished_at=None,
+        )
+    logger.warning(
+        "outbox_events_requeued",
+        extra={
+            "requeued": len(requeued),
+            "superseded": len(superseded),
+            "redacted": len(redacted),
+            "event_ids": requeued[:100],
+        },
+    )
+    return Requeued(requeued, superseded, redacted)
+
+
+def purge_done(*, finished_before: datetime) -> int:
+    """Delete done events finished before `finished_before`, in batches (short
+    transactions, no long lock), at most OUTBOX_PURGE_MAX_BATCHES per call; the rest waits
+    for the next run. Dead events are never purged here."""
+    purged = 0
+    for _ in range(settings.OUTBOX_PURGE_MAX_BATCHES):
+        batch = list(
+            OutboxEvent.objects.filter(status=OutboxStatus.DONE, finished_at__lt=finished_before)
+            .order_by()
+            .values_list("pk", flat=True)[: settings.OUTBOX_PURGE_BATCH]
+        )
+        if not batch:
+            break
+        deleted, _ = OutboxEvent.objects.filter(pk__in=batch, status=OutboxStatus.DONE).delete()
+        purged += deleted
+    return purged
+
+
 def redact_finished_payloads(topic: str, *, finished_before: datetime) -> int:
     """Blank the payloads of finished (done or dead) events of `topic`.
 
@@ -236,8 +314,13 @@ def backoff_seconds(
     return ceiling / 2 + rng() * ceiling / 2
 
 
+_EMAIL = re.compile(r"[^\s'\"<>(),;:@]+@[^\s'\"<>(),;:@]+")
+
+
 def _describe(exc: BaseException) -> str:
-    return f"{type(exc).__name__}: {exc}"[:_ERROR_TEXT_LIMIT]
+    """An event's last error, without email addresses (an SMTP rejection quotes the
+    recipient's, and dead events are kept until resolved: Phase 11 review)."""
+    return _EMAIL.sub("[email]", safe_exception_text(exc))[:_ERROR_TEXT_LIMIT]
 
 
 def _current(event_id: int, claim_token: UUID) -> Any:

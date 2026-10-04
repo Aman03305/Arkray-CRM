@@ -17,6 +17,7 @@ from decimal import Decimal
 import pytest
 
 from arkray.audit.models import AuditEvent
+from arkray.core.keyset import INVALID_CURSOR
 from arkray.leads.models import Lead
 from arkray.pipeline.models import Opportunity, Pipeline, Stage, StageHistory
 from tests.factories import LeadFactory, OpportunityFactory, UserFactory, default_stage
@@ -134,11 +135,10 @@ class TestReads:
             OpportunityFactory(lead=victim_lead, title=f"Victim {i}")
         victims_page = signed_in(victim).get(f"{ME}/opportunities", {"page_size": 1}).json()
         replayed = signed_in(attacker).get(victims_page["next"])
-        assert replayed.status_code == 200
-        assert all(
-            row["title"] not in {"Victim 0", "Victim 1", "Victim 2", SECRET_TITLE}
-            for row in replayed.json()["results"]
-        )
+        # Since Phase 9 bound to its user and workspace: refused (before: the attacker's own).
+        assert replayed.status_code == 400
+        assert replayed.json()["error"]["details"] == {"cursor": [INVALID_CURSOR]}
+        assert "Victim" not in replayed.content.decode()
 
 
 class TestAggregatesNeverLeak:

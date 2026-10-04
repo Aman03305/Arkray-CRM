@@ -10,9 +10,9 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
-from django.core import signing
 from django.utils import timezone
 
+from arkray.core import keyset
 from arkray.core.access import AccessScope
 from arkray.core.keyset import KeysetPaginator
 from arkray.pipeline import selectors
@@ -50,7 +50,7 @@ def scope():
 
 
 def walk(queryset, ordering, page_size, *, backwards=False):
-    paginator = KeysetPaginator(ordering, page_size=page_size)
+    paginator = KeysetPaginator(ordering, page_size=page_size, binding=None)
     page = paginator.paginate(queryset, None)
     seen = [o.pk for o in page.items]
     while page.next_cursor:
@@ -82,10 +82,10 @@ def test_every_ordering_walks_exactly_like_postgresql(scope, name, page_size, ba
 def test_a_value_cursor_never_carries_the_amount(scope):
     """Deal values are private sort keys (review): the cursor, which ends up in URLs and
     proxy logs, holds only the boundary row's id; the amount is re-read from that row."""
-    paginator = KeysetPaginator(ORDERINGS["-value"], page_size=3)
+    paginator = KeysetPaginator(ORDERINGS["-value"], page_size=3, binding=None)
     queryset = selectors.opportunity_list(scope, OpportunityFilters())
     page = paginator.paginate(queryset, None)
-    payload = signing.loads(page.next_cursor, salt="arkray.core.keyset")
+    payload = keyset._open(page.next_cursor)
     assert payload["v"][0] is None
     assert "99999999" not in page.next_cursor
     assert "99999999.99" not in str(payload)
@@ -93,7 +93,7 @@ def test_a_value_cursor_never_carries_the_amount(scope):
 
 def test_expected_close_cursors_hold_exact_dates(scope):
     """Date sort keys travel as ISO text and decode back to dates (not datetimes)."""
-    paginator = KeysetPaginator(ORDERINGS["expected_close"], page_size=3)
+    paginator = KeysetPaginator(ORDERINGS["expected_close"], page_size=3, binding=None)
     page = paginator.paginate(selectors.opportunity_list(scope, OpportunityFilters()), None)
-    payload = signing.loads(page.next_cursor, salt="arkray.core.keyset")
+    payload = keyset._open(page.next_cursor)
     assert payload["v"][0] == "2026-10-01"

@@ -61,7 +61,7 @@ const STATUSES: Record<ActivityStatus, { label: string; tone: "blue" | "green" |
 
 /** The status in words (notes have none); colour and icon only reinforce it. */
 export function StatusBadge({ status, overdue = false, type }: { status: ActivityStatus | null; overdue?: boolean; type?: ActivityType }) {
-  if (!status) return <span className="text-slate-400">—</span>;
+  if (!status) return <span className="text-slate-500">—</span>;
   const known = STATUSES[status] ?? STATUSES.open;
   const Icon = known.icon;
   return (
@@ -82,7 +82,7 @@ export function statusLabel(status: ActivityStatus): string {
 const PRIORITIES: Record<ActivityPriority, string> = { low: "Low", normal: "Normal", high: "High" };
 
 export function PriorityLabel({ priority }: { priority: ActivityPriority | null }) {
-  if (!priority) return <span className="text-slate-400">—</span>;
+  if (!priority) return <span className="text-slate-500">—</span>;
   return <span className={priority === "high" ? "font-medium text-red-700" : undefined}>{PRIORITIES[priority] ?? priority}</span>;
 }
 
@@ -109,9 +109,9 @@ export function LeadLink({ workspace, lead }: { workspace: Workspace; lead: Acti
 }
 
 export function OpportunityLink({ workspace, opportunity }: { workspace: Workspace; opportunity: ActivityOpportunityRef | null }) {
-  if (!opportunity) return <span className="text-slate-400">—</span>;
+  if (!opportunity) return <span className="text-slate-500">—</span>;
   if (opportunity.restricted || !opportunity.id) {
-    return <span className="italic text-slate-400">Opportunity in another workspace</span>;
+    return <span className="italic text-slate-500">Opportunity in another workspace</span>;
   }
   return (
     <Link href={opportunityHref(workspace, opportunity.id)} className="text-brand-700 hover:underline">

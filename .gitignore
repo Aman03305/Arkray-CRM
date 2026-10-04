@@ -27,6 +27,9 @@ next-env.d.ts
 # Generated
 backend/schema.yaml
 
+# Downloaded embedding model files (manage.py ai_fetch_model)
+backend/.models/
+
 # Editors / OS
 .idea/
 .vscode/*

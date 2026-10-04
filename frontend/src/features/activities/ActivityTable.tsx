@@ -144,7 +144,7 @@ export function ActivityTable({ activities, loading, workspace, showOwner, canWr
                   <StatusBadge status={activity.status} overdue={activity.is_overdue} type={activity.type} />
                 </td>
                 <td className={`${TD} whitespace-nowrap`}>
-                  {activity.type === "note" ? <span className="text-slate-400">—</span> : <When iso={scheduleOf(activity)} empty="No due date" />}
+                  {activity.type === "note" ? <span className="text-slate-500">—</span> : <When iso={scheduleOf(activity)} empty="No due date" />}
                 </td>
                 <td className={`${TD} hidden whitespace-nowrap xl:table-cell`}>
                   <time dateTime={activity.updated_at} title={formatDateTime(activity.updated_at)}>

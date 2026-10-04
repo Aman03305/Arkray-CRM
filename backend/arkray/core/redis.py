@@ -27,13 +27,32 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from redis.retry import Retry
 
 COOLDOWN_SECONDS = 15.0
+MAX_COOLDOWN_SECONDS = 120.0
 
 logger = logging.getLogger(__name__)
 
 
 class CircuitBreaker:
-    def __init__(self, cooldown_seconds: float) -> None:
+    """Per process: after a failure, fail instantly for a cool-down; each failure in a row
+    doubles it, up to `max_cooldown_seconds`, and the first success resets it.
+
+    Phase 10 drill: the probe that ends a cool-down stalls its request until it fails (with
+    Redis's container stopped, about 4 s for the DNS lookup alone; about 10 s for a broker
+    publish), and every gunicorn process probes on its own. At a fixed 15 s that took a
+    quarter of each process's time for as long as an outage lasted."""
+
+    def __init__(
+        self,
+        cooldown_seconds: float,
+        max_cooldown_seconds: float | None = None,
+        *,
+        event: str = "cache_circuit_opened",
+    ) -> None:
+        self._base = cooldown_seconds
+        self._max = max(max_cooldown_seconds or cooldown_seconds, cooldown_seconds)
         self._cooldown = cooldown_seconds
+        self._failures = 0  # in a row
+        self._event = event
         self._open_until = 0.0
         self._lock = threading.Lock()
 
@@ -42,18 +61,34 @@ class CircuitBreaker:
 
     def trip(self) -> None:
         with self._lock:
-            was_open = time.monotonic() < self._open_until
-            self._open_until = time.monotonic() + self._cooldown
+            now = time.monotonic()
+            was_open = now < self._open_until
+            if not was_open:  # the probe after a cool-down failed too: wait longer
+                # Doubled from the current value, never from an exponent that keeps growing
+                # (2**1024 can't become a float: after ~34 h of outage that raised on every
+                # cache call; Phase 10 review).
+                self._cooldown = self._base if not self._failures else self._cooldown * 2
+                self._cooldown = min(self._cooldown, self._max)
+                self._failures = min(self._failures + 1, 1_000_000)
+            self._open_until = now + self._cooldown
         if not was_open:
-            # One line per outage window per process, not one per cache operation.
-            logger.warning("cache_circuit_opened", extra={"cooldown_s": self._cooldown})
+            # One line per outage window per process, not one per operation.
+            logger.warning(self._event, extra={"cooldown_s": self._cooldown})
+
+    def succeeded(self) -> None:
+        if self._failures:  # cheap when healthy: no lock unless recovering
+            with self._lock:
+                self._failures = 0
+                self._cooldown = self._base
 
     def reset(self) -> None:
         with self._lock:
             self._open_until = 0.0
+            self._failures = 0
+            self._cooldown = self._base
 
 
-cache_breaker = CircuitBreaker(COOLDOWN_SECONDS)
+cache_breaker = CircuitBreaker(COOLDOWN_SECONDS, MAX_COOLDOWN_SECONDS)
 
 
 class _FailFastMixin:
@@ -65,6 +100,7 @@ class _FailFastMixin:
         except (RedisConnectionError, RedisTimeoutError, OSError):
             cache_breaker.trip()
             raise
+        cache_breaker.succeeded()
 
 
 class FailFastConnection(_FailFastMixin, Connection):

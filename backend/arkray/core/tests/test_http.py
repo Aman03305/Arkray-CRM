@@ -68,6 +68,23 @@ class TestRequestId:
         (record,) = [r for r in caplog.records if r.getMessage() == "http_request"]
         assert record.user_id is None
 
+    def test_logging_never_looks_up_a_user_the_request_did_not(self, caplog):
+        """Whole-software audit: resolving the lazy user for the log line read the session
+        store again (with the database down, a second connection attempt per request)."""
+        from django.utils.functional import SimpleLazyObject
+
+        lookups = []
+
+        def view(request):
+            request.user = SimpleLazyObject(lambda: lookups.append(1))
+            return HttpResponse(status=503)
+
+        with caplog.at_level(logging.INFO, logger="arkray.access"):
+            RequestContextMiddleware(view)(RequestFactory().get("/api/v1/x"))
+        assert lookups == []
+        (record,) = [r for r in caplog.records if r.getMessage() == "http_request"]
+        assert record.user_id is None
+
 
 class TestClientIp:
     def test_ignores_forwarded_header_without_trusted_proxies(self):
@@ -102,6 +119,25 @@ class TestHealth:
         monkeypatch.setattr(health, "_database_ok", lambda: False)
         response = client.get("/health/ready")
         assert (response.status_code, response.json()) == (503, {"status": "unavailable"})
+
+    def test_a_stalled_database_is_reported_within_the_probe_deadline(self, client, monkeypatch):
+        """Whole-software audit: a paused database made readiness wait as long as the stall
+        (it never said "not ready"). The check is bounded now."""
+        import threading
+        import time
+
+        from arkray.core import metrics
+
+        release = threading.Event()
+        monkeypatch.setattr(metrics, "PROBE_TIMEOUT_S", 0.2)
+        monkeypatch.setattr(health, "_select_one", lambda: release.wait(5))
+        started = time.monotonic()
+        try:
+            response = client.get("/health/ready")
+        finally:
+            release.set()
+        assert (response.status_code, response.json()) == (503, {"status": "unavailable"})
+        assert time.monotonic() - started < 1
 
     def test_cache_outage_is_degraded_but_still_ready(self, client, monkeypatch):
         monkeypatch.setattr(health, "_cache_ok", lambda: False)

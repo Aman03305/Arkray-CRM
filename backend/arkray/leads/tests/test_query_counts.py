@@ -62,7 +62,7 @@ def test_a_users_workspace_list_opened_by_an_admin(
         warm_up(admin_client, leads_url(str(user_a.pk)))
     queries, rows = count(admin_client, leads_url(str(user_a.pk)))
     assert rows == min(n, 100)
-    assert queries == 4  # session, user, subject exists, leads
+    assert queries == 5  # session, user, subject exists, audit window (Phase 9), leads
 
 
 @pytest.mark.parametrize("n", [10, 100])
@@ -73,7 +73,7 @@ def test_organisation_list_with_many_owners(admin_client, n, django_capture_on_c
         warm_up(admin_client, leads_url("all"))
     queries, rows = count(admin_client, leads_url("all"))
     assert rows == min(n, 100)
-    assert queries == 3
+    assert queries == 4  # + the audit window check (PostgreSQL since Phase 9)
 
 
 @pytest.mark.parametrize(

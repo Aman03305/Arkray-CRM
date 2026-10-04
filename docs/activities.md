@@ -18,7 +18,7 @@ Lead 1 ── * TimelineEntry ── 0..1 Opportunity, 0..1 Activity     (append
 
 One table, `activities_activity`, with a `type` discriminator; which columns a type uses and
 which statuses it may have are CHECK constraints (the matrix in
-[database.md](database.md#activities_activity)):
+[database.md](database.md#activities_activity-built-phase-4)):
 
 | Column | task | meeting | note |
 |---|---|---|---|

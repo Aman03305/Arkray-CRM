@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import environ
+from celery.schedules import crontab
 
 from arkray.core.redis import fail_fast_pool_kwargs
 
@@ -19,6 +20,9 @@ env = environ.Env()
 # --- Core ----------------------------------------------------------------------------------
 DEBUG = False
 SECRET_KEY = env("DJANGO_SECRET_KEY")
+# Rotation without signing everyone out: the previous key(s), still accepted for sessions,
+# sealed page links and trusted-browser cookies until removed (docs/runbooks.md#rotate-a-secret).
+SECRET_KEY_FALLBACKS: list[str] = env.list("DJANGO_SECRET_KEY_FALLBACKS", default=[])
 ALLOWED_HOSTS: list[str] = env.list("DJANGO_ALLOWED_HOSTS", default=[])
 ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
@@ -42,6 +46,8 @@ INSTALLED_APPS = [
     "arkray.activities",
     "arkray.dashboard",
     "arkray.search",
+    "arkray.ai",
+    "arkray.privacy",
 ]
 
 MIDDLEWARE = [
@@ -64,6 +70,15 @@ TEMPLATES: list[dict[str, Any]] = []  # API-only service: no server-rendered HTM
 _db = env.db("DATABASE_URL")
 _db_options: dict[str, Any] = {
     "connect_timeout": env.int("DB_CONNECT_TIMEOUT_S", default=5),
+    # A database that stops answering without closing connections (a partition, a host
+    # failing over) must become an error, not a request waiting for ever: keepalives notice
+    # a silent peer within about a minute, and tcp_user_timeout fails a write the server
+    # never acknowledges after 30 s (whole-software audit; libpq, where the OS supports it).
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 3,
+    "tcp_user_timeout": 30_000,
     "options": " ".join(
         [
             f"-c statement_timeout={env.int('DB_STATEMENT_TIMEOUT_MS', default=10_000)}",
@@ -77,6 +92,11 @@ _db_options: dict[str, Any] = {
         ]
     ),
 }
+# The runtime role must own nothing and be no superuser (R74; arkray.core.privileges).
+# Production refuses to start otherwise; development and tests run as the database's
+# superuser.
+DB_REQUIRE_RESTRICTED_ROLE = env.bool("DB_REQUIRE_RESTRICTED_ROLE", default=False)
+
 if env.bool("DB_POOL_ENABLED", default=False):
     # Per-process pool (psycopg_pool). Total connections = processes x max_size; keep that
     # below the budget documented in docs/reliability.md ("Connection budget").
@@ -102,6 +122,10 @@ CACHES = {
         "LOCATION": REDIS_CACHE_URL,
         "KEY_PREFIX": "arkray",
         "OPTIONS": {
+            # JSON, never pickle: whoever can write to Redis must not be able to run code in
+            # every process that reads the cache (Phase 9 review). Cached values are numbers,
+            # strings and lists of numbers.
+            "SERIALIZER": "django_redis.serializers.json.JSONSerializer",
             "SOCKET_CONNECT_TIMEOUT": 1,
             "SOCKET_TIMEOUT": 1,
             "IGNORE_EXCEPTIONS": True,
@@ -153,6 +177,9 @@ SESSION_COOKIE_SECURE = env.bool("DJANGO_SECURE_COOKIES", default=True)
 # SESSION_ACTIVITY_REFRESH_S, so an active user costs one session write per interval.
 SESSION_IDLE_TIMEOUT_S = env.int("SESSION_IDLE_TIMEOUT_S", default=2 * 60 * 60)
 SESSION_ACTIVITY_REFRESH_S = 5 * 60
+# List page links (keyset cursors) expire after the longest a session can last: no signed-in
+# user ever needs an older one (core/keyset.py).
+KEYSET_CURSOR_MAX_AGE_S = SESSION_COOKIE_AGE
 
 # The SPA reads the CSRF cookie and echoes it in the X-CSRFToken header (double submit).
 CSRF_COOKIE_NAME = "arkray_csrftoken"
@@ -201,8 +228,12 @@ TIME_ZONE = "UTC"  # storage and APIs are UTC; business "today" uses CRM_TIME_ZO
 USE_TZ = True
 
 # --- Arkray business settings --------------------------------------------------------------
-CRM_TIME_ZONE = env("CRM_TIME_ZONE", default="Asia/Kolkata")
-CRM_CURRENCY = env("CRM_CURRENCY", default="INR")
+# Fixed, not deployment options: the web app formats every date in IST and every amount in
+# rupees (frontend/src/lib/format.ts, money.ts). Configurable here alone, a different value
+# made the API and the screens disagree on "today" and on the currency (whole-software
+# audit, P2); tests/architecture/test_business_constants.py keeps the two in step.
+CRM_TIME_ZONE = "Asia/Kolkata"
+CRM_CURRENCY = "INR"
 # Number of reverse proxies in front of Django whose X-Forwarded-For entries are trusted.
 TRUSTED_PROXY_COUNT = env.int("TRUSTED_PROXY_COUNT", default=0)
 # Adopt an incoming X-Request-ID as our correlation id only when a trusted edge proxy sets
@@ -211,6 +242,9 @@ TRUSTED_PROXY_COUNT = env.int("TRUSTED_PROXY_COUNT", default=0)
 TRUST_INCOMING_REQUEST_ID = env.bool("TRUST_INCOMING_REQUEST_ID", default=False)
 # Window during which repeated admin access to the same user's workspace is audited once.
 WORKSPACE_ACCESS_AUDIT_WINDOW_S = env.int("WORKSPACE_ACCESS_AUDIT_WINDOW_S", default=15 * 60)
+# The metrics endpoint (/health/metrics, config/metrics.py) answers only a scraper sending
+# this token as a bearer token; unset, it doesn't exist (404).
+METRICS_TOKEN = env("METRICS_TOKEN", default="")
 
 # --- Django REST Framework -----------------------------------------------------------------
 REST_FRAMEWORK = {
@@ -223,10 +257,12 @@ REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     # UTF-8 JSON only; the charset in Content-Type is never used as a codec (core.parsers).
     "DEFAULT_PARSER_CLASSES": ["arkray.core.parsers.Utf8JSONParser"],
-    "DEFAULT_PAGINATION_CLASS": "arkray.core.pagination.DefaultCursorPagination",
+    # No default pagination: every list pages through core.keyset's sealed, bound cursors
+    # (ADR-0016). A DRF default was never used, and would have handed a future generic
+    # list view unsigned, unbound cursors (whole-software audit).
+    "DEFAULT_PAGINATION_CLASS": None,
     # No OPTIONS metadata: it would describe serializers to anyone who asks.
     "DEFAULT_METADATA_CLASS": None,
-    "PAGE_SIZE": 25,
     "EXCEPTION_HANDLER": "arkray.core.exceptions.api_exception_handler",
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_THROTTLE_CLASSES": [
@@ -241,6 +277,8 @@ REST_FRAMEWORK = {
         # Global search: the most expensive read per request, sent as people type (a
         # 250 ms debounce): about two searches a second sustained per user (docs/search.md).
         "search": env("API_THROTTLE_SEARCH", default="120/min"),
+        # Ask Arkray: each question may call a language model (docs/rag-architecture.md).
+        "ask": env("API_THROTTLE_ASK", default="20/min"),
     },
     "NUM_PROXIES": TRUSTED_PROXY_COUNT,
     "COERCE_DECIMAL_TO_STRING": True,  # money is serialised as strings, never floats
@@ -265,6 +303,11 @@ SPECTACULAR_SETTINGS = {
         "ActivityStatusEnum": "arkray.activities.models.ActivityStatus",
         "PriorityEnum": "arkray.activities.models.Priority",
         "TimelineKindEnum": "arkray.activities.models.TimelineKind",
+        "QuestionStatusEnum": "arkray.ai.models.QuestionStatus",
+        "AskRecordKindEnum": "arkray.ai.api.serializers.REF_KINDS",
+        "AskFactKindEnum": "arkray.ai.api.serializers.FACT_KINDS",
+        "AskBlockTypeEnum": "arkray.ai.api.serializers.BLOCK_TYPES",
+        "AskAnswerModeEnum": "arkray.ai.api.serializers.ANSWER_MODES",
     },
 }
 
@@ -300,8 +343,21 @@ CELERY_TASK_TIME_LIMIT = 120
 CELERY_TASK_DEFAULT_QUEUE = "default"
 # The relay gets its own queue so it is never stuck behind a backlog of real work (which
 # would stall every queue, including email). Production runs a dedicated consumer for it.
-CELERY_TASK_ROUTES = {"core.outbox.relay": {"queue": "outbox"}}
+CELERY_TASK_ROUTES = {
+    "core.outbox.relay": {"queue": "outbox"},
+    # Ask Arkray questions are dispatched straight to their own queue (an answer is
+    # interactive; the outbox relay's 5 s tick would add latency for nothing) and answered
+    # by their own workers, so a slow AI provider can never occupy the web workers or the
+    # workers that send email and run CRM background work.
+    "ai.answer_question": {"queue": "ai"},
+    "ai.housekeeping": {"queue": "default"},
+    "ai.reconcile_index": {"queue": "ai_index"},
+}
 CELERY_WORKER_HIJACK_ROOT_LOGGER = False
+# Wall-clock schedules for everything slower than the relay: beat keeps its schedule file
+# in tmpfs (read-only containers), so every restart (every release) reset interval timers,
+# and a daily job could be pushed back indefinitely (Phase 11 review). A crontab fires at
+# its time whatever happened since.
 CELERY_BEAT_SCHEDULE = {
     "outbox-relay": {
         "task": "core.outbox.relay",
@@ -311,26 +367,114 @@ CELERY_BEAT_SCHEDULE = {
     },
     "core-housekeeping": {
         "task": "core.housekeeping",
-        "schedule": 60.0 * 60,  # purge expired idempotency records
+        # purge expired idempotency records and old finished outbox events
+        "schedule": crontab(minute=5),
         "options": {"expires": 30 * 60},
     },
     "identity-housekeeping": {
         "task": "identity.housekeeping",
-        "schedule": 60.0 * 60,  # purge old throttle evidence and expired sessions
+        "schedule": crontab(minute=15),  # old throttle evidence, expired sessions
         "options": {"expires": 30 * 60},
+    },
+    "ai-housekeeping": {
+        "task": "ai.housekeeping",
+        "schedule": crontab(minute=25),  # expire stuck questions, purge old conversations
+        "options": {"expires": 30 * 60},
+    },
+    "ai-reconcile-index": {
+        "task": "ai.reconcile_index",
+        # self-healing: re-enqueue sources whose chunks drifted; 21:30 UTC is 03:00 in India
+        "schedule": crontab(hour=21, minute=30),
+        "options": {"expires": 60 * 60},
     },
 }
 
 # --- Transactional outbox ------------------------------------------------------------------
 # Maximum events per Celery queue that may be dispatched-but-unfinished at once. This is what
 # keeps broker queues bounded: the durable backlog lives in PostgreSQL, not in Redis.
-OUTBOX_MAX_IN_FLIGHT = {"default": 200, "email": 50, "ai": 50}
+# `ai_index` is Ask Arkray's background indexing (embeddings), kept apart from `ai`, the
+# interactive questions, so a re-indexing backlog never delays an answer.
+# The relay refills a queue once per tick, so cap / 5 s is the queue's sustained ceiling
+# however fast its workers are. Phase 10 measured `ai_index` at 20: a 4 events/s ceiling
+# while one indexing process cleared each batch in under 0.5 s and idled the rest of the tick
+# (a load test's 13 writes/s built a backlog of 616 events, draining at exactly 4/s). 100 is
+# still a bounded broker (ids only) and a 20 events/s ceiling, below one process's measured
+# rate for short notes (> 33/s); full-length notes embed at 1.5-7 chunks/s per process (R70),
+# where the workers, not the relay, are the limit. The backlog stays in PostgreSQL.
+OUTBOX_MAX_IN_FLIGHT = {"default": 200, "email": 50, "ai_index": 100}
 OUTBOX_RELAY_BATCH_SIZE = 100
 # While a claimed event's message waits in the broker. The message expires with it; after
 # that the event is re-claimed under a new token (the old message is a no-op if it runs).
 OUTBOX_DISPATCH_LEASE_SECONDS = 1800
 # Once a worker starts the event. Must exceed CELERY_TASK_TIME_LIMIT.
 OUTBOX_LEASE_SECONDS = 300
+# Finished work is kept this long for investigation, then purged by the hourly housekeeping
+# (Phase 10 review: nothing deleted it, so the table and every metrics scrape grew forever).
+# Dead events stay until an operator re-queues or deletes them.
+OUTBOX_DONE_RETENTION_DAYS = env.int("OUTBOX_DONE_RETENTION_DAYS", default=7)
+OUTBOX_PURGE_BATCH = 5000
+OUTBOX_PURGE_MAX_BATCHES = 100  # per run: at most 500,000 rows an hour
+
+# --- Ask Arkray (Phase 8, docs/rag-architecture.md) -----------------------------------------
+# Every AI setting lives here: providers, models, timeouts and every bound. Nothing else in
+# the code names a model or a limit.
+AI_ENABLED = env.bool("AI_ENABLED", default=False)
+# "anthropic": Claude through the Anthropic API (needs ANTHROPIC_API_KEY).
+# "none": no language model. Ask Arkray still answers the questions its deterministic router
+#   recognises (pipeline value, overdue tasks, today's meetings, ...) and otherwise shows the
+#   most relevant records it can retrieve; no CRM text leaves the deployment.
+AI_LLM_PROVIDER = env("AI_LLM_PROVIDER", default="none")
+ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
+# Where model calls go, passed to the SDK explicitly: otherwise it reads ANTHROPIC_BASE_URL
+# from the environment, and a stray value (a drill's stand-in, a typo'd gateway) would send
+# questions, CRM context and the key elsewhere, even over plain HTTP (Phase 10 review).
+# Production requires https:// and refuses the SDK's own variables.
+AI_LLM_BASE_URL = env("AI_LLM_BASE_URL", default="https://api.anthropic.com")
+# Whether this process calls the provider (the ai worker). The web tier and the other workers
+# never do: deployments give them no key and set this false (Phase 9 review: the key was in
+# every container). They still know a model is configured from AI_LLM_PROVIDER.
+AI_LLM_KEY_HOLDER = env.bool("AI_LLM_KEY_HOLDER", default=True)
+AI_CHAT_MODEL = env("AI_CHAT_MODEL", default="claude-opus-5-5")
+AI_CHAT_EFFORT = env("AI_CHAT_EFFORT", default="low")
+AI_CHAT_MAX_TOKENS = env.int("AI_CHAT_MAX_TOKENS", default=8000)
+AI_LLM_TIMEOUT_S = env.float("AI_LLM_TIMEOUT_S", default=20.0)
+AI_LLM_MAX_RETRIES = env.int("AI_LLM_MAX_RETRIES", default=1)
+AI_QUESTION_BUDGET_S = env.float("AI_QUESTION_BUDGET_S", default=30.0)
+AI_MAX_TOOL_ROUNDS = env.int("AI_MAX_TOOL_ROUNDS", default=4)
+AI_MAX_TOOL_CALLS_PER_ROUND = env.int("AI_MAX_TOOL_CALLS_PER_ROUND", default=6)
+# Circuit breaker around the language model: this many failures in a row open it for the
+# cool-down; while open, questions are answered without the model (router / retrieval).
+AI_BREAKER_FAILURES = env.int("AI_BREAKER_FAILURES", default=3)
+AI_BREAKER_COOLDOWN_S = env.int("AI_BREAKER_COOLDOWN_S", default=60)
+# Embeddings are computed inside the deployment by a pinned open model (no external
+# embeddings service): "local" (BAAI/bge-small-en-v1.5, ONNX, CPU) or "hashing" (a
+# deterministic lexical stand-in for tests only; refused in production).
+AI_EMBEDDING_PROVIDER = env("AI_EMBEDDING_PROVIDER", default="local")
+AI_EMBEDDING_MODEL_DIR = env(
+    "AI_EMBEDDING_MODEL_DIR", default=str(BASE_DIR / ".models" / "bge-small-en-v1.5")
+)
+AI_EMBEDDING_THREADS = env.int("AI_EMBEDDING_THREADS", default=2)
+# Index CRM text as it changes (outbox, queue ai_index). Off while AI is off: turning AI on
+# later is followed by `manage.py ai_reindex` (or the nightly reconciliation).
+AI_INDEXING_ENABLED = env.bool("AI_INDEXING_ENABLED", default=AI_ENABLED)
+AI_RETRIEVAL_TOP_K = env.int("AI_RETRIEVAL_TOP_K", default=8)
+# Calibrated for bge-small-en-v1.5 on Arkray-like notes (ai/tests/test_local_model.py):
+# relevant passages scored 0.505-0.78 (median 0.665), clearly off-topic questions 0.42-0.51,
+# near-domain nonsense up to 0.57. The model's scores are compressed, so this filters the
+# clearly unrelated; the language model (when there is one) judges the rest.
+AI_RETRIEVAL_MIN_SIMILARITY = env.float("AI_RETRIEVAL_MIN_SIMILARITY", default=0.55)
+# Per question: retrieved passage text, and all tool output together (what the model may
+# be sent, beyond the question and its conversation).
+AI_CONTEXT_MAX_CHARS = env.int("AI_CONTEXT_MAX_CHARS", default=12_000)
+AI_TOOL_RESULTS_MAX_CHARS = env.int("AI_TOOL_RESULTS_MAX_CHARS", default=40_000)
+AI_HISTORY_TURNS = env.int("AI_HISTORY_TURNS", default=4)
+# A question not answered within this time is reported as failed (worker down, backlog).
+AI_QUESTION_TIMEOUT_S = env.int("AI_QUESTION_TIMEOUT_S", default=90)
+# Bulkheads: unanswered questions per person and in total (PostgreSQL-counted, so they hold
+# when Redis is down).
+AI_MAX_PENDING_PER_USER = env.int("AI_MAX_PENDING_PER_USER", default=2)
+AI_MAX_PENDING_TOTAL = env.int("AI_MAX_PENDING_TOTAL", default=40)
+AI_CONVERSATION_RETENTION_DAYS = env.int("AI_CONVERSATION_RETENTION_DAYS", default=30)
 
 # --- Logging -------------------------------------------------------------------------------
 LOG_LEVEL = env("LOG_LEVEL", default="INFO")
@@ -365,5 +509,12 @@ LOGGING: dict[str, Any] = {
         "celery.beat": {"level": "WARNING", "propagate": True},
         "celery.worker.strategy": {"level": "WARNING", "propagate": True},
         "celery.app.trace": {"level": "WARNING", "propagate": True},
+        # HTTP clients and the AI SDK log whole request bodies at DEBUG: a question, earlier
+        # turns, notes and tool results. Never below WARNING, whatever LOG_LEVEL says
+        # (Phase 9 review).
+        **{
+            name: {"level": "WARNING", "propagate": True}
+            for name in ("anthropic", "httpx", "httpx2", "httpcore", "urllib3")
+        },
     },
 }

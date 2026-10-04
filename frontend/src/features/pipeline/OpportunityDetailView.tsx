@@ -45,7 +45,7 @@ function Fields({ items }: { items: [string, ReactNode][] }) {
       {items.map(([label, value]) => (
         <div key={label} className="contents">
           <dt className="text-slate-500">{label}</dt>
-          <dd className="min-w-0 break-words text-slate-900">{value ?? <span className="text-slate-400">—</span>}</dd>
+          <dd className="min-w-0 break-words text-slate-900">{value ?? <span className="text-slate-500">—</span>}</dd>
         </div>
       ))}
     </dl>
@@ -53,7 +53,7 @@ function Fields({ items }: { items: [string, ReactNode][] }) {
 }
 
 function When({ iso }: { iso: string | null }) {
-  if (!iso) return <span className="text-slate-400">—</span>;
+  if (!iso) return <span className="text-slate-500">—</span>;
   return (
     <time dateTime={iso}>
       {formatDateTime(iso)} <span className="text-slate-500">({formatRelative(iso)})</span>
@@ -258,7 +258,7 @@ export function OpportunityDetailView({ workspace, opportunityId }: { workspace:
             {opportunity.description ? (
               <p className="whitespace-pre-line break-words text-sm text-slate-900">{opportunity.description}</p>
             ) : (
-              <p className="text-sm text-slate-400">No description</p>
+              <p className="text-sm text-slate-500">No description</p>
             )}
           </Section>
           <Timeline
@@ -370,7 +370,7 @@ function StageHistory({ workspace, opportunityId, version }: { workspace: Worksp
       ) : !rows ? (
         <Skeleton className="h-16 w-full" />
       ) : rows.length === 0 ? (
-        <p className="text-sm text-slate-400">No stage changes yet.</p>
+        <p className="text-sm text-slate-500">No stage changes yet.</p>
       ) : (
         <ol className="space-y-3">
           {rows.map((row) => (

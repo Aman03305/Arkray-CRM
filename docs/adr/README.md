@@ -28,6 +28,9 @@ and update the old one's status line.
 | [0020](0020-activity-integrity.md) | Activities: lead-bound, owned by the lead's owner while current, guarded by composite keys |
 | [0021](0021-materialized-timeline.md) | The timeline is an append-only table written in-transaction; visibility is decided when read |
 | [0022](0022-global-search.md) | Global search: authorised, grouped lexical search with a bounded two-pass window |
+| [0023](0023-ask-arkray-implementation.md) | Ask Arkray as built: local embeddings, answers on their own queue, a deterministic fast path |
+| [0024](0024-phase-9-security-hardening.md) | Security hardening: sealed and bound page links, prefixed cookies, a nonce CSP, audit outside the cache |
+| [0025](0025-production-deployment.md) | Production deployment: restricted database role enforced at start, the edge proxy's contract, erasure on request |
 
 Template:
 

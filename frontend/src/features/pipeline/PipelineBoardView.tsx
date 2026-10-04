@@ -397,7 +397,7 @@ function BoardColumnView({
   };
   const hidden = column.count - column.cards.length;
   return (
-    <section
+    <div
       role="listitem"
       aria-labelledby={headingId}
       onDragOver={onDragOver}
@@ -456,7 +456,7 @@ function BoardColumnView({
           View all {column.count} in {column.stage.name}
         </button>
       ) : null}
-    </section>
+    </div>
   );
 }
 

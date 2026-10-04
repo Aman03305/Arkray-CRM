@@ -1,9 +1,10 @@
 /**
- * Sidebar model. Deliberately contains only the four CRM modules plus Settings, and Users
- * for viewers who can manage users. There are no Companies or Products modules.
+ * Sidebar model. Deliberately contains only the four CRM modules, Ask Arkray (when it is
+ * on and the viewer may ask), Settings, and Users for viewers who can manage users. There are no Companies or Products modules.
  */
 import {
   CalendarCheck,
+  MessageSquareText,
   Contact,
   LayoutDashboard,
   type LucideIcon,
@@ -12,8 +13,8 @@ import {
   UsersRound,
 } from "lucide-react";
 
-import { hasCapability, type Viewer } from "./viewer";
-import { SECTION_LABELS, type Workspace, WORKSPACE_SECTIONS, type WorkspaceSection, workspaceHref } from "./workspace";
+import { canAsk, hasCapability, type Viewer } from "./viewer";
+import { askHref, SECTION_LABELS, type Workspace, WORKSPACE_SECTIONS, type WorkspaceSection, workspaceHref } from "./workspace";
 
 export interface NavItem {
   key: string;
@@ -37,6 +38,11 @@ export function workspaceNavigation(workspace: Workspace): NavItem[] {
     href: workspaceHref(workspace, section),
     icon: SECTION_ICONS[section],
   }));
+}
+
+/** Ask Arkray, inside `workspace`: only when the CRM has it on and the viewer may ask. */
+export function assistantNavigation(workspace: Workspace, viewer: Viewer | null): NavItem[] {
+  return canAsk(viewer) ? [{ key: "ask", label: "Ask Arkray", href: askHref(workspace), icon: MessageSquareText }] : [];
 }
 
 export function administrationNavigation(viewer: Viewer | null): NavItem[] {

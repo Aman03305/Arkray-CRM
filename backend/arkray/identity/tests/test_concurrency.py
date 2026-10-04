@@ -209,7 +209,9 @@ def test_the_owner_is_not_refused_while_an_attacker_is_guessing():
     user = UserFactory()
     identifier = throttling.login_identifier(user.email)
     cookie = HttpResponse()
-    remember_device(cookie, identifier, "d" * 32)
+    remember_device(
+        cookie, identifier, "d" * 32, throttling.device_trust(user.password, user.session_epoch)
+    )
     device_cookie = cookie.cookies[settings.LOGIN_DEVICE_COOKIE_NAME].value
     factory = RequestFactory()
 

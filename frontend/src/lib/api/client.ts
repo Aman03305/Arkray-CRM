@@ -12,7 +12,12 @@
  *   `{"error": {"code", "message", "details", "request_id"}}`.
  */
 
-export const CSRF_COOKIE_NAME = "arkray_csrftoken";
+/**
+ * Over HTTPS the backend names its CSRF cookie `__Host-arkray_csrftoken` (Secure, host-only,
+ * Path=/: a sibling subdomain can't set or shadow it); a plain-HTTP local stack can't use the
+ * prefix and keeps `arkray_csrftoken`. The prefixed cookie wins when both exist.
+ */
+export const CSRF_COOKIE_NAMES = ["__Host-arkray_csrftoken", "arkray_csrftoken"] as const;
 export const CSRF_ENDPOINT = "/api/v1/auth/csrf";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -38,6 +43,14 @@ export interface ApiRequestOptions {
   timeoutMs?: number;
   /** Extra request headers (e.g. Idempotency-Key). Never credentials: the session is a cookie. */
   headers?: Record<string, string>;
+}
+
+export function readCsrfToken(cookies: string = document.cookie): string | null {
+  for (const name of CSRF_COOKIE_NAMES) {
+    const token = readCookie(name, cookies);
+    if (token) return token;
+  }
+  return null;
 }
 
 export function readCookie(name: string, cookies: string = document.cookie): string | null {
@@ -98,7 +111,7 @@ async function send(
   const headers: Record<string, string> = { ...extraHeaders, Accept: "application/json" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (!SAFE_METHODS.has(method)) {
-    const token = readCookie(CSRF_COOKIE_NAME);
+    const token = readCsrfToken();
     if (token) headers["X-CSRFToken"] = token;
   }
   return fetch(path, {
@@ -126,7 +139,7 @@ export async function apiFetch<T>(path: string, options: ApiRequestOptions = {})
   let response: Response;
   let payload: unknown;
   try {
-    if (unsafe && !readCookie(CSRF_COOKIE_NAME)) await refreshCsrfCookie(combined);
+    if (unsafe && !readCsrfToken()) await refreshCsrfCookie(combined);
     response = await send(path, method, body, combined, headers);
     payload = await readJson(response);
     if (unsafe && response.status === 403 && toApiError(response, payload).code === "csrf_failed") {

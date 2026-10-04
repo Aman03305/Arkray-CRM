@@ -17,7 +17,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from arkray.audit.models import AuditEvent
-from arkray.core import idempotency
+from arkray.core import idempotency, keyset
 from arkray.core.access import AccessScope
 from arkray.core.errors import ConflictError, InvalidInputError
 from arkray.core.models import IdempotencyRecord
@@ -38,10 +38,12 @@ def post_raw(client, path, body: bytes, content_type="application/json"):
 
 
 def cursor_payload(link: str):
-    """The signed (not encrypted) JSON inside a cursor, as anyone holding the URL can read it."""
+    """The JSON inside a cursor. Since Phase 9 (R48) cursors are sealed, so only the server
+    can read it: what anyone holding the URL sees is ciphertext (checked here too)."""
     token = parse_qs(urlsplit(link).query)["cursor"][0]
-    data = token.split(":")[0]
-    return json.loads(base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)))
+    raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+    assert b'"v"' not in raw  # nothing readable in the URL
+    return keyset._open(token)
 
 
 class TestRequestParsing:
@@ -341,7 +343,7 @@ class TestIdempotency:
 
         idempotency.remember(UserFactory().pk, "op", uuid.uuid4(), "a" * 64, uuid.uuid4())
         IdempotencyRecord.objects.update(created_at=timezone.now() - timedelta(hours=25))
-        assert housekeeping() == {"idempotency_records": 1}
+        assert housekeeping()["idempotency_records"] == 1
         assert not IdempotencyRecord.objects.exists()
 
 

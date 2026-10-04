@@ -96,7 +96,7 @@ function RecentUsersPanel() {
     <section aria-labelledby="recent-users" className="mt-6 rounded-lg border border-slate-200 bg-white p-5">
       <div className="flex items-center justify-between gap-2">
         <h2 id="recent-users" className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-          <UsersRound aria-hidden="true" className="size-4 text-slate-400" />
+          <UsersRound aria-hidden="true" className="size-4 text-slate-500" />
           Recently added users
         </h2>
         <Link href="/admin/users" className="text-sm font-medium text-brand-700 hover:underline">

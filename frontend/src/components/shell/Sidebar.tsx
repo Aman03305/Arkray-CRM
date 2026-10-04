@@ -11,13 +11,14 @@ import { useSignOut } from "@/features/auth/useSignOut";
 import { selectedUserId, useWorkspaceSubject } from "@/features/workspace/api";
 import {
   administrationNavigation,
+  assistantNavigation,
   type NavItem,
   settingsNavItem,
   workspaceNavigation,
 } from "@/lib/navigation";
-import { initials } from "@/lib/viewer";
+import { hasCapability, initials } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
-import { activeSection, workspaceFromPathname } from "@/lib/workspace";
+import { activeSection, isAskPath, workspaceFromPathname } from "@/lib/workspace";
 
 const NAV_LINK = "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors";
 // The current page is marked by more than colour: a bar at its left edge and a heavier weight.
@@ -32,7 +33,7 @@ function NavLink({ item, active, onNavigate }: { item: NavItem; active: boolean;
       aria-current={active ? "page" : undefined}
       className={`${NAV_LINK} ${active ? NAV_LINK_ACTIVE : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"}`}
     >
-      <Icon aria-hidden="true" className={`size-4 ${active ? "text-brand-600" : "text-slate-400"}`} />
+      <Icon aria-hidden="true" className={`size-4 ${active ? "text-brand-600" : "text-slate-500"}`} />
       {item.label}
     </Link>
   );
@@ -42,7 +43,7 @@ function NavLink({ item, active, onNavigate }: { item: NavItem; active: boolean;
 function WorkspaceLabel({ id, userId }: { id: string; userId: string }) {
   const subject = useWorkspaceSubject(userId);
   return (
-    <p id={id} className="truncate px-3 pb-1 text-xs font-medium uppercase tracking-wide text-slate-400">
+    <p id={id} className="truncate px-3 pb-1 text-xs font-medium uppercase tracking-wide text-slate-500">
       CRM for{" "}
       {subject.data ? (
         <span className="normal-case tracking-normal text-slate-700">{subject.data.full_name}</span>
@@ -62,8 +63,14 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   const viewer = useViewer();
   // A URL naming no workspace (a malformed user id) shows "not found"; the links then lead
-  // back to the viewer's own top-level pages, never into a guessed workspace.
-  const workspace = workspaceFromPathname(pathname, viewer) ?? workspaceFromPathname("/", viewer)!;
+  // back to the viewer's own top-level pages, never into a guessed workspace. So does a
+  // selected user's workspace the viewer may not open (a link shared by an administrator):
+  // its pages are "not found" for them, and so were all five links (whole-software audit).
+  const named = workspaceFromPathname(pathname, viewer);
+  const workspace =
+    named && !(named.kind === "user" && !hasCapability(viewer, "workspace.view_any"))
+      ? named
+      : workspaceFromPathname("/", viewer)!;
   const userId = selectedUserId(workspace);
   const labelId = useId();
   const section = activeSection(pathname);
@@ -88,16 +95,25 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
                 <NavLink item={item} active={section === item.key} onNavigate={onNavigate} />
               </li>
             ))}
+            {assistantNavigation(workspace, viewer).map((item) => (
+              <li key={item.key}>
+                <NavLink item={item} active={isAskPath(pathname)} onNavigate={onNavigate} />
+              </li>
+            ))}
           </ul>
         </div>
 
         {adminItems.length > 0 ? (
           <div>
-            <p className="px-3 pb-1 text-xs font-medium uppercase tracking-wide text-slate-400">Administration</p>
+            <p className="px-3 pb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Administration</p>
             <ul className="space-y-1">
               {adminItems.map((item) => (
                 <li key={item.key}>
-                  <NavLink item={item} active={section === null && pathname.startsWith(item.href)} onNavigate={onNavigate} />
+                  <NavLink
+                    item={item}
+                    active={section === null && !isAskPath(pathname) && pathname.startsWith(item.href)}
+                    onNavigate={onNavigate}
+                  />
                 </li>
               ))}
             </ul>
@@ -128,7 +144,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
                 disabled={signOut.isPending || signOut.isSuccess}
                 aria-label="Sign out"
                 title={signOut.isError ? "Sign-out failed. Try again." : "Sign out"}
-                className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
+                className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
               >
                 {signOut.isPending ? <Spinner /> : <LogOut aria-hidden="true" className="size-4" />}
               </button>

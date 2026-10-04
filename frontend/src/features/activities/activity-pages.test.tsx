@@ -222,20 +222,20 @@ describe("the timeline", () => {
       leadRoutes({
         status: 200,
         body: page([
-          noteEntry("y".repeat(300), { id: 9 }),
+          noteEntry("y".repeat(300), { id: "e9" }),
           makeEntry({
-            id: 8,
+            id: "e8",
             kind: "task.created",
             activity: { id: TASK_ID, type: "task", title: "Follow up", preview: "", preview_truncated: false, status: "open", due_at: null, starts_at: null, ends_at: null },
             opportunity: { id: null, restricted: true },
           }),
           makeEntry({
-            id: 7,
+            id: "e7",
             kind: "lead.reassigned",
             actor: { id: "a1", full_name: "Anita Admin", is_active: true },
             details: { from_owner: { id: PRIYA_ID, full_name: "Priya Patel", is_active: false }, to_owner: SALES_REF },
           }),
-          makeEntry({ id: 6, kind: "lead.status_changed", details: { from: "new", from_name: "New", to: "contacted", to_name: "Contacted" } }),
+          makeEntry({ id: "e6", kind: "lead.status_changed", details: { from: "new", from_name: "New", to: "contacted", to_name: "Contacted" } }),
         ]),
       }),
     );
@@ -257,8 +257,8 @@ describe("the timeline", () => {
     const api = mockApi(
       leadRoutes((call: RecordedCall) =>
         call.query.get("cursor")
-          ? { status: 200, body: page([makeEntry({ id: 1, kind: "lead.created" })]) }
-          : { status: 200, body: page([noteEntry("Newest", { id: 5 })], `http://testserver${ME}/leads/${LEAD_ID}/timeline?cursor=abc`) },
+          ? { status: 200, body: page([makeEntry({ id: "e1", kind: "lead.created" })]) }
+          : { status: 200, body: page([noteEntry("Newest", { id: "e5" })], `http://testserver${ME}/leads/${LEAD_ID}/timeline?cursor=abc`) },
       ),
     );
     renderWithProviders(<LeadView leadId={LEAD_ID} />, { viewer: SALES });

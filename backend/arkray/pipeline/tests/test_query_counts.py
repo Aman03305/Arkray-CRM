@@ -68,7 +68,7 @@ def test_board_in_a_users_workspace(
     with django_capture_on_commit_callbacks(execute=True):
         warm_up(admin_client, board_url(str(user_a.pk)))
     queries, _ = count(admin_client, board_url(str(user_a.pk)))
-    assert queries == 8  # + subject exists
+    assert queries == 9  # + subject exists, + the audit window check (Phase 9)
 
 
 @pytest.mark.parametrize("n", [10, 100])
@@ -80,7 +80,7 @@ def test_board_organisation_wide_with_many_owners(
         warm_up(admin_client, board_url("all"))
     queries, body = count(admin_client, board_url("all"))
     assert sum(c["count"] for c in body["columns"]) == n
-    assert queries == 7
+    assert queries == 8  # + the audit window check (PostgreSQL since Phase 9)
 
 
 @pytest.mark.parametrize("n", [10, 100])

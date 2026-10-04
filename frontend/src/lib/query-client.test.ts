@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "./api/client";
-import { createQueryClient, isPublicPath, shouldRetry, VIEWER_QUERY_KEY } from "./query-client";
+import { createQueryClient, isPublicPath, retryDelay, shouldRetry, VIEWER_QUERY_KEY } from "./query-client";
 
 const browser = vi.hoisted(() => ({ hardNavigate: vi.fn(), location: "/leads?status=new" }));
 vi.mock("./browser", () => ({
@@ -24,6 +24,19 @@ describe("retry policy", () => {
     const error = new ApiError(0, "network_error", "x");
     expect([0, 1, 2].map((n) => shouldRetry(n, error))).toEqual([true, true, false]);
     expect(shouldRetry(0, new ApiError(503, "service_unavailable", "x"))).toBe(true);
+  });
+
+  it("never retries a request that timed out (it already waited 15 s)", () => {
+    expect(shouldRetry(0, new ApiError(0, "timeout", "x"))).toBe(false);
+  });
+
+  it("follows Retry-After: a short one is waited for, a long one isn't retried", () => {
+    const brief = new ApiError(503, "service_unavailable", "x", null, null, 3);
+    const long = new ApiError(503, "service_unavailable", "x", null, null, 30);
+    expect(shouldRetry(0, brief)).toBe(true);
+    expect(retryDelay(0, brief)).toBe(3000);
+    expect(shouldRetry(0, long)).toBe(false);
+    expect(retryDelay(1, new ApiError(0, "network_error", "x"))).toBe(2000);
   });
 });
 

@@ -8,6 +8,7 @@ values); secrets are redacted defensively and oversized payloads are truncated.
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -15,32 +16,52 @@ from typing import Any
 from uuid import UUID
 
 from arkray.core.context import get_context
+from arkray.core.text import without_refused
 
 from .models import ActorType, AuditEvent
 
 MAX_METADATA_BYTES = 4 * 1024
+MAX_KEY_LENGTH = 64
+MAX_DEPTH = 6
 _SECRET_KEY_PATTERN = re.compile(
-    r"pass(word)?|secret|token|api[_-]?key|authorization|cookie|session|credential", re.I
+    r"pass(word)?|pwd|secret|token|api[_-]?key|private[_-]?key|authori[sz]ation|^auth$|bearer"
+    r"|cookie|session|credential|otp|dsn|signature",
+    re.I,
+)
+# "password=hunter2" or "token: abc" inside a value under a harmless key.
+_SECRET_IN_VALUE = re.compile(
+    r"(pass(?:word)?|pwd|secret|token|api[_-]?key|bearer)(\s*[=:]\s*|\s+)\S+", re.I
 )
 REDACTED = "[REDACTED]"
 
 
 def sanitize_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
-    """Redact secret-looking keys (recursively) and cap the serialised size."""
+    """Redact secret-looking keys and values (recursively), drop what PostgreSQL's JSON or a
+    log viewer can't take safely (non-finite numbers, NUL, control and bidi characters),
+    bound key length and depth, and cap the serialised size (Phase 9 review)."""
 
-    def scrub(value: Any) -> Any:
+    def text(value: str) -> str:
+        return _SECRET_IN_VALUE.sub(lambda m: f"{m.group(1)}={REDACTED}", without_refused(value))
+
+    def scrub(value: Any, depth: int) -> Any:
+        if depth > MAX_DEPTH:
+            return "[nested too deeply]"
         if isinstance(value, dict):
-            return {
-                str(k): REDACTED if _SECRET_KEY_PATTERN.search(str(k)) else scrub(v)
-                for k, v in value.items()
-            }
+            cleaned: dict[str, Any] = {}
+            for raw_key, item in value.items():
+                key = text(str(raw_key))[:MAX_KEY_LENGTH]
+                secret = _SECRET_KEY_PATTERN.search(key)
+                cleaned[key] = REDACTED if secret else scrub(item, depth + 1)
+            return cleaned
         if isinstance(value, list | tuple):
-            return [scrub(v) for v in value]
-        if value is None or isinstance(value, bool | int | float | str):
+            return [scrub(v, depth + 1) for v in value]
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        if value is None or isinstance(value, bool | int | float):
             return value
-        return str(value)
+        return text(str(value))
 
-    cleaned = scrub(metadata or {})
+    cleaned = scrub(metadata or {}, 0)
     if len(json.dumps(cleaned, default=str).encode()) > MAX_METADATA_BYTES:
         return {"_truncated": True, "keys": sorted(cleaned)[:50]}
     return cleaned  # type: ignore[no-any-return]
@@ -92,3 +113,9 @@ def record(
     event = _event(Entry(action, actor_id, target_type, target_id, subject_user_id, metadata))
     event.save()
     return event
+
+
+def count(action: str) -> int:
+    """How many events of one kind have been recorded (and committed, as the caller's
+    transaction sees them). An index-only count (`audit_action_idx`)."""
+    return AuditEvent.objects.filter(action=action).count()

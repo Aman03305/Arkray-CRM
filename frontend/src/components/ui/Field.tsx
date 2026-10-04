@@ -37,7 +37,7 @@ function Label({ htmlFor, label, optional }: { htmlFor: string; label: string; o
   return (
     <label htmlFor={htmlFor} className="mb-1.5 block text-sm font-medium text-slate-700">
       {label}
-      {optional ? <span className="font-normal text-slate-400"> (optional)</span> : null}
+      {optional ? <span className="font-normal text-slate-500"> (optional)</span> : null}
     </label>
   );
 }

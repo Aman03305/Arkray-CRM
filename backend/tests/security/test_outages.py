@@ -187,9 +187,8 @@ class TestActivitiesKeepWorking:
 
 class TestDashboardKeepsWorking:
     """The dashboard reads PostgreSQL only (no analytics cache, no worker, no AI): with Redis
-    or the broker down it still answers, and an administrator's delegated viewing is then
-    audited on every request (the audit window lives in the cache; fail towards more
-    auditing)."""
+    or the broker down it still answers, and an administrator's delegated viewing is audited
+    exactly as without it (the audit window lives in PostgreSQL since Phase 9)."""
 
     def journey(self, owner, admin):
         from arkray.audit.models import AuditEvent
@@ -214,7 +213,7 @@ class TestDashboardKeepsWorking:
     @pytest.mark.usefixtures("redis_down")
     def test_during_a_redis_outage(self, user_a, admin):
         started = time.monotonic()
-        assert self.journey(user_a, admin) == 4  # every delegated view audited
+        assert self.journey(user_a, admin) == 2  # once per workspace, as always
         assert time.monotonic() - started < 10  # fail-fast cache: no multi-second stalls
 
     def test_during_a_broker_outage(self, user_a, admin, monkeypatch):
@@ -228,8 +227,8 @@ class TestDashboardKeepsWorking:
 class TestSearchKeepsWorking:
     """Global search reads PostgreSQL only (no search cache, no worker, no AI or embedding
     provider): with Redis or the broker down it still answers, with the same results, and
-    an administrator's delegated searching is then audited on every request (the audit window
-    lives in the cache; fail towards more auditing)."""
+    an administrator's delegated searching is audited exactly as without it (the audit window
+    lives in PostgreSQL since Phase 9)."""
 
     def journey(self, owner, admin):
         from arkray.audit.models import AuditEvent
@@ -255,7 +254,7 @@ class TestSearchKeepsWorking:
     @pytest.mark.usefixtures("redis_down")
     def test_during_a_redis_outage(self, user_a, admin):
         started = time.monotonic()
-        assert self.journey(user_a, admin) == 4  # every delegated search audited
+        assert self.journey(user_a, admin) == 2  # once per workspace, as always
         assert time.monotonic() - started < 10  # fail-fast cache: no multi-second stalls
 
     def test_during_a_broker_outage(self, user_a, admin, monkeypatch):

@@ -14,6 +14,7 @@ import pytest
 from django.core import signing
 from django.utils import timezone
 
+from arkray.core import keyset
 from arkray.core.access import AccessScope
 from arkray.core.errors import InvalidInputError
 from arkray.core.keyset import KeysetOrdering, KeysetPaginator, SortKey
@@ -64,7 +65,7 @@ def reference(queryset, ordering: KeysetOrdering):
 
 
 def walk_forward(queryset, ordering, page_size):
-    paginator = KeysetPaginator(ordering, page_size=page_size)
+    paginator = KeysetPaginator(ordering, page_size=page_size, binding=None)
     seen, cursor, pages = [], None, []
     while True:
         page = paginator.paginate(queryset, cursor)
@@ -90,7 +91,7 @@ def test_walking_every_page_yields_exactly_the_ordered_rows(leads, owner, name, 
 def test_walking_backwards_from_the_last_page_yields_the_same_rows(leads, owner, name):
     ordering = ORDERINGS[name]
     _, pages = walk_forward(scoped(owner), ordering, 9)
-    paginator = KeysetPaginator(ordering, page_size=9)
+    paginator = KeysetPaginator(ordering, page_size=9, binding=None)
     collected = list(pages[-1].items)
     cursor = pages[-1].previous_cursor
     while cursor:
@@ -103,7 +104,7 @@ def test_walking_backwards_from_the_last_page_yields_the_same_rows(leads, owner,
 @pytest.mark.parametrize("name", sorted(ORDERINGS))
 def test_rows_inserted_while_paging_neither_duplicate_nor_hide_existing_rows(leads, owner, name):
     ordering = ORDERINGS[name]
-    paginator = KeysetPaginator(ordering, page_size=10)
+    paginator = KeysetPaginator(ordering, page_size=10, binding=None)
     original = set(reference(scoped(owner), ordering))
     first = paginator.paginate(scoped(owner), None)
     seen = [lead.pk for lead in first.items]
@@ -124,7 +125,7 @@ def test_rows_inserted_while_paging_neither_duplicate_nor_hide_existing_rows(lea
 
 def test_rows_archived_while_paging_do_not_break_the_walk(leads, owner):
     queryset = scoped(owner).filter(archived_at__isnull=True)
-    paginator = KeysetPaginator(ORDERINGS["-created_at"], page_size=10)
+    paginator = KeysetPaginator(ORDERINGS["-created_at"], page_size=10, binding=None)
     first = paginator.paginate(queryset, None)
     boundary = first.items[-1]
     Lead.objects.filter(pk=boundary.pk).update(archived_at=timezone.now())  # the cursor row
@@ -135,7 +136,9 @@ def test_rows_archived_while_paging_do_not_break_the_walk(leads, owner):
 
 
 def test_an_empty_scope_has_one_empty_page(owner):
-    page = KeysetPaginator(ORDERINGS["name"], page_size=25).paginate(scoped(owner), None)
+    page = KeysetPaginator(ORDERINGS["name"], page_size=25, binding=None).paginate(
+        scoped(owner), None
+    )
     assert (page.items, page.next_cursor, page.previous_cursor) == ([], None, None)
 
 
@@ -143,10 +146,12 @@ class TestInvalidCursors:
     ORDERING = ORDERINGS["-last_contacted_at"]
 
     def paginate(self, cursor):
-        return KeysetPaginator(self.ORDERING, page_size=5).paginate(Lead.objects.all(), cursor)
+        return KeysetPaginator(self.ORDERING, page_size=5, binding=None).paginate(
+            Lead.objects.all(), cursor
+        )
 
     def forged(self, payload):
-        return signing.dumps(payload, salt="arkray.core.keyset")
+        return keyset._seal(payload)
 
     @pytest.mark.parametrize(
         "cursor",
@@ -175,11 +180,11 @@ class TestInvalidCursors:
         with pytest.raises(InvalidInputError):
             self.paginate(self.forged(payload))
 
-    def test_a_cursor_signed_with_another_salt_is_refused(self):
-        with pytest.raises(InvalidInputError):
-            self.paginate(
-                signing.dumps({"o": "-last_contacted_at", "d": "next", "v": [None, None]})
-            )
+    def test_a_cursor_signed_or_sealed_elsewhere_is_refused(self):
+        payload = {"o": "-last_contacted_at", "d": "next", "v": [None, None], "b": None}
+        for cursor in (signing.dumps(payload), keyset._fernet("another-key").encrypt(b"{}")):
+            with pytest.raises(InvalidInputError):
+                self.paginate(cursor if isinstance(cursor, str) else cursor.decode())
 
 
 def test_an_ordering_must_end_in_a_non_null_key():
@@ -187,3 +192,55 @@ def test_an_ordering_must_end_in_a_non_null_key():
         KeysetOrdering("bad", (SortKey("last_contacted_at", nullable=True),))
     with pytest.raises(ValueError, match="unique, non-null"):
         KeysetOrdering("empty", ())
+
+
+# --- R49 (Phase 10): the whole sort row bounds the scan -------------------------------------
+UNIFORM = KeysetOrdering("uniform", (SortKey("created_at"), SortKey("id")))
+UNIFORM_DESC = KeysetOrdering(
+    "uniform_desc", (SortKey("created_at", descending=True), SortKey("id", descending=True))
+)
+MIXED = KeysetOrdering("mixed", (SortKey("created_at"), SortKey("id", descending=True)))
+NULLABLE = KeysetOrdering("nullable", (SortKey("last_contacted_at", nullable=True), SortKey("id")))
+
+
+def second_page_sql(queryset, ordering: KeysetOrdering) -> str:
+    paginator = KeysetPaginator(ordering, page_size=5, binding=None)
+    first = paginator.paginate(queryset, None)
+    window, _ = paginator.window(queryset, first.next_cursor)
+    return str(window.query)
+
+
+@pytest.mark.parametrize(
+    ("ordering", "bounded_by_row"),
+    [(UNIFORM, True), (UNIFORM_DESC, True), (MIXED, False), (NULLABLE, False)],
+)
+def test_a_uniform_not_null_ordering_starts_the_scan_at_the_cursors_whole_row(
+    leads, owner, ordering, bounded_by_row
+):
+    """A page deep inside a large group of equal leading values re-read the group from its
+    start (18,182 undated open tasks: 4.18 ms 5,000 rows in, 0.15 ms with the row bound).
+    NULL placement and mixed directions can't be a row comparison: they keep the leading
+    key's bound."""
+    sql = second_page_sql(scoped(owner), ordering)
+    assert ("ROW(" in sql) is bounded_by_row, sql
+
+
+@pytest.mark.parametrize("ordering", [UNIFORM, UNIFORM_DESC, MIXED, NULLABLE])
+@pytest.mark.parametrize("page_size", [1, 4, 13])
+def test_one_large_group_of_equal_leading_values_pages_exactly(owner, ordering, page_size):
+    """Every row shares the leading value but four: only the id orders the group."""
+    rows = [LeadFactory(owner=owner) for _ in range(40)]
+    same = timezone.now() - timedelta(days=3)
+    Lead.objects.filter(pk__in=[lead.pk for lead in rows[4:]]).update(
+        created_at=same, last_contacted_at=same
+    )
+    seen, _ = walk_forward(scoped(owner), ordering, page_size)
+    assert seen == reference(scoped(owner), ordering)
+    paginator = KeysetPaginator(ordering, page_size=page_size, binding=None)
+    _, pages = walk_forward(scoped(owner), ordering, page_size)
+    collected, cursor = list(pages[-1].items), pages[-1].previous_cursor
+    while cursor:
+        page = paginator.paginate(scoped(owner), cursor)
+        collected[:0] = page.items
+        cursor = page.previous_cursor
+    assert [lead.pk for lead in collected] == reference(scoped(owner), ordering)

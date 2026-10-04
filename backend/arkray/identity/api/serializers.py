@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from django.conf import settings
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
@@ -41,12 +42,19 @@ def _email_field() -> serializers.EmailField:
 
 
 # --- output -----------------------------------------------------------------------------------
+class ViewerFeaturesSerializer(serializers.Serializer[Any]):
+    """Deployment-wide features the UI should offer (configuration, not permissions)."""
+
+    ask = serializers.BooleanField(help_text="Ask Arkray is turned on for this CRM.")
+
+
 class ViewerSerializer(serializers.ModelSerializer[User]):
     """The signed-in user (GET /auth/me and the sign-in response)."""
 
     full_name = serializers.CharField(read_only=True)
     role_label = serializers.CharField(source="get_role_display", read_only=True)
     capabilities = serializers.SerializerMethodField()
+    features = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -59,12 +67,17 @@ class ViewerSerializer(serializers.ModelSerializer[User]):
             "role",
             "role_label",
             "capabilities",
+            "features",
         ]
         read_only_fields = fields
 
     @extend_schema_field(serializers.ListField(child=serializers.CharField()))
     def get_capabilities(self, user: User) -> list[str]:
         return sorted(capability.value for capability in capabilities_for(user))
+
+    @extend_schema_field(ViewerFeaturesSerializer)
+    def get_features(self, user: User) -> dict[str, bool]:
+        return {"ask": bool(settings.AI_ENABLED)}
 
 
 class InvitationStateSerializer(serializers.Serializer[Any]):

@@ -47,6 +47,7 @@ class TestSuccessfulSignIn:
             "role",
             "role_label",
             "capabilities",
+            "features",
         }
         assert body["full_name"] == "Rahul Sharma"
         assert body["capabilities"] == ["ai.query", "crm.access_own"]
@@ -89,7 +90,8 @@ class TestSuccessfulSignIn:
         cookie = login(api_client, user_a.email).cookies[DEVICE_COOKIE]
         assert cookie["httponly"] is True
         assert cookie["samesite"] == "Strict"
-        assert cookie["path"] == "/api/v1/auth/"  # never sent anywhere else
+        # The API only (sign-in and the re-authentication of account changes), never pages.
+        assert cookie["path"] == "/api/v1/"
 
 
 class TestSessionFixation:

@@ -501,7 +501,7 @@ def main() -> None:
     parser.add_argument("--steps", default=",".join(STEPS), help="with --seed-text")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--runs", type=int, default=3, help="best of N (timings and plans)")
-    parser.add_argument("--only", default="", help="comma-separated query names to run")
+    parser.add_argument("--only", default="", help="comma-separated query names or words")
     parser.add_argument("--recent", type=int, help="override core.ranking.RECENT")
     parser.add_argument("--no-explain", action="store_true", help="wall-clock timings only")
     parser.add_argument(
@@ -530,7 +530,7 @@ def main() -> None:
         print(f"RECENT = {ranking.RECENT}")
     if args.only:
         wanted = set(args.only.split(","))
-        QUERIES[:] = [(n, q) for n, q in QUERIES if n in wanted]
+        QUERIES[:] = [(n, q) for n, q in QUERIES if n in wanted or q in wanted]
     if args.check_plans:
         scopes = {
             "heavy owner (SELF)": AccessScope.own(heavy),

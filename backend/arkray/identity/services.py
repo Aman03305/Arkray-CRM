@@ -18,7 +18,7 @@ the one-time secret, stores its digest and emails the link, all inside the email
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -37,6 +37,7 @@ from arkray.core.errors import (
     PermissionDeniedError,
     RateLimitedError,
 )
+from arkray.core.text import TextRejected, clean_line
 
 from . import emails, selectors, throttling, tokens
 from .models import (
@@ -174,11 +175,22 @@ def _audit_user(action: str, actor_id: UUID | None, user: User, **metadata: obje
 
 
 # --- user administration --------------------------------------------------------------------
+def _clean_name(value: str, field: str) -> str:
+    """A person's name, under the same text rules as every CRM field (Phase 9 review: names
+    took control, bidi, zero-width and tag characters and line breaks, which reached the
+    owner pickers and the lines of invitation emails)."""
+    try:
+        return clean_line(value)
+    except TextRejected as exc:
+        raise InvalidInputError(details={field: [str(exc)]}) from None
+
+
 def create_user(*, actor_id: UUID, email: str, first_name: str, last_name: str, role: str) -> User:
     """Create an invited user and queue their invitation. Nobody ever chooses (or sees)
     another user's password; the email job delivers a one-time activation link."""
     email = normalize_email(email)
-    first_name, last_name = first_name.strip(), last_name.strip()
+    first_name = _clean_name(first_name, "first_name")
+    last_name = _clean_name(last_name, "last_name")
     if role not in Role.values:
         raise InvalidInputError(details={"role": ["Choose a valid role."]})
     if not first_name:
@@ -230,7 +242,7 @@ def update_user(*, actor_id: UUID, user_id: UUID, version: int, changes: Mapping
         changed: list[str] = []
         for field in ("first_name", "last_name"):
             if field in changes:
-                value = changes[field].strip()
+                value = _clean_name(changes[field], field)
                 if field == "first_name" and not value:
                     raise InvalidInputError(details={field: ["This field may not be blank."]})
                 if value != getattr(user, field):
@@ -276,14 +288,30 @@ def update_user(*, actor_id: UUID, user_id: UUID, version: int, changes: Mapping
     return selectors.admin_user_detail(user.pk)
 
 
-def change_user_email(*, actor_id: UUID, user_id: UUID, version: int, email: str) -> User:
-    """Change a user's sign-in identity. Explicit, audited, and it ends their sessions."""
+# A change to one's own account refused because the requesting session ended meanwhile.
+SESSION_ENDED = "Your session ended while this change was being made. Sign in again."
+
+
+def change_user_email(
+    *,
+    actor_id: UUID,
+    user_id: UUID,
+    version: int,
+    email: str,
+    still_signed_in: Callable[[User], bool] | None = None,
+) -> User:
+    """Change a user's sign-in identity. Explicit, audited, and it ends their sessions.
+
+    `still_signed_in`: for a change to one's own email, checked against the locked user, so
+    a password reset that ended the requesting session meanwhile can't be undone by it."""
     new_email = normalize_email(email)
     try:
         with transaction.atomic():
             _serialise_user_administration()
             actor = _acting_manager(actor_id)
             user = _lock_user(user_id)
+            if still_signed_in is not None and not still_signed_in(user):
+                raise PermissionDeniedError(SESSION_ENDED)
             _require_version(user, version)
             previous_email = user.email
             if new_email == previous_email:

@@ -90,3 +90,17 @@ export type SearchOpportunity = Schemas["SearchOpportunity"];
 export type SearchTask = Schemas["SearchTask"];
 export type SearchMeeting = Schemas["SearchMeeting"];
 export type SearchNote = Schemas["SearchNote"];
+
+// --- Ask Arkray (Phase 8) ----------------------------------------------------------------------
+export type AskStatus = Schemas["AskStatus"];
+export type AskQuestion = Schemas["Question"];
+export type AskAnswer = Schemas["Answer"];
+export type AskAnswerBlock = Schemas["AnswerBlock"];
+export type AskAnswerPart = Schemas["AnswerPart"];
+export type AskFact = Schemas["AnswerFact"];
+export type AskSource = Schemas["AnswerSource"];
+export type AskCitation = Schemas["AnswerCitation"];
+export type AskConversation = Schemas["Conversation"];
+export type AskConversationSummary = Schemas["ConversationSummary"];
+export type AskRecordKind = Schemas["AskRecordKindEnum"];
+export type AskRequest = Schemas["AskInputRequest"];

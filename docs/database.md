@@ -236,9 +236,13 @@ Background work written in the business transaction ([reliability.md](reliabilit
 - CHECKs: valid status; in-flight rows have a lease and a claim token; `finished_at` is set
   exactly for done/dead.
 - Partial indexes: `(queue, available_at) WHERE pending` (relay claim),
-  `(queue, locked_until) WHERE in_flight` (in-flight cap, lease recovery).
-- Housekeeping (Phase 10): purge `done` rows older than 7 days; `dead` rows are kept until
-  an operator resolves them.
+  `(queue, locked_until) WHERE in_flight` (in-flight cap, lease recovery), `(queue) WHERE
+  dead` (Phase 10: the metrics endpoint counts each status from its own partial index).
+- Housekeeping (Phase 10 review; until then nothing deleted finished events, so the table
+  and every metrics scrape grew forever): the hourly `core.housekeeping` deletes `done`
+  rows finished more than `OUTBOX_DONE_RETENTION_DAYS` (7) ago, 5,000 at a time, at most
+  500,000 a run; `dead` rows are kept until an operator re-queues them
+  (`manage.py outbox_requeue`) or deletes them.
 
 ### `core_idempotency_record` (built, Phase 2)
 
@@ -319,7 +323,14 @@ lead edit is a non-HOT update (`updated_at` is indexed) that clears two pages'
 all-visible marks; with the defaults the dashboard's index-only lead count fetched most
 heap rows for up to 200,000 edits at 1,000,000 leads (the organisation's figure up to ~1 s;
 performance review, P1). At 1 % the worst case before a run is ~10,000 edits: 11 ms for
-the heaviest owner, 71 ms organisation-wide.
+the heaviest owner, 71 ms organisation-wide. `activities_activity` follows at **2 %**
+(Phase 10, migration `activities.0009`): the dashboard's open-task and meetings-from-today
+figures are index-only ranges over the newest activities, which stay off the visibility map
+until a vacuum (4,309 heap fetches for 31,263 rows after 5,947 inserts; the default
+insert-vacuum waits for 400,000 at 2,000,000 activities). The other large tables keep the
+defaults: nothing reads them index-only. A restore, `VACUUM FULL` or bulk load leaves an
+empty visibility map until the next vacuum: run `VACUUM (ANALYZE)` on the large tables
+after one ([reliability.md](reliability.md#performance-baseline-phase-10)).
 
 The duplicate check is issued **without** `ORDER BY` so PostgreSQL combines the two
 duplicate indexes (a `BitmapOr`, 0.35 ms) instead of walking a date index until it meets
@@ -544,15 +555,45 @@ Adding Call, Email or WhatsApp later: the enum value, the type's statuses and an
 (for example `duration_seconds`, `direction`) with NULL-safe CHECKs in one migration, plus a
 type spec in code. No new tables and no API redesign.
 
-### `ai_knowledge_chunk` (Phase 8)
+### `ai_knowledge_chunk` (built, Phase 8)
 
-`source_type`, `source_id uuid`, `lead_id uuid NULL`, **`owner_id uuid NOT NULL`**,
-`chunk_index`, `content`, `content_hash char(64)`, `embedding vector(1024)`,
-`embedding_model`, `source_updated_at`, `indexed_at`.
-UNIQUE `(source_type, source_id, chunk_index)`; btree `(owner_id)`, `(lead_id)`; HNSW on
-`embedding vector_cosine_ops`. The vector index **locates candidates only**: every hit is
-re-verified against the live source table through the caller's scope before any text
-reaches the model ([rag-architecture.md](rag-architecture.md)).
+Derived data: deleted and rebuilt from the CRM at will (`manage.py ai_reindex`). **No
+text column**: a chunk is a slice of its source's knowledge document.
+
+| Column | Notes |
+|---|---|
+| `id bigint` | internal; never addressed by the API |
+| `source_type varchar(16)` | CHECK in (`lead`, `opportunity`, `task`, `meeting`, `note`) |
+| `source_id uuid`, `chunk_index smallint` | UNIQUE (`source_type`, `source_id`, `chunk_index`): idempotent replacement |
+| `owner_id uuid NOT NULL` | FK `identity_user` ON DELETE CASCADE; authorization metadata as of indexing (the pre-filter) |
+| `lead_id uuid NOT NULL` | FK `leads_lead` ON DELETE CASCADE |
+| `opportunity_id uuid NULL` | filter for one opportunity |
+| `source_hash char(64)` | CHECK `^[0-9a-f]{64}$`; SHA-256 of the document (with `DOCUMENT_FORMAT`) |
+| `char_start`, `char_end` | CHECK `char_end > char_start`; the slice embedded |
+| `embedding vector(384)` | bge-small-en-v1.5, normalised |
+| `embedding_model`, `source_updated_at`, `indexed_at` | drift detection |
+
+Indexes: HNSW `(embedding vector_cosine_ops)` m 16, ef_construction 64 (organisation-wide
+search); `(owner_id, source_type)` (one person's chunks: exact search); `(lead_id)`. The
+vector index **locates candidates only**: every hit is re-read through the caller's scope and
+hash-checked before any text is used ([rag-architecture.md](rag-architecture.md)). Migration
+`ai.0001` creates `vector` with `CREATE EXTENSION IF NOT EXISTS` (kept on rollback).
+
+### `ai_conversation`, `ai_question` (built, Phase 8)
+
+`ai_conversation`: `id uuid`, `actor_id` (FK user, CASCADE), `workspace_kind` (`self`,
+`user`, `organization`), `subject_id` (FK user, CASCADE, NULL for the organisation),
+timestamps. CHECK: organisation ⇒ no subject; self ⇒ subject = actor; user ⇒ subject ≠ actor.
+Index `(actor_id, workspace_kind, subject_id, updated_at DESC)` for "my conversations here";
+`(updated_at)` for retention.
+
+`ai_question`: `id uuid`, `conversation_id` (CASCADE), `actor_id`, `text` (≤ 1,000),
+`status` (`pending`, `answered`, `failed`), `answer jsonb` (the typed answer), `error_code`,
+`mode` (`router`, `llm`, `retrieval`), `created_at`, `started_at` (the worker's one claim),
+`finished_at`, `expires_at`. CHECKs: pending ⇔ no `finished_at`; an error code only when
+failed. Indexes: `(conversation_id, created_at)`; partial `(actor_id) WHERE status =
+'pending'` (bulkheads). Conversations idle for 30 days are deleted with their questions
+(`ai.housekeeping`).
 
 ## Aggregate queries (built in Phase 5)
 

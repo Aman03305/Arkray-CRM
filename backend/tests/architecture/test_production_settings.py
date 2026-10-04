@@ -13,8 +13,8 @@ BACKEND = Path(__file__).resolve().parents[2]
 STRONG_KEY = "k" * 64
 BASE_ENV = {
     "DATABASE_URL": "postgres://u:p@localhost:5432/db",
-    "CELERY_BROKER_URL": "memory://",
-    "REDIS_CACHE_URL": "redis://localhost:6379/0",
+    "CELERY_BROKER_URL": "rediss://:broker-secret@redis.internal:6380/0",
+    "REDIS_CACHE_URL": "rediss://:cache-secret@redis.internal:6380/1",
     "DJANGO_ALLOWED_HOSTS": "crm.example.com",
     "DJANGO_SECRET_KEY": STRONG_KEY,
     "TRUSTED_PROXY_COUNT": "1",
@@ -23,8 +23,17 @@ BASE_ENV = {
 }
 
 
-def load_production_settings(**overrides: str | None) -> subprocess.CompletedProcess[str]:
-    """Import production settings in a clean interpreter. An override of None unsets."""
+DEFAULT_PRINT = (
+    "settings.DEBUG, settings.SESSION_COOKIE_SECURE, settings.CSRF_COOKIE_SECURE,"
+    " settings.SECURE_SSL_REDIRECT, settings.SECURE_HSTS_SECONDS"
+)
+
+
+def load_production_settings(
+    _print: str = DEFAULT_PRINT, **overrides: str | None
+) -> subprocess.CompletedProcess[str]:
+    """Import production settings in a clean interpreter and print `_print` (settings
+    attributes). An override of None unsets."""
     env = {
         k: v
         for k, v in os.environ.items()
@@ -38,9 +47,7 @@ def load_production_settings(**overrides: str | None) -> subprocess.CompletedPro
             env[key] = value
     code = (
         "import django, os; os.environ['DJANGO_SETTINGS_MODULE']='config.settings.production';"
-        "from django.conf import settings;"
-        "print(settings.DEBUG, settings.SESSION_COOKIE_SECURE, settings.CSRF_COOKIE_SECURE,"
-        " settings.SECURE_SSL_REDIRECT, settings.SECURE_HSTS_SECONDS)"
+        f"from django.conf import settings; print({_print})"
     )
     return subprocess.run(  # noqa: S603 — fixed interpreter and code
         [sys.executable, "-c", code],
@@ -101,6 +108,8 @@ def test_app_base_url_must_be_stated_explicitly():
         {"APP_BASE_URL": "http://crm.example.com"},  # account links over plain HTTP
         {"EMAIL_URL": "consolemail://"},  # account links printed to the logs
         {"EMAIL_URL": "filemail:///tmp/mail"},  # account links written to disk
+        {"REDIS_CACHE_URL": "redis://redis.internal:6379/1"},  # Phase 9: no AUTH
+        {"CELERY_BROKER_URL": "redis://redis.internal:6379/0"},  # Phase 9: no AUTH
     ],
 )
 def test_weakening_https_requires_an_explicit_local_opt_in(weakening):
@@ -109,3 +118,171 @@ def test_weakening_https_requires_an_explicit_local_opt_in(weakening):
     assert "DJANGO_ALLOW_INSECURE_LOCAL_HTTP" in refused.stderr
     allowed = load_production_settings(**weakening, DJANGO_ALLOW_INSECURE_LOCAL_HTTP="true")
     assert allowed.returncode == 0, allowed.stderr
+
+
+COOKIES = (
+    "settings.SESSION_COOKIE_NAME, settings.CSRF_COOKIE_NAME, settings.LOGIN_DEVICE_COOKIE_NAME,"
+    " settings.SESSION_COOKIE_DOMAIN, settings.CSRF_COOKIE_DOMAIN,"
+    " settings.SESSION_COOKIE_PATH, settings.CSRF_COOKIE_PATH"
+)
+
+
+def test_https_cookies_carry_host_and_secure_prefixes():
+    """Phase 9: `__Host-` (Secure, no Domain, Path=/) for the session and CSRF cookies; the
+    path-scoped login-device cookie is `__Secure-`."""
+    result = load_production_settings(COOKIES)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == [
+        "__Host-arkray_session",
+        "__Host-arkray_csrftoken",
+        "__Secure-arkray_login_device",
+        "None",
+        "None",
+        "/",
+        "/",
+    ]
+
+
+def test_a_plain_http_local_stack_keeps_unprefixed_cookie_names():
+    """Browsers reject prefixed cookies without Secure: the opted-in local stack would
+    otherwise lose its session and CSRF cookies."""
+    result = load_production_settings(
+        COOKIES, DJANGO_SECURE_COOKIES="false", DJANGO_ALLOW_INSECURE_LOCAL_HTTP="true"
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split()[:3] == [
+        "arkray_session",
+        "arkray_csrftoken",
+        "arkray_login_device",
+    ]
+
+
+def test_the_ai_sdks_debug_logging_is_refused():
+    """Phase 9 review: ANTHROPIC_LOG makes the SDK log whole requests (questions, notes)."""
+    result = load_production_settings(ANTHROPIC_LOG="debug")
+    assert result.returncode != 0
+    assert "ANTHROPIC_LOG" in result.stderr
+
+
+@pytest.mark.parametrize("variable", ["ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS"])
+def test_the_sdks_own_routing_variables_are_refused(variable):
+    """Phase 10 review, P2: the SDK read ANTHROPIC_BASE_URL (even plain http) and extra
+    headers from the environment, so a stray value could send questions, CRM context and
+    the key elsewhere. Where calls go is AI_LLM_BASE_URL alone."""
+    result = load_production_settings(**{variable: "http://elsewhere.invalid:8080"})
+    assert result.returncode != 0
+    assert variable in result.stderr
+
+
+def test_model_calls_must_use_https():
+    plain = load_production_settings(AI_LLM_BASE_URL="http://gateway.internal")
+    assert plain.returncode != 0
+    assert "AI_LLM_BASE_URL" in plain.stderr
+    gateway = load_production_settings(
+        "settings.AI_LLM_BASE_URL", AI_LLM_BASE_URL="https://gateway.example.com"
+    )
+    assert gateway.returncode == 0, gateway.stderr
+    assert gateway.stdout.strip() == "https://gateway.example.com"
+    assert load_production_settings("settings.AI_LLM_BASE_URL").stdout.strip() == (
+        "https://api.anthropic.com"
+    )
+
+
+def test_the_provider_client_is_given_the_configured_host(settings, monkeypatch):
+    """Even outside production, the SDK never picks ANTHROPIC_BASE_URL up by itself."""
+    from arkray.ai.llm import AnthropicProvider
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://elsewhere.invalid:8080")
+    settings.ANTHROPIC_API_KEY = "sk-ant-test-not-a-real-key"
+    settings.AI_LLM_BASE_URL = "https://api.anthropic.com"
+    client = AnthropicProvider()._client
+    assert str(client.base_url).startswith("https://api.anthropic.com")
+
+
+@pytest.mark.parametrize(
+    ("rate", "accepted"),
+    [
+        ("60/min", True),
+        ("20/s", True),
+        ("1000/hour", True),
+        ("5/day", True),
+        ("10/week", False),
+        ("0/min", False),
+        ("abc", False),
+        ("60", False),
+        ("60/", False),
+    ],
+)
+def test_rate_limits_are_validated_at_startup(rate, accepted):
+    """Phase 11 (R77: operators resize the sign-in limit): DRF parses rates on the first
+    request, so a typo was a 500 there, not a failed start."""
+    result = load_production_settings(API_THROTTLE_AUTH=rate)
+    assert (result.returncode == 0) is accepted, result.stderr
+    if not accepted:
+        assert "API_THROTTLE_AUTH" in result.stderr
+
+
+def test_a_previous_secret_key_can_be_kept_for_a_rotation():
+    """Phase 11: the code honoured SECRET_KEY_FALLBACKS since Phase 9, but no deployment
+    could set it, so rotating the key signed everyone out at once."""
+    previous = "p" * 64
+    kept = load_production_settings(
+        "settings.SECRET_KEY_FALLBACKS", DJANGO_SECRET_KEY_FALLBACKS=previous
+    )
+    assert kept.returncode == 0, kept.stderr
+    assert kept.stdout.strip() == f"['{previous}']"
+    for weak in ("short", "dev-" + "x" * 60, STRONG_KEY):
+        refused = load_production_settings(DJANGO_SECRET_KEY_FALLBACKS=weak)
+        assert refused.returncode != 0
+        assert "DJANGO_SECRET_KEY_FALLBACKS" in refused.stderr
+
+
+def test_the_database_role_is_checked_by_default_in_production():
+    printed = load_production_settings("settings.DB_REQUIRE_RESTRICTED_ROLE").stdout.strip()
+    assert printed == "True"
+
+
+@pytest.mark.parametrize(("token", "accepted"), [("", True), ("x" * 31, False), ("x" * 32, True)])
+def test_a_metrics_token_is_long_or_absent(token, accepted):
+    """Phase 10 review: the endpoint's only protection is the token."""
+    result = load_production_settings(METRICS_TOKEN=token)
+    assert (result.returncode == 0) is accepted, result.stderr
+    if not accepted:
+        assert "METRICS_TOKEN" in result.stderr
+
+
+def test_only_the_process_calling_the_provider_needs_its_key():
+    """Phase 9 review: the key was in every container; only the ai worker holds it now."""
+    anthropic = {"AI_ENABLED": "true", "AI_LLM_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": ""}
+    refused = load_production_settings(**anthropic)  # AI_LLM_KEY_HOLDER defaults to true
+    assert refused.returncode != 0
+    assert "ANTHROPIC_API_KEY" in refused.stderr
+    web = load_production_settings(**anthropic, AI_LLM_KEY_HOLDER="false")
+    assert web.returncode == 0, web.stderr
+
+
+def test_the_cache_never_unpickles():
+    result = load_production_settings("settings.CACHES['default']['OPTIONS']['SERIALIZER']")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "django_redis.serializers.json.JSONSerializer"
+
+
+@pytest.mark.parametrize("value", ["", " ", "ture", "yes please"])
+def test_an_unrecognisable_role_check_value_is_refused(value):
+    """Phase 11 review: env.bool read these as false and silently switched the check off."""
+    result = load_production_settings(DB_REQUIRE_RESTRICTED_ROLE=value)
+    assert result.returncode != 0
+    assert "DB_REQUIRE_RESTRICTED_ROLE" in result.stderr
+
+
+def test_switching_the_role_check_off_needs_the_insecure_opt_in():
+    off = load_production_settings(DB_REQUIRE_RESTRICTED_ROLE="false")
+    assert off.returncode != 0
+    assert "DB_REQUIRE_RESTRICTED_ROLE" in off.stderr
+    local = load_production_settings(
+        "settings.DB_REQUIRE_RESTRICTED_ROLE",
+        DB_REQUIRE_RESTRICTED_ROLE="false",
+        DJANGO_ALLOW_INSECURE_LOCAL_HTTP="true",
+    )
+    assert local.returncode == 0, local.stderr
+    assert local.stdout.strip() == "False"

@@ -10,6 +10,15 @@ describe("describeError", () => {
     );
   });
 
+  it("says the service is down, and for how long when the server says (audit)", () => {
+    expect(describeError(new ApiError(503, "service_unavailable", "x", null, "r", 30)).message).toBe(
+      "Arkray is temporarily unavailable. Please try again in 30 seconds.",
+    );
+    expect(describeError(new ApiError(503, "service_unavailable", "x")).message).toBe(
+      "Arkray is temporarily unavailable. Please try again in a moment.",
+    );
+  });
+
   it("uses a generic message (with the reference) for server errors", () => {
     const shown = describeError(new ApiError(500, "server_error", "Traceback ...", null, "req-9"));
     expect(shown).toEqual({

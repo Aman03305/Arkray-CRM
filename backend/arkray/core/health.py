@@ -19,6 +19,8 @@ from django.http import HttpRequest, JsonResponse
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET
 
+from .metrics import bounded
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,11 +30,27 @@ def live(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"status": "ok"})
 
 
-def _database_ok() -> bool:
+def _select_one() -> bool:
+    """In a probe thread, on its own connection, closed afterwards."""
     try:
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1")
             return bool(cursor.fetchone() == (1,))
+    finally:
+        connection.close()
+
+
+def _database_ok() -> bool:
+    # Bounded: a database that stalls (paused, failing over) instead of refusing made the
+    # probe wait as long as the stall, so the instance never reported itself unready
+    # (whole-software audit). Now: 503 within the probe deadline.
+    try:
+        return bounded(_select_one)
+    except TimeoutError:
+        logger.warning(
+            "readiness_check_failed", extra={"dependency": "database", "reason": "timeout"}
+        )
+        return False
     except Exception:  # any failure at all means "not ready"
         logger.warning("readiness_check_failed", extra={"dependency": "database"}, exc_info=True)
         return False

@@ -17,6 +17,7 @@ from typing import Any
 from uuid import UUID
 
 from django.utils.cache import add_never_cache_headers
+from django.utils.crypto import salted_hmac
 from django.utils.dateparse import parse_datetime
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
@@ -105,6 +106,22 @@ def validated[S: serializers.Serializer[Any]](
     serializer = serializer_class(data=data)
     serializer.is_valid(raise_exception=True)
     return dict(serializer.validated_data)
+
+
+@extend_schema_field({"type": "string", "example": "3f9a1c0b7d2e4a6c8e10"})
+class OpaqueIdField(serializers.Field):  # type: ignore[type-arg]
+    """An append-only row's identity for clients (list keys): a stable keyed hash of its
+    sequential id, never the id itself. Ids from one global sequence measured how many
+    events were written organisation-wide between two of one's own (R48, Phase 9)."""
+
+    def __init__(self, namespace: str, **kwargs: Any) -> None:
+        self.namespace = namespace
+        kwargs["read_only"] = True
+        super().__init__(**kwargs)
+
+    def to_representation(self, value: int) -> str:
+        salt = f"arkray.opaque-id.{self.namespace}"
+        return salted_hmac(salt, str(value), algorithm="sha256").hexdigest()[:20]
 
 
 @extend_schema_field(

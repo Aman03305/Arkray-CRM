@@ -60,7 +60,10 @@ _DEVICE_ID = re.compile(r"^[0-9a-f]{32}$")
 # Advisory-lock namespaces ("ARK1", "ARK3"; "ARK2" is the user-administration lock).
 _ACCOUNT_LOCK = 0x41524B31
 _SOURCE_LOCK = 0x41524B33
-DEVICE_COOKIE_PATH = "/api/v1/auth/"
+# The API only: sign-in and the re-authentication of account changes (password, own
+# email: /api/v1/admin/users/<id>/change-email), never the pages.
+DEVICE_COOKIE_PATH = "/api/v1/"
+_DEVICE_TRUST_SALT = "arkray.identity.login-device-trust"
 RESET_REQUEST_WINDOW = timedelta(hours=1)
 IPV6_SOURCE_PREFIX = 64
 
@@ -134,8 +137,39 @@ def _seconds_until(moment: datetime, now: datetime) -> int:
 
 
 # --- trusted-device cookie ---------------------------------------------------------------
-def read_device(request: HttpRequest, identifiers: Sequence[str]) -> str:
-    """The trusted-device id for this account, or "" for an unrecognised browser."""
+def device_trust(password_hash: str, session_epoch: int, *, secret: str | None = None) -> str:
+    """What a trusted-device cookie was issued against: the account's credentials as they
+    were (a keyed hash; neither value is recoverable). A password reset or change, or
+    anything that ends every session (`session_epoch`), retires every trusted browser:
+    each must sign in successfully again (Phase 9 review: cookies harvested by someone who
+    once knew the password kept their own budgets against the new one)."""
+    return salted_hmac(
+        _DEVICE_TRUST_SALT, f"{password_hash}|{session_epoch}", secret=secret, algorithm="sha256"
+    ).hexdigest()[:32]
+
+
+def _current_trusts(email: str) -> list[str]:
+    """The account's trust under the current key, then any fallback keys (rotating
+    SECRET_KEY keeps browsers trusted, like the login identifiers)."""
+    from .models import User
+
+    row = (
+        User.objects.filter(email=normalize_email(email))
+        .values_list("password", "session_epoch")
+        .first()
+    )
+    if row is None:
+        return []
+    return [
+        device_trust(*row, secret=key)
+        for key in [settings.SECRET_KEY, *settings.SECRET_KEY_FALLBACKS]
+    ]
+
+
+def read_device(request: HttpRequest, identifiers: Sequence[str], email: str) -> str:
+    """The trusted-device id for this account, or "" for an unrecognised browser (or one
+    trusted before the account's credentials last changed). The account is read only for a
+    validly signed cookie bound to this email, which an attacker can't forge."""
     raw = request.COOKIES.get(settings.LOGIN_DEVICE_COOKIE_NAME)
     if not raw:
         return ""
@@ -150,15 +184,24 @@ def read_device(request: HttpRequest, identifiers: Sequence[str]) -> str:
         return ""
     if not any(constant_time_compare(bound_to, identifier) for identifier in identifiers):
         return ""
-    return device if isinstance(device, str) and _DEVICE_ID.fullmatch(device) else ""
+    if not isinstance(device, str) or not _DEVICE_ID.fullmatch(device):
+        return ""
+    trust = data.get("t")
+    if not isinstance(trust, str):
+        return ""
+    if not any(constant_time_compare(trust, current) for current in _current_trusts(email)):
+        return ""
+    return device
 
 
-def remember_device(response: HttpResponseBase, identifier: str, device_id: str) -> None:
+def remember_device(
+    response: HttpResponseBase, identifier: str, device_id: str, trust: str
+) -> None:
     response.set_cookie(
         settings.LOGIN_DEVICE_COOKIE_NAME,
-        signing.dumps({"i": identifier, "d": device_id}, salt=_DEVICE_SALT),
+        signing.dumps({"i": identifier, "d": device_id, "t": trust}, salt=_DEVICE_SALT),
         max_age=settings.LOGIN_DEVICE_COOKIE_AGE_S,
-        path=DEVICE_COOKIE_PATH,  # only ever sent to the authentication endpoints
+        path=DEVICE_COOKIE_PATH,
         secure=settings.SESSION_COOKIE_SECURE,
         httponly=True,
         samesite="Strict",

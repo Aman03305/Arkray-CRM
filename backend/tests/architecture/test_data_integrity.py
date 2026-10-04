@@ -35,6 +35,8 @@ def test_business_entities_use_uuid_primary_keys():
         "IdempotencyRecord",
         "StageHistory",
         "TimelineEntry",
+        "KnowledgeChunk",  # derived index rows, never addressed by id (Phase 8)
+        "WorkspaceAccessWindow",  # audit bookkeeping, never addressed by id (Phase 9)
     }
     offenders = [
         m.__name__

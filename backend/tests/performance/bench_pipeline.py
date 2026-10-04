@@ -166,7 +166,7 @@ def main() -> None:
     )
 
     def page(scope, filters, ordering, cursor=None):
-        paginator = KeysetPaginator(ORDERINGS[ordering], page_size=25)
+        paginator = KeysetPaginator(ORDERINGS[ordering], page_size=25, binding=None)
         return paginator.paginate(selectors.opportunity_list(scope, filters), cursor)
 
     for who, owner_id in (
@@ -182,7 +182,9 @@ def main() -> None:
         print(f"\n== {who} ==")
         run_captured(
             "board: [1] stage aggregates [2] totals [3] cards",
-            lambda scope=scope: selectors.board(scope, pipeline, OpportunityFilters()),
+            lambda scope=scope: selectors.board(
+                scope, pipeline, OpportunityFilters(), binding_for=None
+            ),
             verbose=verbose,
         )
         run_captured(
@@ -218,7 +220,9 @@ def main() -> None:
         )
         listing = selectors.opportunity_list(scope, OpportunityFilters())
         deep = listing.order_by("-value", "-id")[min(5000, listing.count() - 30)]
-        cursor = KeysetPaginator(ORDERINGS["-value"], page_size=25)._cursor(deep, "next")
+        cursor = KeysetPaginator(ORDERINGS["-value"], page_size=25, binding=None)._cursor(
+            deep, "next"
+        )
         run_captured(
             "list -value, deep cursor",
             lambda scope=scope, cursor=cursor: page(scope, OpportunityFilters(), "-value", cursor),

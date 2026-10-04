@@ -155,6 +155,19 @@ class TestRelay:
         assert outbox.relay(dispatch=dispatch) == 0  # still two in flight -> no capacity
         assert OutboxEvent.objects.filter(status=OutboxStatus.PENDING).count() == 3
 
+    def test_each_queues_sustained_ceiling_stays_bounded_and_above_its_measured_need(self):
+        """Phase 10: the relay refills a queue once per tick, so min(cap, batch) / tick is
+        its ceiling however fast the workers are. `ai_index` at 20 capped indexing at 4
+        events/s while its one worker idled most of each tick; a bulk reassignment's
+        re-indexing would have taken hours."""
+        tick = outbox.settings.CELERY_BEAT_SCHEDULE["outbox-relay"]["schedule"]
+        batch = outbox.settings.OUTBOX_RELAY_BATCH_SIZE
+        caps = outbox.settings.OUTBOX_MAX_IN_FLIGHT
+        ceiling = {queue: min(cap, batch) / tick for queue, cap in caps.items()}
+        assert ceiling["ai_index"] >= 20
+        assert ceiling["default"] >= 20
+        assert all(cap <= 200 for cap in caps.values())  # still a bounded broker
+
     def test_broker_failure_releases_undispatched_events(self):
         for i in range(3):
             outbox.enqueue("test.ok", {"id": i})

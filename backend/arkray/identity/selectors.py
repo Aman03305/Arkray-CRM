@@ -3,6 +3,7 @@ workspaces are resolved to an AccessScope before anything here runs)."""
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from uuid import UUID
 
 from django.db import connection
@@ -96,3 +97,13 @@ def lock_assignable_user(user_id: UUID) -> bool:
         )
         row = cursor.fetchone()
     return row is not None and row[0] in roles_with(Capability.CRM_ACCESS_OWN)
+
+
+def people(user_ids: Iterable[UUID]) -> dict[UUID, User]:
+    """Users by id with only what names them (first and last name, active state): for
+    labelling owners in aggregates. Never the email, role or any security field."""
+    ids = set(user_ids)
+    if not ids:
+        return {}
+    users = User.objects.filter(pk__in=ids).only("id", "first_name", "last_name", "is_active")
+    return {user.pk: user for user in users}

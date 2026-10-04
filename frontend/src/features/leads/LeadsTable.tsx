@@ -39,7 +39,7 @@ function actionsFor(lead: LeadListItem, canWrite: boolean, onAction: LeadsTableP
 }
 
 function When({ iso, relative = false }: { iso: string | null; relative?: boolean }) {
-  if (!iso) return <span className="text-slate-400">—</span>;
+  if (!iso) return <span className="text-slate-500">—</span>;
   return (
     <time dateTime={iso} title={formatDateTime(iso)}>
       {relative ? formatRelative(iso) : formatDate(iso)}

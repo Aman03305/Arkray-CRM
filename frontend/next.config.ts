@@ -12,7 +12,7 @@ const securityHeaders = [
   { key: "Referrer-Policy", value: "same-origin" },
   { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=()" },
-  // A nonce-based Content-Security-Policy is added in Phase 9 (security hardening).
+  // The Content-Security-Policy is set per request with a nonce (src/proxy.ts).
 ];
 
 // Pages whose URL carries a one-time secret (emailed invitation and reset links): never

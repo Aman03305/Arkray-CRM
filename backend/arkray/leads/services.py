@@ -137,6 +137,10 @@ def _owner_for_new_lead(actor: User, scope: AccessScope, requested: UUID | None)
     if scope.kind is ScopeKind.SELF:
         if requested is not None and requested != actor.pk:
             raise InvalidInputError(details={"owner": [OWNER_IS_SELF_ONLY]})
+        # Share-locked like any other owner: a deactivation committing meanwhile waits for
+        # this lead, or this sees it (whole-software audit: the lead landed afterwards).
+        if not lock_assignable_user(actor.pk):
+            raise PermissionDeniedError()
         return actor.pk
     if not has_capability(actor, Capability.CRM_ASSIGN_ANY):
         raise PermissionDeniedError()

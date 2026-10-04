@@ -24,6 +24,7 @@ parsing using the lead's country) without changing what is stored.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 PHONE_MAX_LENGTH = 40
 MIN_DIGITS, MAX_DIGITS = 5, 17
@@ -68,9 +69,12 @@ def clean_phone(value: str) -> str:
 
 
 def phone_key(value: str) -> str:
-    """Canonical form for exact matching ("" for a blank or unparseable number)."""
+    """Canonical form for exact matching ("" for a blank or unparseable number). Full-width
+    digits and symbols count as their ASCII forms, as the saved number does (validation
+    stores it NFKC): typed the same way, a duplicate check finds it (whole-software audit)."""
     if not value:
         return ""
+    value = unicodedata.normalize("NFKC", value)
     number, extension = _split(value)
     if number.startswith(("+", "00")):
         number = _TRUNK_ZERO.sub("", number, count=1)
@@ -88,7 +92,9 @@ def phone_key(value: str) -> str:
 
 def search_digits(term: str) -> str | None:
     """A search term that looks like (part of) a phone number, reduced to its digits, so
-    "98765-43210" finds "+91 98765 43210". None for ordinary words."""
+    "98765-43210" finds "+91 98765 43210" (full-width digits too). None for ordinary
+    words."""
+    term = unicodedata.normalize("NFKC", term)
     if re.fullmatch(r"[+0-9().\-/]+", term) and len(_NOT_DIGIT.sub("", term)) >= 2:
         return _NOT_DIGIT.sub("", term)
     return None

@@ -7,6 +7,7 @@ import { afterEach } from "vitest";
 configure({ asyncUtilTimeout: 4000 });
 
 afterEach(() => {
+  if (typeof document === "undefined") return; // a `@vitest-environment node` test
   cleanup();
   // Tests must not leak cookies (e.g. the CSRF token) into each other.
   for (const cookie of document.cookie.split(";")) {

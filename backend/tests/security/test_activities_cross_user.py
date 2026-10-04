@@ -21,6 +21,7 @@ from django.utils import timezone
 
 from arkray.activities.models import Activity, TimelineEntry
 from arkray.audit.models import AuditEvent
+from arkray.core.keyset import INVALID_CURSOR
 from arkray.leads.models import Lead
 from tests.factories import (
     LeadFactory,
@@ -182,14 +183,15 @@ class TestReads:
             TaskFactory(lead=lead, due_at=timezone.now() - timedelta(days=1))
         assert client.get(f"{ME}/activity-summary").json() == before
 
-    def test_a_cursor_replayed_in_another_workspace_shows_only_that_workspace(self, world):
+    def test_a_cursor_replayed_in_another_workspace_is_refused(self, world):
+        """Since Phase 9 a cursor is bound to its user and workspace: the replay is a 400
+        (before: a page of the attacker's own activities). Nothing of the victim's either way."""
         attacker, victim, _, _ = world
         victim_page = signed_in(victim).get(f"{ME}/activities", {"page_size": 1}).json()
         cursor = parse_qs(urlparse(victim_page["next"]).query)["cursor"][0]
         response = signed_in(attacker).get(f"{ME}/activities", {"page_size": 1, "cursor": cursor})
-        assert response.status_code == 200
-        ids = {row["id"] for row in response.json()["results"]}
-        assert ids <= {str(a.pk) for a in Activity.objects.filter(owner=attacker)}
+        assert response.status_code == 400
+        assert response.json()["error"]["details"] == {"cursor": [INVALID_CURSOR]}
 
     @pytest.mark.parametrize(
         "segment", ["VICTIM", "all", "VICTIM_UPPER", "urn:uuid:VICTIM", "{VICTIM}", "VICTIM_HEX"]

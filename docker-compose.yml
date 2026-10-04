@@ -17,6 +17,9 @@ x-backend-env: &backend-env
   DJANGO_SECURE_COOKIES: "false"
   DJANGO_SECURE_SSL_REDIRECT: "false"
   DJANGO_HSTS_SECONDS: "0"
+  # One superuser owns everything here: the startup role check (R74) is opted out
+  # explicitly. Production runs as the restricted application role and refuses this.
+  DB_REQUIRE_RESTRICTED_ROLE: "false"
   TRUSTED_PROXY_COUNT: "0"
   # Base URL for links in invitation and password-reset emails (Mailpit captures them).
   APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
@@ -25,14 +28,36 @@ x-backend-env: &backend-env
   REDIS_CACHE_URL: redis://redis:6379/1
   EMAIL_URL: smtp://mailpit:1025
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  # /health/metrics for a local scraper (empty: the endpoint does not exist).
+  METRICS_TOKEN: ${METRICS_TOKEN:-}
   LOG_FORMAT: json
-  CRM_TIME_ZONE: ${CRM_TIME_ZONE:-Asia/Kolkata}
-  CRM_CURRENCY: ${CRM_CURRENCY:-INR}
-  AI_ENABLED: ${AI_ENABLED:-false}
+  # Ask Arkray. Without an Anthropic key it runs with AI_LLM_PROVIDER=none: structured
+  # questions answered from the CRM, other questions answered with the best-matching records.
+  AI_ENABLED: ${AI_ENABLED:-true}
+  AI_LLM_PROVIDER: ${AI_LLM_PROVIDER:-none}
+  # Only the ai worker calls the provider, so only it gets the key (worker-ai below).
+  AI_LLM_KEY_HOLDER: "false"
+
+# The application containers run as they must in production (Phase 11): read-only root
+# filesystem (writes go to tmpfs /tmp only), no Linux capabilities, no privilege escalation.
+x-hardened: &hardened
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
 
 services:
   postgres:
     image: pgvector/pgvector:0.8.6-pg16
+    # Docker's default 64 MB /dev/shm makes parallel maintenance (a manual VACUUM, an index
+    # build) and large parallel queries fail ("could not resize shared memory segment"):
+    # measured in Phase 10.
+    shm_size: 256mb
+    # R63: PostgreSQL would log a failing statement's text, values included (Django binds
+    # values on the client). Production sets the same (infrastructure/postgres/roles.sql).
+    command: ["postgres", "-c", "log_min_error_statement=panic", "-c", "log_error_verbosity=terse", "-c", "shared_preload_libraries=pg_stat_statements"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-arkray}
       POSTGRES_USER: ${POSTGRES_USER:-arkray}
@@ -74,6 +99,7 @@ services:
 
   migrate:
     profiles: ["app"]
+    <<: *hardened
     build: ./backend
     environment: *backend-env
     command: ["python", "manage.py", "migrate", "--noinput"]
@@ -83,6 +109,7 @@ services:
 
   backend:
     profiles: ["app"]
+    <<: *hardened
     build: ./backend
     environment: *backend-env
     ports:
@@ -97,24 +124,70 @@ services:
       interval: 10s
       timeout: 3s
       retries: 10
+    # Longer than gunicorn's 30 s graceful timeout: requests in flight finish before the kill.
+    stop_grace_period: 35s
     restart: unless-stopped
 
   worker:
     profiles: ["app"]
+    <<: *hardened
     build: ./backend
     environment:
       <<: *backend-env
       DB_STATEMENT_TIMEOUT_MS: "60000"
-    command: ["celery", "-A", "config", "worker", "--queues", "outbox,default,email,ai", "--concurrency", "2", "--loglevel", "INFO"]
+    # CRM background work only (Ask Arkray's indexing and questions have their own workers).
+    command: ["celery", "-A", "config", "worker", "--queues", "outbox,default,email", "--concurrency", "2", "--loglevel", "INFO"]
     depends_on:
       migrate:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    # Longer than the task hard limit (120 s): a warm shutdown finishes the running task.
+    stop_grace_period: 130s
+    restart: unless-stopped
+
+  worker-index:
+    profiles: ["app"]
+    <<: *hardened
+    build: ./backend
+    environment:
+      <<: *backend-env
+      DB_STATEMENT_TIMEOUT_MS: "60000"
+    # Ask Arkray's indexing (queue ai_index): CPU-bound embedding, kept away from email and
+    # CRM background work, and from the questions' workers.
+    command: ["celery", "-A", "config", "worker", "--queues", "ai_index", "--concurrency", "1", "--loglevel", "INFO", "--hostname", "index@%h"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    # Longer than the task hard limit (120 s): a warm shutdown finishes the running task.
+    stop_grace_period: 130s
+    restart: unless-stopped
+
+  worker-ai:
+    profiles: ["app"]
+    <<: *hardened
+    build: ./backend
+    environment:
+      <<: *backend-env
+      DB_STATEMENT_TIMEOUT_MS: "60000"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AI_LLM_KEY_HOLDER: "true"
+    # Ask Arkray's questions only (queue ai): a slow model can't hold up anything else.
+    command: ["celery", "-A", "config", "worker", "--queues", "ai", "--concurrency", "2", "--loglevel", "INFO", "--hostname", "ai@%h"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    # Longer than the task hard limit (120 s): a warm shutdown finishes the running task.
+    stop_grace_period: 130s
     restart: unless-stopped
 
   beat:
     profiles: ["app"]
+    <<: *hardened
     build: ./backend
     environment: *backend-env
     command: ["celery", "-A", "config", "beat", "--loglevel", "INFO", "--schedule", "/tmp/celerybeat-schedule"]
@@ -127,6 +200,10 @@ services:
 
   frontend:
     profiles: ["app"]
+    <<: *hardened
+    tmpfs:
+      - /tmp
+      - /app/.next/cache:uid=10001,gid=10001
     build:
       context: ./frontend
       args:
@@ -136,6 +213,14 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    # The web tier's probe (whole-software audit: it had none, and its outage showed only
+    # as the proxy's 502/504). Node's own fetch: the image has no curl.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
 volumes:

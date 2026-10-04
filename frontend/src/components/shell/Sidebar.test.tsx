@@ -55,6 +55,16 @@ describe("Sidebar", () => {
     expect(screen.getByRole("link", { name: "Dashboard" })).not.toHaveAttribute("aria-current");
   });
 
+  it("leads a sales user on an administrator's link back to their own workspace", () => {
+    // Whole-software audit: every link pointed into the user's workspace, all "not found".
+    navigation.pathname = `/admin/users/${RAHUL}/leads`;
+    renderSidebar(salesUser);
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    expect(within(nav).getByRole("link", { name: "Leads" })).toHaveAttribute("href", "/leads");
+    expect(within(nav).getByRole("link", { name: "Dashboard" })).toHaveAttribute("href", "/dashboard");
+    expect(within(nav).queryByText(/selected user/i)).not.toBeInTheDocument();
+  });
+
   it("keeps an admin inside the selected user's workspace while navigating", () => {
     navigation.pathname = `/admin/users/${RAHUL}/dashboard`;
     renderSidebar(admin);

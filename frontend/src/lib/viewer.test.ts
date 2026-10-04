@@ -39,6 +39,7 @@ describe("toViewer", () => {
       role: "sales_user",
       role_label: "User",
       capabilities: ["crm.access_own", "superpowers.all"],
+      features: { ask: true },
     });
     expect(viewer).toEqual({
       id: "u1",
@@ -48,6 +49,7 @@ describe("toViewer", () => {
       fullName: "Priya Patel",
       roleLabel: "User",
       capabilities: ["crm.access_own"],
+      features: { ask: true },
     });
   });
 });

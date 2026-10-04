@@ -149,6 +149,16 @@ export function newOpportunityHref(workspace: Workspace, leadId?: string): strin
   return leadId ? `${base}?lead=${encodeURIComponent(leadId)}` : base;
 }
 
+/** Ask Arkray in this workspace: /ask, or /admin/users/{userId}/ask. */
+export function askHref(workspace: Workspace): string {
+  return workspace.kind === "user" ? `/admin/users/${workspace.userId}/ask` : "/ask";
+}
+
+/** Is `pathname` Ask Arkray (in any workspace)? */
+export function isAskPath(pathname: string): boolean {
+  return /^(?:\/admin\/users\/[^/]+)?\/ask\/?$/.test(pathname);
+}
+
 /** An activity's page in this workspace, e.g. /activities/{id} or /admin/users/{userId}/activities/{id}. */
 export function activityHref(workspace: Workspace, activityId: string): string {
   return `${workspaceHref(workspace, "activities")}/${encodeURIComponent(activityId)}`;

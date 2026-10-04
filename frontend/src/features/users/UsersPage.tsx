@@ -108,7 +108,7 @@ export function UsersPage() {
           <label htmlFor={searchId} className="sr-only">
             Search users
           </label>
-          <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
+          <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-500" />
           <input
             id={searchId}
             type="search"

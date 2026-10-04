@@ -23,7 +23,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from arkray.core.access import AccessScope
-from arkray.core.api import AwareDateTimeField, StrictInputSerializer
+from arkray.core.api import AwareDateTimeField, OpaqueIdField, StrictInputSerializer
 from arkray.leads.api.serializers import UserRefSerializer
 from arkray.leads.models import Lead
 from arkray.pipeline.models import Opportunity, StageCategory
@@ -227,7 +227,7 @@ class TimelineEntrySerializer(serializers.Serializer[Any]):
     people as {id, full_name, is_active}, a meeting's times when it was scheduled); the
     activity and opportunity are the live records, shown only because they are visible."""
 
-    id = serializers.IntegerField()
+    id = OpaqueIdField("timeline")
     kind = serializers.ChoiceField(choices=m.TimelineKind.choices)
     occurred_at = serializers.DateTimeField()
     actor = UserRefSerializer(allow_null=True, help_text="Null when the system acted.")

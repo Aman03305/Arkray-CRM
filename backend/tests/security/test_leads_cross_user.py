@@ -15,6 +15,7 @@ import pytest
 from django.utils import timezone
 
 from arkray.audit.models import AuditEvent
+from arkray.core.keyset import INVALID_CURSOR
 from arkray.leads.models import Lead
 from tests.factories import LeadFactory, UserFactory
 from tests.helpers import signed_in, without_request_id
@@ -280,16 +281,18 @@ class TestWrites:
 
 
 class TestCursors:
-    def test_a_cursor_issued_to_the_victim_shows_the_attacker_only_their_own(self, world):
-        attacker, victim, own, _ = world
+    def test_a_cursor_issued_to_the_victim_is_refused_for_the_attacker(self, world):
+        """Since Phase 9 a cursor is bound to its user and workspace: the replay is a 400
+        (before: a page of the attacker's own leads). Nothing of the victim's either way."""
+        attacker, victim, _, _ = world
         LeadFactory.create_batch(3, owner=victim)
         victim_page = signed_in(victim).get("/api/v1/workspaces/me/leads", {"page_size": 1}).json()
         cursor = cursor_of(victim_page["next"])
         response = signed_in(attacker).get(
             "/api/v1/workspaces/me/leads", {"page_size": 100, "cursor": cursor}
         )
-        assert response.status_code == 200
-        assert ids(response) <= {str(lead.pk) for lead in own}
+        assert response.status_code == 400
+        assert response.json()["error"]["details"] == {"cursor": [INVALID_CURSOR]}
 
     def test_a_cursor_cannot_carry_another_workspace(self, world):
         """Cursors hold sort positions only: the workspace always comes from the URL."""

@@ -123,6 +123,24 @@ class TestCleanFields:
             "description": "Line 1\nLine 2",
         }
 
+    @pytest.mark.parametrize(
+        "email",
+        [
+            "x?to=sales%40client.com&bcc=spy%40evil.example&body=P9XSS&x=@client.com",
+            "a&b@client.example",
+            "a=b@client.example",
+            "a%40b@client.example",
+            "a#b@client.example",
+            '"quoted"@client.example',
+        ],
+    )
+    def test_mailto_header_delimiters_are_refused(self, email):
+        """Phase 9 review: the email standard allows these before the "@", but in a
+        mailto link they add recipients (Bcc) or text to the colleague's draft."""
+        with pytest.raises(InvalidInputError) as raised:
+            clean_fields({"email": email})
+        assert "email" in raised.value.details
+
     def test_email_is_optional_and_international_domains_are_accepted(self):
         assert clean_fields({"email": ""}) == {"email": ""}
         assert clean_fields({"email": "info@münchen.example"}) == {"email": "info@münchen.example"}

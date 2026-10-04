@@ -260,7 +260,9 @@ def main() -> None:
     now = timezone.now()
 
     def page(scope, filters, ordering="-created_at", cursor=None):
-        paginator = KeysetPaginator(selectors.ordering(ordering, scope, filters), page_size=25)
+        paginator = KeysetPaginator(
+            selectors.ordering(ordering, scope, filters), page_size=25, binding=None
+        )
         return paginator.paginate(selectors.activity_list(scope, filters, now=now), cursor)
 
     def day(offset: int):
@@ -360,7 +362,9 @@ def main() -> None:
             scope, ActivityFilters(type="task", status="open"), now=now
         )
         deep = listing.order_by("schedule_sort", "id")[min(3000, listing.count() - 30)]
-        cursor = KeysetPaginator(ORDERINGS["scheduled"], page_size=25)._cursor(deep, "next")
+        cursor = KeysetPaginator(ORDERINGS["scheduled"], page_size=25, binding=None)._cursor(
+            deep, "next"
+        )
         run_captured(
             "tasks open, deep cursor",
             lambda scope=scope, cursor=cursor: page(
@@ -398,7 +402,7 @@ def main() -> None:
         lambda: page(org, ActivityFilters(opportunity_id=opportunity_id)),
         verbose=verbose,
     )
-    timeline_page = KeysetPaginator(TIMELINE_ORDERING, page_size=20)
+    timeline_page = KeysetPaginator(TIMELINE_ORDERING, page_size=20, binding=None)
     for label, scope, lead_id in (
         ("timeline, typical lead (org)", org, typical_lead),
         ("timeline, 3,000-note lead (org)", org, long_lead),

@@ -6,6 +6,7 @@ import { NotFoundView } from "@/components/ui/NotFoundView";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ActivitiesListView } from "@/features/activities/ActivitiesListView";
 import { ActivityDetailView } from "@/features/activities/ActivityDetailView";
+import { AskView } from "@/features/ask/AskView";
 import { WorkspaceDashboard } from "@/features/dashboard/DashboardView";
 import { LeadDetailView } from "@/features/leads/LeadDetailView";
 import { LeadFormView } from "@/features/leads/LeadFormView";
@@ -15,6 +16,7 @@ import { OpportunityFormView } from "@/features/pipeline/OpportunityFormView";
 import { PipelineBoardView } from "@/features/pipeline/PipelineBoardView";
 import { AdminHome } from "@/features/users/AdminHome";
 import { useWorkspace } from "@/lib/use-workspace";
+import { canAsk } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
 import { type Workspace, workspaceApiSegment } from "@/lib/workspace";
 
@@ -144,6 +146,17 @@ export function ActivityView({ activityId }: { activityId: string }) {
       {(workspace, segment) => (
         <ActivityDetailView key={`${segment}/${activityId}`} workspace={workspace} activityId={activityId} />
       )}
+    </InWorkspace>
+  );
+}
+
+// Ask Arkray: only for viewers who may ask, in a CRM that has it on (the API refuses
+// otherwise too). Keyed by workspace like every module view.
+export function AskWorkspaceView() {
+  const viewer = useViewer();
+  return (
+    <InWorkspace>
+      {(workspace, segment) => (canAsk(viewer) ? <AskView key={segment} workspace={workspace} /> : <NotFoundView />)}
     </InWorkspace>
   );
 }

@@ -10,17 +10,26 @@ stage in one query (docs/pipeline.md#the-board).
 
 from __future__ import annotations
 
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from django.db import connection, transaction
-from django.db.models import Count, Prefetch, QuerySet
+from django.db.models import Count, Prefetch, Q, QuerySet
 
 from arkray.core.access import AccessScope
 from arkray.core.errors import InvalidInputError, NotFoundError
-from arkray.core.keyset import KeysetOrdering, KeysetPage, KeysetPaginator, SortKey
+from arkray.core.keyset import (
+    CursorBinding,
+    KeysetOrdering,
+    KeysetPage,
+    KeysetPaginator,
+    SortKey,
+)
+from arkray.core.knowledge import KnowledgeDocument, SourceType, compose
 from arkray.core.ranking import Matches, SearchQuery, top_matches
 
 from . import metrics
@@ -288,6 +297,21 @@ def opportunity_by_id(opportunity_id: UUID) -> Opportunity:
     return _with_relations(Opportunity.objects.filter(pk=opportunity_id)).get()
 
 
+def hold_opportunity_key(opportunity_id: UUID) -> None:
+    """FOR KEY SHARE on an opportunity until the transaction ends: as
+    `leads.selectors.hold_lead_key`, for rows that reference it (the Ask Arkray index)."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT 1 FROM pipeline_opportunity WHERE id = %s FOR KEY SHARE", [opportunity_id]
+        )
+
+
+def opportunity_is_archived(opportunity_id: UUID) -> bool:
+    """For a module holding the opportunity's lead lock (archive state changes only under
+    it): whether an activity's opportunity is archived. Reveals nothing else."""
+    return Opportunity.objects.filter(pk=opportunity_id, archived_at__isnull=False).exists()
+
+
 def opportunity_ref(scope: AccessScope, opportunity_id: UUID) -> Opportunity:
     """The identity and state of an opportunity `scope` may see (id, lead, owner, status,
     archive state), for modules whose records hang off opportunities (Phase 4: an activity
@@ -324,16 +348,93 @@ def board(
     filters: OpportunityFilters,
     *,
     cards_per_stage: int = BOARD_CARDS_DEFAULT,
+    binding_for: Callable[[UUID, str], CursorBinding] | None,
 ) -> Board:
     """See _board. Its queries run in one REPEATABLE READ, read-only transaction, so the
     counts, the totals and the cards describe the same moment: a move committing between
     them can't make the columns and the totals disagree (review). Inside a caller's
     transaction (tests, services) that transaction's snapshot rules apply."""
     if connection.in_atomic_block:
-        return _board(scope, pipeline, filters, cards_per_stage=cards_per_stage)
+        return _board(
+            scope, pipeline, filters, cards_per_stage=cards_per_stage, binding_for=binding_for
+        )
     with transaction.atomic(), connection.cursor() as cursor:
         cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        return _board(scope, pipeline, filters, cards_per_stage=cards_per_stage)
+        return _board(
+            scope, pipeline, filters, cards_per_stage=cards_per_stage, binding_for=binding_for
+        )
+
+
+def _stage_aggregates(base: QuerySet[Opportunity]) -> dict[UUID, dict[str, Any]]:
+    """Count, value and weighted value per stage of an already-scoped, filtered queryset
+    (one grouped query, metrics' definitions)."""
+    return {
+        row["stage_id"]: row
+        for row in base.values("stage_id")
+        .order_by()
+        .annotate(
+            count=Count("id"),
+            total_value=metrics.value_sum(),
+            weighted_value=metrics.weighted_sum(),
+        )
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class StageTotal:
+    stage: Stage
+    count: int
+    total_value: Decimal
+    weighted_value: Decimal
+
+
+def stage_breakdown(scope: AccessScope, pipeline: Pipeline) -> list[StageTotal]:
+    """Each stage of `pipeline` with the number, value and weighted value of the
+    non-archived opportunities in it that `scope` may see: exactly the board's column
+    figures, without the cards (Ask Arkray's "deals by stage"). Retired stages only while
+    they still hold opportunities. One query (plus the pipeline's prefetched stages)."""
+    per_stage = _stage_aggregates(_filtered(scope, OpportunityFilters(pipeline_id=pipeline.pk)))
+    zero = Decimal("0.00")
+    return [
+        StageTotal(
+            stage=stage,
+            count=per_stage.get(stage.pk, {}).get("count", 0),
+            total_value=per_stage.get(stage.pk, {}).get("total_value", zero),
+            weighted_value=per_stage.get(stage.pk, {}).get("weighted_value", zero),
+        )
+        for stage in pipeline.stages.all()
+        if stage.is_active or stage.pk in per_stage
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerPipeline:
+    owner_id: UUID
+    open_count: int
+    pipeline_value: Decimal
+    weighted_pipeline: Decimal
+
+
+def open_pipeline_by_owner(scope: AccessScope, *, limit: int) -> list[OwnerPipeline]:
+    """Pipeline value and weighted pipeline per owner over the open, non-archived
+    opportunities in `scope` (organisation-wide questions such as "whose pipeline is the
+    largest"), largest pipeline value first, at most `limit` owners. One grouped query
+    with metrics' definitions."""
+    if not 1 <= limit <= 50:
+        raise ValueError("limit out of range")
+    rows = (
+        _filtered(scope, OpportunityFilters())
+        .filter(metrics.OPEN)
+        .values("owner_id")
+        .order_by()
+        .annotate(
+            open_count=Count("id"),
+            pipeline_value=metrics.value_sum(),
+            weighted_pipeline=metrics.weighted_sum(),
+        )
+        .order_by("-pipeline_value", "owner_id")[:limit]
+    )
+    return [OwnerPipeline(**row) for row in rows]
 
 
 def _board(
@@ -342,6 +443,7 @@ def _board(
     filters: OpportunityFilters,
     *,
     cards_per_stage: int,
+    binding_for: Callable[[UUID, str], CursorBinding] | None,
 ) -> Board:
     """The Kanban board of one pipeline: every stage (retired stages only while they still
     hold opportunities), each with its count, value, weighted value and at most
@@ -354,25 +456,18 @@ def _board(
     filters = replace(filters, pipeline_id=pipeline.pk)
     base = _filtered(scope, filters)
     stages: list[Stage] = list(pipeline.stages.all())
-    per_stage = {
-        row["stage_id"]: row
-        for row in base.values("stage_id")
-        .order_by()
-        .annotate(
-            count=Count("id"),
-            total_value=metrics.value_sum(),
-            weighted_value=metrics.weighted_sum(),
-        )
-    }
+    per_stage = _stage_aggregates(base)
     shown = [s for s in stages if s.is_active or s.pk in per_stage]
     totals = pipeline_totals(scope, filters)
 
-    paginators = {
-        stage.pk: KeysetPaginator(
-            BOARD_ORDERING[StageCategory(stage.category)], page_size=cards_per_stage
-        )
-        for stage in shown
-    }
+    def paginator(stage: Stage) -> KeysetPaginator:
+        # A column's cursor continues in the opportunities list: `binding_for` binds it
+        # (stage id, ordering name) exactly as that list will check it.
+        ordering = BOARD_ORDERING[StageCategory(stage.category)]
+        binding = None if binding_for is None else binding_for(stage.pk, ordering.name)
+        return KeysetPaginator(ordering, page_size=cards_per_stage, binding=binding)
+
+    paginators = {stage.pk: paginator(stage) for stage in shown}
     # `status` equals the stage's category (database-enforced); stating it lets PostgreSQL
     # use the board's partial indexes (open / closed), which only cover one status each.
     windows = [
@@ -435,3 +530,68 @@ def stage_history(scope: AccessScope, opportunity_id: UUID) -> QuerySet[StageHis
             *(f"actor__{f}" for f in _PERSON),
         )
     )
+
+
+# --- Ask Arkray's semantic index (Phase 8, docs/rag-architecture.md) -------------------------
+# An opportunity is embedded only when someone wrote about it (a description or a lost
+# reason); its title alone is found by global search. Never amounts: figures come from the
+# deterministic tools (metrics), not from text similarity.
+_KNOWLEDGE_FIELDS = (
+    "id",
+    "owner_id",
+    "lead_id",
+    "title",
+    "description",
+    "lost_reason",
+    "created_at",
+    "updated_at",
+)
+_HAS_KNOWLEDGE = Q(archived_at__isnull=True) & (~Q(description="") | ~Q(lost_reason=""))
+
+
+def _knowledge(queryset: QuerySet[Opportunity]) -> list[KnowledgeDocument]:
+    return [
+        KnowledgeDocument(
+            source_type=SourceType.OPPORTUNITY,
+            source_id=found.pk,
+            owner_id=found.owner_id,
+            lead_id=found.lead_id,
+            opportunity_id=found.pk,
+            label=found.title,
+            text=compose(
+                ("Opportunity", found.title),
+                ("Description", found.description),
+                ("Lost reason", found.lost_reason),
+            ),
+            occurred_at=found.created_at,
+            updated_at=found.updated_at,
+        )
+        for found in queryset.filter(_HAS_KNOWLEDGE).only(*_KNOWLEDGE_FIELDS)
+    ]
+
+
+def knowledge_documents(
+    scope: AccessScope, opportunity_ids: Collection[UUID]
+) -> list[KnowledgeDocument]:
+    """The embeddable text of the given opportunities that `scope` may see now (archived
+    ones have none). Retrieval re-reads every hit through this."""
+    if not opportunity_ids:
+        return []
+    return _knowledge(scope.apply(Opportunity.objects.filter(pk__in=list(opportunity_ids))))
+
+
+def knowledge_documents_for_indexing(
+    opportunity_ids: Collection[UUID],
+) -> list[KnowledgeDocument]:
+    """Unscoped: only for the indexer (runs as the system)."""
+    if not opportunity_ids:
+        return []
+    return _knowledge(Opportunity.objects.filter(pk__in=list(opportunity_ids)))
+
+
+def knowledge_source_ids(*, after: UUID | None, limit: int) -> list[UUID]:
+    """Ids of opportunities with a knowledge document, in id order (indexer only)."""
+    queryset = Opportunity.objects.filter(_HAS_KNOWLEDGE)
+    if after is not None:
+        queryset = queryset.filter(pk__gt=after)
+    return list(queryset.order_by("pk").values_list("pk", flat=True)[:limit])

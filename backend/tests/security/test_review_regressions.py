@@ -17,6 +17,7 @@ from rest_framework.test import APIClient
 
 from arkray.audit.models import AuditEvent
 from arkray.core.context import get_context
+from arkray.core.keyset import INVALID_CURSOR
 from arkray.core.middleware import client_ip
 from arkray.core.models import OutboxEvent
 from arkray.identity import services, throttling
@@ -233,12 +234,13 @@ class TestInvitationAudit:
 
 class TestErrorHandling:
     @pytest.mark.parametrize("position", ["not-a-date", "2026-13-45", "9" * 60])
-    def test_a_forged_cursor_is_a_404_not_a_500(self, admin_client, position):
-        """Review (admin) #6: forged cursor positions raised an unhandled 500."""
+    def test_a_forged_cursor_is_a_clean_400_not_a_500(self, admin_client, position):
+        """Review (admin) #6: forged cursor positions raised an unhandled 500. (Since Phase 9
+        the user table pages with sealed keyset cursors: a forged one is invalid input.)"""
         cursor = base64.b64encode(f"p={position}".encode()).decode()
         response = admin_client.get("/api/v1/admin/users", {"cursor": cursor})
-        assert response.status_code == 404
-        assert response.json()["error"]["code"] == "not_found"
+        assert response.status_code == 400
+        assert response.json()["error"]["details"] == {"cursor": [INVALID_CURSOR]}
 
     def test_csrf_rejections_are_logged_with_a_reason(self, csrf_client, user_a, caplog):
         """Review F10: rejections left no trace for operators."""

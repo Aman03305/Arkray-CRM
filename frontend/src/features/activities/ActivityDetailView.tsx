@@ -38,7 +38,7 @@ function Fields({ items }: { items: [string, ReactNode][] }) {
       {items.map(([label, value]) => (
         <div key={label} className="contents">
           <dt className="text-slate-500">{label}</dt>
-          <dd className="min-w-0 break-words text-slate-900">{value ?? <span className="text-slate-400">—</span>}</dd>
+          <dd className="min-w-0 break-words text-slate-900">{value ?? <span className="text-slate-500">—</span>}</dd>
         </div>
       ))}
     </dl>
@@ -288,7 +288,7 @@ export function ActivityDetailView({ workspace, activityId }: { workspace: Works
                 {activity.description ? (
                   <p className="whitespace-pre-line break-words text-sm text-slate-900">{activity.description}</p>
                 ) : (
-                  <p className="text-sm text-slate-400">Nothing written</p>
+                  <p className="text-sm text-slate-500">Nothing written</p>
                 )}
               </Section>
             </>

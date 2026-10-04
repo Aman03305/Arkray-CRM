@@ -25,7 +25,7 @@ import { leadHref, opportunityHref, sectionBack, type Workspace, workspaceHref }
 import { leadKeys, leadsApi } from "./api";
 import { countryName, leadPermissions, leftBehind, movedOutOf, useLeadOptions, useLeadWriteSync } from "./hooks";
 import { ChangeStatusDialog, ReassignDialog } from "./LeadActionDialogs";
-import { PersonName, RatingLabel, StatusBadge, telHref } from "./LeadBits";
+import { mailtoHref, PersonName, RatingLabel, StatusBadge, telHref } from "./LeadBits";
 
 type OpenDialog = "status" | "reassign" | "archive" | "restore" | "convert" | null;
 
@@ -44,7 +44,7 @@ function Fields({ items }: { items: [string, ReactNode][] }) {
       {items.map(([label, value]) => (
         <div key={label} className="contents">
           <dt className="text-slate-500">{label}</dt>
-          <dd className="min-w-0 break-words text-slate-900">{value || <span className="text-slate-400">—</span>}</dd>
+          <dd className="min-w-0 break-words text-slate-900">{value || <span className="text-slate-500">—</span>}</dd>
         </div>
       ))}
     </dl>
@@ -252,7 +252,7 @@ export function LeadDetailView({ workspace, leadId }: { workspace: Workspace; le
           <Section title="Contact">
             <Fields
               items={[
-                ["Email", lead.email ? <a href={`mailto:${lead.email}`} className="text-brand-700 hover:underline">{lead.email}</a> : null],
+                ["Email", lead.email ? <a href={mailtoHref(lead.email)} className="text-brand-700 hover:underline">{lead.email}</a> : null],
                 ["Phone", <Phone key="p" value={lead.phone} />],
                 ["Mobile", <Phone key="m" value={lead.mobile} />],
                 ["Alternate phone", <Phone key="a" value={lead.alternate_phone} />],
@@ -263,13 +263,13 @@ export function LeadDetailView({ workspace, leadId }: { workspace: Workspace; le
             <Fields items={[["Organization", lead.organization_name], ["Job title", lead.job_title]]} />
           </Section>
           <Section title="Address">
-            {address ? <p className="whitespace-pre-line text-sm text-slate-900">{address}</p> : <p className="text-sm text-slate-400">No address</p>}
+            {address ? <p className="whitespace-pre-line text-sm text-slate-900">{address}</p> : <p className="text-sm text-slate-500">No address</p>}
           </Section>
           <Section title="Description">
             {lead.description ? (
               <p className="whitespace-pre-line break-words text-sm text-slate-900">{lead.description}</p>
             ) : (
-              <p className="text-sm text-slate-400">No description</p>
+              <p className="text-sm text-slate-500">No description</p>
             )}
           </Section>
           <Timeline

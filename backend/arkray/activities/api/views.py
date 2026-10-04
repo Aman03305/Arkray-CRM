@@ -18,16 +18,17 @@ from uuid import UUID
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import status as http
+from rest_framework.permissions import SAFE_METHODS
 from rest_framework.request import Request
 from rest_framework.response import Response
 
 from arkray.core.access import AccessScope
 from arkray.core.api import ApiView, idempotency_key, validated
 from arkray.core.errors import InvalidInputError, PermissionDeniedError
-from arkray.core.keyset import KeysetPaginator, page_links
+from arkray.core.keyset import CursorBinding, KeysetPaginator, page_links
 from arkray.identity.models import User
 from arkray.identity.permissions import IsActiveUser
-from arkray.identity.workspaces import resolve_workspace, workspace_segment
+from arkray.identity.workspaces import authorize_write, resolve_workspace, workspace_segment
 from arkray.leads.api.views import IDEMPOTENCY_PARAMETER, NOT_FOUND, OWNER_FILTER_ORG_ONLY
 
 from .. import selectors, services
@@ -42,7 +43,12 @@ def _scope(request: Request, workspace: str) -> tuple[User, AccessScope]:
     actor = request.user
     if not isinstance(actor, User):  # unreachable behind the permission classes
         raise PermissionDeniedError()
-    return actor, resolve_workspace(actor, workspace)
+    scope = resolve_workspace(actor, workspace)
+    # Unsafe methods are writes: refused before the body is even read (Phase 9: a viewer's
+    # write with a malformed body got a validation error instead of a 403).
+    if request.method not in SAFE_METHODS:
+        authorize_write(actor, scope)
+    return actor, scope
 
 
 def _context(scope: AccessScope) -> dict[str, Any]:
@@ -83,7 +89,11 @@ class ActivityListView(ApiView):
             archived=params["archived"],
         )
         paginator = KeysetPaginator(
-            selectors.ordering(params["ordering"], scope, filters), page_size=params["page_size"]
+            selectors.ordering(params["ordering"], scope, filters),
+            page_size=params["page_size"],
+            binding=CursorBinding.of(
+                "activities.list", params, actor_id=scope.actor_id, scope=scope
+            ),
         )
         page = paginator.paginate(
             selectors.activity_list(scope, filters, now=context["now"]), params.get("cursor")
@@ -232,9 +242,15 @@ class ActivitySummaryView(ApiView):
         return Response(s.ActivitySummarySerializer(summary).data)
 
 
-def _timeline_page(request: Request, scope: AccessScope, entries: Any) -> dict[str, Any]:
+def _timeline_page(
+    request: Request, scope: AccessScope, entries: Any, *, purpose: str
+) -> dict[str, Any]:
     params = validated(s.TimelineQuerySerializer, request.query_params)
-    paginator = KeysetPaginator(selectors.TIMELINE_ORDERING, page_size=params["page_size"])
+    paginator = KeysetPaginator(
+        selectors.TIMELINE_ORDERING,
+        page_size=params["page_size"],
+        binding=CursorBinding.of(purpose, params, actor_id=scope.actor_id, scope=scope),
+    )
     page = paginator.paginate(entries, params.get("cursor"))
     rows: list[TimelineEntry] = page.items
     context = {"scope": scope, "people": selectors.people_in(rows)}
@@ -258,7 +274,14 @@ class LeadTimelineView(ApiView):
     )
     def get(self, request: Request, workspace: str, lead_id: UUID) -> Response:
         _, scope = _scope(request, workspace)
-        return Response(_timeline_page(request, scope, selectors.lead_timeline(scope, lead_id)))
+        return Response(
+            _timeline_page(
+                request,
+                scope,
+                selectors.lead_timeline(scope, lead_id),
+                purpose=f"leads.timeline:{lead_id}",
+            )
+        )
 
 
 class OpportunityTimelineView(ApiView):
@@ -275,5 +298,10 @@ class OpportunityTimelineView(ApiView):
     def get(self, request: Request, workspace: str, opportunity_id: UUID) -> Response:
         _, scope = _scope(request, workspace)
         return Response(
-            _timeline_page(request, scope, selectors.opportunity_timeline(scope, opportunity_id))
+            _timeline_page(
+                request,
+                scope,
+                selectors.opportunity_timeline(scope, opportunity_id),
+                purpose=f"opportunities.timeline:{opportunity_id}",
+            )
         )

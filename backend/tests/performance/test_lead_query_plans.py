@@ -87,7 +87,7 @@ def lead_scans(text: str) -> set[str]:
 
 def page_query(scope, filters, ordering, *, second_page=False):
     queryset = selectors.lead_list(scope, filters)
-    paginator = KeysetPaginator(selectors.ORDERINGS[ordering], page_size=25)
+    paginator = KeysetPaginator(selectors.ORDERINGS[ordering], page_size=25, binding=None)
     cursor = paginator.paginate(queryset, None).next_cursor if second_page else None
     return paginator.window(queryset, cursor)[0]
 
@@ -171,7 +171,8 @@ def test_the_duplicate_selector_matches_the_planned_query(dataset):
 @pytest.mark.parametrize("ordering", ["-last_contacted_at", "last_contacted_at"])
 def test_deep_last_contact_pages_start_the_index_scan_at_the_cursor(dataset, ordering):
     """Phase 2 review: with a NULL-able sort key the cursor couldn't bound the scan, so a
-    page's cost grew with its depth. The NOT NULL sort column makes it an index condition."""
+    page's cost grew with its depth. The NOT NULL sort column makes it an index condition;
+    since Phase 10 (R49) the whole (sort, id) row, so the scan starts exactly at the cursor."""
     _, admin = dataset
     text = plan(page_query(AccessScope.organization(admin.pk), F(), ordering, second_page=True))
-    assert re.search(r"Index Cond: \(last_contacted_sort [<>]=", text), text
+    assert re.search(r"Index Cond: \(ROW\(last_contacted_sort, id\) [<>] ROW\(", text), text

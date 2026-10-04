@@ -1,11 +1,12 @@
-.venv
+# An allowlist (Phase 9 review): only what the image needs. Tests, caches, local
+# environments, developer-local model files and anything untracked stay out.
+*
+!arkray/
+!config/
+!manage.py
+!gunicorn.conf.py
+!pyproject.toml
+!uv.lock
+arkray/**/tests/
 **/__pycache__
 **/*.pyc
-.pytest_cache
-.mypy_cache
-.ruff_cache
-.coverage
-htmlcov
-schema.yaml
-.env
-.env.*

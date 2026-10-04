@@ -904,6 +904,174 @@ paths:
           description: ''
         '404':
           description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/ask:
+    get:
+      operationId: ask_status
+      description: Ask a question about this workspace, or read what Ask Arkray can
+        do right now.
+      parameters:
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AskStatus'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+    post:
+      operationId: ask
+      description: Ask a question about this workspace, or read what Ask Arkray can
+        do right now.
+      parameters:
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AskInputRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Question'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+        '429':
+          description: Too many questions, or one is still pending.
+        '503':
+          description: Ask Arkray is turned off or busy.
+  /api/v1/workspaces/{workspace}/ask/conversations:
+    get:
+      operationId: ask_conversations
+      description: The caller's most recent conversations in this workspace (at most
+        20).
+      parameters:
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConversationSummary'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/ask/conversations/{conversation_id}:
+    get:
+      operationId: ask_conversation
+      description: One of the caller's conversations in this workspace, or forget
+        it.
+      parameters:
+      - in: path
+        name: conversation_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+    delete:
+      operationId: ask_conversation_delete
+      description: One of the caller's conversations in this workspace, or forget
+        it.
+      parameters:
+      - in: path
+        name: conversation_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '204':
+          description: No response body
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/ask/questions/{question_id}:
+    get:
+      operationId: ask_question
+      description: One of the caller's questions in this workspace (poll until answered
+        or failed).
+      parameters:
+      - in: path
+        name: question_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Question'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
   /api/v1/workspaces/{workspace}/dashboard:
     get:
       operationId: dashboard
@@ -2531,6 +2699,216 @@ components:
       - next
       - previous
       - results
+    Answer:
+      type: object
+      properties:
+        blocks:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnswerBlock'
+        facts:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnswerFact'
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnswerSource'
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnswerCitation'
+        notices:
+          type: array
+          items:
+            type: string
+        provenance:
+          $ref: '#/components/schemas/AnswerProvenance'
+      required:
+      - blocks
+      - citations
+      - facts
+      - notices
+      - provenance
+      - sources
+    AnswerBlock:
+      type: object
+      properties:
+        type:
+          $ref: '#/components/schemas/AskBlockTypeEnum'
+        parts:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnswerPart'
+      required:
+      - parts
+      - type
+    AnswerCitation:
+      type: object
+      properties:
+        ref:
+          type: string
+        kind:
+          $ref: '#/components/schemas/AskRecordKindEnum'
+        label:
+          type: string
+        snippet:
+          type: string
+          description: Quoted from the record as it is now.
+        when:
+          type: string
+      required:
+      - kind
+      - label
+      - ref
+      - snippet
+      - when
+    AnswerFact:
+      type: object
+      properties:
+        label:
+          type: string
+        value:
+          type: string
+          description: Formatted by the server, e.g. ₹12,50,000.
+        kind:
+          $ref: '#/components/schemas/AskFactKindEnum'
+        raw:
+          type: string
+          description: 'The exact value: an integer or a decimal string.'
+      required:
+      - kind
+      - label
+      - raw
+      - value
+    AnswerPart:
+      type: object
+      properties:
+        text:
+          type: string
+        bold:
+          type: boolean
+        ref:
+          type: string
+          description: kind:id of a record in `sources`.
+    AnswerProvenance:
+      type: object
+      properties:
+        mode:
+          allOf:
+          - $ref: '#/components/schemas/AskAnswerModeEnum'
+          description: |-
+            router: CRM figures and a fixed template; llm: written by the AI model from tool results; retrieval: the most relevant records, without a summary.
+
+            * `router` - router
+            * `llm` - llm
+            * `retrieval` - retrieval
+        tools:
+          type: array
+          items:
+            type: string
+        grounded:
+          type: boolean
+        model:
+          type: string
+      required:
+      - grounded
+      - mode
+      - model
+      - tools
+    AnswerSource:
+      type: object
+      properties:
+        ref:
+          type: string
+        kind:
+          $ref: '#/components/schemas/AskRecordKindEnum'
+        id:
+          type: string
+          format: uuid
+        label:
+          type: string
+        detail:
+          type: string
+      required:
+      - detail
+      - id
+      - kind
+      - label
+      - ref
+    AskAnswerModeEnum:
+      enum:
+      - router
+      - llm
+      - retrieval
+      type: string
+      description: |-
+        * `router` - router
+        * `llm` - llm
+        * `retrieval` - retrieval
+    AskBlockTypeEnum:
+      enum:
+      - paragraph
+      - bullet
+      type: string
+      description: |-
+        * `paragraph` - paragraph
+        * `bullet` - bullet
+    AskFactKindEnum:
+      enum:
+      - count
+      - money
+      type: string
+      description: |-
+        * `count` - count
+        * `money` - money
+    AskInputRequest:
+      type: object
+      properties:
+        question:
+          type: string
+          minLength: 1
+          description: The question, up to 1,000 characters once cleaned.
+          maxLength: 4000
+        conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Continue this conversation (yours, in this workspace); omit
+            to start one.
+      required:
+      - question
+    AskRecordKindEnum:
+      enum:
+      - lead
+      - opportunity
+      - task
+      - meeting
+      - note
+      type: string
+      description: |-
+        * `lead` - lead
+        * `opportunity` - opportunity
+        * `task` - task
+        * `meeting` - meeting
+        * `note` - note
+    AskStatus:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        summaries:
+          allOf:
+          - $ref: '#/components/schemas/SummariesEnum'
+          description: |-
+            available: written answers by the AI model; unavailable: temporarily down (answers show records instead); none: this CRM runs without a model.
+
+            * `available` - available
+            * `unavailable` - unavailable
+            * `none` - none
+      required:
+      - enabled
+      - summaries
     Assignee:
       type: object
       description: A user CRM records can be assigned to (for owner pickers).
@@ -2631,6 +3009,55 @@ components:
         * `qualified` - Qualified
         * `unqualified` - Unqualified
         * `converted` - Converted
+    Conversation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+        questions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Question'
+          readOnly: true
+      required:
+      - created_at
+      - id
+      - questions
+      - updated_at
+    ConversationSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        title:
+          type: string
+          readOnly: true
+          description: The first question, shortened.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - id
+      - title
+      - updated_at
     Conversion:
       type: object
       properties:
@@ -4007,6 +4434,61 @@ components:
         * `low` - Low
         * `normal` - Normal
         * `high` - High
+    Question:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        conversation_id:
+          type: string
+          format: uuid
+          readOnly: true
+        question:
+          type: string
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/QuestionStatusEnum'
+          readOnly: true
+        error:
+          type: string
+          nullable: true
+          readOnly: true
+        answer:
+          allOf:
+          - $ref: '#/components/schemas/Answer'
+          nullable: true
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        finished_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+      required:
+      - answer
+      - conversation_id
+      - created_at
+      - error
+      - finished_at
+      - id
+      - question
+      - status
+    QuestionStatusEnum:
+      enum:
+      - pending
+      - answered
+      - failed
+      type: string
+      description: |-
+        * `pending` - Pending
+        * `answered` - Answered
+        * `failed` - Failed
     RatingEnum:
       enum:
       - hot
@@ -4407,7 +4889,8 @@ components:
       type: object
       properties:
         id:
-          type: integer
+          type: string
+          example: 3f9a1c0b7d2e4a6c8e10
           readOnly: true
         from_stage_id:
           type: string
@@ -4508,6 +4991,16 @@ components:
       - category
       - key
       - name
+    SummariesEnum:
+      enum:
+      - available
+      - unavailable
+      - none
+      type: string
+      description: |-
+        * `available` - available
+        * `unavailable` - unavailable
+        * `none` - none
     TimelineActivity:
       type: object
       properties:
@@ -4557,7 +5050,9 @@ components:
         activity and opportunity are the live records, shown only because they are visible.
       properties:
         id:
-          type: integer
+          type: string
+          example: 3f9a1c0b7d2e4a6c8e10
+          readOnly: true
         kind:
           $ref: '#/components/schemas/TimelineKindEnum'
         occurred_at:
@@ -4723,15 +5218,30 @@ components:
           items:
             type: string
           readOnly: true
+        features:
+          allOf:
+          - $ref: '#/components/schemas/ViewerFeatures'
+          readOnly: true
       required:
       - capabilities
       - email
+      - features
       - first_name
       - full_name
       - id
       - last_name
       - role
       - role_label
+    ViewerFeatures:
+      type: object
+      description: Deployment-wide features the UI should offer (configuration, not
+        permissions).
+      properties:
+        ask:
+          type: boolean
+          description: Ask Arkray is turned on for this CRM.
+      required:
+      - ask
     Workspace:
       type: object
       properties:

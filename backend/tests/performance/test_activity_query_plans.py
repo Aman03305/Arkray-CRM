@@ -121,7 +121,9 @@ def scans(text: str, table: str = "activities_activity") -> set[str]:
 
 
 def page_sql(scope, filters, ordering, cursor=None) -> str:
-    paginator = KeysetPaginator(selectors.ordering(ordering, scope, filters), page_size=25)
+    paginator = KeysetPaginator(
+        selectors.ordering(ordering, scope, filters), page_size=25, binding=None
+    )
     queryset = selectors.activity_list(scope, filters, now=NOW)
     sql, params = paginator.window(queryset, cursor)[0].query.sql_with_params()
     with connection.cursor() as c:
@@ -205,7 +207,7 @@ def test_an_admins_owner_filter_reads_that_owners_index(dataset, ordering, filte
 def test_a_deep_cursor_still_starts_at_the_index(dataset):
     scope = scopes(dataset)["own"]
     filters = ActivityFilters(type="task", status="open")
-    first = KeysetPaginator(selectors.ORDERINGS["scheduled"], page_size=5).paginate(
+    first = KeysetPaginator(selectors.ORDERINGS["scheduled"], page_size=5, binding=None).paginate(
         selectors.activity_list(scope, filters, now=NOW), None
     )
     text = plan(page_sql(scope, filters, "scheduled", first.next_cursor))
@@ -270,7 +272,7 @@ def test_a_timeline_page_walks_the_leads_entries_in_order(dataset, kind):
     )
     queryset = selectors.lead_timeline(scope, leads[0].pk)
     sql, params = (
-        KeysetPaginator(TIMELINE_ORDERING, page_size=20)
+        KeysetPaginator(TIMELINE_ORDERING, page_size=20, binding=None)
         .window(queryset, None)[0]
         .query.sql_with_params()
     )

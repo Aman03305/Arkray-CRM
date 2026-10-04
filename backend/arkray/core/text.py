@@ -52,6 +52,14 @@ def _check(value: str, allowed_controls: frozenset[str]) -> None:
         raise TextRejected("Remove the invisible or control characters from this text.")
 
 
+def without_refused(value: str) -> str:
+    """Text we didn't receive from a person (a language model's answer) with every
+    character the input rules refuse removed: bidi overrides, tag characters, controls
+    other than newline and tab. Input is refused instead (the person can fix it)."""
+    value = unicodedata.normalize("NFC", value).replace("\r\n", "\n").replace("\r", "\n")
+    return "".join(char for char in value if not _refused(char, _MULTILINE_CONTROLS))
+
+
 def _visible(value: str) -> bool:
     """At least one letter, number, punctuation mark or symbol (not only joiners/marks)."""
     return any(unicodedata.category(char)[0] in "LNPS" for char in value)

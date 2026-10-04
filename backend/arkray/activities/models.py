@@ -82,8 +82,6 @@ TASK_STATUSES = (ActivityStatus.OPEN, ActivityStatus.COMPLETED, ActivityStatus.C
 MEETING_STATUSES = (ActivityStatus.SCHEDULED, ActivityStatus.COMPLETED, ActivityStatus.CANCELLED)
 # Actionable work: follows its lead when the lead is reassigned.
 CURRENT_STATUSES = (ActivityStatus.OPEN, ActivityStatus.SCHEDULED)
-# Historical outcomes: keep the owner who had the work.
-CLOSED_STATUSES = (ActivityStatus.COMPLETED, ActivityStatus.CANCELLED)
 
 # The owner while the activity is current work (an open task, a scheduled meeting, any
 # note), else NULL: the key of the ownership foreign key (MATCH SIMPLE skips NULLs).
@@ -422,10 +420,6 @@ class Activity(UUIDPrimaryKeyModel, TimeStampedModel):
 
     def __str__(self) -> str:
         return f"Activity({self.pk})"  # never the title or body: this string can reach logs
-
-    @property
-    def is_current(self) -> bool:
-        return self.type == ActivityType.NOTE or self.status in CURRENT_STATUSES
 
     def is_completable(self, now: datetime) -> bool:
         """Could it be completed now (rules of services.complete_activity, permissions

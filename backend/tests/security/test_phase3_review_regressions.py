@@ -25,11 +25,11 @@ from decimal import Decimal
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
-from django.core import signing
 from django.db import connection, connections
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
+from arkray.core import keyset
 from arkray.core.access import AccessScope
 from arkray.core.errors import BusinessRuleViolation, InvalidInputError
 from arkray.leads import services as lead_services
@@ -190,7 +190,12 @@ def test_the_boards_figures_describe_one_moment(monkeypatch):
         return original(scope, filters)
 
     monkeypatch.setattr(selectors, "pipeline_totals", totals_after_a_concurrent_commit)
-    board = selectors.board(OWN(owner.pk), selectors.pipeline_for_board(None), OpportunityFilters())
+    board = selectors.board(
+        OWN(owner.pk),
+        selectors.pipeline_for_board(None),
+        OpportunityFilters(),
+        binding_for=None,
+    )
     open_in_columns = sum(c.count for c in board.columns if c.stage.category == "open")
     assert fired
     assert Opportunity.objects.get(pk=opportunity.pk).status == "won"  # it did commit
@@ -313,7 +318,7 @@ def test_value_sorted_page_links_hold_no_amount(user_a):
         .json()
     )
     cursor = parse_qs(urlsplit(body["next"]).query)["cursor"][0]
-    assert signing.loads(cursor, salt="arkray.core.keyset")["v"][0] is None
+    assert keyset._open(cursor)["v"][0] is None
     assert "987654321" not in body["next"]
 
 
