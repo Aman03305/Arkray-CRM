@@ -81,14 +81,14 @@ def test_the_backfill_rebuilds_what_the_live_subscribers_recorded():
         scope=own,
         lead_id=lead.pk,
         lead_version=lead.version,
-        fields={"title": "Analyser", "value": Decimal("1000")},
+        fields={"value": Decimal("1000"), "instrument_name": "Adams 8380 V-lite"},
     ).opportunity
     # A second opportunity, created directly in a won stage.
     pipeline_services.create_opportunity(
         actor=admin,
         scope=org,
         lead_id=lead.pk,
-        fields={"title": "Reagents", "value": Decimal("50")},
+        fields={"value": Decimal("50")},
         stage_id=default_stage("won").pk,
     )
     for key in ("qualified", "won", "proposal", "lost"):

@@ -134,6 +134,16 @@ class PipelineSerializer(serializers.ModelSerializer[m.Pipeline]):
         return configuration.can_manage(actor, scope, pipeline)
 
 
+class InstrumentSerializer(serializers.Serializer[Any]):
+    name = serializers.CharField(help_text="Stored on the opportunity as `instrument_name`.")
+
+
+class OpportunityOptionsSerializer(serializers.Serializer[Any]):
+    """The choices an opportunity form offers (pipeline.instruments: the one list)."""
+
+    instruments = InstrumentSerializer(many=True)
+
+
 class PipelineListSerializer(serializers.Serializer[Any]):
     results = PipelineSerializer(many=True)
 
@@ -230,6 +240,7 @@ class OpportunitySerializer(_ScopedLead, serializers.ModelSerializer[m.Opportuni
             "address",
             "instrument_name",
             "work_load",
+            "expected_cpt",
             "custom_fields",
             "negotiated_at",
             "description",
@@ -376,7 +387,8 @@ def _custom_values() -> serializers.DictField:
 
 class DealFieldsMixin(serializers.Serializer[Any]):
     """The opportunity's customer, instrument and custom details (all optional here; the
-    account and customer names default to the lead's at creation)."""
+    account and customer names default to the lead's at creation). There is no title: the
+    opportunity's name is derived from its customer and instrument (ADR-0028)."""
 
     opportunity_date = serializers.DateField(required=False)
     account_name = _text(m.ACCOUNT_NAME_MAX_LENGTH)
@@ -384,13 +396,19 @@ class DealFieldsMixin(serializers.Serializer[Any]):
     contact_phone = _text(40)
     contact_email = _text(254)
     address = _text(m.ADDRESS_MAX_LENGTH)
-    instrument_name = _text(m.INSTRUMENT_NAME_MAX_LENGTH)
+    instrument_name = _text(
+        m.INSTRUMENT_NAME_MAX_LENGTH,
+        help_text="One of the instruments listed by /config/opportunity-options (or blank).",
+    )
     work_load = _text(m.WORK_LOAD_MAX_LENGTH)
+    expected_cpt = _text(
+        m.EXPECTED_CPT_MAX_LENGTH,
+        help_text="Expected CPT as the salesperson states it (free text; no unit is implied).",
+    )
     custom_fields = _custom_values()
 
 
 class OpportunityFieldsSerializer(DealFieldsMixin, StrictInputSerializer):
-    title = serializers.CharField(max_length=m.TITLE_MAX_LENGTH)
     value = _value()
     probability = _probability(required=False)
     expected_close_date = serializers.DateField(allow_null=True, required=False)
@@ -427,7 +445,6 @@ class OpportunityCreateSerializer(OpportunityFieldsSerializer):
 
 class OpportunityUpdateSerializer(DealFieldsMixin, StrictInputSerializer):
     version = serializers.IntegerField(min_value=1)
-    title = serializers.CharField(max_length=m.TITLE_MAX_LENGTH, required=False)
     value = _value(required=False)
     probability = _probability(required=False)
     expected_close_date = serializers.DateField(allow_null=True, required=False)

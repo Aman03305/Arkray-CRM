@@ -16,6 +16,7 @@ import { NotFoundView } from "@/components/ui/NotFoundView";
 import { PersonName } from "@/components/ui/PersonName";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { activityKeys, timelineKeys } from "@/features/activities/api";
+import { leadKeys } from "@/features/leads/api";
 import { CurrentWork } from "@/features/activities/CurrentWork";
 import { DealNotes } from "@/features/activities/DealNotes";
 import { Timeline } from "@/features/activities/Timeline";
@@ -28,7 +29,7 @@ import { setFlash, useFlash } from "@/lib/flash";
 import { businessToday, formatDateOnly, formatDateTime, formatRelative } from "@/lib/format";
 import { formatPercent, parseAmountInput } from "@/lib/money";
 import { useViewer } from "@/lib/viewer-context";
-import { opportunityHref, sectionBack, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
+import { leadHref, opportunityHref, sectionBack, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
 
 import { pipelineApi, pipelineKeys } from "./api";
 import { formatCustomValue } from "./CustomFields";
@@ -340,6 +341,18 @@ export function OpportunityDetailView({
                   items={[
                     ["Account", opportunity.account_name],
                     ["Customer", opportunity.customer_name],
+                    // Its lead (the customer record made with it): read-only, one click away.
+                    // Not linked when it has moved to someone else's workspace.
+                    [
+                      "Lead",
+                      opportunity.lead.restricted || !opportunity.lead.id ? (
+                        <span key="l" className="italic text-slate-500">In another workspace</span>
+                      ) : (
+                        <Link key="l" href={leadHref(workspace, opportunity.lead.id)} className="text-brand-700 [overflow-wrap:anywhere] hover:underline">
+                          {opportunity.lead.display_name}
+                        </Link>
+                      ),
+                    ],
                     [
                       "Phone",
                       opportunity.contact_phone ? (
@@ -365,6 +378,7 @@ export function OpportunityDetailView({
                   items={[
                     ["Instrument", opportunity.instrument_name || null],
                     ["Work load", opportunity.work_load || null],
+                    ["Expected CPT", opportunity.expected_cpt || null],
                   ]}
                 />
               </Section>
@@ -456,11 +470,15 @@ export function OpportunityDetailView({
             // Handed out of this user's workspace: here it would only be found gone now.
             // Mark this workspace's data stale without refetching what this page shows, and
             // go to the Pipeline, which loads afresh.
-            for (const queryKey of [pipelineKeys.all, activityKeys.all, timelineKeys.all]) {
+            for (const queryKey of [pipelineKeys.all, activityKeys.all, timelineKeys.all, leadKeys.all]) {
               void queryClient.invalidateQueries({ queryKey, refetchType: "none" });
             }
             const segment = workspaceApiSegment(workspace);
+            // Its lead (the customer record) moved with it (ADR-0028: the lead page would
+            // otherwise show it here from the cache: frontend review).
+            const lead = opportunity.lead.id;
             leftBehind.current = [
+              ...(lead ? [leadKeys.detail(workspace, lead), ["leads", "opportunities", segment, lead]] : []),
               ["pipeline", "detail", segment, updated.id],
               ["pipeline", "history", segment, updated.id],
               ["pipeline", "negotiation", segment, updated.id],

@@ -48,7 +48,7 @@ from tests.helpers import run_concurrently, signed_in
 
 OWN = AccessScope.own
 ORG = AccessScope.organization
-FIELDS = {"title": "Review deal", "value": Decimal("100000")}
+FIELDS = {"value": Decimal("100000")}
 KEY = "3f2b8c1e-9a4d-4e2f-8b7a-1c2d3e4f5a6b"
 
 transactional = [

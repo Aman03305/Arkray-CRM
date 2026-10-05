@@ -7,12 +7,17 @@ Authorization, applied here for every caller (API, conversion, future imports an
 - writing requires identity.workspaces.authorize_write (own workspace: crm.access_own;
   another user's or the organisation's: crm.manage_any), else 403;
 - an opportunity's owner is always its lead's owner (who must be an active, assignable
-  user). Since Leads left the UI (ADR-0027) the lead is the opportunity's hidden customer
-  record: an opportunity created without one gets a new one, owned as a lead created in the
-  same workspace would be (the creator in their own workspace, the user in theirs, a chosen
-  active user organisation-wide: only that last is an assignment, crm.assign_any). Changing
-  the owner afterwards is `reassign_opportunity`, which reassigns the customer record
-  (crm.assign_any), so the customer's other open opportunities and current work move too.
+  user). The lead is the opportunity's canonical customer record (ADR-0027, ADR-0028): an
+  opportunity created without one gets a new one, in the same transaction, owned as a lead
+  created in the same workspace would be (the creator in their own workspace, the user in
+  theirs, a chosen active user organisation-wide: only that last is an assignment,
+  crm.assign_any). Changing the owner afterwards is `reassign_opportunity`, which reassigns
+  the customer record (crm.assign_any), so the customer's other open opportunities and
+  current work move too.
+
+Nobody names an opportunity: its title is derived from its customer and instrument
+(naming.py) at creation and whenever those change. Its instrument is one of
+instruments.INSTRUMENTS (checked here, never only in the browser).
 
 Lock order (docs/pipeline.md#lock-order), the same in every operation, so two operations
 can never wait for each other in a cycle:
@@ -76,9 +81,9 @@ from arkray.identity.selectors import lock_assignable_user
 from arkray.identity.workspaces import authorize_write
 from arkray.leads import selectors as lead_selectors
 from arkray.leads import services as lead_services
-from arkray.leads.models import NAME_MAX_LENGTH, Lead, StatusCategory
+from arkray.leads.models import ADDRESS_LINE_MAX_LENGTH, NAME_MAX_LENGTH, Lead, StatusCategory
 
-from . import events, selectors, validation
+from . import events, instruments, naming, selectors, validation
 from .models import (
     NegotiationPrice,
     NegotiationSource,
@@ -429,8 +434,10 @@ def _insert(
     stage_id: UUID | None,
     negotiated_price: Decimal | None,
     via_conversion: bool,
+    lead_created: bool = False,
 ) -> Opportunity:
-    """Create an opportunity for an already-locked lead (inside the caller's transaction)."""
+    """Create an opportunity for an already-locked lead (inside the caller's transaction).
+    `lead_created`: the lead was made for it in this transaction (recorded in the audit)."""
     if lead.archived_at is not None:
         raise BusinessRuleViolation(LEAD_ARCHIVED)
     pipeline = _pipeline(pipeline_id, lead.owner_id)
@@ -449,9 +456,16 @@ def _insert(
     )
     # The customer defaults to the lead (an editable snapshot from now on).
     account_default, customer_default = lead_selectors.customer_names(lead.pk)
+    account_name = cleaned.get("account_name") or account_default
+    customer_name = cleaned.get("customer_name") or customer_default
+    instrument_name = cleaned.get("instrument_name", "")
     now = timezone.now()
     opportunity = Opportunity.objects.create(
-        title=cleaned["title"],
+        title=naming.opportunity_title(
+            customer_name=customer_name,
+            account_name=account_name,
+            instrument_name=instrument_name,
+        ),
         lead_id=lead.pk,
         owner_id=lead.owner_id,
         pipeline=pipeline,
@@ -465,13 +479,14 @@ def _insert(
         lost_reason=lost_reason,
         closed_at=now if stage.is_closed else None,
         opportunity_date=cleaned.get("opportunity_date") or business_today(),
-        account_name=cleaned.get("account_name") or account_default,
-        customer_name=cleaned.get("customer_name") or customer_default,
+        account_name=account_name,
+        customer_name=customer_name,
         contact_phone=cleaned.get("contact_phone", ""),
         contact_email=cleaned.get("contact_email", ""),
         address=cleaned.get("address", ""),
-        instrument_name=cleaned.get("instrument_name", ""),
+        instrument_name=instrument_name,
         work_load=cleaned.get("work_load", ""),
+        expected_cpt=cleaned.get("expected_cpt", ""),
         custom_fields=custom,
         negotiated_price=price,
         negotiated_at=now if price is not None else None,
@@ -500,6 +515,7 @@ def _insert(
         stage=stage.key,
         status=stage.category,
         via="conversion" if via_conversion else "create",
+        lead_created=lead_created,
     )
     publish(
         events.OpportunityCreated(
@@ -518,9 +534,27 @@ def _insert(
     return opportunity
 
 
+def _known_instrument(cleaned: dict[str, Any], *, current: str = "") -> list[str] | None:
+    """Put a given instrument in the list's spelling; the problem, if it isn't on the list.
+    The current value of an existing opportunity is accepted unchanged (one from before the
+    list keeps its text until the instrument is changed)."""
+    name = cleaned.get("instrument_name")
+    if not name or name == current:
+        return None
+    known = instruments.canonical(name)
+    if known is None:
+        return [instruments.UNKNOWN_INSTRUMENT]
+    cleaned["instrument_name"] = known
+    return None
+
+
 def _creation_fields(fields: Mapping[str, Any]) -> dict[str, Any]:
     cleaned = validation.clean_fields(fields)
-    errors = {f: ["This field is required."] for f in ("title", "value") if f not in cleaned}
+    errors: dict[str, list[str]] = {}
+    if "value" not in cleaned:
+        errors["value"] = ["This field is required."]
+    if problem := _known_instrument(cleaned):
+        errors["instrument_name"] = problem
     if errors:
         raise InvalidInputError(details=errors)
     return cleaned
@@ -528,19 +562,41 @@ def _creation_fields(fields: Mapping[str, Any]) -> dict[str, Any]:
 
 def _split_name(name: str) -> tuple[str, str]:
     """A customer name as a lead's first and last name (each at most 100 characters; the
-    customer name may be 200), cut at a space so the lead's display name reads the same."""
+    customer name may be 200), cut at the last space that lets both halves fit, so the lead's
+    display name ("first last") reads exactly the same. A name with no such space (over 100
+    characters without one there) is cut at 100: nothing is lost, but the lead's name then
+    has a space the customer name hasn't (backend review)."""
     if len(name) <= NAME_MAX_LENGTH:
         return name, ""
-    cut = name.rfind(" ", 1, NAME_MAX_LENGTH + 1)
-    if cut <= 0:
-        cut = NAME_MAX_LENGTH
-    return name[:cut].rstrip(), name[cut:].strip()[:NAME_MAX_LENGTH]
+    earliest = max(1, len(name) - NAME_MAX_LENGTH - 1)
+    cut = name.rfind(" ", earliest, NAME_MAX_LENGTH + 1)
+    if cut == -1:
+        return name[:NAME_MAX_LENGTH], name[NAME_MAX_LENGTH:]
+    return name[:cut], name[cut + 1 :]
+
+
+def _address_lines(address: str) -> list[str] | None:
+    """The opportunity's address as the lead's two address lines, or None when it doesn't
+    fit them (more than two lines, or a line longer than a lead's). It is then kept on the
+    opportunity only: never cut, and never guessed into a city, state or postal code."""
+    lines = [line.strip() for line in address.splitlines() if line.strip()]
+    if not lines or len(lines) > 2 or any(len(line) > ADDRESS_LINE_MAX_LENGTH for line in lines):
+        return None
+    return lines
 
 
 def _customer_record(cleaned: Mapping[str, Any]) -> dict[str, Any]:
-    """The fields of the hidden customer record (a lead, ADR-0027) a new opportunity without
-    a lead gets: its names, email and phone from the opportunity's customer details, already
-    cleaned by the opportunity's own rules (which are the lead's: pipeline.validation)."""
+    """The fields of the canonical customer record (a lead, ADR-0027/0028) a new opportunity
+    without a lead gets, from the opportunity's customer details, already cleaned by the
+    opportunity's own rules (which are the lead's: pipeline.validation):
+
+        customer name -> the lead's name (first and last name, as one reads it)
+        account name  -> the lead's organisation
+        phone, email  -> the lead's phone and email
+        address       -> the lead's address lines 1 and 2, when it fits them
+
+    The instrument, work load, prices, Expected CPT and dates are the deal's, not the
+    customer's: they stay on the opportunity only."""
     customer = cleaned.get("customer_name", "")
     account = cleaned.get("account_name", "")
     if not (customer or account):
@@ -551,7 +607,27 @@ def _customer_record(cleaned: Mapping[str, Any]) -> dict[str, Any]:
         record["email"] = cleaned["contact_email"]
     if cleaned.get("contact_phone"):
         record["phone"] = cleaned["contact_phone"]
+    lines = _address_lines(cleaned.get("address", ""))
+    if lines is not None:
+        record["address_line_1"] = lines[0]
+        if len(lines) == 2:
+            record["address_line_2"] = lines[1]
     return record
+
+
+def _mark_converted(actor: User, scope: AccessScope, lead: Lead) -> None:
+    """A lead made together with its opportunity has entered the opportunity process: it is
+    Converted (ADR-0019), exactly as converting a lead
+    leaves it, through the leads module's own operation (its audit and LeadStatusChanged; the
+    conversion veto passes, the opportunity exists). Skipped when no converted status is
+    configured: the opportunity is still created (backend review: these leads stayed "New",
+    so Ask Arkray counted none of them as converted)."""
+    converted = lead_selectors.first_active_status(StatusCategory.CONVERTED)
+    if converted is None or lead.status_id == converted.key:
+        return
+    lead_services.change_status(
+        actor=actor, scope=scope, lead_id=lead.pk, version=lead.version, status=converted.key
+    )
 
 
 def _check_new_owner(actor: User, scope: AccessScope, owner_id: UUID | None) -> None:
@@ -583,8 +659,9 @@ def create_opportunity(
     idempotency_key: UUID | None = None,
 ) -> CreateResult:
     """Create an opportunity in `scope`, for a lead of the scope or (`lead_id` None: the UI
-    since ADR-0027) with a new hidden customer record made from its customer details, in the
-    same transaction. Its owner is the lead's owner: for a new record, as for a lead created
+    since ADR-0027) with a new lead made from its customer details, in the same transaction:
+    both are created or neither is (one new opportunity, one new lead). Its name is derived
+    (naming.py). Its owner is the lead's owner: for a new record, as for a lead created
     in `scope` (`owner_id` names it organisation-wide, where it is required). The pipeline
     defaults to the organisation's default pipeline and the stage to its first open stage.
     Created in a negotiation stage, it needs the negotiated price.
@@ -628,7 +705,9 @@ def create_opportunity(
                 target = lead_services.create_lead(
                     actor=actor, scope=scope, fields=customer, owner_id=owner_id
                 ).lead.pk
-            lead = lead_selectors.lock_lead(scope, target)
+            # FOR UPDATE for a lead made here: its status changes below, and a lock is never
+            # upgraded mid-transaction (nobody else can see the new row yet anyway).
+            lead = lead_selectors.lock_lead(scope, target, exclusive=customer is not None)
             opportunity = _insert(
                 actor=actor,
                 scope=scope,
@@ -638,7 +717,10 @@ def create_opportunity(
                 stage_id=stage_id,
                 negotiated_price=price,
                 via_conversion=False,
+                lead_created=customer is not None,
             )
+            if customer is not None:
+                _mark_converted(actor, scope, lead)
             if idempotency_key is not None:
                 idempotency.remember(
                     actor.pk, IDEMPOTENT_CREATE, idempotency_key, digest, opportunity.pk
@@ -790,11 +872,13 @@ def update_opportunity(
     version: int,
     changes: Mapping[str, Any],
 ) -> Opportunity:
-    """Change the deal's fields (validation.EDITABLE_FIELDS): title, value, probability,
-    dates, customer and instrument details, description, custom values or (while lost) the
-    lost reason. `probability: None` returns to the stage's default; custom values merge
-    (null clears one). Only fields whose value actually changes are written and audited (by
-    name, and custom fields by id: no values, no text)."""
+    """Change the deal's fields (validation.EDITABLE_FIELDS): value, probability, dates,
+    customer and instrument details, Expected CPT, description, custom values or (while lost)
+    the lost reason. `probability: None` returns to the stage's default; custom values merge
+    (null clears one). A change to the customer, account or instrument renames it (naming.py).
+    Only fields whose value actually changes are written and audited (by name, and custom
+    fields by id: no values, no text). Never touches its lead: the opportunity keeps the same
+    customer record, and no other is made."""
     authorize_write(actor, scope)
     cleaned = validation.clean_fields(changes)
     custom_changed: list[str] = []
@@ -802,6 +886,8 @@ def update_opportunity(
         opportunity, _ = _lock(scope, opportunity_id)
         _require_version(opportunity, version)
         _require_not_archived(opportunity)
+        if problem := _known_instrument(cleaned, current=opportunity.instrument_name):
+            raise InvalidInputError(details={"instrument_name": problem})
         if "custom_fields" in cleaned:
             # FOR SHARE on the pipeline: its field definitions can't change meanwhile.
             _hold(_SHARE_PIPELINE, opportunity.pipeline_id)
@@ -823,6 +909,15 @@ def update_opportunity(
             return selectors.opportunity_by_id(opportunity.pk)
         for field in changed:
             setattr(opportunity, field, cleaned[field])
+        if naming.SOURCES & set(changed):
+            title = naming.opportunity_title(
+                customer_name=opportunity.customer_name,
+                account_name=opportunity.account_name,
+                instrument_name=opportunity.instrument_name,
+            )
+            if title != opportunity.title:
+                opportunity.title = title
+                changed.append("title")
         opportunity.version += 1
         opportunity.save(update_fields=[*changed, "version", "updated_at"])
         reported = sorted({"probability" if f == "probability_overridden" else f for f in changed})

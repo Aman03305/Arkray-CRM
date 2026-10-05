@@ -3,7 +3,8 @@ conversion, future imports and tools). Serializers check shapes; these decide va
 canonical form.
 
 Opportunities:
-- Title: one line of text (core.text), required, up to 200 characters.
+- Title: never set by a client. The services derive it from the customer and instrument
+  (naming.py, ADR-0028), so it is not a field here.
 - Value (shown as "Installation price"): a Decimal (or int) amount in the organisation
   currency, 0 to 999,999,999,999.99, at most 2 decimal places. Floats are refused outright:
   money is never converted through binary floating point, and NaN/Infinity can't even be
@@ -13,8 +14,11 @@ Opportunities:
   them), 2000-2099.
 - Account and customer names: one line, up to 200 characters, never blank once set.
 - Contact: a phone number and an email address, each checked as a lead's are.
-- Address: multi-line, up to 1,000. Instrument: one line, up to 200. Work load: one line,
-  up to 100 (free text: the product has no workload unit, so none is invented).
+- Address: multi-line, up to 1,000. Instrument: one line, up to 200, and one of
+  instruments.INSTRUMENTS (checked by the services, which know the current value: an
+  opportunity from before the list keeps its own text until the instrument is changed).
+  Work load and Expected CPT: one line, up to 100 (free text: the product defines no
+  workload unit and no meaning or unit for CPT, so none is invented).
 - Description: multi-line text up to 5,000 characters. Lost reason: up to 500.
 
 Configuration (docs/pipeline.md#configuration): stage and custom-field specifications,
@@ -42,7 +46,6 @@ from arkray.leads.validation import clean_email_address, clean_phone_number
 
 from . import models as m
 
-TITLE_REQUIRED = "Enter a title."
 VALUE_INVALID = "Enter an amount such as 1250000 or 1250000.50."
 PROBABILITY_INVALID = "Enter a percentage from 0 to 100, with at most 2 decimal places."
 NAME_REQUIRED = "Enter a name."
@@ -64,17 +67,6 @@ def _exact(value: Any, *, message: str) -> Decimal:
     except InvalidOperation:  # too many digits to quantize: certainly out of range
         raise ValueError(message) from None
     return number.quantize(m.HUNDREDTH)
-
-
-def clean_title(value: Any) -> str:
-    if not isinstance(value, str):
-        raise ValueError("Enter text.")
-    title = clean_line(value)
-    if not title:
-        raise ValueError(TITLE_REQUIRED)
-    if len(title) > m.TITLE_MAX_LENGTH:
-        raise ValueError(f"Use at most {m.TITLE_MAX_LENGTH} characters.")
-    return title
 
 
 def clean_value(value: Any) -> Decimal:
@@ -161,7 +153,6 @@ def _custom_values_shape(value: Any) -> dict[str, Any]:
 
 
 CLEANERS: Mapping[str, Callable[[Any], Any]] = {
-    "title": clean_title,
     "value": clean_value,
     "probability": clean_probability,
     "expected_close_date": clean_expected_close_date,
@@ -175,11 +166,12 @@ CLEANERS: Mapping[str, Callable[[Any], Any]] = {
     "address": _multiline(m.ADDRESS_MAX_LENGTH),
     "instrument_name": _line(m.INSTRUMENT_NAME_MAX_LENGTH),
     "work_load": _line(m.WORK_LOAD_MAX_LENGTH),
+    "expected_cpt": _line(m.EXPECTED_CPT_MAX_LENGTH),
     "custom_fields": _custom_values_shape,
 }
 # What PATCH may change. Lead, owner, pipeline, stage, status, closed_at, provenance,
 # timestamps, archive state, the negotiated price and version have their own rules and
-# operations.
+# operations; the title follows the customer and instrument (naming.py).
 EDITABLE_FIELDS = frozenset(CLEANERS)
 
 

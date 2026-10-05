@@ -29,7 +29,7 @@ pytestmark = pytest.mark.django_db
 
 OWN = AccessScope.own
 KEY = "3f2b8c1e-9a4d-4e2f-8b7a-1c2d3e4f5a6b"
-FIELDS = {"title": "Hospital Lab Upgrade", "value": Decimal("1250000")}
+FIELDS = {"value": Decimal("1250000")}
 
 
 def convert(actor, scope, lead, version=None, **kwargs):
@@ -251,7 +251,6 @@ class TestApi:
             convert_url(lead.pk),
             {
                 "version": 1,
-                "title": "Lab Upgrade",
                 "value": "1250000.00",
                 "stage": str(stages["proposal"].pk),
             },
@@ -262,6 +261,8 @@ class TestApi:
         body = response.json()
         assert body["lead"]["status"]["key"] == "converted"
         assert body["opportunity"]["value"] == "1250000.00"
+        # Named after the lead (no customer or instrument given): nobody types the name.
+        assert body["opportunity"]["title"] == lead.display_name
         assert body["opportunity"]["stage"]["key"] == "proposal"
         assert body["opportunity"]["lead"] == {
             "id": str(lead.pk),
@@ -276,7 +277,6 @@ class TestApi:
             convert_url(lead.pk),
             {
                 "version": 1,
-                "title": "Lab Upgrade",
                 "value": "1250000.00",
                 "stage": str(stages["proposal"].pk),
             },
@@ -288,7 +288,14 @@ class TestApi:
 
     @pytest.mark.parametrize(
         "extra",
-        [{"owner": "x"}, {"status": "won"}, {"lead": "x"}, {"created_by": "x"}, {"closed_at": "x"}],
+        [
+            {"owner": "x"},
+            {"status": "won"},
+            {"lead": "x"},
+            {"created_by": "x"},
+            {"closed_at": "x"},
+            {"title": "x"},  # the name is derived, never typed (ADR-0028)
+        ],
     )
     def test_strict_body(self, user_a_client, user_a, stages, extra):
         lead = LeadFactory(owner=user_a)

@@ -1,4 +1,4 @@
-import type { AdminUser } from "@/lib/api/types";
+import type { AdminUser, OpportunityOptions } from "@/lib/api/types";
 import type { Capability, Viewer } from "@/lib/viewer";
 
 export const RAHUL_ID = "3f2b8c1e-9a4d-4e2f-8b7a-1c2d3e4f5a6b";
@@ -68,6 +68,14 @@ export function makeAdminUser(overrides: Partial<AdminUser> = {}): AdminUser {
   return { ...base, ...overrides };
 }
 
-// --- customer records (the API's leads; no screen of their own, ADR-0027) -----------------
+// --- leads (made with their opportunity; no Leads module, ADR-0027; a read-only page, ADR-0028)
 export const LEAD_ID = "9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2c";
 export const PRIYA_ID = "5c4b3a29-1807-4f6e-9d5c-4b3a29180716";
+
+// --- the New Opportunity form's choices (GET /api/v1/config/opportunity-options) ----------
+export const INSTRUMENT_NAMES = ["Adams 8380 V-lite", "Adams 8180 V", "Adams 8180 T", "PCBA with Printer"] as const;
+export const OPPORTUNITY_OPTIONS: OpportunityOptions = { instruments: INSTRUMENT_NAMES.map((name) => ({ name })) };
+/** A mockApi route answering the instrument list (shared configuration, not a workspace's). */
+export const OPPORTUNITY_OPTIONS_ROUTE = {
+  "GET /api/v1/config/opportunity-options": { status: 200, body: OPPORTUNITY_OPTIONS },
+};

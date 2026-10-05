@@ -5,31 +5,44 @@ import { makeOpportunity } from "@/test/pipeline-fixtures";
 import {
   changedFields,
   createRequest,
+  DRAFT_FIELDS,
   draftFromOpportunity,
   EMPTY_DRAFT,
+  FIELD_LABELS,
   mergeConflict,
   updateRequest,
   validateDraft,
 } from "./draft";
 
 const OWNER = "9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2c";
-const COMPLETE = { ...EMPTY_DRAFT, title: "x", value: "1", opportunity_date: "2026-10-01", account_name: "City Lab", customer_name: "Dr. Iyer" };
+const COMPLETE = { ...EMPTY_DRAFT, value: "1", opportunity_date: "2026-10-01", account_name: "City Lab", customer_name: "Dr. Iyer" };
 
 describe("creating", () => {
   it("sends amounts as exact decimal strings and omits empty fields", () => {
     const body = createRequest(
-      { ...COMPLETE, title: "  Lab upgrade ", value: "12,50,000.5", account_name: " City Lab ", customer_name: "Dr. Iyer  " },
+      { ...COMPLETE, value: "12,50,000.5", account_name: " City Lab ", customer_name: "Dr. Iyer  " },
       { stage: "s1", stageProbability: "50.00" },
     );
-    // The customer details are the customer (ADR-0027): no lead, and no owner in a user's workspace.
+    // The customer details are the customer: no lead, and no owner in a user's workspace. There
+    // is no name to send either: the server names the opportunity (ADR-0028).
     expect(body).toEqual({
-      title: "Lab upgrade",
       value: "1250000.5",
       stage: "s1",
       opportunity_date: "2026-10-01",
       account_name: "City Lab",
       customer_name: "Dr. Iyer",
     });
+    expect(body).not.toHaveProperty("title");
+    expect(body).not.toHaveProperty("lead");
+  });
+
+  it("sends whichever of the account and customer names is given, and never an empty one", () => {
+    const customerOnly = createRequest({ ...COMPLETE, account_name: "  " }, {});
+    expect(customerOnly.customer_name).toBe("Dr. Iyer");
+    expect(customerOnly).not.toHaveProperty("account_name");
+    const accountOnly = createRequest({ ...COMPLETE, customer_name: "" }, {});
+    expect(accountOnly.account_name).toBe("City Lab");
+    expect(accountOnly).not.toHaveProperty("customer_name");
   });
 
   it("sends the owner only when one is chosen (organisation-wide)", () => {
@@ -40,13 +53,14 @@ describe("creating", () => {
 
   it("sends the deal's details, the negotiated price and only non-empty custom values", () => {
     const body = createRequest(
-      { ...COMPLETE, value: "1", contact_phone: " +91 98765 43210 ", address: "Line 1\nLine 2", work_load: "300 tests/day" },
+      { ...COMPLETE, value: "1", contact_phone: " +91 98765 43210 ", address: "Line 1\nLine 2", work_load: "300 tests/day", expected_cpt: " 45 " },
       { negotiatedPrice: "950000", customFields: { f1: "GEM/1", f2: "", f3: [], f4: false } },
     );
     expect(body).toMatchObject({
       contact_phone: "+91 98765 43210",
       address: "Line 1\nLine 2",
       work_load: "300 tests/day",
+      expected_cpt: "45",
       negotiated_price: "950000",
       custom_fields: { f1: "GEM/1", f4: false },
     });
@@ -66,6 +80,18 @@ describe("creating", () => {
   });
 });
 
+describe("the fields", () => {
+  it("have no name (the server names an opportunity), and are labelled as the form labels them", () => {
+    expect(DRAFT_FIELDS).not.toContain("title");
+    expect(FIELD_LABELS).toMatchObject({
+      contact_phone: "Contact",
+      instrument_name: "Instrument name",
+      value: "Installation price",
+      expected_cpt: "Expected CPT",
+    });
+  });
+});
+
 describe("validating", () => {
   it("reports every problem", () => {
     expect(
@@ -75,7 +101,6 @@ describe("validating", () => {
       ),
     ).toEqual({
       owner: ["Choose who owns this opportunity."],
-      title: ["Enter a name."],
       account_name: ["Enter the account name."],
       customer_name: ["Enter the customer name."],
       opportunity_date: ["Enter a date between 2000 and 2099."],
@@ -98,6 +123,14 @@ describe("validating", () => {
       customer_name: ["Enter the customer name."],
     });
   });
+
+  it("a new opportunity needs only the customer name or the account name", () => {
+    expect(validateDraft({ ...COMPLETE, account_name: "  ", customer_name: "" }, { creating: true })).toEqual({
+      customer_name: ["Enter the customer name or the account name."],
+    });
+    expect(validateDraft({ ...COMPLETE, account_name: "" }, { creating: true })).toEqual({});
+    expect(validateDraft({ ...COMPLETE, customer_name: " " }, { creating: true })).toEqual({});
+  });
 });
 
 describe("editing", () => {
@@ -115,15 +148,15 @@ describe("editing", () => {
     // Clearing the expected close date is a change: sent as null.
     expect(updateRequest(base, { ...base, expected_close_date: "" }, 3)).toEqual({ version: 3, expected_close_date: null });
     expect(updateRequest(base, { ...base, probability: "" }, 3)).toEqual({ version: 3, probability: null });
-    expect(changedFields(base, { ...base, title: `${base.title}  ` })).toEqual([]);
+    expect(changedFields(base, { ...base, account_name: `${base.account_name}  ` })).toEqual([]);
   });
 
   it("re-applies my changes on top of someone else's and flags overlaps", () => {
     const base = draftFromOpportunity(opportunity);
-    const mine = { ...base, value: "1500000", title: "Mine" };
+    const mine = { ...base, value: "1500000", customer_name: "Mine" };
     const latest = { ...base, value: "1400000", description: "Theirs" };
     const { merged, overlapping } = mergeConflict(base, mine, latest);
-    expect(merged).toMatchObject({ value: "1500000", title: "Mine", description: "Theirs" });
+    expect(merged).toMatchObject({ value: "1500000", customer_name: "Mine", description: "Theirs" });
     expect(overlapping).toEqual(["value"]);
   });
 });

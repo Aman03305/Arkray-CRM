@@ -48,6 +48,10 @@ INSTRUMENT_NAME_MAX_LENGTH = 200
 # Free text such as "300 tests/day": the product has no workload unit semantics, so none is
 # invented (a number with a wrong unit would be worse than the salesperson's own words).
 WORK_LOAD_MAX_LENGTH = 100
+# Expected CPT, free text for the same reason: nothing in the CRM's documentation defines CPT
+# or its unit, so the salesperson's own words are kept until the business confirms them
+# (docs/pipeline.md#expected-cpt).
+EXPECTED_CPT_MAX_LENGTH = 100
 # Configuration bounds (per owner / per pipeline), so nobody can grow the configuration
 # without limit (docs/pipeline.md#configuration).
 MAX_PIPELINES_PER_OWNER = 25
@@ -282,6 +286,8 @@ SEARCH_TEXT = Upper(Concat("title", Value(" "), "account_name", Value(" "), "cus
 
 
 class Opportunity(UUIDPrimaryKeyModel, TimeStampedModel):
+    # The opportunity's name: derived from its customer and instrument by the services
+    # (naming.py), never typed by a user. Older opportunities may keep a typed one.
     title = models.CharField(max_length=TITLE_MAX_LENGTH)
     # The prospect. Fixed for the opportunity's lifetime.
     lead = models.ForeignKey(Lead, on_delete=models.PROTECT, related_name="+", db_index=False)
@@ -321,10 +327,17 @@ class Opportunity(UUIDPrimaryKeyModel, TimeStampedModel):
     contact_phone = models.CharField(max_length=PHONE_MAX_LENGTH, blank=True, default="")
     contact_email = models.CharField(max_length=EMAIL_MAX_LENGTH, blank=True, default="")
     address = models.TextField(max_length=ADDRESS_MAX_LENGTH, blank=True, default="")
+    # One of instruments.INSTRUMENTS (checked by the services for new and changed values; no
+    # database constraint, so opportunities from before the list keep their text).
     instrument_name = models.CharField(
         max_length=INSTRUMENT_NAME_MAX_LENGTH, blank=True, default=""
     )
     work_load = models.CharField(max_length=WORK_LOAD_MAX_LENGTH, blank=True, default="")
+    # db_default too: the column keeps its DEFAULT, so the previous release (which never names
+    # it) can still insert during a rolling deploy or after a rollback (backend review, P2).
+    expected_cpt = models.CharField(
+        max_length=EXPECTED_CPT_MAX_LENGTH, blank=True, default="", db_default=""
+    )
     # Values of the pipeline's custom fields, {field id: canonical value}; validated against
     # the definitions by validation.clean_custom_values (never arbitrary keys or HTML).
     custom_fields = models.JSONField(default=dict, blank=True)

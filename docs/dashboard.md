@@ -5,10 +5,13 @@ is a **read-only view over the authoritative domains**, not an analytics subsyst
 no tables, no cache and no formulas of its own. Every figure is the owning module's
 selector, called with the request's `AccessScope`.
 
-> **Since [ADR-0027](adr/0027-leads-removed-from-the-ui.md) the UI shows four figures and two
-> lists:** Leads left the UI, so "Total leads", "New leads today" and the "New leads today"
-> list are no longer shown. The API below still computes and returns them (unchanged,
-> tested); the page ignores them.
+> **Leads ([ADR-0028](adr/0028-opportunity-creates-its-lead.md)).** Every opportunity created
+> in the pipeline creates its lead in the same transaction, so one new opportunity is one more
+> lead in "Total leads" and, on the day it is created (Asia/Kolkata), in "New leads today":
+> both are counted from the Lead table alone, never from opportunities. The "New leads" list
+> comes **before Upcoming meetings**; each row opens the lead's (read-only) page, which links
+> to its opportunity. ([ADR-0027](adr/0027-leads-removed-from-the-ui.md) had hidden all three;
+> there is still no Leads list page, so the two lead figures are plain tiles.)
 
 Code: [`backend/arkray/dashboard/`](../backend/arkray/dashboard/) (module above
 `activities` in the [layering](architecture.md#dependency-rules)),
@@ -18,8 +21,8 @@ Code: [`backend/arkray/dashboard/`](../backend/arkray/dashboard/) (module above
 
 | Area | Figure | Definition | Authority | Opens |
 |---|---|---|---|---|
-| Total leads | count | leads in the workspace that are **not archived** (any status) | `leads.selectors.lead_summary` | Leads list, default filters (which hide archived leads) |
-| New leads today | count | of those, the ones **created during today's business day** | `leads.selectors.lead_summary` | Leads list filtered to created today (the server's business date) |
+| Total leads | count | leads in the workspace that are **not archived** (any status); a lead whose only opportunity was archived still counts | `leads.selectors.lead_summary` | (a plain tile: no Leads list) |
+| New leads today | count | of those, the ones **created during today's business day** | `leads.selectors.lead_summary` | (a plain tile; its leads are the New leads list) |
 | Pipeline value | ₹ | `SUM(value)` of **open**, non-archived opportunities, **in every pipeline** | `pipeline.selectors.pipeline_totals` → `pipeline.metrics` (Phase 3) | Pipeline board, filters cleared |
 | Weighted pipeline | ₹ | `SUM(value × probability / 100)` of the same, exact, rounded once to paise | same | same |
 | Meetings | today / upcoming | scheduled or completed meetings starting today; scheduled meetings from now on | `activities.selectors.activity_summary` (Phase 4) | Activities: today's meetings (the Activities page's own shortcut) |
@@ -47,18 +50,20 @@ and the **installation price** (`value`): a negotiated price never changes the t
 
 | List | Rows | Order | Authority |
 |---|---|---|---|
-| New leads today | the leads "New leads today" counts | newest first (ties: newest id first) | `leads.selectors.new_leads_today` |
+| New leads | the leads "New leads today" counts, each with its opportunity (its first non-archived one in the workspace: id, name, instrument; or none) | newest first (ties: newest id first) | `leads.selectors.new_leads_today`, `pipeline.selectors.first_opportunities` |
 | Upcoming meetings | scheduled meetings from now on | soonest first | `activities.selectors.upcoming_meetings` (Phase 4) |
 | Tasks requiring attention | open tasks | due time, so overdue first, then today's, then later, undated last (ties by id): the first rows of the Activities page's Tasks tab | `activities.selectors.next_open_tasks` |
 
-Each row links to the record's page **in the same workspace**; each list's footer opens
-the full list ("View all 12 new leads", "View upcoming meetings", "View open tasks").
+Each row links to the record's page **in the same workspace** (a new lead to its lead page);
+the meetings' and tasks' footers open the full list ("View upcoming meetings", "View open
+tasks"), the new leads' footer the Pipeline ("Newest 5 of 7 · View pipeline").
 Rows carry only what the dashboard shows (security review): a lead's name, organisation,
-created time and assigned user; a meeting's or task's title, type, status, start or due
+created time, assigned user and its opportunity's id, name and instrument; a meeting's or task's title, type, status, start or due
 time, "overdue", its lead and its owner. People are `{id, full_name, is_active}`, never an
-email; no description, agenda, author or version is sent. Organisation-wide the UI writes
-"Assigned to Priya Patel" on every lead row and the owner on every meeting and task; in one
-person's workspace the rows don't repeat their name.
+email; no description, agenda, author or version is sent, and no lead contact data. A new
+lead's row shows its name, its instrument, (organisation-wide) its owner and "Today 2:15 pm".
+Organisation-wide the UI writes the owner on every row; in one person's workspace the rows
+don't repeat their name.
 
 ## Workspaces
 
@@ -122,7 +127,9 @@ active user; read-only: other methods 405; any query parameter 400).
                  "meetings_today": 3, "upcoming_meetings": 6},
   "new_leads": [{"id": "…", "display_name": "Asha Mehta", "organization_name": "Apollo Diagnostics",
                  "owner": {"id": "…", "full_name": "Rahul Sharma", "is_active": true},
-                 "created_at": "2026-10-03T04:42:00Z"}],
+                 "created_at": "2026-10-03T04:42:00Z",
+                 "opportunity": {"id": "…", "title": "Asha Mehta — Adams 8380 V-lite",
+                                 "instrument_name": "Adams 8380 V-lite"}}],
   "upcoming_meetings": [{"id": "…", "type": "meeting", "title": "Product demo", "status": "scheduled",
                          "due_at": null, "starts_at": "2026-10-06T05:30:00Z", "is_overdue": false,
                          "lead": {"id": "…", "display_name": "Asha Mehta", "organization_name": "Apollo Diagnostics",
@@ -171,12 +178,16 @@ envelope otherwise. Responses are `Cache-Control: no-store`.
 
 | Dashboard | In tests | In production |
 |---|---|---|
-| own (`me`) | 9: session, user, the seven | 10 (+ `SET TRANSACTION`), between BEGIN and COMMIT |
-| a selected user's | 10 (+ the workspace's user exists-check) | 11 |
-| organisation (`all`) | 9 | 10 |
+| own (`me`) | 10: session, user, the eight | 11 (+ `SET TRANSACTION`), between BEGIN and COMMIT |
+| a selected user's | 12 (+ the workspace's user exists-check, the audit window read) | 13 |
+| organisation (`all`) | 11 (+ the audit window read) | 12 |
 
-The seven: lead figures, pipeline totals, the activity figures (two aggregates: open tasks;
-meetings from today on), today's newest leads, the next meetings, the next open tasks. The
+The eight: lead figures, pipeline totals, the activity figures (two aggregates: open tasks;
+meetings from today on), today's newest leads, the next meetings, the next open tasks, and
+(ADR-0028) the new leads' opportunities: one `DISTINCT ON (lead_id)` query for the at most
+five new leads, through `pipeline_opp_lead_idx` (measured on `arkray_bench_enh`, 300,000
+opportunities: 0.26 ms warm and 3-5 ms cold for the heaviest owner's 20,000 deals, 0.12 ms
+organisation-wide), skipped when there are no new leads. The
 first delegated view in a 15-minute window adds the audit insert. Owner and lead names in
 the lists come from the same joins: no query per row or per user
 ([`test_query_counts.py`](../backend/arkray/dashboard/tests/test_query_counts.py)).
@@ -278,20 +289,22 @@ Query shapes are pinned by
 [`test_dashboard_query_plans.py`](../backend/tests/performance/test_dashboard_query_plans.py)
 (lead figures index-only from `leads_owner_created_idx`, today's leads without a sort, the
 activity figures and lists from the schedule indexes, one owner's totals never scanning the
-organisation) and `test_activity_query_plans.py` (each half of the activity summary a range
+organisation, the new leads' opportunities from an index, never a scan) and `test_activity_query_plans.py` (each half of the activity summary a range
 of the schedule index). Those tests vacuum their data first, as autovacuum keeps it; the
 `--churn` option of the benchmark measures the state between autovacuum runs.
 
 ## Frontend
 
 - **Layout:** the page header (Dashboard; Your records / Selected user's records /
-  Organization overview), "Key figures" (four cards since ADR-0027: one column on phones,
-  two on tablets, four on desktops; amounts wrap only at their commas), then the two lists
-  (upcoming meetings, tasks requiring attention; stacked, two columns on large screens;
-  each row names its customer as text; names wrap rather than being cut off, so an
+  Organization overview), "Key figures" (six cards: Total leads, New leads today, Pipeline
+  value, Weighted pipeline, Meetings, Tasks; one column on phones, two on tablets, three on
+  desktops; amounts wrap only at their commas), then the three lists in this order: **New
+  leads**, Upcoming meetings, Tasks requiring attention (stacked on phones and tablets, two
+  columns from 1024 px, three from 1280 px; names wrap rather than being cut off, so an
   assigned user's name and "(deactivated)" always show), then, on Admin Home, "Recently
   added users".
-- **Cards are links** to this workspace's Pipeline and Activities. A card opens the
+- **Cards are links** to this workspace's Pipeline and Activities (the two lead cards are
+  plain tiles: there is no Leads list; their leads are listed below). A card opens the
   list that shows exactly what it counts by presetting that list's in-memory filters
   (`presetActivityList`, `presetBoard`; the same presets as the Activities
   page's own shortcuts, now one function `summaryFilters`), never by putting filters in the
@@ -301,7 +314,8 @@ of the schedule index). Those tests vacuum their data first, as autovacuum keeps
   Rahul's Activities on the Tasks tab, not the organisation's.
 - **States:** a skeleton while loading (never zeros) and one persistent `role="status"`
   region that says "Loading the dashboard" / "Updating the dashboard"; real zeros with empty
-  states for a new user ("No upcoming meetings.", "No open tasks."); errors as above; a 404 is the not-found page alone (one `h1`).
+  states for a new user ("No new leads yet today.", "No upcoming meetings.", "No open
+  tasks."); errors as above; a 404 is the not-found page alone (one `h1`).
 - **Workspace isolation:** the view is keyed by workspace and every query key starts with
   `["dashboard", <workspace>]`; with `gcTime: 0` nothing of a previous workspace (or a
   previous signed-in user) can be shown. Tested: Rahul → Priya (slow, then failing), Back

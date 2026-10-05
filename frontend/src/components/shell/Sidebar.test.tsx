@@ -62,6 +62,14 @@ describe("Sidebar", () => {
     for (const link of within(nav).getAllByRole("link")) expect(link).not.toHaveAttribute("aria-current");
   });
 
+  it("on a selected user's lead page marks their Dashboard, never Users (ADR-0028)", () => {
+    navigation.pathname = `/admin/users/${RAHUL}/leads/9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2c`;
+    renderSidebar(admin);
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    const current = within(nav).getAllByRole("link").filter((link) => link.getAttribute("aria-current") === "page");
+    expect(current.map((link) => link.getAttribute("href"))).toEqual([`/admin/users/${RAHUL}/dashboard`]);
+  });
+
   it("leads a sales user on an administrator's link back to their own workspace", () => {
     // Whole-software audit: every link pointed into the user's workspace, all "not found".
     navigation.pathname = `/admin/users/${RAHUL}/pipeline`;

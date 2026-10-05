@@ -43,4 +43,5 @@ workspace_urlpatterns = [
 
 config_urlpatterns = [
     path("pipelines", views.PipelineConfigView.as_view(), name="pipelines"),
+    path("opportunity-options", views.OpportunityOptionsView.as_view(), name="opportunity-options"),
 ]

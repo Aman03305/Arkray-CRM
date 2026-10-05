@@ -166,7 +166,7 @@ def test_a_pipeline_archived_while_a_deal_is_created_in_it():
                 actor=owner,
                 scope=OWN(owner.pk),
                 lead_id=lead_.pk,
-                fields={"title": "Race", "value": Decimal("1")},
+                fields={"value": Decimal("1")},
                 pipeline_id=p.pk,
             ),
             lambda p=pipeline: configuration.archive_pipeline(

@@ -11,7 +11,7 @@ import { selectedUserId, useWorkspaceSubject } from "@/features/workspace/api";
 import { ApiError } from "@/lib/api/client";
 import type { SearchResults } from "@/lib/api/types";
 import { formatDate, formatDateTime } from "@/lib/format";
-import { activityHref, opportunityHref, type Workspace } from "@/lib/workspace";
+import { activityHref, leadHref, opportunityHref, type Workspace } from "@/lib/workspace";
 
 import { useGlobalSearch } from "./api";
 import { Highlight } from "./Highlight";
@@ -20,11 +20,12 @@ import { queryState, SEARCH_MAX_LENGTH } from "./query";
 /** Typing pauses this long before a request is sent: one request per pause, not per key. */
 export const SEARCH_DEBOUNCE_MS = 250;
 
-// No Leads group: there are no lead pages to open (ADR-0027). The API still sends one; a
-// customer is found through its opportunities, which match on their customer names too.
-type GroupKey = "opportunities" | "tasks" | "meetings" | "notes";
+// A lead and its opportunity are two records, each in its own labelled group: the lead opens
+// its (read-only) page, the opportunity its deal (ADR-0028).
+type GroupKey = "leads" | "opportunities" | "tasks" | "meetings" | "notes";
 
 const GROUPS: { key: GroupKey; label: string; one: string }[] = [
+  { key: "leads", label: "Leads", one: "Lead" },
   { key: "opportunities", label: "Opportunities", one: "Opportunity" },
   { key: "tasks", label: "Tasks", one: "Task" },
   { key: "meetings", label: "Meetings", one: "Meeting" },
@@ -77,10 +78,12 @@ function customerName(lead: { restricted: boolean; display_name?: string }): str
 }
 
 /** Whom an opportunity is for: its own account and customer names (what a search may have
- * matched besides the title), else its customer record's name. */
+ * matched besides the title), else its customer record's name. A name its title is built
+ * from ("<name> — <instrument>", or the name alone) isn't repeated; any other is shown. */
 function dealCustomer(deal: SearchResults["opportunities"]["results"][number]): string[] {
   const names = [deal.account_name, deal.customer_name].filter((name, i, all) => name && all.indexOf(name) === i);
-  return names.length ? names : [customerName(deal.lead)];
+  if (!names.length) return [customerName(deal.lead)];
+  return names.filter((name) => deal.title !== name && !deal.title.startsWith(`${name} — `));
 }
 
 /** Every result as an option, in group order. Text only: React escapes all of it. */
@@ -89,6 +92,16 @@ function toGroups(data: SearchResults, workspace: Workspace): Group[] {
   const owner = (person: { full_name: string }) => (workspace.kind === "organization" ? [person.full_name] : []);
   const hl = (text: string) => <Highlight text={text} terms={terms} />;
   const build: Record<GroupKey, Option[]> = {
+    leads: data.leads.results.map((lead) => {
+      const organisation = lead.organization_name && lead.organization_name !== lead.display_name;
+      return option(
+        { key: `lead-${lead.id}`, group: "leads", href: leadHref(workspace, lead.id) },
+        lead.display_name,
+        [...(organisation ? [lead.organization_name] : []), ...owner(lead.owner)],
+        hl,
+        organisation ? [0] : [],
+      );
+    }),
     opportunities: data.opportunities.results.map((deal) => {
       const customer = dealCustomer(deal);
       return option(
@@ -269,7 +282,7 @@ export function SearchDialog({ workspace, onClose }: { workspace: Workspace; onC
   return (
     <Dialog open title="Search" description={scopeText(workspace, subject.data?.full_name)} onClose={onClose} size="lg">
       <label htmlFor={inputId} className="sr-only">
-        Search opportunities, customers, tasks, meetings and notes
+        Search leads, opportunities, tasks, meetings and notes
       </label>
       <input
         id={inputId}

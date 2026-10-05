@@ -233,7 +233,7 @@ def test_append_only_rows_have_opaque_ids_and_sealed_cursors(user_a):
         actor=user_a,
         scope=scope,
         lead_id=lead.pk,
-        fields={"title": "Order", "value": Decimal("1000")},
+        fields={"value": Decimal("1000")},
     ).opportunity
     pipeline_services.move_opportunity(
         actor=user_a,

@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarClock, IndianRupee, ListTodo, type LucideIcon, Scale } from "lucide-react";
+import { CalendarClock, Contact, IndianRupee, ListTodo, type LucideIcon, Scale, UserPlus } from "lucide-react";
 import Link from "next/link";
 import { Fragment, type ReactNode, useEffect, useId, useRef } from "react";
 
@@ -16,18 +16,18 @@ import { summaryFilters } from "@/features/activities/api";
 import { presetActivityList } from "@/features/activities/list-state";
 import { presetBoard } from "@/features/pipeline/hooks";
 import { describeError, isApiError } from "@/lib/api/errors";
-import type { Dashboard, DashboardActivity } from "@/lib/api/types";
-import { businessToday, formatDateOnly } from "@/lib/format";
+import type { Dashboard, DashboardActivity, DashboardLead } from "@/lib/api/types";
+import { businessToday, formatDateOnly, formatTime } from "@/lib/format";
 import { formatInr } from "@/lib/money";
-import { activityHref, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
+import { activityHref, leadHref, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
 
 import { useDashboard } from "./api";
 
 /*
  * The dashboard of one workspace: a salesperson's own (/dashboard), one user's opened by an
  * administrator (/admin/users/{id}/dashboard) and, inside Admin Home, the organisation's.
- * Pipeline and activity figures only: there are no leads in the UI (ADR-0027; the API still
- * sends its lead figures, which are not shown).
+ * The lead figures count the Lead table, which every opportunity created in the pipeline
+ * adds one lead to (ADR-0028): today's new leads are listed first, each opening its lead.
  * Every figure comes from the server as it is shown (counts, and money as exact decimal
  * strings): nothing is computed here, and amounts never pass through a JavaScript number.
  */
@@ -90,6 +90,8 @@ function TargetLink({ to, className, children }: { to: Target; className: string
 }
 
 // --- figures ---------------------------------------------------------------------------------
+const TILE = "group flex h-full flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm";
+
 function Figure({
   label,
   icon: Icon,
@@ -103,37 +105,47 @@ function Figure({
   value: string;
   unit?: string;
   detail: ReactNode;
-  to: Target;
+  /** Where the figure leads; none for the lead counts (their leads are listed below). */
+  to?: Target;
 }) {
+  // Block elements, so a link's accessible name reads "Tasks 9 open 2 due today · 1 overdue",
+  // not the words run together.
+  const content = (
+    <>
+      <div className="flex items-center justify-between gap-2 text-sm font-medium text-slate-600">
+        {label}
+        <Icon aria-hidden="true" className={`size-4 shrink-0 text-slate-500 ${to ? "group-hover:text-brand-600" : ""}`} />
+      </div>
+      <div className="mt-2 text-xl font-semibold tracking-tight text-slate-900 tabular-nums [overflow-wrap:anywhere] sm:text-2xl">
+        <Grouped text={value} />
+        {unit ? (
+          <>
+            {" "}
+            <span className="text-sm font-normal tracking-normal text-slate-500">{unit}</span>
+          </>
+        ) : null}
+      </div>
+      {detail ? <div className="mt-1 text-sm text-slate-500">{detail}</div> : null}
+    </>
+  );
   return (
     <li className="min-w-0">
-      <TargetLink
-        to={to}
-        className="group flex h-full flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm transition-colors hover:border-brand-300 hover:bg-brand-50/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
-      >
-        {/* Block elements, so the link's accessible name reads "Tasks 9 open 2 due today ·
-            1 overdue", not the words run together. */}
-        <div className="flex items-center justify-between gap-2 text-sm font-medium text-slate-600">
-          {label}
-          <Icon aria-hidden="true" className="size-4 shrink-0 text-slate-500 group-hover:text-brand-600" />
-        </div>
-        <div className="mt-2 text-xl font-semibold tracking-tight text-slate-900 tabular-nums [overflow-wrap:anywhere] sm:text-2xl">
-          <Grouped text={value} />
-          {unit ? (
-            <>
-              {" "}
-              <span className="text-sm font-normal tracking-normal text-slate-500">{unit}</span>
-            </>
-          ) : null}
-        </div>
-        {detail ? <div className="mt-1 text-sm text-slate-500">{detail}</div> : null}
-      </TargetLink>
+      {to ? (
+        <TargetLink
+          to={to}
+          className={`${TILE} transition-colors hover:border-brand-300 hover:bg-brand-50/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600`}
+        >
+          {content}
+        </TargetLink>
+      ) : (
+        <div className={TILE}>{content}</div>
+      )}
     </li>
   );
 }
 
 function Figures({ dashboard, go, updating }: { dashboard: Dashboard; go: Targets; updating: boolean }) {
-  const { pipeline, activities } = dashboard;
+  const { leads, pipeline, activities } = dashboard;
   const heading = useId();
   return (
     <section aria-labelledby={heading} aria-busy={updating || undefined}>
@@ -146,7 +158,9 @@ function Figures({ dashboard, go, updating }: { dashboard: Dashboard; go: Target
           <time dateTime={dashboard.business_date}>{formatDateOnly(dashboard.business_date)}</time>
         </p>
       </div>
-      <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <Figure label="Total leads" icon={Contact} value={count(leads.total)} detail="" />
+        <Figure label="New leads today" icon={UserPlus} value={count(leads.new_today)} detail="" />
         <Figure
           label="Pipeline value"
           icon={IndianRupee}
@@ -209,6 +223,57 @@ const NONE = "py-6 text-center text-sm text-slate-500";
 // Names wrap rather than being cut off: the lists are short, and a truncated row could hide
 // whose work it is, or that they are deactivated (review).
 const WRAP = "[overflow-wrap:anywhere]";
+
+/** Today's newest leads: who, for which instrument, (organisation-wide) whose, and when.
+ * Each opens its lead, which links to its opportunity. */
+function NewLeads({ dashboard, workspace, go }: { dashboard: Dashboard; workspace: Workspace; go: Targets }) {
+  const rows: readonly DashboardLead[] = dashboard.new_leads;
+  const total = dashboard.leads.new_today;
+  const withOwner = workspace.kind === "organization";
+  return (
+    <Panel
+      title="New leads"
+      footer={
+        <>
+          {total > rows.length ? <span className="text-slate-500">Newest {rows.length} of {count(total)} · </span> : null}
+          <TargetLink to={go.pipeline} className={FOOTER_LINK}>
+            View pipeline
+          </TargetLink>
+        </>
+      }
+    >
+      {rows.length === 0 ? (
+        <p className={NONE}>No new leads yet today.</p>
+      ) : (
+        <ul className="divide-y divide-slate-100">
+          {rows.map((lead) => (
+            <li key={lead.id} className="flex items-start justify-between gap-3 py-3">
+              <div className="min-w-0">
+                <Link
+                  href={leadHref(workspace, lead.id)}
+                  className={`block text-sm font-medium text-slate-900 hover:text-brand-700 hover:underline ${WRAP}`}
+                >
+                  {lead.display_name}
+                </Link>
+                {lead.opportunity?.instrument_name ? (
+                  <span className={`block text-xs text-slate-600 ${WRAP}`}>{lead.opportunity.instrument_name}</span>
+                ) : null}
+                {withOwner ? (
+                  <span className={`block text-xs text-slate-500 ${WRAP}`}>
+                    <PersonName person={lead.owner} />
+                  </span>
+                ) : null}
+              </div>
+              <time dateTime={lead.created_at} className="shrink-0 pt-0.5 text-xs text-slate-500 tabular-nums">
+                Today {formatTime(lead.created_at)}
+              </time>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
+  );
+}
 
 function ActivityRows({
   rows,
@@ -306,8 +371,8 @@ function DashboardSkeleton() {
   return (
     <div aria-busy="true" aria-hidden="true">
       <Skeleton className="mb-3 h-4 w-28" />
-      <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {Array.from({ length: 4 }, (_, i) => (
+      <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        {Array.from({ length: 6 }, (_, i) => (
           <li key={i} className="space-y-3 rounded-lg border border-slate-200 bg-white p-4">
             <Skeleton className="h-4 w-24" />
             <div>
@@ -319,8 +384,8 @@ function DashboardSkeleton() {
           </li>
         ))}
       </ul>
-      <div className="mt-6 grid gap-4 lg:grid-cols-2">
-        {Array.from({ length: 2 }, (_, i) => (
+      <div className="mt-6 grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+        {Array.from({ length: 3 }, (_, i) => (
           <div key={i} className="space-y-4 rounded-lg border border-slate-200 bg-white p-4">
             <Skeleton className="h-4 w-32" />
             {Array.from({ length: 3 }, (_, j) => (
@@ -401,7 +466,9 @@ export function DashboardContent({ workspace, header }: { workspace: Workspace; 
     body = (
       <div className="space-y-6">
         <Figures dashboard={data} go={go} updating={updating} />
-        <div className="grid gap-4 lg:grid-cols-2">
+        {/* New leads first, immediately before the upcoming meetings (ADR-0028). */}
+        <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+          <NewLeads dashboard={data} workspace={workspace} go={go} />
           <UpcomingMeetings dashboard={data} workspace={workspace} go={go} />
           <TasksNeedingAttention dashboard={data} workspace={workspace} go={go} />
         </div>

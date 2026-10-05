@@ -93,12 +93,12 @@ def writes(w: dict[str, Any]) -> dict[str, tuple[str, dict[str, Any], type]]:
         "lead": (f"{base}/leads", {"first_name": "Race"}, LeadCreated),
         "opportunity": (
             f"{base}/opportunities",
-            {"lead": lead, "title": "Race", "value": "1"},
+            {"lead": lead, "value": "1"},
             pipeline_events.OpportunityCreated,
         ),
         "convert": (
             f"{base}/leads/{w['to_convert'].pk}/convert",
-            {"version": w["to_convert"].version, "title": "Race", "value": "1"},
+            {"version": w["to_convert"].version, "value": "1"},
             pipeline_events.OpportunityCreated,
         ),
         "task": (

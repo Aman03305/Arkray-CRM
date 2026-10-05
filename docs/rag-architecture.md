@@ -96,7 +96,12 @@ sequenceDiagram
   named configured stage, lead counts, new leads today, overdue / due-today / open tasks and
   today's / tomorrow's / upcoming meetings ("upcoming": scheduled from now on within 7 days,
   the dashboard's definition; the open-deal count and this month's closings were added by
-  the whole-software audit, which found them going to note search without a model). A
+  the whole-software audit, which found them going to note search without a model), and
+  (ADR-0028) "how many (new) leads were created today" (the Dashboard's figure:
+  `get_lead_summary`) and "show (open) opportunities for <instrument>" (one of the listed
+  instruments, by the opportunity's instrument field, never a text match; "leads **I**
+  added/created today" asks who made them, which the owner-based figure doesn't say, so it
+  goes to the model). A
   question queued instead of answered at once (an erasure was running) is routed by the
   worker the same way. A question matches only if every
   word is one of the intent's words or generic filler; "…for Acme", "…does Rahul have",
@@ -130,22 +135,22 @@ sequenceDiagram
 ## Tools
 
 All read-only, scope-bound, strict schemas (`strict: true`, `additionalProperties: false`,
-enums; 12 tools and 16 optional parameters organisation-wide, inside the API's limits of 20
+enums; 12 tools and 17 optional parameters organisation-wide, inside the API's limits of 20
 and 24), and every
 argument validated again server-side (types, enums, `limit` 1–20, references).
 
 | Tool | Answers | Source |
 |---|---|---|
 | `get_pipeline_summary(pipeline?)` | pipeline value, weighted pipeline, open count; count/value/weighted per stage with each stage's type; every visible pipeline, or one by name (a name several visible pipelines share is refused, naming whose they are) | `pipeline.selectors.pipeline_totals`, `stage_breakdown` (`pipeline.metrics`) |
-| `list_opportunities(status?, stage?, stage_type?, pipeline?, closing?, sort?, limit?)` | "Which deals are in negotiation?" (by stage *type*, whatever the stage is called), "closing this month"; rows carry the account and the latest negotiated price | `pipeline.selectors.opportunity_list` |
+| `list_opportunities(status?, stage?, stage_type?, pipeline?, closing?, instrument?, sort?, limit?)` | "Which deals are in negotiation?" (by stage *type*, whatever the stage is called), "closing this month", "for Adams 8380 V-lite" (`instrument`: an enum of the instrument list, ADR-0028, accepted in any letter case or spacing; matched case-insensitively on the field). No index serves the instrument: measured on `arkray_bench_enh` (300,000 opportunities) an organisation-wide count is a sequential scan of 41-72 ms and the heaviest owner's 12 ms warm (110-306 ms cold), run twice per routed answer (count, rows); acceptable for a question, and an index would cost every opportunity write. Rows carry the account, the customer, the instrument and the latest negotiated price | `pipeline.selectors.opportunity_list` |
 | `get_negotiation_history(ref)` | an opportunity's negotiated prices, newest first, from the append-only history (authoritative, never computed); who recorded each ("you", else by name) | `pipeline.selectors.negotiation_history` |
-| `get_lead_summary()` | total leads, new today, leads per status | `leads.selectors.lead_summary`, `status_breakdown` |
+| `get_lead_summary()` | total leads, new today, leads per status: the Dashboard's selector and the only source of lead counts (an opportunity and the lead it created are one customer, never two leads; ADR-0028, said in the tool description and the system prompt) | `leads.selectors.lead_summary`, `status_breakdown` |
 | `list_leads(status?, created?, sort?, limit?)` | "new leads this week", "longest without contact" | `leads.selectors.lead_list` |
 | `get_activity_summary()` | open / overdue / due-today tasks, today's and upcoming meetings | `activities.selectors.activity_summary` |
 | `list_tasks(filter, limit?)` | overdue, due today, open, upcoming | `activities.selectors.activity_list` |
 | `list_meetings(range, limit?)` | today, tomorrow, this week, next 7 days, past 7 days, upcoming (scheduled, from now, within 7 days) | `activities.selectors.activity_list` |
 | `find_records(query)` | names and words → record references | `search.selectors.global_search` |
-| `get_record(ref)` | a lead / opportunity / task / meeting / note, with recent activities and stage history (an opportunity also with its date, instrument, work load and negotiated prices) | the modules' `*_detail` selectors |
+| `get_record(ref)` | a lead / opportunity / task / meeting / note, with recent activities and stage history (an opportunity also with its date, instrument, work load, Expected CPT and negotiated prices; a lead with its opportunities) | the modules' `*_detail` selectors |
 | `search_notes(query, about?)` | what was discussed, concerns, context (semantic) | `ai.retrieval` |
 | `team_breakdown(metric, limit?)` *(organisation only)* | pipeline, leads, overdue tasks per salesperson | `open_pipeline_by_owner`, `lead_counts_by_owner`, `task_counts_by_owner` |
 

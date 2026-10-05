@@ -79,7 +79,7 @@ function WorkspaceSearch({ workspace }: { workspace: Workspace | null }) {
       >
         <Search aria-hidden="true" className="size-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate">
-          Search<span className="hidden sm:inline"> deals, customers, activities</span>
+          Search<span className="hidden sm:inline"> leads, deals, activities</span>
         </span>
         <kbd aria-hidden="true" className="hidden shrink-0 rounded border border-white/15 bg-white/5 px-1.5 font-sans text-xs text-shell-muted sm:inline">
           {apple ? "⌘K" : "Ctrl K"}

@@ -45,7 +45,9 @@ def dataset(django_db_setup, django_db_blocker):
                     owner=o,
                     created_by=o,
                     status_id="new",
-                    created_at=NOW - timedelta(hours=i * 3),
+                    # Lead 1 of each owner is minutes old: there are always new leads today,
+                    # so the dashboard always reads their opportunities (ADR-0028).
+                    created_at=NOW - (timedelta(minutes=1) if i == 1 else timedelta(hours=i * 3)),
                     archived_at=NOW if i % 10 == 0 else None,
                 )
                 for o in owners
@@ -115,12 +117,13 @@ def dataset(django_db_setup, django_db_blocker):
 
 
 def statements(scope: AccessScope) -> list[str]:
-    """The dashboard's seven queries, verbatim and in order: lead figures, pipeline totals,
-    activity figures, today's newest leads, next meetings, next open tasks."""
+    """The dashboard's eight queries, verbatim and in order: lead figures, pipeline totals,
+    activity figures, today's newest leads, next meetings, next open tasks, and the new leads'
+    opportunities."""
     with CaptureQueriesContext(connection) as captured:
         selectors.dashboard(scope, now=NOW)
     found = [q["sql"] for q in captured.captured_queries if q["sql"].startswith("SELECT")]
-    assert len(found) == 7, found
+    assert len(found) == 8, found
     return found
 
 
@@ -165,7 +168,7 @@ def test_todays_newest_leads_come_out_of_a_date_index_without_sorting(dataset, k
 @pytest.mark.parametrize("kind", ["own", "org"])
 def test_the_activity_lists_and_figures_use_the_schedule_indexes(dataset, kind):
     prefix = "activities_owner_" if kind == "own" else "activities_"
-    _, _, task_figures, meeting_figures, _, meetings, tasks = statements(scopes(dataset)[kind])
+    _, _, task_figures, meeting_figures, _, meetings, tasks, _ = statements(scopes(dataset)[kind])
     for sql in (task_figures, meeting_figures, meetings, tasks):
         text = plan(sql)
         assert any(name.startswith(prefix) for name in scans(text)), text
@@ -185,4 +188,23 @@ def test_one_owners_pipeline_totals_read_only_that_owners_opportunities(dataset)
         "pipeline_opp_owner_pipe_idx",  # product enhancement phase
     }
     assert used & owner_leading, used
+    assert "Seq Scan on pipeline_opportunity" not in used, used
+
+
+@pytest.mark.parametrize("kind", ["own", "org"])
+def test_the_new_leads_opportunities_come_from_the_lead_index(dataset, kind):
+    """ADR-0028: each new lead's opportunity, for at most five leads, by an index; never a
+    scan of the workspace's (or the organisation's) opportunities. At this size one owner's
+    few rows may come from an owner-leading index; at benchmark size (20,000 for one owner,
+    300,000 in all) PostgreSQL takes the lead index (docs/dashboard.md#performance)."""
+    deals = statements(scopes(dataset)[kind])[7]
+    assert "pipeline_opportunity" in deals
+    assert "DISTINCT ON" in deals
+    used = scans(plan(deals))
+    indexed = {
+        "pipeline_opp_lead_idx",
+        "pipeline_opp_owner_pipe_idx",
+        "pipeline_opp_owner_created_idx",
+    }
+    assert used & indexed, used
     assert "Seq Scan on pipeline_opportunity" not in used, used

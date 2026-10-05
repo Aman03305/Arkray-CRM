@@ -2,12 +2,14 @@
  * The opportunity form's editable state and its conversions to API requests. Pure
  * functions, unit-tested without rendering: what is sent, what counts as a change, how an
  * edit conflict is merged. Amounts and percentages stay decimal strings throughout.
+ *
+ * There is no name field: the server names an opportunity after its customer and instrument
+ * (ADR-0028), and makes its lead from the customer details.
  */
 import type { CustomField, Opportunity, OpportunityCreateRequest, OpportunityUpdateRequest } from "@/lib/api/types";
 import { amountInputValue, parseAmountInput, parsePercentInput, sameDecimal } from "@/lib/money";
 
 export const DRAFT_FIELDS = [
-  "title",
   "opportunity_date",
   "account_name",
   "customer_name",
@@ -17,6 +19,7 @@ export const DRAFT_FIELDS = [
   "instrument_name",
   "work_load",
   "value",
+  "expected_cpt",
   "probability",
   "expected_close_date",
   "description",
@@ -31,16 +34,16 @@ export type DraftField = (typeof DRAFT_FIELDS)[number];
 export type Draft = Record<DraftField, string>;
 
 export const FIELD_LABELS: Record<DraftField, string> = {
-  title: "Opportunity name",
   opportunity_date: "Opportunity date",
   account_name: "Account name",
   customer_name: "Customer name",
-  contact_phone: "Phone",
+  contact_phone: "Contact",
   contact_email: "Email",
   address: "Address",
-  instrument_name: "Instrument",
+  instrument_name: "Instrument name",
   work_load: "Work load",
   value: "Installation price",
+  expected_cpt: "Expected CPT",
   probability: "Probability",
   expected_close_date: "Expected closing date",
   description: "Description",
@@ -50,7 +53,6 @@ export const FIELD_LABELS: Record<DraftField, string> = {
 const MULTILINE: ReadonlySet<DraftField> = new Set(["description", "lost_reason", "address"]);
 
 export const EMPTY_DRAFT: Draft = {
-  title: "",
   opportunity_date: "",
   account_name: "",
   customer_name: "",
@@ -60,6 +62,7 @@ export const EMPTY_DRAFT: Draft = {
   instrument_name: "",
   work_load: "",
   value: "",
+  expected_cpt: "",
   probability: "",
   expected_close_date: "",
   description: "",
@@ -68,7 +71,6 @@ export const EMPTY_DRAFT: Draft = {
 
 export function draftFromOpportunity(opportunity: Opportunity): Draft {
   return {
-    title: opportunity.title,
     opportunity_date: opportunity.opportunity_date,
     account_name: opportunity.account_name,
     customer_name: opportunity.customer_name,
@@ -78,6 +80,7 @@ export function draftFromOpportunity(opportunity: Opportunity): Draft {
     instrument_name: opportunity.instrument_name,
     work_load: opportunity.work_load,
     value: amountInputValue(opportunity.value),
+    expected_cpt: opportunity.expected_cpt,
     probability: opportunity.probability_overridden ? amountInputValue(opportunity.probability) : "",
     expected_close_date: opportunity.expected_close_date ?? "",
     description: opportunity.description,
@@ -102,23 +105,28 @@ export function changedFields(before: Draft, after: Draft): DraftField[] {
   return DRAFT_FIELDS.filter((f) => comparable(f, before[f]) !== comparable(f, after[f]));
 }
 
-export type Problems = Partial<Record<DraftField | "owner" | "stage" | "negotiated_price" | `custom_fields.${string}`, string[]>>;
+export type Problems = Partial<Record<DraftField | "owner" | "pipeline" | "stage" | "negotiated_price" | `custom_fields.${string}`, string[]>>;
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const inRange = (date: string) => DATE.test(date) && date >= "2000-01-01" && date <= "2099-12-31";
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
- * Client-side checks (the server re-checks everything); each field's first problem. The
- * customer details are required: a new opportunity's customer record is made from them
- * (ADR-0027).
+ * Client-side checks (the server re-checks everything); each field's first problem. A new
+ * opportunity needs the customer or the account name (its lead and its name are made from
+ * them); an existing one keeps both (neither can be cleared).
  */
-export function validateDraft(draft: Draft, { requireOwner = false, owner = "" } = {}): Problems {
+export function validateDraft(draft: Draft, { requireOwner = false, owner = "", creating = false } = {}): Problems {
   const problems: Problems = {};
   if (requireOwner && !owner) problems.owner = ["Choose who owns this opportunity."];
-  if (!draft.title.trim()) problems.title = ["Enter a name."];
-  if (!draft.account_name.trim()) problems.account_name = ["Enter the account name."];
-  if (!draft.customer_name.trim()) problems.customer_name = ["Enter the customer name."];
+  const account = draft.account_name.trim();
+  const customer = draft.customer_name.trim();
+  if (creating) {
+    if (!account && !customer) problems.customer_name = ["Enter the customer name or the account name."];
+  } else {
+    if (!account) problems.account_name = ["Enter the account name."];
+    if (!customer) problems.customer_name = ["Enter the customer name."];
+  }
   if (!draft.opportunity_date || !inRange(draft.opportunity_date)) problems.opportunity_date = ["Enter a date between 2000 and 2099."];
   const value = parseAmountInput(draft.value);
   if (!value.ok) problems.value = [value.error];
@@ -146,7 +154,7 @@ function percent(text: string): string | null {
   return parsed.value;
 }
 
-const OPTIONAL_TEXT = ["contact_phone", "contact_email", "address", "instrument_name", "work_load"] as const;
+const OPTIONAL_TEXT = ["account_name", "customer_name", "contact_phone", "contact_email", "address", "instrument_name", "work_load", "expected_cpt"] as const;
 
 export function createRequest(
   draft: Draft,
@@ -162,11 +170,8 @@ export function createRequest(
   },
 ): OpportunityCreateRequest {
   const body: { -readonly [K in keyof OpportunityCreateRequest]: OpportunityCreateRequest[K] } = {
-    title: draft.title.trim(),
     value: amount(draft.value),
     opportunity_date: draft.opportunity_date,
-    account_name: draft.account_name.trim(),
-    customer_name: draft.customer_name.trim(),
   };
   for (const field of OPTIONAL_TEXT) {
     if (draft[field].trim()) body[field] = MULTILINE.has(field) ? draft[field] : draft[field].trim();
@@ -204,7 +209,6 @@ export function updateRequest(
       case "expected_close_date":
         body.expected_close_date = draft.expected_close_date || null;
         break;
-      case "title":
       case "account_name":
       case "customer_name":
         body[field] = draft[field].trim();

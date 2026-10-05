@@ -89,7 +89,7 @@ class TestWhatIsRecorded:
             actor=user_a,
             scope=scope,
             lead_id=lead.pk,
-            fields={"title": "Analyser", "value": Decimal("100000")},
+            fields={"value": Decimal("100000"), "instrument_name": "Adams 8180 T"},
         ).opportunity
         pipeline_services.move_opportunity(
             actor=user_a,
@@ -125,7 +125,8 @@ class TestWhatIsRecorded:
             "from_stage": "New",
             "to_stage": "Proposal",
         }
-        assert by_kind["opportunity.created"]["opportunity"]["title"] == "Analyser"
+        # Named after the lead (the customer) and the instrument.
+        assert by_kind["opportunity.created"]["opportunity"]["title"] == "Asha — Adams 8180 T"
         assert by_kind["meeting.scheduled"]["opportunity"]["id"] == str(opportunity.pk)
         assert by_kind["task.created"]["activity"]["title"] == "Send the revised quotation"
         assert by_kind["lead.created"]["details"]["owner"]["full_name"] == "Rahul Sharma"
@@ -138,7 +139,7 @@ class TestWhatIsRecorded:
             scope=OWN(user_a.pk),
             lead_id=lead.pk,
             lead_version=1,
-            fields={"title": "Deal", "value": Decimal("1")},
+            fields={"value": Decimal("1")},
         )
         rows = entries(user_a_client, lead_timeline_url(lead.pk))
         created = next(r for r in rows if r["kind"] == "opportunity.created")
@@ -342,7 +343,7 @@ class TestVisibility:
             actor=user_a,
             scope=scope,
             lead_id=lead.pk,
-            fields={"title": "Dup", "value": Decimal("1")},
+            fields={"value": Decimal("1")},
         ).opportunity
         services.archive_activity(actor=user_a, scope=scope, activity_id=note.pk, version=1)
         pipeline_services.archive_opportunity(

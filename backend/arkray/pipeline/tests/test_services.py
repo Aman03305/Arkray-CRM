@@ -30,7 +30,7 @@ pytestmark = pytest.mark.django_db
 D = Decimal
 OWN = AccessScope.own
 ORG = AccessScope.organization
-FIELDS = {"title": "Hospital Analyzer Project", "value": D("1200000")}
+FIELDS = {"value": D("1200000")}
 
 
 def create(actor, scope, lead, **kwargs):
@@ -84,6 +84,8 @@ class TestCreate:
         assert opportunity.value == D("1200000.00")
         assert opportunity.weighted_value == D("120000.00")
         assert opportunity.closed_at is None
+        # Named after the lead (its customer details default to the lead's), no instrument.
+        assert opportunity.title == opportunity.customer_name == lead.display_name
         assert history(opportunity) == [("", "New", "", "open")]
         assert actions(opportunity.pk) == ["opportunity.created"]
 
@@ -172,9 +174,11 @@ class TestCreate:
     @pytest.mark.parametrize(
         ("fields", "field"),
         [
-            ({"title": "   "}, "title"),
-            ({"title": "x" * 201}, "title"),
-            ({"title": "Bad‮title"}, "title"),
+            # The customer name, which the derived title is made of, follows the text rules.
+            ({"customer_name": "   "}, "customer_name"),
+            ({"customer_name": "x" * 201}, "customer_name"),
+            ({"customer_name": "Bad\u202ename"}, "customer_name"),  # a bidi override
+            ({"instrument_name": "HbA1c analyser"}, "instrument_name"),  # not on the list
             ({"value": D("-1")}, "value"),
             ({"value": D("1000000000000")}, "value"),
             ({"value": D("1.001")}, "value"),
@@ -196,12 +200,30 @@ class TestCreate:
             create(user_a, OWN(user_a.pk), LeadFactory(owner=user_a), fields=fields)
         assert field in error.value.details
 
-    def test_title_and_value_are_required(self, user_a, stages):
+    def test_the_value_is_required(self, user_a, stages):
+        """The value is the only required field for an existing lead's opportunity: its name
+        is derived (naming.py), never asked for."""
         with pytest.raises(InvalidInputError) as error:
             services.create_opportunity(
                 actor=user_a, scope=OWN(user_a.pk), lead_id=LeadFactory(owner=user_a).pk, fields={}
             )
-        assert set(error.value.details) == {"title", "value"}
+        assert set(error.value.details) == {"value"}
+
+    def test_the_title_cant_be_set_it_is_derived(self, user_a, stages):
+        lead = LeadFactory(owner=user_a)
+        with pytest.raises(InvalidInputError) as error:
+            create(user_a, OWN(user_a.pk), lead, fields={"title": "Hospital Analyzer Project"})
+        assert error.value.details == {"non_field_errors": ["These fields can't be set: title."]}
+        assert not Opportunity.objects.exists()
+        opportunity = create(
+            user_a,
+            OWN(user_a.pk),
+            lead,
+            fields={"customer_name": "City Hospital", "instrument_name": "adams  8180 v"},
+        )
+        # The instrument in the list's spelling, after the customer and an em dash.
+        assert opportunity.instrument_name == "Adams 8180 V"
+        assert opportunity.title == "City Hospital — Adams 8180 V"
 
     def test_system_fields_cant_be_passed(self, user_a, user_b, stages):
         with pytest.raises(InvalidInputError):
@@ -276,18 +298,24 @@ class TestEdit:
             user_a,
             OWN(user_a.pk),
             opportunity,
-            title="Lab upgrade",
+            customer_name="Lab upgrade",
             value=D("2500000.50"),
             description="Confidential: CFO wants a discount",
         )
-        assert (updated.title, updated.value, updated.version) == (
+        # A new customer name renames it (the derived title is audited as changed too).
+        assert (updated.customer_name, updated.title, updated.value, updated.version) == (
+            "Lab upgrade",
             "Lab upgrade",
             D("2500000.50"),
             2,
         )
         event = AuditEvent.objects.get(action="opportunity.updated")
-        assert event.metadata == {"workspace": "self", "fields": ["description", "title", "value"]}
+        assert event.metadata == {
+            "workspace": "self",
+            "fields": ["customer_name", "description", "title", "value"],
+        }
         assert "Confidential" not in str(event.metadata)
+        assert "Lab upgrade" not in str(event.metadata)
 
     def test_probability_override_and_back_to_the_stage_default(self, user_a, stages):
         opportunity = OpportunityFactory(lead=LeadFactory(owner=user_a), stage=stages["proposal"])
@@ -312,22 +340,23 @@ class TestEdit:
         assert self.edit(user_a, OWN(user_a.pk), lost, lost_reason="Budget").lost_reason == "Budget"
 
     def test_no_change_is_a_no_op(self, user_a, stages):
-        opportunity = OpportunityFactory(lead=LeadFactory(owner=user_a), title="Same")
-        assert self.edit(user_a, OWN(user_a.pk), opportunity, title="Same").version == 1
+        opportunity = OpportunityFactory(lead=LeadFactory(owner=user_a), description="Same")
+        assert self.edit(user_a, OWN(user_a.pk), opportunity, description="Same").version == 1
         assert not AuditEvent.objects.exists()
 
     def test_stale_version_conflicts(self, user_a, stages):
         opportunity = OpportunityFactory(lead=LeadFactory(owner=user_a), version=3)
         with pytest.raises(ConflictError):
-            self.edit(user_a, OWN(user_a.pk), opportunity, version=2, title="Late")
+            self.edit(user_a, OWN(user_a.pk), opportunity, version=2, description="Late")
 
     def test_archived_is_read_only(self, user_a, stages):
         opportunity = OpportunityFactory(lead=LeadFactory(owner=user_a), archived_at=timezone.now())
         with pytest.raises(BusinessRuleViolation, match="Restore"):
-            self.edit(user_a, OWN(user_a.pk), opportunity, title="x")
+            self.edit(user_a, OWN(user_a.pk), opportunity, description="x")
 
     @pytest.mark.parametrize(
-        "field", ["owner", "stage", "status", "closed_at", "lead", "pipeline", "created_by"]
+        "field",
+        ["owner", "stage", "status", "closed_at", "lead", "pipeline", "created_by", "title"],
     )
     def test_system_fields_are_not_editable(self, user_a, user_b, stages, field):
         opportunity = OpportunityFactory(lead=LeadFactory(owner=user_a))

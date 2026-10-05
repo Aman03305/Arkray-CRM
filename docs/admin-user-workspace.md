@@ -3,9 +3,10 @@
 An administrator opens a user's CRM by clicking the user's **name** on the Users page,
 and lands on that user's Dashboard.
 From there they move through the user's Dashboard, Pipeline and Activities
-without signing out and without impersonating the user (there are no Leads since
-[ADR-0027](adr/0027-leads-removed-from-the-ui.md); old `/admin/users/{id}/leads…` links
-redirect to the user's Pipeline). Phase 6 completed and hardened
+without signing out and without impersonating the user (there is no Leads module since
+[ADR-0027](adr/0027-leads-removed-from-the-ui.md); a lead's read-only page is
+`/admin/users/{id}/leads/{leadId}` ([ADR-0028](adr/0028-opportunity-creates-its-lead.md)), and
+other old `/admin/users/{id}/leads…` links redirect to the user's Pipeline). Phase 6 completed and hardened
 this journey. The design decisions are [ADR-0005](adr/0005-admin-workspace-without-impersonation.md)
 (scoped, audited access instead of impersonation) and [ADR-0010](adr/0010-frontend-workspace-routing.md)
 (URL-derived workspaces, shared module views). This page describes how the pieces fit

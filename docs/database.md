@@ -391,7 +391,7 @@ Configuration rows seeded by `pipeline.0003` ([pipeline.md](pipeline.md#stages))
 | Column | Notes |
 |---|---|
 | `id` uuid PK | |
-| `title` varchar(200) | CHECK non-empty |
+| `title` varchar(200) | CHECK non-empty; derived by the services from the customer and instrument since ADR-0028 (`pipeline/naming.py`), never written by a client |
 | `lead_id` FK → `leads_lead` | PROTECT; fixed for the opportunity's lifetime |
 | `owner_id` FK → `identity_user` | PROTECT; the authorization key; while open, always the lead's owner (below) |
 | `pipeline_id`, `stage_id` FK | PROTECT; bound to each other and to `status` by the composite key below |
@@ -409,7 +409,8 @@ Configuration rows seeded by `pipeline.0003` ([pipeline.md](pipeline.md#stages))
 | `closed_sort` timestamptz **GENERATED** | `COALESCE(closed_at, '1900-01-01')`, NOT NULL sort key |
 | `opportunity_date` date | product enhancement phase; CHECK 2000-01-01 … 2099-12-31; backfilled from `created_at` in `CRM_TIME_ZONE` |
 | `account_name`, `customer_name` varchar(200) | CHECK non-empty; backfilled from the lead |
-| `contact_phone`, `contact_email`, `address` (≤ 1,000), `instrument_name` (≤ 200), `work_load` (≤ 100) | optional |
+| `contact_phone`, `contact_email`, `address` (≤ 1,000), `instrument_name` (≤ 200), `work_load` (≤ 100) | optional; a new or changed `instrument_name` is one of `pipeline/instruments.py` (checked by the services; no CHECK, so older free text survives) |
+| `expected_cpt` varchar(100) DEFAULT '' | optional free text (ADR-0028; meaning and unit to be confirmed by the business); added by `pipeline.0008` with a constant default it keeps, a catalogue-only change (no rewrite, no backfill) |
 | `custom_fields` jsonb | CHECK `jsonb_typeof = 'object'`; values keyed by field id, validated against the pipeline's definitions ([pipeline.md](pipeline.md#custom-fields)) |
 | `negotiated_price` NUMERIC(14,2) NULL, `negotiated_at` NULL | the latest negotiated price (a copy of the history's newest row); CHECK set together, price ≥ 0 |
 
@@ -784,5 +785,13 @@ checksum of every opportunity's id, stage, value, owner and version unchanged.
   0.1-1.5 s for the WAL flush while the note index was written out). A concurrent build
   waits for older transactions (a long dump delays it). A failed concurrent build leaves an
   INVALID index, still maintained on writes: drop it and rerun.
+- `pipeline.0008` (ADR-0028) adds `pipeline_opportunity.expected_cpt` (`varchar(100) NOT NULL
+  DEFAULT ''`). The column **keeps** its database default (`db_default`): the previous release
+  never names it and must still insert while it runs beside the new one in a rolling deploy,
+  or after a rollback to it (backend review, P2; tested with the previous release's INSERT
+  shape). PostgreSQL 11+ stores a constant default in the catalogue, so this takes only a
+  brief ACCESS EXCLUSIVE lock at any size; it is not table-wide and needs no lifted timeout.
+  Reversible (the column is dropped); tested forwards, backwards and forwards again on a copy
+  of the development database, and from an empty database.
 - Extensions (`vector`, `pg_trgm`, `btree_gin`) are created by the migration of the module
   that needs them. All are "trusted" extensions installable by the database owner role.

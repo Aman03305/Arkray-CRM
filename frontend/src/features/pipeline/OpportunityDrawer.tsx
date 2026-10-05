@@ -9,6 +9,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Drawer } from "@/components/ui/Drawer";
 import { SelectField, TextAreaField, TextField } from "@/components/ui/Field";
 import { useFocusFirstInvalid } from "@/components/ui/useFocusFirstInvalid";
+import { DuplicateNotice } from "@/features/leads/DuplicateNotice";
 import { OwnerSelect } from "@/features/users/OwnerSelect";
 import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
 import type { CustomField, Opportunity, OpportunityCreateRequest } from "@/lib/api/types";
@@ -43,11 +44,13 @@ import {
   firstOpenStage,
   isNegotiation,
   pipelinePermissions,
+  useInstruments,
   useOpportunityWriteSync,
   usePipeline,
   usePipelines,
 } from "./hooks";
-import { CustomerName, StageName } from "./PipelineBits";
+import { InstrumentPicker } from "./InstrumentPicker";
+import { StageName } from "./PipelineBits";
 
 const FORM_ID = "opportunity-drawer-form";
 const NO_FIELDS: readonly CustomField[] = [];
@@ -64,15 +67,17 @@ interface OpportunityDrawerProps {
 
 /**
  * New or edit opportunity, in a panel on the right: the board (or the deal) stays visible
- * behind it on wide screens; full width on phones. Grouped: basics, customer, instrument,
- * closing, additional (the pipeline's custom fields). A new opportunity's customer details
- * are its customer (ADR-0027: there is no Leads screen to pick one from); organisation-wide
- * its owner is chosen here, elsewhere it is the workspace's user.
+ * behind it on wide screens; full width on phones. Grouped: customer, instrument, timeline,
+ * pipeline, additional (the pipeline's custom fields). Nobody names the opportunity or picks
+ * a lead: the server names it after its customer and instrument and makes its lead from the
+ * customer details, with it, in one transaction (ADR-0028). Organisation-wide its owner is
+ * chosen here; elsewhere it is the workspace's user.
  */
 export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPipeline, onClose, onSaved }: OpportunityDrawerProps) {
   const queryClient = useQueryClient();
   const choosesOwner = pipelinePermissions(useViewer(), workspace).choosesOwner;
   const pipelines = usePipelines(workspace);
+  const instruments = useInstruments();
   const sync = useOpportunityWriteSync(workspace);
   const editing = opportunity !== null;
   const form = useRef<HTMLFormElement>(null);
@@ -94,6 +99,8 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
   const [archivedMeanwhile, setArchivedMeanwhile] = useState(false);
   const [reviewFields, setReviewFields] = useState<string[]>([]);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  // One logical create, one key: a double click or a retry of the same form replays the
+  // first request (one opportunity, one lead), never makes a second pair.
   const idempotency = useRef<{ body: string; key: string } | null>(null);
   const keyFor = (body: OpportunityCreateRequest): string => {
     const serialised = JSON.stringify(body);
@@ -171,8 +178,9 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
     },
   });
 
+  // A new opportunity takes its stage's probability (an own one is set when editing).
   function manualDraft(): Draft {
-    return manualProbability && !closed ? draft : { ...draft, probability: "" };
+    return editing && manualProbability && !closed ? draft : { ...draft, probability: "" };
   }
 
   useEffect(() => {
@@ -200,9 +208,13 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
       return;
     }
     const problems: Problems = {
-      ...validateDraft(manualDraft(), { requireOwner: !editing && choosesOwner, owner }),
+      ...validateDraft(manualDraft(), { requireOwner: !editing && choosesOwner, owner, creating: !editing }),
       ...validateCustom(fields, custom, !editing),
     };
+    // Never created into a pipeline nobody chose: the list must have loaded (review).
+    if (!editing && !pipeline) {
+      problems.pipeline = [pipelines.isError ? "Pipelines couldn't be loaded. Try again." : "Pipelines are still loading."];
+    }
     if (!editing && isNegotiation(stage)) {
       const price = parseAmountInput(negotiatedPrice);
       if (!price.ok) problems.negotiated_price = [negotiatedPrice.trim() ? price.error : "Enter the negotiated price."];
@@ -229,7 +241,8 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
     setReviewFields(overlapping.map((f) => FIELD_LABELS[f]));
     setConflict(null);
     save.reset();
-    focusLater(overlapping.length ? `[name="${overlapping[0]}"]` : `button[form="${FORM_ID}"]`);
+    const first = overlapping[0];
+    focusLater(first ? `[name="${first}"], [data-field="${first}"]` : `button[form="${FORM_ID}"]`);
   };
 
   const discardMine = () => {
@@ -259,11 +272,28 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
     if (dirty && !save.isSuccess) setConfirmDiscard(true);
     else onClose();
   };
+  const text = (
+    field: keyof Draft,
+    maxLength: number,
+    { label = FIELD_LABELS[field], ...extra }: { label?: string; optional?: boolean; type?: string; placeholder?: string; inputMode?: "decimal" } = {},
+  ) => (
+    <TextField
+      label={label}
+      name={field}
+      maxLength={maxLength}
+      value={draft[field]}
+      onChange={(e) => set(field)(e.target.value)}
+      errors={errors[field]}
+      autoComplete="off"
+      {...extra}
+    />
+  );
 
   return (
     <Drawer
       open
       title={editing ? "Edit opportunity" : "New opportunity"}
+      description={editing ? opportunity.title : undefined}
       onClose={close}
       busy={save.isPending}
       width="xl"
@@ -317,22 +347,66 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
           </Alert>
         ) : null}
 
-        <Group title="Basic">
+        <Group title="Customer">
+          {text("account_name", 200)}
           <TextField
-            className="sm:col-span-2"
-            label={FIELD_LABELS.title}
-            name="title"
-            value={draft.title}
+            label={FIELD_LABELS.customer_name}
+            name="customer_name"
             maxLength={200}
-            onChange={(e) => set("title")(e.target.value)}
-            errors={errors.title}
+            value={draft.customer_name}
+            onChange={(e) => set("customer_name")(e.target.value)}
+            errors={errors.customer_name}
             autoComplete="off"
             data-autofocus={editing || undefined}
           />
+          {text("contact_phone", 40, { optional: true, type: "tel", placeholder: "Phone number" })}
+          {text("contact_email", 254, { optional: true, type: "email" })}
+          {editing ? null : <DuplicateNotice workspace={workspace} email={draft.contact_email} phones={[draft.contact_phone]} />}
+          <TextAreaField className="sm:col-span-2" label={FIELD_LABELS.address} name="address" optional rows={2} maxLength={1000} value={draft.address} onChange={(e) => set("address")(e.target.value)} errors={errors.address} />
+        </Group>
+
+        <Group title="Instrument">
+          <InstrumentPicker
+            instruments={instruments.names}
+            status={instruments.status}
+            onRetry={instruments.retry}
+            retrying={instruments.retrying}
+            value={draft.instrument_name}
+            onChange={set("instrument_name")}
+            errors={errors.instrument_name}
+          />
+          {text("work_load", 100, { optional: true, placeholder: "e.g. 300 tests/day" })}
+          {text("value", 20, { label: `${FIELD_LABELS.value} (₹)`, inputMode: "decimal" })}
+          {text("expected_cpt", 100, { optional: true })}
+        </Group>
+
+        <Group title="Timeline">
+          <TextField
+            label={FIELD_LABELS.opportunity_date}
+            name="opportunity_date"
+            type="date"
+            min="2000-01-01"
+            max="2099-12-31"
+            value={draft.opportunity_date}
+            onChange={(e) => set("opportunity_date")(e.target.value)}
+            errors={errors.opportunity_date}
+          />
+          <TextField
+            label={FIELD_LABELS.expected_close_date}
+            name="expected_close_date"
+            type="date"
+            min="2000-01-01"
+            max="2099-12-31"
+            optional
+            value={draft.expected_close_date}
+            onChange={(e) => set("expected_close_date")(e.target.value)}
+            errors={errors.expected_close_date}
+          />
+        </Group>
+
+        <Group title="Pipeline">
           {editing ? (
-            <p className="text-sm text-slate-600 sm:col-span-2">
-              <CustomerName lead={opportunity.lead} />
-              {" · "}
+            <p className="text-sm text-slate-700 sm:col-span-2">
               {opportunity.pipeline.name} · <StageName stage={opportunity.stage} />
             </p>
           ) : (
@@ -350,104 +424,73 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
                       setOwnerLabel(label);
                     }}
                     errors={errors.owner}
-                    hint="The salesperson responsible for this customer and opportunity."
                   />
                 </div>
               ) : null}
-              {usable.length > 1 ? (
-                <SelectField
-                  label="Pipeline"
-                  name="pipeline"
-                  value={pipeline?.id ?? ""}
-                  onChange={(e) => {
-                    setPipelineId(e.target.value);
-                    setStageId("");
-                  }}
-                  options={usable.map((p) => ({ value: p.id, label: p.name }))}
-                  errors={errors.pipeline}
-                />
+              {pipelines.isError ? (
+                <div role="alert" className="flex flex-wrap items-center gap-2 text-sm text-red-700 sm:col-span-2">
+                  Pipelines couldn&apos;t be loaded.
+                  <Button variant="secondary" size="sm" onClick={() => void pipelines.refetch()} loading={pipelines.isFetching}>
+                    Try again
+                  </Button>
+                </div>
               ) : null}
+              <SelectField
+                label="Pipeline"
+                name="pipeline"
+                value={pipeline?.id ?? ""}
+                onChange={(e) => {
+                  setPipelineId(e.target.value);
+                  setStageId("");
+                }}
+                options={usable.map((p) => ({ value: p.id, label: p.name }))}
+                errors={errors.pipeline}
+              />
               <SelectField
                 label="Stage"
                 name="stage"
                 value={stage?.id ?? ""}
                 onChange={(e) => setStageId(e.target.value)}
-                options={stages.map((s) => ({ value: s.id, label: `${s.name} (${formatPercent(s.probability)})` }))}
+                options={stages.map((s) => ({ value: s.id, label: s.name }))}
                 errors={errors.stage}
               />
+              {isNegotiation(stage) ? (
+                <TextField
+                  label="Negotiated price (₹)"
+                  name="negotiated_price"
+                  inputMode="decimal"
+                  value={negotiatedPrice}
+                  onChange={(e) => setNegotiatedPrice(e.target.value)}
+                  errors={errors.negotiated_price}
+                  autoComplete="off"
+                />
+              ) : null}
             </>
           )}
-          <TextField
-            label={FIELD_LABELS.opportunity_date}
-            name="opportunity_date"
-            type="date"
-            min="2000-01-01"
-            max="2099-12-31"
-            value={draft.opportunity_date}
-            onChange={(e) => set("opportunity_date")(e.target.value)}
-            errors={errors.opportunity_date}
-          />
-          {!editing && isNegotiation(stage) ? (
-            <TextField
-              label="Negotiated price (₹)"
-              name="negotiated_price"
-              inputMode="decimal"
-              value={negotiatedPrice}
-              onChange={(e) => setNegotiatedPrice(e.target.value)}
-              errors={errors.negotiated_price}
-              autoComplete="off"
-            />
-          ) : null}
-        </Group>
-
-        <Group title="Customer">
-          <TextField label={FIELD_LABELS.account_name} name="account_name" maxLength={200} value={draft.account_name} onChange={(e) => set("account_name")(e.target.value)} errors={errors.account_name} autoComplete="off" />
-          <TextField label={FIELD_LABELS.customer_name} name="customer_name" maxLength={200} value={draft.customer_name} onChange={(e) => set("customer_name")(e.target.value)} errors={errors.customer_name} autoComplete="off" />
-          <TextField label={FIELD_LABELS.contact_phone} name="contact_phone" type="tel" optional maxLength={40} value={draft.contact_phone} onChange={(e) => set("contact_phone")(e.target.value)} errors={errors.contact_phone} autoComplete="off" />
-          <TextField label={FIELD_LABELS.contact_email} name="contact_email" type="email" optional maxLength={254} value={draft.contact_email} onChange={(e) => set("contact_email")(e.target.value)} errors={errors.contact_email} autoComplete="off" />
-          <TextAreaField className="sm:col-span-2" label={FIELD_LABELS.address} name="address" optional rows={2} maxLength={1000} value={draft.address} onChange={(e) => set("address")(e.target.value)} errors={errors.address} />
-        </Group>
-
-        <Group title="Instrument">
-          <TextField label={FIELD_LABELS.instrument_name} name="instrument_name" optional maxLength={200} value={draft.instrument_name} onChange={(e) => set("instrument_name")(e.target.value)} errors={errors.instrument_name} autoComplete="off" />
-          <TextField label={FIELD_LABELS.work_load} name="work_load" optional maxLength={100} placeholder="e.g. 300 tests/day" value={draft.work_load} onChange={(e) => set("work_load")(e.target.value)} errors={errors.work_load} autoComplete="off" />
-          <TextField label={`${FIELD_LABELS.value} (₹)`} name="value" inputMode="decimal" value={draft.value} onChange={(e) => set("value")(e.target.value)} errors={errors.value} autoComplete="off" />
-        </Group>
-
-        <Group title="Closing">
-          <TextField
-            label={FIELD_LABELS.expected_close_date}
-            name="expected_close_date"
-            type="date"
-            min="2000-01-01"
-            max="2099-12-31"
-            optional
-            value={draft.expected_close_date}
-            onChange={(e) => set("expected_close_date")(e.target.value)}
-            errors={errors.expected_close_date}
-          />
-          {closed ? (
-            <p className="self-end pb-2 text-sm text-slate-600">Probability {formatPercent(stage?.probability)}</p>
-          ) : (
-            <div className="space-y-2">
-              <label className="flex items-center gap-2 pt-6 text-sm text-slate-700">
+          {editing && !closed ? (
+            <div className="space-y-2 sm:col-span-2">
+              <label className="flex items-center gap-2 text-sm text-slate-700">
                 <input type="checkbox" checked={manualProbability} onChange={(e) => setManualProbability(e.target.checked)} className="size-4 accent-brand-600" />
                 Own probability (stage: {formatPercent(stage?.probability)})
               </label>
               {manualProbability ? (
-                <TextField label="Probability (%)" name="probability" inputMode="decimal" value={draft.probability} onChange={(e) => set("probability")(e.target.value)} errors={errors.probability} autoComplete="off" />
+                <TextField className="sm:max-w-48" label="Probability (%)" name="probability" inputMode="decimal" value={draft.probability} onChange={(e) => set("probability")(e.target.value)} errors={errors.probability} autoComplete="off" />
               ) : null}
             </div>
-          )}
+          ) : null}
           {lost ? (
             <TextAreaField className="sm:col-span-2" label="Lost reason" name="lost_reason" optional rows={2} maxLength={500} value={draft.lost_reason} onChange={(e) => set("lost_reason")(e.target.value)} errors={errors.lost_reason} />
           ) : null}
         </Group>
 
-        <Group title="Additional">
-          <CustomFieldInputs fields={fields} values={custom} onChange={(id, value) => setCustom((c) => ({ ...c, [id]: value }))} errors={errors} />
-          <TextAreaField className="sm:col-span-2" label="Description" name="description" optional rows={3} maxLength={5000} value={draft.description} onChange={(e) => set("description")(e.target.value)} errors={errors.description} />
-        </Group>
+        {fields.length || editing ? (
+          <Group title="Additional">
+            <CustomFieldInputs fields={fields} values={custom} onChange={(id, value) => setCustom((c) => ({ ...c, [id]: value }))} errors={errors} />
+            {editing ? (
+              <TextAreaField className="sm:col-span-2" label="Description" name="description" optional rows={3} maxLength={5000} value={draft.description} onChange={(e) => set("description")(e.target.value)} errors={errors.description} />
+            ) : null}
+          </Group>
+        ) : null}
       </form>
       <ConfirmDialog
         open={confirmDiscard}
@@ -478,4 +521,3 @@ function Group({ title, children }: { title: string; children: ReactNode }) {
     </section>
   );
 }
-

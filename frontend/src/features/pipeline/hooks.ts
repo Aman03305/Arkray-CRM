@@ -4,12 +4,25 @@ import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-quer
 import { useCallback, useSyncExternalStore } from "react";
 
 import { activityKeys, timelineKeys } from "@/features/activities/api";
+import { leadKeys } from "@/features/leads/api";
 import type { Board, Opportunity, OpportunityCard, OpportunityPage, PipelineDto, Stage } from "@/lib/api/types";
 import { hasCapability, type Viewer } from "@/lib/viewer";
 import type { Workspace } from "@/lib/workspace";
 
-import { type BoardFilters, NO_BOARD_FILTERS, pipelineApi, pipelineKeys } from "./api";
+import { type BoardFilters, NO_BOARD_FILTERS, OPPORTUNITY_OPTIONS_KEY, pipelineApi, pipelineKeys } from "./api";
 import { moveCardInBoard } from "./transitions";
+
+/** The instruments an opportunity can be for (the server's one list, ADR-0028). */
+export function useInstruments() {
+  const options = useQuery({ queryKey: OPPORTUNITY_OPTIONS_KEY, queryFn: pipelineApi.options, staleTime: Infinity });
+  const names = options.data?.instruments.map((instrument) => instrument.name);
+  return {
+    names: names ?? [],
+    status: names ? ("ready" as const) : options.isError ? ("error" as const) : ("loading" as const),
+    retrying: options.isError && options.isFetching,
+    retry: () => void options.refetch(),
+  };
+}
 
 /** The pipelines this workspace may use, with their stages and custom fields. */
 export function usePipelines(workspace: Workspace) {
@@ -150,6 +163,8 @@ export function syncAfterOpportunityWrite(queryClient: QueryClient, workspace: W
   });
   void queryClient.invalidateQueries({ queryKey: timelineKeys.all });
   void queryClient.invalidateQueries({ queryKey: activityKeys.all });
+  // A new opportunity brings its lead; a change of owner moves it (ADR-0028).
+  void queryClient.invalidateQueries({ queryKey: leadKeys.all });
 }
 
 export function useOpportunityWriteSync(workspace: Workspace) {

@@ -528,6 +528,23 @@ paths:
               schema:
                 $ref: '#/components/schemas/LeadOptions'
           description: ''
+  /api/v1/config/opportunity-options:
+    get:
+      operationId: opportunity_options
+      description: |-
+        What an opportunity form offers: the instruments (the same for everyone). The
+        services accept exactly these for a new or changed instrument.
+      tags:
+      - config
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpportunityOptions'
+          description: ''
   /api/v1/config/pipelines:
     get:
       operationId: pipelines_list
@@ -3938,8 +3955,9 @@ components:
       - type
     DashboardLead:
       type: object
-      description: 'One of today''s new leads: its name, who it is assigned to, and
-        when it was created.'
+      description: |-
+        One of today's new leads: its name, who it is assigned to, when it was created, and
+        the opportunity it was made for (its first one in this workspace), if any.
       properties:
         id:
           type: string
@@ -3960,12 +3978,32 @@ components:
           type: string
           format: date-time
           readOnly: true
+        opportunity:
+          allOf:
+          - $ref: '#/components/schemas/DashboardLeadOpportunity'
+          nullable: true
+          readOnly: true
       required:
       - created_at
       - display_name
       - id
+      - opportunity
       - organization_name
       - owner
+    DashboardLeadOpportunity:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        instrument_name:
+          type: string
+      required:
+      - id
+      - instrument_name
+      - title
     Detail:
       type: object
       properties:
@@ -4073,6 +4111,14 @@ components:
       required:
       - custom_fields
       - version
+    Instrument:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Stored on the opportunity as `instrument_name`.
+      required:
+      - name
     InvitationAcceptRequest:
       type: object
       properties:
@@ -4266,7 +4312,8 @@ components:
       type: object
       description: |-
         The opportunity's customer, instrument and custom details (all optional here; the
-        account and customer names default to the lead's at creation).
+        account and customer names default to the lead's at creation). There is no title: the
+        opportunity's name is derived from its customer and instrument (ADR-0028).
       properties:
         opportunity_date:
           type: string
@@ -4288,9 +4335,16 @@ components:
           maxLength: 1000
         instrument_name:
           type: string
+          description: One of the instruments listed by /config/opportunity-options
+            (or blank).
           maxLength: 200
         work_load:
           type: string
+          maxLength: 100
+        expected_cpt:
+          type: string
+          description: Expected CPT as the salesperson states it (free text; no unit
+            is implied).
           maxLength: 100
         custom_fields:
           type: object
@@ -4298,10 +4352,6 @@ components:
             nullable: true
           description: Custom field id -> value (null clears it). Numbers and amounts
             as strings.
-        title:
-          type: string
-          minLength: 1
-          maxLength: 200
         value:
           oneOf:
           - type: string
@@ -4346,7 +4396,6 @@ components:
           type: string
           format: uuid
       required:
-      - title
       - value
       - version
     LeadCreateRequest:
@@ -4978,6 +5027,9 @@ components:
         work_load:
           type: string
           readOnly: true
+        expected_cpt:
+          type: string
+          readOnly: true
         custom_fields:
           type: object
           additionalProperties: {}
@@ -5012,6 +5064,7 @@ components:
       - customer_name
       - description
       - expected_close_date
+      - expected_cpt
       - id
       - instrument_name
       - lead
@@ -5144,7 +5197,8 @@ components:
       type: object
       description: |-
         The opportunity's customer, instrument and custom details (all optional here; the
-        account and customer names default to the lead's at creation).
+        account and customer names default to the lead's at creation). There is no title: the
+        opportunity's name is derived from its customer and instrument (ADR-0028).
       properties:
         opportunity_date:
           type: string
@@ -5166,9 +5220,16 @@ components:
           maxLength: 1000
         instrument_name:
           type: string
+          description: One of the instruments listed by /config/opportunity-options
+            (or blank).
           maxLength: 200
         work_load:
           type: string
+          maxLength: 100
+        expected_cpt:
+          type: string
+          description: Expected CPT as the salesperson states it (free text; no unit
+            is implied).
           maxLength: 100
         custom_fields:
           type: object
@@ -5176,10 +5237,6 @@ components:
             nullable: true
           description: Custom field id -> value (null clears it). Numbers and amounts
             as strings.
-        title:
-          type: string
-          minLength: 1
-          maxLength: 200
         value:
           oneOf:
           - type: string
@@ -5236,7 +5293,6 @@ components:
           type: string
           maxLength: 500
       required:
-      - title
       - value
     OpportunityMoveRequest:
       type: object
@@ -5264,6 +5320,17 @@ components:
       required:
       - stage
       - version
+    OpportunityOptions:
+      type: object
+      description: 'The choices an opportunity form offers (pipeline.instruments:
+        the one list).'
+      properties:
+        instruments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Instrument'
+      required:
+      - instruments
     OpportunityPage:
       type: object
       description: One keyset-paginated page of opportunities (follow `next` / `previous`
@@ -5464,7 +5531,8 @@ components:
       type: object
       description: |-
         The opportunity's customer, instrument and custom details (all optional here; the
-        account and customer names default to the lead's at creation).
+        account and customer names default to the lead's at creation). There is no title: the
+        opportunity's name is derived from its customer and instrument (ADR-0028).
       properties:
         opportunity_date:
           type: string
@@ -5486,9 +5554,16 @@ components:
           maxLength: 1000
         instrument_name:
           type: string
+          description: One of the instruments listed by /config/opportunity-options
+            (or blank).
           maxLength: 200
         work_load:
           type: string
+          maxLength: 100
+        expected_cpt:
+          type: string
+          description: Expected CPT as the salesperson states it (free text; no unit
+            is implied).
           maxLength: 100
         custom_fields:
           type: object
@@ -5499,10 +5574,6 @@ components:
         version:
           type: integer
           minimum: 1
-        title:
-          type: string
-          minLength: 1
-          maxLength: 200
         value:
           oneOf:
           - type: string

@@ -5,10 +5,13 @@ notes. It is **deterministic lexical search in PostgreSQL**: no AI, no embedding
 external service (semantic retrieval is Ask Arkray, Phase 8). The design decision is
 [ADR-0022](adr/0022-global-search.md).
 
-> **Since [ADR-0027](adr/0027-leads-removed-from-the-ui.md)** the UI has no Leads: the dialog
-> shows no Leads group (the API still returns one, unchanged), and an opportunity also
-> matches on its own **account and customer names**, which its results now carry. That is how
-> a customer is found: through their deals.
+> **Since [ADR-0027](adr/0027-leads-removed-from-the-ui.md)** an opportunity also matches on
+> its own **account and customer names**, which its results carry. **Since
+> [ADR-0028](adr/0028-opportunity-creates-its-lead.md)** the dialog shows the **Leads** group
+> again (ADR-0027 had hidden it): a lead opens its read-only page. A lead and the
+> opportunity created with it are two records and appear once each, in their own labelled
+> groups ("Lead: ABC Diagnostics Mumbai", "Opportunity: ABC Diagnostics Mumbai — Adams 8380
+> V-lite"), never as one record twice.
 
 Code: [`backend/arkray/search/`](../backend/arkray/search/) (module beside `dashboard`
 above `activities` in the [layering](architecture.md#dependency-rules)),
@@ -400,8 +403,8 @@ the `SET TRANSACTION` isn't sent (7 / 8 / 7).
 
 ## Frontend
 
-- **Entry**: a search field-like button in the top bar on every page ("Search deals,
-  customers, activities", `Ctrl K` / `⌘K` shown from tablet width up), always visible as a
+- **Entry**: a search field-like button in the top bar on every page ("Search leads,
+  deals, activities", `Ctrl K` / `⌘K` shown from tablet width up), always visible as a
   touch target;
   `Ctrl+K` / `Cmd+K` opens it too, except while another dialog or the mobile menu is open,
   while typing in a multi-line field, or during IME composition. A URL that names no
@@ -413,7 +416,9 @@ the `SET TRANSACTION` isn't sent (7 / 8 / 7).
   Sharma's records.", from the banner's own request).
 - **Results**: a listbox with one group per kind under its written-out heading; each option
   has an explicit label ("Opportunity: Analyser upgrade, Apollo Diagnostics, Proposal,
-  Open"); there is no Leads group (ADR-0027); "Top 5 shown" when
+  Open"; "Lead: ABC Diagnostics Mumbai, ABC Diagnostics"); the Leads group comes first
+  (ADR-0028), and an opportunity's details omit a customer name its name already contains;
+  "Top 5 shown" when
   more matched. A polite status line announces "Searching…" (also while results update, so
   every finished search is announced), "5 results, more match", "No matching CRM records",
   or why the query can't be searched (with `aria-invalid`). Nothing suggests hidden results

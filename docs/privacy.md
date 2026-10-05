@@ -88,7 +88,9 @@ says which). In one transaction it:
   the redacted text (an indexing job that read the old text meanwhile is overwritten);
 - records `lead.erased` (the administrator, the lead's id and counts, never a value);
 - blanks the opportunities' account, customer, contact and address fields and their custom
-  values, deletes the files of the lead's notes (names and content hashes blanked, objects
+  values (their names are derived from the customer since ADR-0028: the title is replaced
+  too; the instrument, work load and Expected CPT describe the deal, not the person, and
+  stay), deletes the files of the lead's notes (names and content hashes blanked, objects
   removed by a job; an upload in flight is removed when it finishes) and, the lead being
   archived, refuses new files and text on its notes (product enhancement phase);
 - last, redacts the lost reasons in the stage history, if there are any.

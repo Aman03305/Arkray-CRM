@@ -36,7 +36,6 @@ OWN = AccessScope.own
 ORG = AccessScope.organization
 FOR_USER = AccessScope.for_user
 CUSTOMER = {
-    "title": "Hospital Analyzer Project",
     "value": Decimal("1200000"),
     "account_name": "Apollo Diagnostics",
     "customer_name": "Asharaf Panka",
@@ -81,6 +80,7 @@ class TestCreateWithoutALead:
             "Asharaf Panka",
             "Apollo Diagnostics",
         )
+        assert opportunity.title == "Asharaf Panka"  # derived: the customer, no instrument
         assert [event.lead_id for event in created] == [lead.pk]
         # Both records are audited, each by its own module.
         assert AuditEvent.objects.filter(target_id=str(lead.pk), action="lead.created").exists()
@@ -106,13 +106,14 @@ class TestCreateWithoutALead:
         fields = {k: v for k, v in CUSTOMER.items() if k != "customer_name"}
         opportunity = create(user_a, OWN(user_a.pk), fields)
         lead = Lead.objects.get(pk=opportunity.lead_id)
-        assert (lead.display_name, opportunity.customer_name) == (
+        assert (lead.display_name, opportunity.customer_name, opportunity.title) == (
+            "Apollo Diagnostics",
             "Apollo Diagnostics",
             "Apollo Diagnostics",
         )
 
     def test_someone_to_sell_to_is_required(self, user_a, stages):
-        fields = {"title": "Analyzer", "value": Decimal("1")}
+        fields = {"value": Decimal("1")}
         with pytest.raises(InvalidInputError) as caught:
             create(user_a, OWN(user_a.pk), fields)
         assert caught.value.details == {"customer_name": [services.CUSTOMER_REQUIRED]}
@@ -276,7 +277,6 @@ class TestReassign:
 class TestApi:
     def body(self, **extra):
         return {
-            "title": "Hospital Analyzer Project",
             "value": "1200000",
             "account_name": "Apollo Diagnostics",
             "customer_name": "Asharaf Panka",
@@ -289,6 +289,7 @@ class TestApi:
         body = response.json()
         assert body["owner"]["id"] == str(user_a.pk)
         assert body["lead"]["display_name"] == "Asharaf Panka"
+        assert body["title"] == "Asharaf Panka"
 
     def test_organisation_wide_needs_an_owner(self, admin_client, user_b, stages):
         missing = admin_client.post(opportunities_url("all"), self.body(), format="json")

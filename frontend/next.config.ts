@@ -28,13 +28,15 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return [{ source: "/api/:path*", destination: `${apiOrigin}/api/:path*` }];
   },
-  // Leads left the UI (ADR-0027): old links and bookmarks open the same workspace's Pipeline
-  // (never a lead's record: its id isn't carried anywhere).
+  // There is no Leads module (ADR-0027): old links to the Leads list, the lead form and lead
+  // edit pages open the same workspace's Pipeline. A lead's own page (/leads/{id}) exists
+  // again, read-only (ADR-0028), so only those other paths redirect.
   async redirects() {
-    return [
-      { source: "/leads/:path*", destination: "/pipeline", permanent: false },
-      { source: "/admin/users/:userId/leads/:path*", destination: "/admin/users/:userId/pipeline", permanent: false },
-    ];
+    const old = ["", "/new", "/:leadId/:rest+"];
+    return old.flatMap((path) => [
+      { source: `/leads${path}`, destination: "/pipeline", permanent: false },
+      { source: `/admin/users/:userId/leads${path}`, destination: "/admin/users/:userId/pipeline", permanent: false },
+    ]);
   },
   async headers() {
     return [

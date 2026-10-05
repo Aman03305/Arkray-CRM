@@ -12,6 +12,7 @@ import type {
   Opportunity,
   OpportunityCreateRequest,
   OpportunityMoveRequest,
+  OpportunityOptions,
   OpportunityOrdering,
   OpportunityPage,
   OpportunityUpdateRequest,
@@ -73,6 +74,10 @@ export function stageListPath(workspace: Workspace, filters: BoardFilters, reque
   return `${workspaceApiPath(workspace, "opportunities")}?${params.toString()}`;
 }
 
+/** What the opportunity form offers (the instruments): the same for everyone, and outside the
+ * pipeline root, so CRM writes never refetch it. */
+export const OPPORTUNITY_OPTIONS_KEY = ["opportunity-options"] as const;
+
 export const pipelineKeys = {
   /** Everything workspace-scoped in the pipeline (invalidated after any CRM write). */
   all: ["pipeline"] as const,
@@ -108,6 +113,7 @@ const opportunity = (workspace: Workspace, id: string, action = "") =>
   workspaceApiPath(workspace, `opportunities/${encodeURIComponent(id)}${action ? `/${action}` : ""}`);
 
 export const pipelineApi = {
+  options: () => apiFetch<OpportunityOptions>("/api/v1/config/opportunity-options"),
   pipelines: (workspace: Workspace, archived = false) =>
     apiFetch<PipelineList>(`${workspaceApiPath(workspace, "pipelines")}${archived ? "?archived=true" : ""}`),
   pipeline: (workspace: Workspace, id: string) => apiFetch<PipelineDto>(pipelinePath(workspace, id)),

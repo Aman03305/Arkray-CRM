@@ -632,6 +632,27 @@ def answer_routed(
         )
         bullets(first["meetings"], lambda r: r["starts"]["display"] if r.get("starts") else "")
         blocks.extend(_more(total, first["shown"]))
+    elif intent == "deals_for_instrument":
+        total = first["total_matching"]
+        kind = "open opportunit" if routed.calls[0][1].get("status") == "open" else "opportunit"
+        deals = _plural(total, f"{kind}y", f"{kind}ies")
+        ctx.count(f"Opportunities for {routed.instrument}", total)
+        blocks.append(answers.text_block(f"{w.subject} {w.has} {deals} for {routed.instrument}."))
+        bullets(
+            first["opportunities"],
+            lambda r: ", ".join(
+                part
+                for part in (
+                    r["value"]["display"],
+                    r.get("stage") or "",
+                    f"expected to close {r['expected_close']['display']}"
+                    if r.get("expected_close") and r.get("status") == "open"
+                    else "",
+                )
+                if part
+            ),
+        )
+        blocks.extend(_more(total, first["shown"]))
     elif intent in {"deals_in_stage", "deals_closing_this_month", "deals_in_negotiation"}:
         total = first["total_matching"]
         if intent == "deals_in_negotiation":

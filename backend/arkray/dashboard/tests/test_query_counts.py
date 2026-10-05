@@ -3,10 +3,11 @@ number of leads, opportunities, tasks, meetings and users, in every kind of work
 Pinned exactly, so an accidental extra query per request is noticed too.
 
 Per request: session (1) + user (1) [+ subject user exists-check (1) in a user's workspace]
-[+ workspace-access audit insert, once per window] + the dashboard's seven: lead figures and
+[+ workspace-access audit insert, once per window] + the dashboard's eight: lead figures and
 pipeline totals (one aggregate each), the activity figures (two aggregates: open tasks;
 meetings from today on), today's newest leads (owner joined), the next meetings and the
-next open tasks (lead and owner joined). Outside a test's transaction one more,
+next open tasks (lead and owner joined), and the new leads' opportunities (one query for all
+of them, ADR-0028; none when there are no new leads). Outside a test's transaction one more,
 `SET TRANSACTION` (the snapshot), comes first, between BEGIN and COMMIT: see
 test_the_figures_share_one_read_only_snapshot.
 """
@@ -34,7 +35,7 @@ from .conftest import NOW, dashboard_url
 
 # Delegated and organisation-wide requests also read the audit window (PostgreSQL since
 # Phase 9): one more query than the user's own.
-OWN, USER, ORGANISATION = 9, 11, 10
+OWN, USER, ORGANISATION = 10, 12, 11
 
 
 @pytest.fixture(autouse=True)
@@ -111,7 +112,7 @@ def test_the_organisation_dashboard(admin, n, users, django_capture_on_commit_ca
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.usefixtures("crm_configuration")
 def test_the_figures_share_one_read_only_snapshot(admin, user_a):
-    """Outside a test transaction (as in production) the seven queries run in one REPEATABLE
+    """Outside a test transaction (as in production) the eight queries run in one REPEATABLE
     READ, read-only transaction opened by `SET TRANSACTION`: one more query (plus BEGIN and
     COMMIT), and every figure and list describes the same moment."""
     seed(3, [user_a])
@@ -127,4 +128,4 @@ def test_the_figures_share_one_read_only_snapshot(admin, user_a):
         assert len([s for s in statements if s not in ("BEGIN", "COMMIT")]) == expected
         begin = statements.index("BEGIN")
         assert statements[begin + 1] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
-        assert statements[begin + 9 :] == ["COMMIT"]  # the seven figure queries, then commit
+        assert statements[begin + 10 :] == ["COMMIT"]  # the eight figure queries, then commit

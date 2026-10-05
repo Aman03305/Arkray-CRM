@@ -6,6 +6,7 @@ import type { Viewer } from "./viewer";
 import {
   activeSection,
   canonicalUserPath,
+  leadHref,
   newOpportunityHref,
   opportunityHref,
   SECTION_LABELS,
@@ -120,10 +121,30 @@ describe("activeSection", () => {
     expect(activeSection(pathname)).toBe(expected);
   });
 
-  it("no longer knows a Leads section, in any workspace", () => {
+  it("knows no Leads section; a lead's page belongs to the Dashboard, in any workspace", () => {
     expect(activeSection("/leads")).toBeNull();
-    expect(activeSection("/leads/9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2c")).toBeNull();
     expect(activeSection(`/admin/users/${RAHUL}/leads`)).toBeNull();
+    expect(activeSection("/leads/9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2c")).toBe("dashboard");
+    expect(activeSection(`/admin/users/${RAHUL}/leads/9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2c`)).toBe("dashboard");
+  });
+});
+
+describe("lead links stay inside their workspace (ADR-0028)", () => {
+  const id = "9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2c";
+
+  it("own and organisation-wide leads live under /leads; a selected user's under theirs", () => {
+    expect(leadHref({ kind: "self" }, id)).toBe(`/leads/${id}`);
+    expect(leadHref({ kind: "organization" }, id)).toBe(`/leads/${id}`);
+    expect(leadHref({ kind: "user", userId: RAHUL }, id)).toBe(`/admin/users/${RAHUL}/leads/${id}`);
+  });
+
+  it("an id is one path segment, never a way out of it", () => {
+    expect(leadHref({ kind: "self" }, "../admin/users")).toBe("/leads/..%2Fadmin%2Fusers");
+  });
+
+  it("a lead's page belongs to its workspace, though Leads is not a module of it", () => {
+    expect(WORKSPACE_SECTIONS).not.toContain("leads");
+    expect(workspaceFromPathname(`/admin/users/${RAHUL}/leads/${id}`, makeViewer())).toEqual({ kind: "user", userId: RAHUL });
   });
 });
 

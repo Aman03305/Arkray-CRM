@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EditOpportunityView, NewOpportunityView, OpportunityView } from "@/features/workspace/views";
 import { useFlash } from "@/lib/flash";
 import { businessToday } from "@/lib/format";
-import { adminViewer, PRIYA_ID, RAHUL_ID, salesViewer } from "@/test/fixtures";
+import { adminViewer, LEAD_ID, OPPORTUNITY_OPTIONS_ROUTE, PRIYA_ID, RAHUL_ID, salesViewer } from "@/test/fixtures";
 import { makeBoard, makeOpportunity, OPPORTUNITY_ID, PIPELINE_ID, PIPELINE_ROUTES, STAGES } from "@/test/pipeline-fixtures";
 import { apiError, mockApi, renderWithProviders, type RecordedCall } from "@/test/render";
 
@@ -16,6 +16,12 @@ vi.mock("next/navigation", () => ({
 }));
 
 const CONFIG = PIPELINE_ROUTES;
+/** What the new-opportunity panel reads besides the pipelines: the instruments, and the
+ * advisory duplicate check (nothing found). */
+const PANEL = {
+  ...OPPORTUNITY_OPTIONS_ROUTE,
+  "GET /api/v1/workspaces/me/leads/duplicates": { status: 200, body: { results: [] } },
+};
 const ME = `/api/v1/workspaces/me/opportunities/${OPPORTUNITY_ID}`;
 const HISTORY = {
   [`GET ${ME}/history`]: {
@@ -56,7 +62,8 @@ const HISTORY = {
     },
   },
 };
-/** The customer's details as typed in the new-opportunity panel (they are the customer, ADR-0027). */
+/** The customer's details as typed in the new-opportunity panel (they are the customer, ADR-0027;
+ * the server makes the opportunity's lead from them, ADR-0028). */
 const CUSTOMER = {
   account_name: "Apollo Diagnostics",
   customer_name: "Asha Mehta",
@@ -87,7 +94,7 @@ async function typeCustomer(user: ReturnType<typeof userEvent.setup>, drawer: HT
   await user.type(within(drawer).getByLabelText("Account name"), CUSTOMER.account_name);
   await user.type(within(drawer).getByLabelText("Customer name"), CUSTOMER.customer_name);
   if (!all) return;
-  await user.type(within(drawer).getByLabelText("Phone (optional)"), CUSTOMER.contact_phone);
+  await user.type(within(drawer).getByLabelText("Contact (optional)"), CUSTOMER.contact_phone);
   await user.type(within(drawer).getByLabelText("Email (optional)"), CUSTOMER.contact_email);
   await user.type(within(drawer).getByLabelText("Address (optional)"), CUSTOMER.address);
 }
@@ -108,11 +115,14 @@ describe("opportunity detail", () => {
     nav.pathname = `/pipeline/${OPPORTUNITY_ID}`;
   });
 
-  it("shows the exact figures, the customer, the owner, and (in History) the stage history", async () => {
+  it("shows the exact figures, the customer and its lead, the owner, and (in History) the stage history", async () => {
     mockApi({
       ...CONFIG,
       ...HISTORY,
-      [`GET ${ME}`]: { status: 200, body: makeOpportunity({ probability: "62.50", probability_overridden: true, weighted_value: "781250.00" }) },
+      [`GET ${ME}`]: {
+        status: 200,
+        body: makeOpportunity({ probability: "62.50", probability_overridden: true, weighted_value: "781250.00", expected_cpt: "₹45 per test" }),
+      },
     });
     renderWithProviders(<OpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
     expect(await screen.findByRole("heading", { level: 1, name: "Hospital Analyzer Project" })).toBeInTheDocument();
@@ -123,14 +133,19 @@ describe("opportunity detail", () => {
     expect(within(deal).getByText("(own)")).toBeInTheDocument();
     expect(within(deal).getByText("₹7,81,250")).toBeInTheDocument();
     const customer = screen.getByRole("region", { name: "Customer" });
-    expect(within(customer).getByText("Asha Mehta")).toBeInTheDocument();
+    // The deal's own customer name is text; its lead (made with it) is one click away (ADR-0028).
+    expect(within(customer).getAllByText("Asha Mehta").map((name) => name.closest("a"))).toEqual([null, expect.any(HTMLAnchorElement)]);
+    expect(within(customer).getByText("Lead")).toBeInTheDocument();
+    expect(within(customer).getByRole("link", { name: "Asha Mehta" })).toHaveAttribute("href", `/leads/${LEAD_ID}`);
     expect(within(customer).getByRole("link", { name: "asha@apollo.example" })).toHaveAttribute("href", "mailto:asha@apollo.example");
     expect(within(customer).getByRole("link", { name: "+91 98765 43210" })).toHaveAttribute("href", expect.stringMatching(/^tel:/));
-    expect(within(screen.getByRole("region", { name: "Instrument" })).getByText("HbA1c analyser")).toBeInTheDocument();
-    // No Leads (ADR-0027): no Lead section and nothing links to a lead page; the customer is plain text.
+    const instrument = screen.getByRole("region", { name: "Instrument" });
+    expect(within(instrument).getByText("HbA1c analyser")).toBeInTheDocument();
+    expect(within(instrument).getByText("Expected CPT")).toBeInTheDocument();
+    expect(within(instrument).getByText("₹45 per test")).toBeInTheDocument();
+    // No Leads module (ADR-0027): no Lead section, and the only lead link is its own lead page.
     expect(screen.queryByRole("region", { name: "Lead" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Asha Mehta" })).not.toBeInTheDocument();
-    expect(document.querySelector('a[href*="/leads"]')).toBeNull();
+    expect([...document.querySelectorAll('a[href*="/leads"]')].map((link) => link.getAttribute("href"))).toEqual([`/leads/${LEAD_ID}`]);
     // The Record section names the owner.
     const record = screen.getByRole("region", { name: "Record" });
     expect(within(record).getByText("Owner")).toBeInTheDocument();
@@ -169,7 +184,10 @@ describe("opportunity detail", () => {
     renderWithProviders(<OpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
     const customer = await screen.findByRole("region", { name: "Customer" });
     expect(within(customer).getByText("Apollo Diagnostics")).toBeInTheDocument(); // the deal's own record of it
+    // Its lead is in another workspace now: said so, never linked.
+    expect(within(customer).getByText("In another workspace")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Asha Mehta" })).not.toBeInTheDocument();
+    expect(document.querySelector('a[href*="/leads"]')).toBeNull();
     expect(screen.queryByRole("region", { name: "Open work" })).not.toBeInTheDocument(); // new work follows the customer
     expect(screen.getByRole("button", { name: "Reopen" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Won" })).not.toBeInTheDocument();
@@ -294,6 +312,11 @@ describe("opportunity detail", () => {
     for (const name of ["Won", "Lost", "Move", "Edit", "More actions for Hospital Analyzer Project"]) {
       expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
     }
+    // Reading is allowed: its lead opens in Rahul's workspace.
+    expect(within(screen.getByRole("region", { name: "Customer" })).getByRole("link", { name: "Asha Mehta" })).toHaveAttribute(
+      "href",
+      `/admin/users/${RAHUL_ID}/leads/${LEAD_ID}`,
+    );
   });
 });
 
@@ -423,18 +446,28 @@ describe("creating an opportunity", () => {
     const api = mockApi({
       ...CONFIG,
       ...BOARD,
+      ...PANEL,
       "POST /api/v1/workspaces/me/opportunities": () =>
         ++attempts === 1 ? apiError(503, "service_unavailable", "Try again.") : { status: 201, body: makeOpportunity() },
     });
     renderWithProviders(<NewOpportunityView />, { viewer: salesViewer });
     const user = userEvent.setup();
     const drawer = await screen.findByRole("dialog", { name: "New opportunity" });
-    // No lead to pick (ADR-0027): the customer's details are the customer.
+    // No lead to pick and no name to type (ADR-0028): the customer's details are the customer,
+    // and the server names the opportunity and makes its lead from them.
     expect(within(drawer).queryByRole("combobox", { name: /lead/i })).not.toBeInTheDocument();
+    expect(within(drawer).queryByLabelText(/Opportunity name/)).not.toBeInTheDocument();
     expect(within(drawer).getByLabelText("Opportunity date")).toHaveValue(businessToday());
+    expect(within(drawer).getByLabelText("Contact (optional)")).toHaveAttribute("type", "tel");
+    // The pipeline is offered even when there is only one; its stages are offered by name.
+    await waitFor(() => expect(within(drawer).getByRole("combobox", { name: "Pipeline" })).toHaveValue(PIPELINE_ID));
+    expect(within(within(drawer).getByRole("combobox", { name: "Stage" })).getAllByRole("option").map((o) => o.textContent)).toEqual(
+      ["New", "Qualified", "Proposal", "Negotiation", "Won", "Lost"],
+    );
     await typeCustomer(user, drawer, true);
-    await user.type(within(drawer).getByLabelText("Opportunity name"), "Lab upgrade");
+    await user.click(await within(drawer).findByRole("radio", { name: "Adams 8380 V-lite" }));
     await user.type(within(drawer).getByLabelText("Installation price (₹)"), "12,50,000.50");
+    await user.type(within(drawer).getByLabelText("Expected CPT (optional)"), "45");
     expect(within(drawer).queryByLabelText("Negotiated price (₹)")).not.toBeInTheDocument();
     await user.selectOptions(within(drawer).getByRole("combobox", { name: "Stage" }), STAGES.negotiation.id);
     await user.type(within(drawer).getByLabelText("Negotiated price (₹)"), "11,00,000");
@@ -444,10 +477,11 @@ describe("creating an opportunity", () => {
     await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`/pipeline/${OPPORTUNITY_ID}`));
     const [first, second] = api.callsTo("POST", "/api/v1/workspaces/me/opportunities");
     expect(first!.body).toEqual({
-      title: "Lab upgrade",
       value: "1250000.50",
       opportunity_date: businessToday(),
       ...CUSTOMER,
+      instrument_name: "Adams 8380 V-lite",
+      expected_cpt: "45",
       pipeline: PIPELINE_ID,
       stage: STAGES.negotiation.id,
       negotiated_price: "1100000",
@@ -456,12 +490,11 @@ describe("creating an opportunity", () => {
   });
 
   it("refuses amounts that aren't plain rupees before sending anything", async () => {
-    const api = mockApi({ ...CONFIG, ...BOARD });
+    const api = mockApi({ ...CONFIG, ...BOARD, ...PANEL });
     renderWithProviders(<NewOpportunityView />, { viewer: salesViewer });
     const user = userEvent.setup();
     const drawer = await screen.findByRole("dialog", { name: "New opportunity" });
     await typeCustomer(user, drawer);
-    await user.type(within(drawer).getByLabelText("Opportunity name"), "x");
     await user.type(within(drawer).getByLabelText("Installation price (₹)"), "1e6");
     await user.click(within(drawer).getByRole("button", { name: "Create opportunity" }));
     expect(await within(drawer).findByText(/Enter an amount in rupees/)).toBeInTheDocument();
@@ -469,36 +502,36 @@ describe("creating an opportunity", () => {
     expect(api.calls.some((c) => c.method === "POST")).toBe(false);
   });
 
-  it("an account and a customer are required; a manual probability is sent only when set", async () => {
+  it("the customer or the account name is required; a new opportunity takes its stage's probability", async () => {
     const api = mockApi({
       ...CONFIG,
       ...BOARD,
+      ...PANEL,
       "POST /api/v1/workspaces/me/opportunities": { status: 201, body: makeOpportunity() },
     });
     renderWithProviders(<NewOpportunityView />, { viewer: salesViewer });
     const user = userEvent.setup();
     const drawer = await screen.findByRole("dialog", { name: "New opportunity" });
-    await user.type(within(drawer).getByLabelText("Opportunity name"), "x");
+    // No own probability (and no description) when creating: those are set when editing.
+    expect(within(drawer).queryByRole("checkbox", { name: /Own probability/ })).not.toBeInTheDocument();
+    expect(within(drawer).queryByLabelText("Probability (%)")).not.toBeInTheDocument();
+    expect(within(drawer).queryByLabelText(/Description/)).not.toBeInTheDocument();
     await user.type(within(drawer).getByLabelText("Installation price (₹)"), "100");
     await user.click(within(drawer).getByRole("button", { name: "Create opportunity" }));
-    expect(await within(drawer).findByText("Enter the account name.")).toBeInTheDocument();
-    expect(within(drawer).getByLabelText("Account name")).toHaveAccessibleDescription("Enter the account name.");
-    expect(within(drawer).getByLabelText("Customer name")).toHaveAccessibleDescription("Enter the customer name.");
-    expect(within(drawer).getByLabelText("Account name")).toHaveFocus(); // the first problem
+    expect(await within(drawer).findByText("Enter the customer name or the account name.")).toBeInTheDocument();
+    expect(within(drawer).getByLabelText("Customer name")).toHaveAccessibleDescription("Enter the customer name or the account name.");
+    expect(within(drawer).getByLabelText("Account name")).not.toHaveAttribute("aria-invalid", "true");
+    expect(within(drawer).getByLabelText("Customer name")).toHaveFocus(); // the (only) problem
     expect(api.calls.some((c) => c.method === "POST")).toBe(false);
-    await typeCustomer(user, drawer);
-    await user.click(within(drawer).getByRole("checkbox", { name: /Own probability/ }));
-    await user.type(within(drawer).getByLabelText("Probability (%)"), "33.5");
+    // The account name alone is enough.
+    await user.type(within(drawer).getByLabelText("Account name"), CUSTOMER.account_name);
     await user.click(within(drawer).getByRole("button", { name: "Create opportunity" }));
     await waitFor(() => expect(api.callsTo("POST", "/api/v1/workspaces/me/opportunities")).toHaveLength(1));
     expect(api.callsTo("POST", "/api/v1/workspaces/me/opportunities")[0]!.body).toEqual({
-      title: "x",
       value: "100",
       opportunity_date: businessToday(),
       account_name: CUSTOMER.account_name,
-      customer_name: CUSTOMER.customer_name,
       pipeline: PIPELINE_ID,
-      probability: "33.5",
     });
   });
 
@@ -507,6 +540,7 @@ describe("creating an opportunity", () => {
     nav.pathname = `/admin/users/${RAHUL_ID}/pipeline/new`;
     const api = mockApi({
       ...CONFIG,
+      ...OPPORTUNITY_OPTIONS_ROUTE,
       [`GET /api/v1/workspaces/${RAHUL_ID}/pipeline-board`]: { status: 200, body: makeBoard() },
       [`POST /api/v1/workspaces/${RAHUL_ID}/opportunities`]: apiError(400, "invalid_input", "Check the details and try again.", { owner: [message] }),
     });
@@ -514,7 +548,6 @@ describe("creating an opportunity", () => {
     const user = userEvent.setup();
     const drawer = await screen.findByRole("dialog", { name: "New opportunity" });
     expect(within(drawer).queryByRole("combobox", { name: /owner/i })).not.toBeInTheDocument(); // Rahul owns it
-    await user.type(within(drawer).getByLabelText("Opportunity name"), "x");
     await user.type(within(drawer).getByLabelText("Installation price (₹)"), "100");
     await typeCustomer(user, drawer);
     await user.click(within(drawer).getByRole("button", { name: "Create opportunity" }));
@@ -583,22 +616,31 @@ describe("editing an opportunity", () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Edit" }));
     const drawer = screen.getByRole("dialog", { name: "Edit opportunity" });
-    for (const group of ["Basic", "Customer", "Instrument", "Closing", "Additional"]) {
+    // The panel names the deal it edits (its name isn't a field).
+    expect(drawer).toHaveAccessibleDescription("Hospital Analyzer Project");
+    expect(within(drawer).queryByLabelText(/Opportunity name/)).not.toBeInTheDocument();
+    for (const group of ["Customer", "Instrument", "Timeline", "Pipeline", "Additional"]) {
       expect(within(drawer).getByRole("region", { name: group })).toBeInTheDocument();
     }
+    // Its pipeline and stage are shown, not chosen, here.
+    const pipeline = within(drawer).getByRole("region", { name: "Pipeline" });
+    expect(pipeline).toHaveTextContent("Sales Pipeline · Proposal");
+    expect(within(pipeline).queryByRole("combobox")).not.toBeInTheDocument();
     expect(within(drawer).getByLabelText("Account name")).toHaveValue("Apollo Diagnostics");
     expect(within(drawer).getByLabelText(/^Work load/)).toHaveValue("300 tests/day");
+    expect(within(drawer).getByLabelText(/^Description/)).toHaveValue("Two analysers for the central lab.");
     await user.click(within(drawer).getByRole("button", { name: "Save changes" }));
     expect(screen.queryByRole("dialog", { name: "Edit opportunity" })).not.toBeInTheDocument();
     expect(api.calls.some((c) => c.method === "PATCH")).toBe(false);
     expect(screen.getByRole("heading", { level: 1, name: "Hospital Analyzer Project" })).toBeInTheDocument();
   });
 
-  it("a won opportunity's probability is shown as fixed", async () => {
+  it("a won opportunity's probability can't be changed: the panel shows its stage, with no own probability", async () => {
     mockApi({ ...CONFIG, ...HISTORY, [`GET ${ME}`]: { status: 200, body: makeOpportunity({ status: "won", stage: STAGES.won, probability: "100.00" }) } });
     renderWithProviders(<EditOpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
     const drawer = await screen.findByRole("dialog", { name: "Edit opportunity" });
-    expect(within(drawer).getByText("Probability 100%")).toBeInTheDocument();
+    expect(within(drawer).getByRole("region", { name: "Pipeline" })).toHaveTextContent("Sales Pipeline · Won");
     expect(within(drawer).queryByRole("checkbox", { name: /Own probability/ })).not.toBeInTheDocument();
+    expect(within(drawer).queryByLabelText("Probability (%)")).not.toBeInTheDocument();
   });
 });

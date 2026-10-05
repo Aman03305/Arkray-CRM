@@ -107,6 +107,8 @@ _CARD_FIELDS = (
     "pipeline_id",
     "stage_id",
     "account_name",
+    "customer_name",
+    "instrument_name",
     "negotiated_price",
     "lead__id",
     "lead__first_name",
@@ -352,12 +354,11 @@ def _with_relations(queryset: QuerySet[Opportunity]) -> QuerySet[Opportunity]:
             "description",
             "lost_reason",
             "opportunity_date",
-            "customer_name",
             "contact_phone",
             "contact_email",
             "address",
-            "instrument_name",
             "work_load",
+            "expected_cpt",
             "custom_fields",
             "negotiated_at",
             "pipeline__id",
@@ -422,6 +423,23 @@ def opportunity_ref(scope: AccessScope, opportunity_id: UUID) -> Opportunity:
     if found is None:
         raise NotFoundError()
     return found
+
+
+def first_opportunities(scope: AccessScope, lead_ids: Collection[UUID]) -> dict[UUID, Opportunity]:
+    """Each given lead's first non-archived opportunity that `scope` may see (the one an
+    opportunity-created lead was made for), by lead id: its id, title and instrument only.
+    For a short list of leads (the dashboard's new leads); one query over the lead index."""
+    if not lead_ids:
+        return {}
+    rows = (
+        scope.apply(
+            Opportunity.objects.filter(lead_id__in=list(lead_ids), archived_at__isnull=True)
+        )
+        .order_by("lead_id", "created_at", "id")
+        .distinct("lead_id")
+        .only("id", "lead_id", "title", "instrument_name")
+    )
+    return {row.lead_id: row for row in rows}
 
 
 def stages_by_id(stage_ids: list[UUID]) -> dict[UUID, Stage]:

@@ -253,9 +253,9 @@ describe("F6 (P1) and F7: editing conflicts", () => {
     });
     renderWithProviders(<EditOpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
     const user = userEvent.setup();
-    const title = await screen.findByLabelText("Opportunity name");
-    await user.clear(title);
-    await user.type(title, "Hospital Analyzer Project (phase 2)");
+    const customer = await screen.findByLabelText("Customer name");
+    await user.clear(customer);
+    await user.type(customer, "Dr. Asha Mehta");
     version = 3;
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await user.click(await screen.findByRole("button", { name: "Keep my changes" }));
@@ -263,7 +263,7 @@ describe("F6 (P1) and F7: editing conflicts", () => {
     expect(screen.getByLabelText("Probability (%)")).toHaveValue("60");
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(api.callsTo("PATCH", ME)).toHaveLength(2));
-    expect(api.callsTo("PATCH", ME)[1]!.body).toEqual({ version: 3, title: "Hospital Analyzer Project (phase 2)" });
+    expect(api.callsTo("PATCH", ME)[1]!.body).toEqual({ version: 3, customer_name: "Dr. Asha Mehta" });
   });
 
   it("F7: an opportunity archived meanwhile keeps the form and the typing on screen", async () => {

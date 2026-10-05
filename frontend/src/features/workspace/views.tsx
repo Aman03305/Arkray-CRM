@@ -8,6 +8,7 @@ import { ActivitiesListView } from "@/features/activities/ActivitiesListView";
 import { ActivityDetailView } from "@/features/activities/ActivityDetailView";
 import { AskView } from "@/features/ask/AskView";
 import { WorkspaceDashboard } from "@/features/dashboard/DashboardView";
+import { LeadDetailView } from "@/features/leads/LeadDetailView";
 import { OpportunityDetailView } from "@/features/pipeline/OpportunityDetailView";
 import { PipelineBoardView } from "@/features/pipeline/PipelineBoardView";
 import { AdminHome } from "@/features/users/AdminHome";
@@ -94,6 +95,15 @@ export function EditOpportunityView({ opportunityId }: { opportunityId: string }
       {(workspace, segment) => (
         <OpportunityDetailView key={`${segment}/${opportunityId}/edit`} workspace={workspace} opportunityId={opportunityId} editOnOpen />
       )}
+    </InWorkspace>
+  );
+}
+
+/** A lead (read-only), reached from the dashboard, search and its opportunity (ADR-0028). */
+export function LeadView({ leadId }: { leadId: string }) {
+  return (
+    <InWorkspace>
+      {(workspace, segment) => <LeadDetailView key={`${segment}/${leadId}`} workspace={workspace} leadId={leadId} />}
     </InWorkspace>
   );
 }

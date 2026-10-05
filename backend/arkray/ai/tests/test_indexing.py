@@ -203,7 +203,6 @@ class TestLifecycle:
             scope=own(user_a),
             lead_id=lead.pk,
             fields={
-                "title": "Analyzer upgrade",
                 "value": Decimal("100000"),
                 "description": "Replace two old analyzers.",
             },

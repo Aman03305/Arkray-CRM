@@ -6,7 +6,9 @@ A1 and A2; lead LB belongs to B with opportunity B1. The attacker must never obt
 learn that it exists, change it, or have it counted in a total, through any channel: list,
 detail, guessed id, lead relationship, pipeline board, filters, sorting, cursors, stage
 transitions, edits, archive, conversion, aggregates, workspace substitution or crafted
-payloads. Every case also runs with the roles swapped.
+payloads. Nor may the attacker reach the lead the victim's opportunity makes when it is
+created without one (ADR-0027/0028): not by id in any workspace, as a filter, on the
+dashboard or in search. Every case also runs with the roles swapped.
 """
 
 from __future__ import annotations
@@ -214,7 +216,8 @@ class TestWrites:
     @pytest.mark.parametrize(
         ("method", "action", "body"),
         [
-            ("patch", "", {"version": 1, "title": "Hacked"}),
+            ("patch", "", {"version": 1, "description": "Hacked"}),
+            ("patch", "", {"version": 1, "customer_name": "Hacked"}),  # would rename it
             ("patch", "", {"version": 1, "value": "1"}),
             ("post", "/move", {"version": 1, "stage": "{won}"}),
             ("post", "/move", {"version": 1, "stage": "{lost}", "lost_reason": "x"}),
@@ -224,6 +227,7 @@ class TestWrites:
     )
     def test_every_write_to_the_victims_opportunity_is_a_404(self, world, method, action, body):
         attacker, _, _, _, _, secret = world
+        customer_name = secret.customer_name
         payload = {
             k: v.format(won=default_stage("won").pk, lost=default_stage("lost").pk)
             if isinstance(v, str)
@@ -235,36 +239,42 @@ class TestWrites:
         )
         assert response.status_code == 404
         secret.refresh_from_db()
-        assert (secret.title, secret.value, secret.status, secret.version) == (
-            SECRET_TITLE,
-            SECRET_VALUE,
-            "open",
-            1,
-        )
+        assert (
+            secret.title,
+            secret.description,
+            secret.customer_name,
+            secret.value,
+            secret.status,
+            secret.version,
+        ) == (SECRET_TITLE, "Confidential pricing", customer_name, SECRET_VALUE, "open", 1)
         assert not AuditEvent.objects.filter(target_id=str(secret.pk)).exists()
         assert not StageHistory.objects.filter(opportunity=secret).exists()
 
     def test_no_opportunity_can_be_created_against_the_victims_lead(self, world):
         attacker, _, _, _, victim_lead, _ = world
+        count = Opportunity.objects.count()
         response = signed_in(attacker).post(
             f"{ME}/opportunities",
-            {"lead": str(victim_lead.pk), "title": "Mine now", "value": "1"},
+            {"lead": str(victim_lead.pk), "description": "Mine now", "value": "1"},
             format="json",
         )
         assert response.status_code == 404
-        assert not Opportunity.objects.filter(title="Mine now").exists()
+        assert not Opportunity.objects.filter(description="Mine now").exists()
+        assert Opportunity.objects.count() == count
 
     def test_the_victims_lead_cant_be_converted(self, world):
         attacker, _, _, _, victim_lead, _ = world
+        count = Opportunity.objects.count()
         response = signed_in(attacker).post(
             f"{ME}/leads/{victim_lead.pk}/convert",
-            {"version": 1, "title": "Mine now", "value": "1"},
+            {"version": 1, "description": "Mine now", "value": "1"},
             format="json",
         )
         assert response.status_code == 404
         victim_lead.refresh_from_db()
         assert victim_lead.status_id == "new"
-        assert not Opportunity.objects.filter(title="Mine now").exists()
+        assert not Opportunity.objects.filter(description="Mine now").exists()
+        assert Opportunity.objects.count() == count
 
     @pytest.mark.parametrize(
         "extra",
@@ -291,11 +301,23 @@ class TestWrites:
         attacker, victim, own_lead, *_ = world
         response = signed_in(attacker).post(
             f"{ME}/opportunities",
-            {"lead": str(own_lead.pk), "title": "Mallory", "value": "1", **extra(victim)},
+            {"lead": str(own_lead.pk), "description": "Mallory", "value": "1", **extra(victim)},
             format="json",
         )
         assert response.status_code == 400
-        assert not Opportunity.objects.filter(title="Mallory").exists()
+        assert not Opportunity.objects.filter(description="Mallory").exists()
+
+    def test_the_crafted_payloads_base_alone_is_accepted(self, world):
+        """The control for the test above: without the crafted field the same request creates
+        the opportunity, so each 400 there is the crafted field's refusal."""
+        attacker, _, own_lead, *_ = world
+        response = signed_in(attacker).post(
+            f"{ME}/opportunities",
+            {"lead": str(own_lead.pk), "description": "Mallory", "value": "1"},
+            format="json",
+        )
+        assert response.status_code == 201, response.content
+        assert response.json()["owner"]["id"] == str(attacker.pk)
 
     @pytest.mark.parametrize(
         "extra",
@@ -368,6 +390,119 @@ class TestWorkspaceSubstitution:
             f"/api/v1/workspaces/{victim.pk}/opportunities/{secret.pk}"
         )
         assert response.status_code == 404
+
+
+CUSTOMER = "Xanthe Quorrell"
+ACCOUNT = "Quorrell Diagnostics"
+INSTRUMENT = "Adams 8380 V-lite"
+
+
+def opportunity_without_a_lead(owner):
+    """`owner` creates an opportunity through the API with no lead, as the UI does since
+    ADR-0027: its customer details make a new customer record (a lead) owned by `owner`, in
+    the same transaction. Returns (the opportunity's response body, that lead)."""
+    response = signed_in(owner).post(
+        f"{ME}/opportunities",
+        {
+            "customer_name": CUSTOMER,
+            "account_name": ACCOUNT,
+            "instrument_name": INSTRUMENT,
+            "value": "250000",
+        },
+        format="json",
+    )
+    assert response.status_code == 201, response.content
+    body = response.json()
+    assert body["title"] == f"{CUSTOMER} — {INSTRUMENT}"  # derived (ADR-0028)
+    lead = Lead.objects.get(pk=body["lead"]["id"])
+    assert (lead.owner_id, lead.display_name) == (owner.pk, CUSTOMER)
+    return body, lead
+
+
+class TestTheLeadAnOpportunityMakes:
+    """The victim creates an opportunity without a lead; the lead made for it is the
+    victim's like any other: the attacker can't open it, filter by it, count it, list it or
+    find it, and an administrator sees it where its owner's records are."""
+
+    @pytest.mark.parametrize("action", ["", "/timeline"])
+    def test_the_attacker_cant_open_the_new_lead_through_any_workspace(self, world, action):
+        attacker, victim, *_ = world
+        _, lead = opportunity_without_a_lead(victim)
+        client = signed_in(attacker)
+        for workspace in ("me", str(victim.pk), "all"):
+            base = f"/api/v1/workspaces/{workspace}/leads"
+            real = client.get(f"{base}/{lead.pk}{action}")
+            missing = client.get(f"{base}/{uuid.uuid4()}{action}")
+            assert real.status_code == missing.status_code == 404, (workspace, real.content)
+            assert without_request_id(real) == without_request_id(missing)
+            assert CUSTOMER not in real.content.decode()
+
+    def test_filtering_by_the_new_lead_lists_nothing(self, world):
+        attacker, victim, *_ = world
+        opportunity, lead = opportunity_without_a_lead(victim)
+        assert walk(signed_in(attacker), f"{ME}/opportunities", {"lead": str(lead.pk)}) == []
+        # The control: the same filter finds it in its owner's workspace.
+        assert walk(signed_in(victim), f"{ME}/opportunities", {"lead": str(lead.pk)}) == [
+            opportunity["id"]
+        ]
+
+    def test_the_attackers_dashboard_never_lists_or_counts_the_new_lead(self, world):
+        attacker, victim, *_ = world
+        theirs, mine = signed_in(attacker), signed_in(victim)
+        before = theirs.get(f"{ME}/dashboard").json()
+        victims_before = mine.get(f"{ME}/dashboard").json()
+        opportunity, lead = opportunity_without_a_lead(victim)
+        response = theirs.get(f"{ME}/dashboard")
+        assert response.status_code == 200, response.content
+        after = response.json()
+        assert str(lead.pk) not in [row["id"] for row in after["new_leads"]]
+        assert after["new_leads"] == before["new_leads"]
+        assert after["leads"] == before["leads"]  # total and new today: unchanged
+        assert after["pipeline"] == before["pipeline"]
+        for trace in (str(lead.pk), opportunity["id"], CUSTOMER, ACCOUNT):
+            assert trace not in response.content.decode()
+        # The control: the owner's dashboard lists and counts it once, with its opportunity.
+        victims = mine.get(f"{ME}/dashboard").json()
+        assert victims["leads"]["total"] == victims_before["leads"]["total"] + 1
+        assert victims["leads"]["new_today"] == victims_before["leads"]["new_today"] + 1
+        row = next(row for row in victims["new_leads"] if row["id"] == str(lead.pk))
+        assert row["opportunity"]["id"] == opportunity["id"]
+
+    def test_the_attackers_search_finds_neither_the_lead_nor_its_opportunity(self, world):
+        attacker, victim, *_ = world
+        opportunity, lead = opportunity_without_a_lead(victim)
+        for words in (CUSTOMER, ACCOUNT, "Quorrell"):
+            response = signed_in(attacker).get(f"{ME}/search", {"q": words})
+            assert response.status_code == 200, response.content
+            body = response.json()
+            assert body["leads"] == {"results": [], "has_more": False}, words
+            assert body["opportunities"] == {"results": [], "has_more": False}, words
+            assert str(lead.pk) not in response.content.decode()
+            assert opportunity["id"] not in response.content.decode()
+        # The control: the owner's search finds both.
+        found = signed_in(victim).get(f"{ME}/search", {"q": CUSTOMER}).json()
+        assert [row["id"] for row in found["leads"]["results"]] == [str(lead.pk)]
+        assert [row["id"] for row in found["opportunities"]["results"]] == [opportunity["id"]]
+
+    def test_an_admin_sees_the_new_lead_organisation_wide_and_in_its_owners_workspace(
+        self, world, admin
+    ):
+        attacker, victim, *_ = world
+        opportunity, lead = opportunity_without_a_lead(victim)
+        client = signed_in(admin)
+        for workspace in ("all", str(victim.pk)):
+            base = f"/api/v1/workspaces/{workspace}"
+            detail = client.get(f"{base}/leads/{lead.pk}")
+            assert detail.status_code == 200, (workspace, detail.content)
+            assert detail.json()["owner"]["id"] == str(victim.pk)
+            assert detail.json()["display_name"] == CUSTOMER
+            assert str(lead.pk) in walk(client, f"{base}/leads", {})
+            assert walk(client, f"{base}/opportunities", {"lead": str(lead.pk)}) == [
+                opportunity["id"]
+            ]
+        # Not in the other user's workspace, even for an administrator.
+        elsewhere = client.get(f"/api/v1/workspaces/{attacker.pk}/leads/{lead.pk}")
+        assert elsewhere.status_code == 404
 
 
 class TestClosedHistoryAfterReassignment:

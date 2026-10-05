@@ -360,6 +360,26 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/config/opportunity-options": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * @description What an opportunity form offers: the instruments (the same for everyone). The
+         *     services accept exactly these for a new or changed instrument.
+         */
+        readonly get: operations["opportunity_options"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/config/pipelines": {
         readonly parameters: {
             readonly query?: never;
@@ -1660,7 +1680,10 @@ export interface components {
             readonly lead: components["schemas"]["ActivityLeadRef"];
             readonly owner: components["schemas"]["UserRef"];
         };
-        /** @description One of today's new leads: its name, who it is assigned to, and when it was created. */
+        /**
+         * @description One of today's new leads: its name, who it is assigned to, when it was created, and
+         *     the opportunity it was made for (its first one in this workspace), if any.
+         */
         readonly DashboardLead: {
             /** Format: uuid */
             readonly id: string;
@@ -1670,6 +1693,13 @@ export interface components {
             readonly owner: components["schemas"]["UserRef"];
             /** Format: date-time */
             readonly created_at: string;
+            readonly opportunity: components["schemas"]["DashboardLeadOpportunity"] | null;
+        };
+        readonly DashboardLeadOpportunity: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly title: string;
+            readonly instrument_name: string;
         };
         readonly Detail: {
             readonly detail: string;
@@ -1716,6 +1746,10 @@ export interface components {
         readonly FieldsReplaceRequest: {
             readonly version: number;
             readonly custom_fields: readonly components["schemas"]["FieldInputRequest"][];
+        };
+        readonly Instrument: {
+            /** @description Stored on the opportunity as `instrument_name`. */
+            readonly name: string;
         };
         readonly InvitationAcceptRequest: {
             readonly token: string;
@@ -1777,7 +1811,8 @@ export interface components {
         };
         /**
          * @description The opportunity's customer, instrument and custom details (all optional here; the
-         *     account and customer names default to the lead's at creation).
+         *     account and customer names default to the lead's at creation). There is no title: the
+         *     opportunity's name is derived from its customer and instrument (ADR-0028).
          */
         readonly LeadConvertRequest: {
             /** Format: date */
@@ -1787,13 +1822,15 @@ export interface components {
             readonly contact_phone?: string;
             readonly contact_email?: string;
             readonly address?: string;
+            /** @description One of the instruments listed by /config/opportunity-options (or blank). */
             readonly instrument_name?: string;
             readonly work_load?: string;
+            /** @description Expected CPT as the salesperson states it (free text; no unit is implied). */
+            readonly expected_cpt?: string;
             /** @description Custom field id -> value (null clears it). Numbers and amounts as strings. */
             readonly custom_fields?: {
                 readonly [key: string]: unknown;
             };
-            readonly title: string;
             /** @description Amount in the organisation currency (INR), e.g. "1250000.00". */
             readonly value: string | number;
             /** @description A percentage (0-100). Omit (or null) to use the stage's default. */
@@ -2038,6 +2075,7 @@ export interface components {
             readonly address: string;
             readonly instrument_name: string;
             readonly work_load: string;
+            readonly expected_cpt: string;
             /** @description Custom field id -> canonical value (strings, booleans or option ids). */
             readonly custom_fields: {
                 readonly [key: string]: unknown;
@@ -2090,7 +2128,8 @@ export interface components {
         };
         /**
          * @description The opportunity's customer, instrument and custom details (all optional here; the
-         *     account and customer names default to the lead's at creation).
+         *     account and customer names default to the lead's at creation). There is no title: the
+         *     opportunity's name is derived from its customer and instrument (ADR-0028).
          */
         readonly OpportunityCreateRequest: {
             /** Format: date */
@@ -2100,13 +2139,15 @@ export interface components {
             readonly contact_phone?: string;
             readonly contact_email?: string;
             readonly address?: string;
+            /** @description One of the instruments listed by /config/opportunity-options (or blank). */
             readonly instrument_name?: string;
             readonly work_load?: string;
+            /** @description Expected CPT as the salesperson states it (free text; no unit is implied). */
+            readonly expected_cpt?: string;
             /** @description Custom field id -> value (null clears it). Numbers and amounts as strings. */
             readonly custom_fields?: {
                 readonly [key: string]: unknown;
             };
-            readonly title: string;
             /** @description Amount in the organisation currency (INR), e.g. "1250000.00". */
             readonly value: string | number;
             /** @description A percentage (0-100). Omit (or null) to use the stage's default. */
@@ -2149,6 +2190,10 @@ export interface components {
             readonly lost_reason?: string;
             /** @description Required when moving into a negotiation stage; refused otherwise. */
             readonly negotiated_price?: (string | number) | null;
+        };
+        /** @description The choices an opportunity form offers (pipeline.instruments: the one list). */
+        readonly OpportunityOptions: {
+            readonly instruments: readonly components["schemas"]["Instrument"][];
         };
         /** @description One keyset-paginated page of opportunities (follow `next` / `previous` as given). */
         readonly OpportunityPage: {
@@ -2243,7 +2288,8 @@ export interface components {
         };
         /**
          * @description The opportunity's customer, instrument and custom details (all optional here; the
-         *     account and customer names default to the lead's at creation).
+         *     account and customer names default to the lead's at creation). There is no title: the
+         *     opportunity's name is derived from its customer and instrument (ADR-0028).
          */
         readonly PatchedOpportunityUpdateRequest: {
             /** Format: date */
@@ -2253,14 +2299,16 @@ export interface components {
             readonly contact_phone?: string;
             readonly contact_email?: string;
             readonly address?: string;
+            /** @description One of the instruments listed by /config/opportunity-options (or blank). */
             readonly instrument_name?: string;
             readonly work_load?: string;
+            /** @description Expected CPT as the salesperson states it (free text; no unit is implied). */
+            readonly expected_cpt?: string;
             /** @description Custom field id -> value (null clears it). Numbers and amounts as strings. */
             readonly custom_fields?: {
                 readonly [key: string]: unknown;
             };
             readonly version?: number;
-            readonly title?: string;
             /** @description Amount in the organisation currency (INR), e.g. "1250000.00". */
             readonly value?: string | number;
             /** @description A percentage (0-100). Omit (or null) to use the stage's default. */
@@ -3284,6 +3332,25 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["LeadOptions"];
+                };
+            };
+        };
+    };
+    readonly opportunity_options: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["OpportunityOptions"];
                 };
             };
         };

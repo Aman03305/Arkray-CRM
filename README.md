@@ -4,8 +4,10 @@ A sales CRM built from scratch as a **modular monolith**: Django 5.2 LTS + DRF +
 PostgreSQL 16 (pgvector) + Redis + Celery on the backend, Next.js 16 + TypeScript on the
 frontend.
 
-Normal users work in three modules — **Dashboard, Pipeline, Activities** (each deal carries
-its customer; Leads were removed from the UI, [ADR-0027](docs/adr/0027-leads-removed-from-the-ui.md)). Admins
+Normal users work in three modules — **Dashboard, Pipeline, Activities**. A new opportunity
+creates its lead (the canonical customer record) in the same transaction; leads are shown
+read-only (their page, the dashboard's new leads, search) but there is no Leads module
+([ADR-0027](docs/adr/0027-leads-removed-from-the-ui.md), [ADR-0028](docs/adr/0028-opportunity-creates-its-lead.md)). Admins
 additionally manage **Users** and can open any user's CRM workspace
 (`/admin/users/{id}/dashboard`), with every such access authorised and audited server-side.
 **Ask Arkray** answers questions about CRM data strictly within the asker's permissions.
@@ -62,7 +64,7 @@ scripts/check.sh      # backend: ruff, mypy (strict), import contracts, pytest, 
 | Topic | Document |
 |---|---|
 | System design, module boundaries, phases | [architecture.md](docs/architecture.md) |
-| Leads (the backend customer record; not in the UI since ADR-0027): model, ownership, statuses, search, concurrency | [leads.md](docs/leads.md) |
+| Leads (the canonical customer record; read-only in the UI, ADR-0028): model, ownership, statuses, search, concurrency | [leads.md](docs/leads.md) |
 | Pipeline: stages, opportunities, transitions, conversion, money, lock order | [pipeline.md](docs/pipeline.md) |
 | Activities: tasks, meetings, notes, the timeline | [activities.md](docs/activities.md) |
 | Schema, ERD, constraints, indexes | [database.md](docs/database.md) |

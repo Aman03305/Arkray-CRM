@@ -110,6 +110,7 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     f"{PIPELINE}/restore": _rule("workspace", "POST"),
     "api/v1/workspaces/<str:workspace>/leads/<uuid:lead_id>/convert": _rule("workspace", "POST"),
     "api/v1/config/pipelines": _rule("authenticated", "GET"),
+    "api/v1/config/opportunity-options": _rule("authenticated", "GET"),  # ADR-0028
     # --- activities (Phase 4). Same workspace rules: the scope decides which activities,
     # timelines and counts exist; writes in delegated workspaces need crm.manage_any. Nobody
     # chooses an owner (current work follows the lead); lifecycle changes are actions. -------

@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { forgetBoardState } from "@/features/pipeline/hooks";
 import { OpportunityView, PipelineView } from "@/features/workspace/views";
 import type { PipelineDto, PipelineList } from "@/lib/api/types";
-import { salesViewer } from "@/test/fixtures";
+import { OPPORTUNITY_OPTIONS_ROUTE, salesViewer } from "@/test/fixtures";
 import { makeBoard, makeOpportunity, OPPORTUNITY_ID, PIPELINE, PIPELINE_ROUTES, STAGES } from "@/test/pipeline-fixtures";
 import { apiError, mockApi, type RecordedCall, renderWithProviders } from "@/test/render";
 
@@ -141,6 +141,7 @@ describe("creating an opportunity into a stage", () => {
       custom_fields: [{ id: "f-tender", name: "Tender number", type: "text", required: true, options: [], position: 0 }],
     };
     const api = mockApi({
+      ...OPPORTUNITY_OPTIONS_ROUTE,
       [`GET ${PIPELINES_URL}`]: { status: 200, body: { results: [withField] } },
       [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) },
       [`POST ${CREATE}`]: { status: 201, body: makeOpportunity() },
@@ -150,7 +151,6 @@ describe("creating an opportunity into a stage", () => {
     await user.click((await screen.findAllByRole("button", { name: "New opportunity" }))[0]!);
     const panel = screen.getByRole("dialog", { name: "New opportunity" });
     await user.selectOptions(within(panel).getByLabelText("Stage"), STAGES.negotiation.id);
-    await user.type(within(panel).getByLabelText("Opportunity name"), "Tender deal");
     await user.type(within(panel).getByLabelText("Account name"), "City Lab");
     await user.type(within(panel).getByLabelText("Customer name"), "Dr. Iyer");
     await user.type(within(panel).getByLabelText("Installation price (₹)"), "12,50,000");
@@ -170,21 +170,22 @@ describe("creating an opportunity into a stage", () => {
       custom_fields: { "f-tender": "GEM/2026/7" },
     });
     expect(body).not.toHaveProperty("lead");
+    expect(body).not.toHaveProperty("title"); // the server names it (ADR-0028)
   });
 });
 
 describe("the opportunity panel and page", () => {
   it("P2: a stray click beside the panel asks before throwing typing away", async () => {
-    const api = mockApi({ ...PIPELINE_ROUTES, [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) } });
+    const api = mockApi({ ...PIPELINE_ROUTES, ...OPPORTUNITY_OPTIONS_ROUTE, [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) } });
     renderWithProviders(<PipelineView />, { viewer: salesViewer });
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "New opportunity" }));
     const panel = screen.getByRole("dialog", { name: "New opportunity" });
-    await user.type(within(panel).getByLabelText("Opportunity name"), "Big deal");
+    await user.type(within(panel).getByLabelText("Customer name"), "Big customer");
     fireEvent.click(panel.parentElement!.querySelector('[aria-hidden="true"]')!);
     const confirm = screen.getByRole("alertdialog", { name: "Discard your changes?" });
     await user.click(within(confirm).getByRole("button", { name: "Keep editing" }));
-    expect(within(panel).getByLabelText("Opportunity name")).toHaveValue("Big deal");
+    expect(within(panel).getByLabelText("Customer name")).toHaveValue("Big customer");
     await user.keyboard("{Escape}");
     await user.click(within(screen.getByRole("alertdialog", { name: "Discard your changes?" })).getByRole("button", { name: "Discard" }));
     expect(screen.queryByRole("dialog", { name: "New opportunity" })).not.toBeInTheDocument();

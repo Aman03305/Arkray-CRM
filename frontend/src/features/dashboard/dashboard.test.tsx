@@ -19,7 +19,7 @@ import {
   RAHUL_DASHBOARD,
   RAHUL_ONLY,
 } from "@/test/dashboard-fixtures";
-import { adminViewer, makeViewer, PRIYA_ID, RAHUL_ID, salesViewer } from "@/test/fixtures";
+import { adminViewer, LEAD_ID, makeViewer, PRIYA_ID, RAHUL_ID, salesViewer } from "@/test/fixtures";
 import { apiError, createTestQueryClient, mockApi, renderWithProviders } from "@/test/render";
 
 import { WorkspaceDashboard } from "./DashboardView";
@@ -80,11 +80,17 @@ afterEach(() => {
   onlineManager.setOnline(true);
 });
 
-describe("the four figures", () => {
+describe("the six figures", () => {
   it("show exactly what the server sent, labelled in words", async () => {
     mockApi({ [`GET ${ME}`]: { status: 200, body: makeDashboard() } });
     renderWithProviders(<DashboardView />, { viewer: salesViewer });
 
+    // The lead counts lead the figures (ADR-0028).
+    const figures = await screen.findByRole("region", { name: "Key figures" });
+    const tiles = within(figures).getAllByRole("listitem");
+    expect(tiles).toHaveLength(6);
+    expect(tiles[0]).toHaveTextContent(/^Total leads\s*1,234$/);
+    expect(tiles[1]).toHaveTextContent(/^New leads today\s*7$/);
     // Over every pipeline the workspace may see, and it says so.
     expect(await screen.findByRole("link", { name: /^Pipeline value\s+₹15,00,000\s+2 open opportunities · all pipelines$/ })).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 1, name: "Dashboard" })).toBeInTheDocument();
@@ -98,12 +104,13 @@ describe("the four figures", () => {
     expect(screen.getByText("3 Oct 2026")).toBeInTheDocument();
     expect(screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual([
       "Key figures",
+      "New leads",
       "Upcoming meetings",
       "Tasks requiring attention",
     ]);
   });
 
-  it("show no lead figures or new-leads list, even though the API still sends them (ADR-0027)", async () => {
+  it("show the lead counts as plain figures (not links), then list today's new leads before the meetings (ADR-0028)", async () => {
     mockApi({
       [`GET ${ME}`]: {
         status: 200,
@@ -115,21 +122,58 @@ describe("the four figures", () => {
     });
     renderWithProviders(<DashboardView />, { viewer: salesViewer });
     const figures = await screen.findByRole("region", { name: "Key figures" });
+    expect(within(figures).getAllByRole("listitem").map((tile) => tile.textContent)).toEqual([
+      expect.stringMatching(/^Total leads\s*4,321$/),
+      expect.stringMatching(/^New leads today\s*87$/),
+      expect.stringMatching(/^Pipeline value/),
+      expect.stringMatching(/^Weighted pipeline/),
+      expect.stringMatching(/^Meetings/),
+      expect.stringMatching(/^Tasks/),
+    ]);
+    // The lead counts are figures only: their leads are listed below.
     expect(within(figures).getAllByRole("link").map((card) => card.textContent)).toEqual([
       expect.stringMatching(/^Pipeline value/),
       expect.stringMatching(/^Weighted pipeline/),
       expect.stringMatching(/^Meetings/),
       expect.stringMatching(/^Tasks/),
     ]);
-    // Two lists: meetings and tasks.
+    expect(within(figures).queryByRole("link", { name: /leads/i })).not.toBeInTheDocument();
+    // Three lists, the new leads first: immediately before the upcoming meetings.
     expect(screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual([
       "Key figures",
+      "New leads",
       "Upcoming meetings",
       "Tasks requiring attention",
     ]);
-    expect(text()).not.toMatch(/leads|4,321|\b87\b|LEAD-ONLY/i);
-    expect(screen.queryByRole("region", { name: "New leads today" })).not.toBeInTheDocument();
-    expect(document.querySelector('a[href*="/leads"]')).toBeNull();
+    const leads = screen.getByRole("region", { name: "New leads" });
+    const meetings = screen.getByRole("region", { name: "Upcoming meetings" });
+    expect(leads.compareDocumentPosition(meetings) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(leads).getByRole("link", { name: "LEAD-ONLY prospect" })).toHaveAttribute("href", `/leads/${LEAD_ID}`);
+    expect(leads).toHaveTextContent("Newest 1 of 87 ·");
+    // Every lead link on the page is a lead page in this workspace, and only the list has them.
+    const leadLinks = [...document.querySelectorAll('a[href*="/leads"]')];
+    expect(leadLinks).toHaveLength(1);
+    for (const link of leadLinks) {
+      expect(link.getAttribute("href")).toMatch(/^\/leads\/[0-9a-f-]+$/);
+      expect(leads).toContainElement(link as HTMLElement);
+    }
+  });
+
+  it("each new lead links to its lead page in this workspace, with its instrument and when it came in", async () => {
+    navigation.pathname = `/admin/users/${RAHUL_ID}/dashboard`;
+    mockApi({ [`GET ${RAHUL_URL}`]: { status: 200, body: makeDashboard() } });
+    renderWithProviders(<DashboardView />, { viewer: adminViewer });
+
+    const leads = await screen.findByRole("region", { name: "New leads" });
+    const row = within(leads).getByRole("listitem");
+    expect(within(row).getByRole("link", { name: "Asha Mehta" })).toHaveAttribute("href", `/admin/users/${RAHUL_ID}/leads/${LEAD_ID}`);
+    expect(row).toHaveTextContent("Adams 8380 V-lite");
+    expect(within(row).getByText("Today 10:12 am")).toHaveAttribute("datetime", "2026-10-03T04:42:00Z");
+    // One person's workspace: their own name isn't repeated on the row.
+    expect(row).not.toHaveTextContent("Rahul Sharma");
+    // More came in than are listed, and the footer says so; it opens Rahul's pipeline.
+    expect(leads).toHaveTextContent("Newest 1 of 7 ·");
+    expect(within(leads).getByRole("link", { name: "View pipeline" })).toHaveAttribute("href", `/admin/users/${RAHUL_ID}/pipeline`);
   });
 
   it("keep money exact: digits a JavaScript number would lose, paise, Indian grouping", async () => {
@@ -158,6 +202,13 @@ describe("the four figures", () => {
     expect(screen.getByRole("link", { name: /^Weighted pipeline\s+₹0\s/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /^Meetings\s+0\s+today\s+0 upcoming$/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /^Tasks\s+0\s+open\s+0 due today · 0 overdue$/ })).toBeInTheDocument();
+    const tiles = within(screen.getByRole("region", { name: "Key figures" })).getAllByRole("listitem");
+    expect(tiles[0]).toHaveTextContent(/^Total leads\s*0$/);
+    expect(tiles[1]).toHaveTextContent(/^New leads today\s*0$/);
+    const leads = screen.getByRole("region", { name: "New leads" });
+    expect(within(leads).getByText("No new leads yet today.")).toBeInTheDocument();
+    expect(leads).not.toHaveTextContent(/Newest/);
+    expect(within(leads).getByRole("link", { name: "View pipeline" })).toHaveAttribute("href", "/pipeline");
     expect(screen.getByText("No upcoming meetings.")).toBeInTheDocument();
     expect(screen.getByText("No open tasks.")).toBeInTheDocument();
     expect(text()).not.toMatch(/NaN|undefined|null|—/);
@@ -172,7 +223,7 @@ describe("loading and errors", () => {
     renderWithProviders(<DashboardView />, { viewer: salesViewer });
 
     expect(await screen.findByRole("status")).toHaveTextContent("Loading the dashboard");
-    expect(text()).not.toMatch(/₹|\b0\b|Pipeline value/);
+    expect(text()).not.toMatch(/₹|\b0\b|Pipeline value|Total leads|New leads/);
     await act(async () => gate.resolve({ status: 200, body: makeDashboard() }));
     expect(await screen.findByRole("link", { name: /Pipeline value/ })).toBeInTheDocument();
     expect(screen.queryByText("Loading the dashboard")).not.toBeInTheDocument();
@@ -279,7 +330,7 @@ describe("loading and errors", () => {
 });
 
 describe("supporting lists", () => {
-  it("organisation-wide, each meeting and task names whose it is", async () => {
+  it("organisation-wide, each new lead, meeting and task names whose it is", async () => {
     mockApi({
       [`GET ${ALL}`]: {
         status: 200,
@@ -292,11 +343,16 @@ describe("supporting lists", () => {
     });
     renderWithProviders(<DashboardView />, { viewer: adminViewer });
 
-    const meetings = await screen.findByRole("region", { name: "Upcoming meetings" });
+    const leads = await screen.findByRole("region", { name: "New leads" });
+    const lead = within(leads).getByRole("listitem");
+    expect(lead).toHaveTextContent("Priya Patel");
+    // The organisation's own pages: the lead opens at /leads/{id}.
+    expect(within(lead).getByRole("link", { name: "Asha Mehta" })).toHaveAttribute("href", `/leads/${LEAD_ID}`);
+    expect(within(lead).getByText("Today 10:12 am")).toHaveAttribute("datetime", "2026-10-03T04:42:00Z");
+    const meetings = screen.getByRole("region", { name: "Upcoming meetings" });
     expect(within(meetings).getByRole("listitem")).toHaveTextContent("Priya Patel");
     const tasks = screen.getByRole("region", { name: "Tasks requiring attention" });
     expect(within(tasks).getByRole("listitem")).toHaveTextContent("Rahul Sharma");
-    expect(screen.queryByRole("region", { name: "New leads today" })).not.toBeInTheDocument();
     expect(screen.queryByText(/Assigned to/)).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 1, name: "Dashboard" })).toBeInTheDocument();
     expect(screen.getByText("Organization overview")).toBeInTheDocument();
@@ -307,10 +363,11 @@ describe("supporting lists", () => {
     renderWithProviders(<DashboardView />, { viewer: salesViewer });
     const meetings = await screen.findByRole("region", { name: "Upcoming meetings" });
     expect(within(meetings).queryByText(/Rahul Sharma/)).not.toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "New leads" })).queryByText(/Rahul Sharma/)).not.toBeInTheDocument();
     expect(within(screen.getByRole("region", { name: "Tasks requiring attention" })).queryByText(/Rahul Sharma/)).not.toBeInTheDocument();
   });
 
-  it("each row names its customer as text, never a link (there are no lead pages)", async () => {
+  it("each meeting and task names its customer as text, never a link; only a new lead opens a lead page", async () => {
     mockApi({
       [`GET ${ME}`]: {
         status: 200,
@@ -325,11 +382,15 @@ describe("supporting lists", () => {
     const meeting = within(meetings).getByRole("listitem");
     expect(meeting).toHaveTextContent("Asha Mehta");
     expect(within(meeting).getAllByRole("link").map((link) => link.textContent)).toEqual([makeMeeting().title]); // the meeting only
-    expect(screen.queryByRole("link", { name: "Asha Mehta" })).not.toBeInTheDocument();
+    expect(within(meetings).queryByRole("link", { name: "Asha Mehta" })).not.toBeInTheDocument();
     const task = within(screen.getByRole("region", { name: "Tasks requiring attention" })).getByRole("listitem");
     expect(task).toHaveTextContent("Customer in another workspace");
     expect(within(task).getAllByRole("link").map((link) => link.textContent)).toEqual(["Restricted follow-up"]);
-    expect(document.querySelector('a[href*="/leads"]')).toBeNull();
+    // The only lead links are the new leads' own rows.
+    const leads = screen.getByRole("region", { name: "New leads" });
+    const leadLinks = [...document.querySelectorAll('a[href*="/leads"]')];
+    expect(leadLinks.map((link) => link.getAttribute("href"))).toEqual([`/leads/${LEAD_ID}`]);
+    expect(leads).toContainElement(leadLinks[0] as HTMLElement);
   });
 
   it("flag overdue tasks in words and link each row to its page in this workspace", async () => {
@@ -363,11 +424,10 @@ describe("supporting lists", () => {
     renderWithProviders(<DashboardView />, { viewer: salesViewer });
     await screen.findByRole("region", { name: "Key figures" });
     const names = screen.getAllByRole("link").map((link) => link.textContent);
-    for (const name of ["View upcoming meetings", "View open tasks"]) {
+    for (const name of ["View pipeline", "View upcoming meetings", "View open tasks"]) {
       expect(names.filter((n) => n === name)).toHaveLength(1);
     }
     expect(names).not.toContain("View in Activities");
-    expect(names).not.toContain("View today's new leads");
   });
 });
 
@@ -383,7 +443,7 @@ describe("cards and links stay in the workspace and open the list each figure co
     return result;
   };
 
-  it("an admin viewing Rahul goes to Rahul's Pipeline and Activities", async () => {
+  it("an admin viewing Rahul goes to Rahul's Pipeline, Activities and lead pages", async () => {
     navigation.pathname = `/admin/users/${RAHUL_ID}/dashboard`;
     mockApi({ [`GET ${RAHUL_URL}`]: { status: 200, body: makeDashboard() } });
     renderWithProviders(<DashboardView />, { viewer: adminViewer });
@@ -407,8 +467,14 @@ describe("cards and links stay in the workspace and open the list each figure co
       dateTo: "2026-10-03",
     });
 
-    // No Leads module to go to (ADR-0027).
-    expect(document.querySelector('a[href*="/leads"]')).toBeNull();
+    // There is no Leads module (ADR-0027): the lead counts aren't links, and a new lead opens
+    // its own lead page in Rahul's workspace (ADR-0028).
+    expect(screen.queryByRole("link", { name: /^Total leads/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /^New leads today/ })).not.toBeInTheDocument();
+    expect([...document.querySelectorAll('a[href*="/leads"]')].map((link) => link.getAttribute("href"))).toEqual([
+      `${base}/leads/${LEAD_ID}`,
+    ]);
+    expect(screen.getByRole("link", { name: "View pipeline" })).toHaveAttribute("href", `${base}/pipeline`);
 
     fireEvent.click(screen.getByRole("link", { name: "View all 6 upcoming meetings" }));
     expect(remembered(RAHUL_ID).activities).toMatchObject({ tab: "meeting", status: "upcoming" });
@@ -553,6 +619,7 @@ describe("accessibility", () => {
     mockApi({ [`GET ${ME}`]: { status: 200, body: makeDashboard() } });
     renderWithProviders(<DashboardView />, { viewer: salesViewer });
     const figures = await screen.findByRole("region", { name: "Key figures" });
+    expect(within(figures).getAllByRole("listitem")).toHaveLength(6);
     const cards = within(figures).getAllByRole("link");
     expect(cards).toHaveLength(4);
     for (const card of cards) {

@@ -45,7 +45,6 @@ def test_every_write_shows_on_the_next_load(user_a_client):
         "opportunities",
         {
             "lead": lead["id"],
-            "title": "Analyser",
             "value": "1000000",
             "stage": str(default_stage("proposal").pk),
         },

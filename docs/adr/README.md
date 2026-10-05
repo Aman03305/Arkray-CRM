@@ -32,7 +32,8 @@ and update the old one's status line.
 | [0024](0024-phase-9-security-hardening.md) | Security hardening: sealed and bound page links, prefixed cookies, a nonce CSP, audit outside the cache |
 | [0025](0025-production-deployment.md) | Production deployment: restricted database role enforced at start, the edge proxy's contract, erasure on request |
 | [0026](0026-user-pipelines-support-sessions-attachments.md) | User-defined pipelines, negotiated prices, support sessions without impersonation, admin-set passwords, note attachments |
-| [0027](0027-leads-removed-from-the-ui.md) | Leads removed from the UI; the lead stays as each deal's hidden customer record |
+| [0027](0027-leads-removed-from-the-ui.md) | Leads removed from the UI; the lead stays as each deal's hidden customer record (partly superseded by 0028) |
+| [0028](0028-opportunity-creates-its-lead.md) | A new opportunity creates its lead; derived opportunity names; the instrument list; Expected CPT; a read-only lead page |
 
 Template:
 

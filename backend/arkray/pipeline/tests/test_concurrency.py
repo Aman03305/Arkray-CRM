@@ -9,7 +9,10 @@ Rules under test:
   for each other in a cycle: the interleavings below would deadlock if any operation ever
   locked an opportunity before its lead;
 - whatever the interleaving, an OPEN opportunity is never left owned by anyone but its
-  lead's owner, conversion never creates two opportunities, and history is never corrupt.
+  lead's owner, conversion never creates two opportunities, and history is never corrupt;
+- a create submitted twice with one Idempotency-Key creates once (with no lead given: one
+  new lead and one opportunity, never an orphan lead); without a key, two creates for the
+  same customer details are two customers (nothing is merged by name).
 """
 
 from __future__ import annotations
@@ -46,7 +49,13 @@ pytestmark = [
 
 OWN = AccessScope.own
 ORG = AccessScope.organization
-FIELDS = {"title": "Race", "value": Decimal("100000")}
+FIELDS = {"value": Decimal("100000")}
+# A new opportunity's customer, for a create without a lead (the lead is made from it).
+CUSTOMER = {
+    "customer_name": "ABC Diagnostics Mumbai",
+    "account_name": "ABC Diagnostics",
+    "instrument_name": "Adams 8380 V-lite",
+}
 
 
 def split(results):
@@ -152,14 +161,15 @@ def test_edit_racing_edit():
             scope=OWN(owner.pk),
             opportunity_id=opportunity.pk,
             version=1,
-            changes={"title": "Mine"},
+            changes={"description": "Mine"},
         ),
     )
     ok, failed = split(results)
     assert len(ok) == 1
     assert [type(f) for f in failed] == [ConflictError]
     opportunity.refresh_from_db()
-    assert (opportunity.value, opportunity.title) == (ok[0].value, ok[0].title)  # no lost update
+    # no lost update
+    assert (opportunity.value, opportunity.description) == (ok[0].value, ok[0].description)
     assert AuditEvent.objects.filter(action="opportunity.updated").count() == 1
 
 
@@ -312,12 +322,76 @@ def test_a_double_submitted_create_with_one_key_creates_one_opportunity():
     assert Opportunity.objects.count() == 1
 
 
+def test_a_double_submitted_create_without_a_lead_makes_one_lead_and_one_opportunity():
+    """The UI's create (ADR-0027/0028): no lead given, the customer record is made in the same
+    transaction. The key serialises the duplicates: the losers' whole transactions (their new
+    lead included) roll back and they replay the winner, so no orphan lead is left behind."""
+    owner = UserFactory()
+    key = "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"
+    results = run_concurrently(
+        *(
+            lambda: services.create_opportunity(
+                actor=owner,
+                scope=OWN(owner.pk),
+                lead_id=None,
+                fields={**FIELDS, **CUSTOMER},
+                idempotency_key=key,
+            )
+            for _ in range(3)
+        )
+    )
+    no_deadlocks(results)
+    assert all(isinstance(r, services.CreateResult) for r in results), results
+    assert sorted(r.replayed for r in results) == [False, True, True]
+    assert len({r.opportunity.pk for r in results}) == 1
+    assert (Lead.objects.count(), Opportunity.objects.count()) == (1, 1)
+    lead, opportunity = Lead.objects.get(), Opportunity.objects.get()
+    assert opportunity.pk == results[0].opportunity.pk
+    assert opportunity.lead_id == lead.pk
+    assert {r.opportunity.lead_id for r in results} == {lead.pk}
+    assert (lead.owner_id, opportunity.owner_id) == (owner.pk, owner.pk)
+    assert opportunity.title == "ABC Diagnostics Mumbai — Adams 8380 V-lite"
+    assert AuditEvent.objects.filter(action="lead.created").count() == 1
+    assert AuditEvent.objects.filter(action="opportunity.created").count() == 1
+
+
+def test_concurrent_creates_without_a_key_for_the_same_customer_make_two_records():
+    """Without an Idempotency-Key two creates are two requests, even with identical customer
+    details: each gets its own lead (no silent merge by name) and its opportunity is linked
+    to that lead."""
+    owner = UserFactory()
+    results = run_concurrently(
+        *(
+            lambda: services.create_opportunity(
+                actor=owner, scope=OWN(owner.pk), lead_id=None, fields={**FIELDS, **CUSTOMER}
+            )
+            for _ in range(2)
+        )
+    )
+    no_deadlocks(results)
+    assert all(isinstance(r, services.CreateResult) for r in results), results
+    assert [r.replayed for r in results] == [False, False]
+    assert (Lead.objects.count(), Opportunity.objects.count()) == (2, 2)
+    links = dict(Opportunity.objects.values_list("pk", "lead_id"))
+    assert links == {r.opportunity.pk: r.opportunity.lead_id for r in results}
+    # One lead each: the two opportunities don't share a lead, and no lead is left over.
+    assert sorted(links.values()) == sorted(Lead.objects.values_list("pk", flat=True))
+    assert len(set(links.values())) == 2
+    assert (
+        list(Lead.objects.values_list("display_name", flat=True)) == ["ABC Diagnostics Mumbai"] * 2
+    )
+
+
 # --- lock order: interleavings that deadlock if anything locks opportunity -> lead ----------
 OPERATIONS = {
     "move": lambda a, opp: move(a, OWN(a.pk), opp.pk, "proposal"),
     "close": lambda a, opp: move(a, OWN(a.pk), opp.pk, "won"),
     "edit": lambda a, opp: services.update_opportunity(
-        actor=a, scope=OWN(a.pk), opportunity_id=opp.pk, version=1, changes={"title": "Edited"}
+        actor=a,
+        scope=OWN(a.pk),
+        opportunity_id=opp.pk,
+        version=1,
+        changes={"description": "Edited"},
     ),
     "archive": lambda a, opp: services.archive_opportunity(
         actor=a, scope=OWN(a.pk), opportunity_id=opp.pk, version=1

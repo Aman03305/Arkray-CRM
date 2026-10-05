@@ -134,19 +134,24 @@ describe("answers", () => {
       `/admin/users/${RAHUL}/pipeline/${DEAL}`,
     );
     expect(within(thread).getByRole("link", { name: "Call notes" })).toHaveAttribute("href", `/admin/users/${RAHUL}/activities/${NOTE}`);
-    // The customer (the API's lead) has no page: named, never linked.
-    expect(within(thread).getByText("Dr Mehta <b>bold</b>").closest("a")).toBeNull();
+    // A cited lead opens its (read-only) lead page, in Rahul's workspace too (ADR-0028).
+    expect(within(thread).getByRole("link", { name: "Dr Mehta <b>bold</b>" })).toHaveAttribute("href", `/admin/users/${RAHUL}/leads/${LEAD}`);
     expect(container.querySelector("img, script, b, i")).toBeNull();
     expect(screen.getByText(/<img src=x onerror="alert\(1\)"> see/)).toBeInTheDocument();
     // A reference the server didn't resolve is not rendered at all.
     expect(screen.getAllByRole("link").map((l) => l.getAttribute("href"))).not.toContain(
       `/admin/users/${RAHUL}/activities/99999999-9999-4999-8999-999999999999`,
     );
-    expect(screen.getAllByRole("link").some((l) => l.getAttribute("href")?.includes("/leads"))).toBe(false);
+    // Every record link in the answer stays in Rahul's workspace.
+    const recordLinks = within(thread)
+      .getAllByRole("link")
+      .map((l) => l.getAttribute("href") ?? "");
+    expect(recordLinks).toHaveLength(3);
+    for (const href of recordLinks) expect(href.startsWith(`/admin/users/${RAHUL}/`)).toBe(true);
     expect(screen.getByText("Asked <script>x()</script> about price")).toBeInTheDocument();
   });
 
-  it("names a cited customer (the API's lead) as plain text labelled Customer, never as a link", async () => {
+  it("labels a cited lead Lead and links it to its lead page in this workspace", async () => {
     nav.pathname = "/ask";
     const reply = question({
       answer: answer({
@@ -166,17 +171,15 @@ describe("answers", () => {
     renderWithProviders(<AskWorkspaceView />, { viewer: asker });
     await askFor("What did Dr Mehta ask?");
     const quote = (await screen.findByText("Prefers morning calls")).closest("li")!;
-    expect(within(quote).getByText("Customer")).toBeInTheDocument();
-    expect(within(quote).getByText("Dr Mehta")).toBeInTheDocument();
-    expect(within(quote).queryByRole("link")).not.toBeInTheDocument();
-    expect(quote).not.toHaveTextContent(/lead/i);
+    expect(within(quote).getByText("Lead")).toBeInTheDocument();
+    expect(within(quote).getByRole("link", { name: "Dr Mehta" })).toHaveAttribute("href", `/leads/${LEAD}`);
     // The note quoted next to it still opens in this workspace.
     const note = screen.getByText("Asked about price").closest("li")!;
     expect(within(note).getByText("Note")).toBeInTheDocument();
     expect(within(note).getByRole("link", { name: "Call notes" })).toHaveAttribute("href", `/activities/${NOTE}`);
   });
 
-  it("lists a customer source as Customer without a link; opportunity and activity sources link in this workspace", async () => {
+  it("lists each source with its kind in words; lead, opportunity and activity sources all link in this workspace", async () => {
     nav.pathname = `/admin/users/${RAHUL}/ask`;
     const reply = question({
       answer: answer({
@@ -196,19 +199,19 @@ describe("answers", () => {
     const heading = await screen.findByRole("heading", { name: "Sources" });
     const items = within(heading.parentElement!).getAllByRole("listitem");
     expect(items.map((item) => item.textContent)).toEqual([
-      "Customer: Dr Mehta",
+      "Lead: Dr Mehta",
       "Opportunity: Analyser upgrade",
       "Task: Send the quote",
     ]);
-    expect(within(items[0]!).queryByRole("link")).not.toBeInTheDocument();
+    expect(within(items[0]!).getByRole("link", { name: "Dr Mehta" })).toHaveAttribute("href", `/admin/users/${RAHUL}/leads/${LEAD}`);
     expect(within(items[1]!).getByRole("link", { name: "Analyser upgrade" })).toHaveAttribute("href", `/admin/users/${RAHUL}/pipeline/${DEAL}`);
     expect(within(items[2]!).getByRole("link", { name: "Send the quote" })).toHaveAttribute("href", `/admin/users/${RAHUL}/activities/${TASK}`);
   });
 
-  it("recordHref gives a customer record no page, and keeps the others in the workspace", () => {
+  it("recordHref keeps every record, a lead included, in the workspace", () => {
     const rahul = { kind: "user", userId: RAHUL } as const;
-    expect(recordHref(rahul, "lead", LEAD)).toBeNull();
-    expect(recordHref({ kind: "self" }, "lead", LEAD)).toBeNull();
+    expect(recordHref(rahul, "lead", LEAD)).toBe(`/admin/users/${RAHUL}/leads/${LEAD}`);
+    expect(recordHref({ kind: "self" }, "lead", LEAD)).toBe(`/leads/${LEAD}`);
     expect(recordHref(rahul, "opportunity", DEAL)).toBe(`/admin/users/${RAHUL}/pipeline/${DEAL}`);
     expect(recordHref(rahul, "meeting", TASK)).toBe(`/admin/users/${RAHUL}/activities/${TASK}`);
     expect(recordHref({ kind: "organization" }, "note", NOTE)).toBe(`/activities/${NOTE}`);
@@ -247,7 +250,7 @@ describe("answers", () => {
     );
     renderWithProviders(<AskWorkspaceView />, { viewer: asker });
     await askFor("Why did we lose?");
-    expect(await screen.findByRole("alert")).toHaveTextContent("Pipeline, customer, task and meeting questions");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Pipeline, lead, task and meeting questions");
   });
 
   it("explains a refused question (rate limit)", async () => {

@@ -433,7 +433,7 @@ def measure(
 
 TRIGRAM = {
     "leads": "leads_search_trgm",
-    "opportunities": "pipeline_opp_search_trgm",
+    "opportunities": "pipeline_opp_text_trgm",  # pipeline.0007 (ADR-0027)
     "tasks": "activities_task_search_trgm",
     "meetings": "activities_meeting_search_trgm",
     "notes": "activities_note_search_trgm",

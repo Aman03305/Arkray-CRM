@@ -17,7 +17,7 @@ pytestmark = pytest.mark.django_db
 
 
 def create_body(lead, **extra):
-    return {"lead": str(lead.pk), "title": "Hospital Analyzer Project", "value": "1200000", **extra}
+    return {"lead": str(lead.pk), "value": "1200000", **extra}
 
 
 class TestConfig:
@@ -71,9 +71,29 @@ class TestCreateAndDetail:
         assert body["status"] == "open"
         assert body["owner"]["id"] == str(user_a.pk)
         assert body["lead"]["id"] == str(lead.pk)
+        assert body["title"] == lead.display_name  # derived: the lead's name, no instrument
         assert body["version"] == 1
         detail = user_a_client.get(opportunity_url(body["id"])).json()
         assert detail == body
+
+    def test_the_title_is_derived_never_sent(self, user_a_client, user_a, stages):
+        lead = LeadFactory(owner=user_a)
+        refused = user_a_client.post(
+            opportunities_url(), create_body(lead, title="Hospital Analyzer Project"), format="json"
+        )
+        assert refused.status_code == 400
+        assert refused.json()["error"]["details"] == {
+            "non_field_errors": ["Unknown field(s): title."]
+        }
+        assert not Opportunity.objects.exists()
+        created = user_a_client.post(
+            opportunities_url(),
+            create_body(lead, account_name="City Hospital", instrument_name="PCBA with Printer"),
+            format="json",
+        )
+        assert created.status_code == 201, created.content
+        # The customer name defaults to the lead's, which names it before the account.
+        assert created.json()["title"] == f"{lead.display_name} — PCBA with Printer"
 
     def test_integer_amounts_are_accepted(self, user_a_client, user_a, stages):
         response = user_a_client.post(
@@ -118,7 +138,7 @@ class TestCreateAndDetail:
 
     def test_nan_as_a_json_literal_is_malformed(self, user_a_client, user_a, stages):
         lead = LeadFactory(owner=user_a)
-        body = f'{{"lead": "{lead.pk}", "title": "x", "value": NaN}}'
+        body = f'{{"lead": "{lead.pk}", "value": NaN}}'
         response = user_a_client.post(opportunities_url(), body, content_type="application/json")
         assert response.status_code == 400
         assert not Opportunity.objects.exists()
@@ -171,7 +191,7 @@ class TestCreateAndDetail:
     def test_unknown_lead_is_a_404(self, user_a_client, stages):
         response = user_a_client.post(
             opportunities_url(),
-            {"lead": "5a1e4d2c-0000-4000-8000-00000000abcd", "title": "x", "value": "1"},
+            {"lead": "5a1e4d2c-0000-4000-8000-00000000abcd", "value": "1"},
             format="json",
         )
         assert response.status_code == 404
@@ -229,17 +249,18 @@ class TestEditMoveArchiveHistory:
         opportunity = OpportunityFactory(lead=LeadFactory(owner=user_a))
         assert (
             user_a_client.patch(
-                opportunity_url(opportunity.pk), {"title": "x"}, format="json"
+                opportunity_url(opportunity.pk), {"description": "x"}, format="json"
             ).status_code
             == 400
         )
         stale = user_a_client.patch(
-            opportunity_url(opportunity.pk), {"version": 9, "title": "x"}, format="json"
+            opportunity_url(opportunity.pk), {"version": 9, "description": "x"}, format="json"
         )
         assert (stale.status_code, stale.json()["error"]["code"]) == (409, "conflict")
 
     @pytest.mark.parametrize(
-        "field", ["stage", "status", "owner", "lead", "pipeline", "closed_at", "archived_at"]
+        "field",
+        ["stage", "status", "owner", "lead", "pipeline", "closed_at", "archived_at", "title"],
     )
     def test_patch_cant_touch_state(self, user_a_client, user_a, stages, field):
         opportunity = OpportunityFactory(lead=LeadFactory(owner=user_a))

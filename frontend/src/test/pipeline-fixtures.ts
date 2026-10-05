@@ -92,6 +92,7 @@ export function makeOpportunity(overrides: Partial<Opportunity> = {}): Opportuni
     address: "12 MG Road, Bengaluru",
     instrument_name: "HbA1c analyser",
     work_load: "300 tests/day",
+    expected_cpt: "",
     custom_fields: {},
     negotiated_at: null,
     description: "Two analysers for the central lab.",

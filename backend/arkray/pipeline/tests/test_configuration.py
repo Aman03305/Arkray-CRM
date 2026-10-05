@@ -401,7 +401,6 @@ class TestStageEditing:
             opportunities_url(),
             {
                 "lead": str(lead.pk),
-                "title": "Analyser",
                 "value": "100000",
                 "pipeline": body["id"],
             },
@@ -440,7 +439,6 @@ class TestProbabilityAndTotals:
             opportunities_url(),
             {
                 "lead": str(lead.pk),
-                "title": "Deal",
                 "value": "100000",
                 "pipeline": body["id"],
                 "stage": commercial["id"],
@@ -491,7 +489,7 @@ class TestArchive:
         lead = LeadFactory(owner=user_a)
         refused = user_a_client.post(
             opportunities_url(),
-            {"lead": str(lead.pk), "title": "X", "value": "1", "pipeline": body["id"]},
+            {"lead": str(lead.pk), "value": "1", "pipeline": body["id"]},
             format="json",
         )
         assert refused.status_code == 400
@@ -577,7 +575,7 @@ class TestDealsAfterReassignment:
         lead = LeadFactory(owner=user_a)
         response = admin_client.post(
             opportunities_url("all"),
-            {"lead": str(lead.pk), "title": "X", "value": "1", "pipeline": priyas["id"]},
+            {"lead": str(lead.pk), "value": "1", "pipeline": priyas["id"]},
             format="json",
         )
         assert response.status_code == 400

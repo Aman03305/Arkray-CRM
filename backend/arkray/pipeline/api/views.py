@@ -30,7 +30,7 @@ from arkray.identity.policy import Capability
 from arkray.identity.workspaces import authorize_write, resolve_workspace, workspace_segment
 from arkray.leads.api.views import IDEMPOTENCY_PARAMETER, NOT_FOUND, OWNER_FILTER_ORG_ONLY
 
-from .. import configuration, selectors, services
+from .. import configuration, instruments, selectors, services
 from ..selectors import OpportunityFilters
 from . import serializers as s
 
@@ -80,6 +80,20 @@ class PipelineConfigView(ApiView):
     @extend_schema(operation_id="pipelines_list", responses={200: s.PipelineListSerializer})
     def get(self, request: Request) -> Response:
         return Response(s.PipelineListSerializer({"results": selectors.pipelines()}).data)
+
+
+class OpportunityOptionsView(ApiView):
+    """What an opportunity form offers: the instruments (the same for everyone). The
+    services accept exactly these for a new or changed instrument."""
+
+    permission_classes = [IsActiveUser]
+
+    @extend_schema(
+        operation_id="opportunity_options", responses={200: s.OpportunityOptionsSerializer}
+    )
+    def get(self, request: Request) -> Response:
+        options = {"instruments": [{"name": name} for name in instruments.INSTRUMENTS]}
+        return Response(s.OpportunityOptionsSerializer(options).data)
 
 
 def _pipeline(pipeline: Any, actor: User, scope: AccessScope) -> dict[str, Any]:

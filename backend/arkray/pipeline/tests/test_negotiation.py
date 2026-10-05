@@ -154,11 +154,12 @@ class TestEnteringNegotiation:
         lead = LeadFactory(owner=user_a)
         body = {
             "lead": str(lead.pk),
-            "title": "Analyser",
             "value": "1500000",
             "stage": str(stages["negotiation"].pk),
         }
-        assert user_a_client.post(opportunities_url(), body, format="json").status_code == 400
+        refused = user_a_client.post(opportunities_url(), body, format="json")
+        assert refused.status_code == 400
+        assert "negotiated_price" in refused.json()["error"]["details"]
         response = user_a_client.post(
             opportunities_url(), {**body, "negotiated_price": "1400000"}, format="json"
         )
@@ -171,11 +172,12 @@ class TestEnteringNegotiation:
         lead = LeadFactory(owner=user_a)
         body = {
             "version": lead.version,
-            "title": "Analyser",
             "value": "1500000",
             "stage": str(stages["negotiation"].pk),
         }
-        assert user_a_client.post(convert_url(lead.pk), body, format="json").status_code == 400
+        refused = user_a_client.post(convert_url(lead.pk), body, format="json")
+        assert refused.status_code == 400
+        assert "negotiated_price" in refused.json()["error"]["details"]
         response = user_a_client.post(
             convert_url(lead.pk), {**body, "negotiated_price": "1450000"}, format="json"
         )

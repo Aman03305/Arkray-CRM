@@ -1,13 +1,11 @@
-import type { Activity, Dashboard, DashboardActivity } from "@/lib/api/types";
+import type { Activity, Dashboard, DashboardActivity, DashboardLead } from "@/lib/api/types";
 
 import { makeActivity, makeMeeting } from "./activity-fixtures";
 import { LEAD_ID, PRIYA_ID, RAHUL_ID } from "./fixtures";
+import { OPPORTUNITY_ID } from "./pipeline-fixtures";
 
 export const RAHUL = { id: RAHUL_ID, full_name: "Rahul Sharma", is_active: true };
 export const PRIYA = { id: PRIYA_ID, full_name: "Priya Patel", is_active: true };
-
-/** The API still lists new leads; the UI shows none (ADR-0027). */
-type DashboardLead = Dashboard["new_leads"][number];
 
 export function makeDashboardLead(overrides: Partial<DashboardLead> = {}): DashboardLead {
   return {
@@ -16,6 +14,7 @@ export function makeDashboardLead(overrides: Partial<DashboardLead> = {}): Dashb
     organization_name: "Apollo Diagnostics",
     owner: RAHUL,
     created_at: "2026-10-03T04:42:00Z", // 10:12 am IST
+    opportunity: { id: OPPORTUNITY_ID, title: "Asha Mehta — Adams 8380 V-lite", instrument_name: "Adams 8380 V-lite" },
     ...overrides,
   };
 }

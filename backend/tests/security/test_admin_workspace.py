@@ -397,7 +397,7 @@ def test_linking_new_work_in_rahuls_workspace_to_priyas_records_is_refused(world
     responses = [
         client.post(
             f"{API}/{rahul}/opportunities",
-            {"lead": str(priya_lead.pk), "title": "x", "value": "1"},
+            {"lead": str(priya_lead.pk), "value": "1"},
             format="json",
         ),
         client.post(
@@ -432,7 +432,7 @@ def test_every_change_in_rahuls_workspace_is_anitas_and_none_is_rahuls(world):
 
     opportunity = client.post(
         f"{base}/opportunities",
-        {"lead": lead["id"], "title": "Lab", "value": "111111.00"},
+        {"lead": lead["id"], "value": "111111.00"},
         format="json",
     ).json()
     assert opportunity["owner"]["id"] == ws(rahul)
@@ -541,7 +541,7 @@ def test_no_payload_field_moves_a_write_out_of_the_url_workspace(world, extra):
     for path, body in [
         ("/leads", {"first_name": "X"}),
         ("/activities", {"type": "task", "lead": str(lead.pk), "title": "X"}),
-        ("/opportunities", {"lead": str(lead.pk), "title": "X", "value": "1"}),
+        ("/opportunities", {"lead": str(lead.pk), "value": "1"}),
     ]:
         response = client.post(base + path, {**body, **extra}, format="json")
         if response.status_code == 201:
@@ -642,7 +642,7 @@ def test_a_deactivated_users_history_stays_readable_and_receives_no_new_work(wor
         "lead": client.post(f"{base}/leads", {"first_name": "New"}, format="json"),
         "opportunity": client.post(
             f"{base}/opportunities",
-            {"lead": str(lead.pk), "title": "New", "value": "1"},
+            {"lead": str(lead.pk), "value": "1"},
             format="json",
         ),
         "task": client.post(
@@ -738,7 +738,9 @@ def test_there_is_no_route_to_act_as_another_user():
 # reads: the same as in the user's own workspace plus those two checks.
 EXPECTED_QUERIES = {
     "": 5,  # + the subject's id, name and status
-    "/dashboard": 11,  # + the read-only snapshot and its six figures and three lists
+    # + the read-only snapshot, its figures and three lists, and the new leads' opportunities
+    # (Rahul's lead is new today: one query for all of them, ADR-0028)
+    "/dashboard": 12,
     "/leads": 5,  # + one keyset page
     "/pipeline-board": 9,  # + pipeline, stages, totals, columns, cards
     "/activities": 5,  # + one keyset page

@@ -51,7 +51,8 @@ def workspace_of(owner: Any, marker: str, secret: str) -> dict[str, Any]:
         scope=scope,
         lead_id=lead.pk,
         fields={
-            "title": f"{owner.first_name} analyser order",
+            # Named after the lead ("<first name> Hospital — Adams 8380 V-lite", ADR-0028).
+            "instrument_name": "Adams 8380 V-lite",
             "value": Decimal("250000"),
             "description": f"{marker}: deal terms, contract code {secret}.",
         },

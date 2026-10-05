@@ -32,15 +32,30 @@ class LeadSummarySerializer(serializers.Serializer[Any]):
     new_today = serializers.IntegerField(help_text="Created during today's business day.")
 
 
+class DashboardLeadOpportunitySerializer(serializers.Serializer[Any]):
+    id = serializers.UUIDField()
+    title = serializers.CharField()
+    instrument_name = serializers.CharField()
+
+
 class DashboardLeadSerializer(serializers.ModelSerializer[Lead]):
-    """One of today's new leads: its name, who it is assigned to, and when it was created."""
+    """One of today's new leads: its name, who it is assigned to, when it was created, and
+    the opportunity it was made for (its first one in this workspace), if any."""
 
     owner = UserRefSerializer(read_only=True, help_text="The assigned user.")
+    opportunity = serializers.SerializerMethodField()
 
     class Meta:
         model = Lead
-        fields = ["id", "display_name", "organization_name", "owner", "created_at"]
+        fields = ["id", "display_name", "organization_name", "owner", "created_at", "opportunity"]
         read_only_fields = fields
+
+    @extend_schema_field(DashboardLeadOpportunitySerializer(allow_null=True))
+    def get_opportunity(self, lead: Lead) -> dict[str, Any] | None:
+        found = self.context["new_lead_opportunities"].get(lead.pk)
+        if found is None:
+            return None
+        return {"id": found.pk, "title": found.title, "instrument_name": found.instrument_name}
 
 
 class DashboardActivitySerializer(serializers.ModelSerializer[Activity]):

@@ -31,28 +31,28 @@ def world(admin, user_a, user_b, stages):
     lead = LeadFactory(owner=user_a)
     scope = OWN(user_a.pk)
 
-    def new(title, stage=None):
+    def new(stage=None):
         result = services.create_opportunity(
             actor=user_a,
             scope=scope,
             lead_id=lead.pk,
-            fields={"title": title, "value": 100000},
+            fields={"value": 100000},
             stage_id=stage.pk if stage else None,
         )
         return result.opportunity
 
-    open_1, open_2 = new("Open 1"), new("Open 2", stages["proposal"])
+    open_1, open_2 = new(), new(stages["proposal"])
     won = services.move_opportunity(
         actor=user_a,
         scope=scope,
-        opportunity_id=new("Won").pk,
+        opportunity_id=new().pk,
         version=1,
         stage_id=stages["won"].pk,
     )
     lost = services.move_opportunity(
         actor=user_a,
         scope=scope,
-        opportunity_id=new("Lost").pk,
+        opportunity_id=new().pk,
         version=1,
         stage_id=stages["lost"].pk,
     )

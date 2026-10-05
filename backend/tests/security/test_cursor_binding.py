@@ -52,7 +52,7 @@ def with_history(owner: Any) -> Any:
         actor=owner,
         scope=scope,
         lead_id=lead.pk,
-        fields={"title": "Analyser order", "value": Decimal("1000")},
+        fields={"value": Decimal("1000")},
     ).opportunity
     pipeline_services.move_opportunity(
         actor=owner,

@@ -162,7 +162,7 @@ NEWEST = {
 }
 TRIGRAM = {
     0: "leads_search_trgm",
-    1: "pipeline_opp_search_trgm",
+    1: "pipeline_opp_text_trgm",  # renamed by pipeline.0007 (ADR-0027: title and customer names)
     2: "activities_task_search_trgm",
     3: "activities_meeting_search_trgm",
     4: "activities_note_search_trgm",

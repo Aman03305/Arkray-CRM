@@ -1,14 +1,19 @@
 # Leads
 
-> **Removed from the UI on 2026-10-05 ([ADR-0027](adr/0027-leads-removed-from-the-ui.md)).**
-> There is no Leads screen, picker, conversion or dashboard figure any more. The lead remains
-> the backend's customer record: every opportunity and activity still has one, a new
-> opportunity created without one makes one from its customer details, and a deal's
-> *Change owner* reassigns it. This page describes the model and the API, which are
-> unchanged; the frontend parts below are history.
+> **No Leads module since 2026-10-05 ([ADR-0027](adr/0027-leads-removed-from-the-ui.md)); the
+> lead is shown read-only again ([ADR-0028](adr/0028-opportunity-creates-its-lead.md)).**
+> There is no Leads list, lead form, picker or conversion in the UI. The lead remains the
+> canonical customer record: every opportunity and activity has one, and a new opportunity
+> creates its lead from its customer details in the same transaction
+> ([pipeline.md](pipeline.md#the-lead-a-new-opportunity-creates)); a deal's *Change owner*
+> reassigns it. The UI shows a lead read-only on its own page (`/leads/{id}`), in the
+> dashboard's figures and "New leads" list, in global search and in Ask Arkray's answers.
+> This page describes the model and the API, which are unchanged; the list, form and edit
+> parts of "Frontend" below are history.
 
-**Built in Phase 2.** Code: [`backend/arkray/leads/`](../backend/arkray/leads/) (the frontend
-`features/leads/` was removed by ADR-0027). Decisions:
+**Built in Phase 2.** Code: [`backend/arkray/leads/`](../backend/arkray/leads/) and
+[`frontend/src/features/leads/`](../frontend/src/features/leads/) (since ADR-0028 only the
+read-only lead page, its API client and the duplicate notice). Decisions:
 [ADR-0015](adr/0015-leads-domain-model.md) (model, configurable statuses and sources),
 [ADR-0016](adr/0016-composite-keyset-pagination.md) (pagination),
 [ADR-0017](adr/0017-in-transaction-domain-events.md) (domain events).
@@ -293,7 +298,15 @@ analytics and automation subscribe later and enqueue outbox work from their subs
 
 ## Frontend
 
-| Route | Workspace |
+**Now (ADR-0028):** `/leads/{id}` (own, or organisation-wide for administrators) and
+`/admin/users/{id}/leads/{leadId}` (that user's) are the **read-only lead page**: name,
+organisation, owner, creation time, contact details and the lead's opportunities in the
+workspace, each opening the deal ([pipeline.md](pipeline.md#frontend)). Another workspace's
+lead is "not found". `/leads`, `/leads/new` and `/leads/{id}/edit` (and the same under a
+user's workspace) redirect to that workspace's Pipeline. The rest of this section describes
+the Phase 2 Leads module, removed by ADR-0027.
+
+| Route (Phase 2, removed) | Workspace |
 |---|---|
 | `/leads`, `/leads/new`, `/leads/{id}`, `/leads/{id}/edit` | own (sales users); organisation-wide (admins) |
 | `/admin/users/{id}/leads`, `…/new`, `…/{leadId}`, `…/{leadId}/edit` | that user's, under the "Viewing CRM for" banner |
@@ -321,8 +334,11 @@ analytics and automation subscribe later and enqueue outbox work from their subs
 `selectors.lead_summary(scope, now=…)` is the authoritative definition of the dashboard's
 lead figures, in one aggregate query: **total** = leads in the scope that are not
 archived (any status); **new today** = those created during today's business day in
-Asia/Kolkata (`core.business_time`). Each equals the count of the Leads list it opens
-(default filters; created from/to today), tested in every scope kind.
+Asia/Kolkata (`core.business_time`). Each equals the count of the API's lead list with
+the same filters (default; created from/to today), tested in every scope kind. Since
+ADR-0028 every opportunity created in the pipeline adds exactly one lead, so it moves both
+figures by one; opportunities are never counted as leads (Ask Arkray uses this same
+selector).
 `selectors.new_leads_today(scope, now=…, limit=5)` returns the newest of those with their
 owner joined (names only, no contact data). A lead counts for its current owner. The
 figures are an index-only scan of `leads_owner_created_idx`, which carries `archived_at`

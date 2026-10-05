@@ -1,6 +1,6 @@
 # 0027. Leads removed from the UI; the lead stays as each deal's hidden customer record
 
-Status: Accepted
+Status: Accepted; partly superseded by [0028](0028-opportunity-creates-its-lead.md) (a read-only lead page, the dashboard's lead figures and new leads, the search Leads group and lead links are back; no Leads module)
 Date: 2026-10-05
 
 ## Context

@@ -43,6 +43,7 @@ from arkray.identity import selectors as identity_selectors
 from arkray.leads import selectors as lead_selectors
 from arkray.leads.models import Lead
 from arkray.leads.selectors import LeadFilters
+from arkray.pipeline import instruments
 from arkray.pipeline import selectors as pipeline_selectors
 from arkray.pipeline.models import Opportunity, Pipeline, Stage
 from arkray.pipeline.selectors import OpportunityFilters
@@ -142,6 +143,18 @@ def _choice(
     return value
 
 
+def _instrument(args: dict[str, Any]) -> str | None:
+    """One of the instruments (pipeline.instruments), in the list's spelling whatever the
+    letter case or spacing it was asked in."""
+    value = args.get("instrument")
+    if value is None:
+        return None
+    known = instruments.canonical(value) if isinstance(value, str) else None
+    if known is None:
+        raise ToolError(f"instrument must be one of: {', '.join(instruments.INSTRUMENTS)}.")
+    return known
+
+
 def _limit(args: dict[str, Any]) -> int:
     value = args.get("limit", DEFAULT_LIMIT)
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_LIMIT:
@@ -236,6 +249,10 @@ def _opportunity_row(
     }
     if found.account_name:
         row["account"] = fmt.label(found.account_name)
+    if found.customer_name and found.customer_name != found.account_name:
+        row["customer"] = fmt.label(found.customer_name)
+    if found.instrument_name:
+        row["instrument"] = fmt.label(found.instrument_name)
     if found.negotiated_price is not None:
         # The latest recorded negotiated price (authoritative, from the price history).
         row["negotiated_price"] = fmt.money(found.negotiated_price)
@@ -360,8 +377,12 @@ def _month_bounds(day: date, months_ahead: int) -> tuple[date, date]:
 
 
 def list_opportunities(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    _check_keys(args, {"status", "stage", "stage_type", "pipeline", "closing", "sort", "limit"})
+    _check_keys(
+        args,
+        {"status", "stage", "stage_type", "pipeline", "closing", "instrument", "sort", "limit"},
+    )
     status = _choice(args, "status", ("open", "won", "lost"), None)
+    instrument = _instrument(args)
     closing = _choice(args, "closing", _CLOSING, None)
     sort = _choice(args, "sort", tuple(_OPPORTUNITY_SORTS), "value_desc") or "value_desc"
     limit = _limit(args)
@@ -387,6 +408,10 @@ def list_opportunities(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
             status=status, expected_close_from=first, expected_close_to=last
         )
     queryset = pipeline_selectors.opportunity_list(ctx.scope, filters)
+    if instrument is not None:
+        # The structured field (one of the instruments), never a text match on the title;
+        # letter case aside, as an opportunity from before the list may spell it.
+        queryset = queryset.filter(instrument_name__iexact=instrument)
     if pipeline_name is not None:
         queryset = queryset.filter(pipeline_id=_named_pipeline(ctx, pipeline_name).pk)
     if stage_type is not None:
@@ -705,10 +730,11 @@ def _opportunity_details(ctx: ToolContext, opportunity_id: UUID) -> dict[str, An
         for h in history
     ]
     row["opportunity_date"] = fmt.day(found.opportunity_date)
-    if found.instrument_name:
-        row["instrument"] = fmt.label(found.instrument_name)
     if found.work_load:
         row["work_load"] = fmt.label(found.work_load)
+    if found.expected_cpt:
+        # Free text as the salesperson wrote it: the CRM defines no unit for CPT.
+        row["expected_cpt"] = fmt.label(found.expected_cpt)
     row["negotiation_history"] = _negotiation_rows(ctx, opportunity_id)
     row["recent_activities"] = _recent_activities(
         ctx, ActivityFilters(opportunity_id=opportunity_id)
@@ -928,8 +954,8 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         "list_opportunities",
         "Opportunities (deals) in this workspace, filtered and sorted, with value, stage, "
-        "probability, expected close date and lead. Returns the total matching and up to "
-        "`limit` rows.",
+        "probability, expected close date, customer, instrument and lead. Returns the total "
+        "matching and up to `limit` rows.",
         _schema(
             {
                 "status": {"type": "string", "enum": ["open", "won", "lost"]},
@@ -944,6 +970,11 @@ TOOLS: tuple[Tool, ...] = (
                     "type": "string",
                     "enum": list(_CLOSING),
                     "description": "Expected close date window (open deals).",
+                },
+                "instrument": {
+                    "type": "string",
+                    "enum": list(instruments.INSTRUMENTS),
+                    "description": "Only deals for this instrument.",
                 },
                 "sort": {"type": "string", "enum": list(_OPPORTUNITY_SORTS)},
                 "limit": _LIMIT_PROPERTY,
@@ -961,7 +992,9 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         "get_lead_summary",
-        "Total leads, new leads today and leads per status in this workspace.",
+        "Total leads, new leads today and leads per status in this workspace. The only "
+        "source of lead counts: every opportunity created in the pipeline made its own lead, "
+        "so never count opportunities as leads.",
         _schema({}),
         get_lead_summary,
     ),

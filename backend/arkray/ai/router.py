@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from arkray.core.access import AccessScope
+from arkray.pipeline import instruments
 from arkray.pipeline import selectors as pipeline_selectors
 
 FILLER = frozenset(
@@ -94,6 +95,7 @@ class Route:
     calls: tuple[tuple[str, dict[str, Any]], ...]  # tool name and arguments, in order
     stage: str | None = None  # deals_in_stage: the stage name as configured
     pipeline: str | None = None  # pipeline_named: the pipeline's name as configured
+    instrument: str | None = None  # deals_for_instrument: the instrument as listed
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,9 +164,10 @@ INTENTS: tuple[_Intent, ...] = (
         (("get_pipeline_summary", {}),),
     ),
     _Intent(
+        # "How many new leads were created today?": the Dashboard's own figure (ADR-0028).
         "new_leads_today",
-        _words("new", LEADS, "today"),
-        frozenset(["got", "came", "created", "added", "in"]),
+        _words("new created added came got", LEADS, "today"),
+        frozenset(["in", "were", "was", "been"]),
         (("get_lead_summary", {}), ("list_leads", {"created": "today", "limit": 10})),
     ),
     _Intent(
@@ -245,6 +248,32 @@ def _stage_route(words: list[str], stage_names: list[str]) -> Route | None:
     return None
 
 
+AUTHORED = frozenset(["created", "added"])
+SELF = frozenset(["i", "me", "we"])
+INSTRUMENT_FILLER = frozenset(["for", "with", "of", "on", "instrument", "instruments", "open"])
+
+
+def _instrument_route(words: list[str]) -> Route | None:
+    """ "Show opportunities for Adams 8380 V-lite": an instrument of the list, deal words and
+    filler. Answered from the opportunities' instrument field ("open" keeps to open ones)."""
+    if not set(words) & set(DEALS.split()):
+        return None
+    for name in sorted(instruments.INSTRUMENTS, key=len, reverse=True):
+        name_words = tokens(name)
+        for at in range(len(words) - len(name_words) + 1):
+            if words[at : at + len(name_words)] == name_words:
+                rest = words[:at] + words[at + len(name_words) :]
+                allowed = FILLER | frozenset(DEALS.split()) | INSTRUMENT_FILLER
+                if all(word in allowed for word in rest):
+                    args: dict[str, Any] = {"instrument": name, "limit": 10}
+                    if "open" in rest:
+                        args["status"] = "open"
+                    return Route(
+                        "deals_for_instrument", (("list_opportunities", args),), instrument=name
+                    )
+    return None
+
+
 PIPELINE_VALUE_WORDS = frozenset(["pipeline", "value", "worth", "amount", "size", "open"])
 
 
@@ -282,7 +311,15 @@ def route(
         return None
     for intent in INTENTS:
         if _covers(words, intent):
+            if intent.name == "new_leads_today" and AUTHORED & set(words) and SELF & set(words):
+                # "Leads I added today" asks who made them: the figure counts each lead for
+                # its owner (an administrator's or a colleague's leads included), so the
+                # model answers it instead (backend review).
+                continue
             return Route(intent.name, intent.calls)
+    instrument = _instrument_route(words)
+    if instrument is not None:
+        return instrument
     named = _pipeline_route(words, pipeline_names() if pipeline_names is not None else [])
     if named is not None:
         return named

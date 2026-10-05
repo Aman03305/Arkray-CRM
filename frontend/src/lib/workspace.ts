@@ -108,19 +108,32 @@ export function workspaceApiPath(workspace: Workspace, resource: string): string
 }
 
 export function activeSection(pathname: string): WorkspaceSection | null {
-  const raw = pathname.replace(/^\/admin\/users\/[^/]+/, "").split("/")[1] ?? "";
+  const [raw = "", rest] = pathname.replace(/^\/admin\/users\/[^/]+/, "").split("/").slice(1);
   let segment: string;
   try {
     segment = decodeURIComponent(raw); // as Next.js decodes the [section] param
   } catch {
     return null;
   }
+  // A lead's page (ADR-0028) belongs to the Dashboard, where its link and its way back are;
+  // the bare /leads (the old module) only redirects.
+  if (segment === "leads" && rest) return "dashboard";
   return (WORKSPACE_SECTIONS as readonly string[]).includes(segment) ? (segment as WorkspaceSection) : null;
 }
 
 /** An opportunity's page in this workspace, e.g. /pipeline/{id} or /admin/users/{userId}/pipeline/{id}. */
 export function opportunityHref(workspace: Workspace, opportunityId: string, action?: "edit"): string {
   return `${workspaceHref(workspace, "pipeline")}/${encodeURIComponent(opportunityId)}${action ? `/${action}` : ""}`;
+}
+
+/**
+ * A lead's page in this workspace, e.g. /leads/{id} or /admin/users/{userId}/leads/{id}. There
+ * is no Leads module (ADR-0027): the page is reached from the dashboard's new leads, search and
+ * the lead's opportunity (ADR-0028), so "leads" is not one of the WORKSPACE_SECTIONS.
+ */
+export function leadHref(workspace: Workspace, leadId: string): string {
+  const base = workspace.kind === "user" ? `/admin/users/${workspace.userId}/leads` : "/leads";
+  return `${base}/${encodeURIComponent(leadId)}`;
 }
 
 /** The new-opportunity form (over the board). */

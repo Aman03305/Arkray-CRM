@@ -197,6 +197,7 @@ def test_lead_figures_follow_the_business_day_not_utc(user_a_client, user_a, use
             "organization_name": "Acme Labs",
             "owner": {"id": str(user_a.pk), "full_name": "Rahul Sharma", "is_active": True},
             "created_at": "2026-10-02T18:44:00Z",
+            "opportunity": None,  # made through the lead API: no opportunity yet
         },
         {
             "id": str(at_midnight.pk),
@@ -204,6 +205,7 @@ def test_lead_figures_follow_the_business_day_not_utc(user_a_client, user_a, use
             "organization_name": at_midnight.organization_name,
             "owner": {"id": str(user_a.pk), "full_name": "Rahul Sharma", "is_active": True},
             "created_at": "2026-10-02T18:30:00Z",
+            "opportunity": None,
         },
     ]
 
@@ -250,7 +252,14 @@ def test_rows_show_names_never_contact_data(user_a_client, user_a, frozen_now):
     assert "98765" not in raw
     assert user_a.email not in raw
     (row,) = get(user_a_client)["new_leads"]
-    assert set(row) == {"id", "display_name", "organization_name", "owner", "created_at"}
+    assert set(row) == {
+        "id",
+        "display_name",
+        "organization_name",
+        "owner",
+        "created_at",
+        "opportunity",  # {id, title, instrument_name} or null (ADR-0028)
+    }
     assert set(row["owner"]) == {"id", "full_name", "is_active"}
 
 

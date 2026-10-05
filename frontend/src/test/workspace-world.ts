@@ -9,11 +9,11 @@
  */
 import { vi } from "vitest";
 
-import type { Activity, Dashboard, Opportunity } from "@/lib/api/types";
+import type { Activity, Dashboard, Lead, Opportunity } from "@/lib/api/types";
 
 import { asListItem, makeActivity, makeMeeting, makeNote, page, SUMMARY } from "./activity-fixtures";
 import { asRow, makeDashboard, makeDashboardLead } from "./dashboard-fixtures";
-import { PRIYA_ID, RAHUL_ID } from "./fixtures";
+import { OPPORTUNITY_OPTIONS, PRIYA_ID, RAHUL_ID } from "./fixtures";
 import { makeBoard, makeCard, makeOpportunity, PIPELINES, STAGES } from "./pipeline-fixtures";
 import { json, type RecordedCall } from "./render";
 
@@ -24,7 +24,8 @@ export interface Person {
   status: "active" | "invited" | "deactivated";
   amount: string;
   shown: string; // the amount as the UI shows it
-  /** Their customer record (the API's lead): named on their deals and work, never opened. */
+  /** Their lead (the API's customer record): named on their deals and work; its read-only
+   * page, when linked, is in their workspace (ADR-0028). */
   leadId: string;
   opportunityId: string;
   taskId: string;
@@ -68,6 +69,40 @@ export function markersOf(person: Person): string[] {
 export const ACTOR = { id: "a1", full_name: "Anita Admin", is_active: true };
 const ref = (p: Person) => ({ id: p.id, full_name: p.name, is_active: p.status === "active" });
 const leadRef = (p: Person) => ({ id: p.leadId, display_name: `${p.mark}-LEAD`, organization_name: "", restricted: false });
+
+/** The person's lead, as its read-only page reads it (ADR-0028). */
+export function leadOf(p: Person, overrides: Partial<Lead> = {}): Lead {
+  return {
+    id: p.leadId,
+    display_name: `${p.mark}-LEAD`,
+    first_name: `${p.mark}-LEAD`,
+    last_name: "",
+    organization_name: "",
+    job_title: "",
+    email: "",
+    phone: "",
+    mobile: "",
+    alternate_phone: "",
+    status: { key: "new", name: "New", category: "open" },
+    source: null,
+    rating: null,
+    owner: ref(p),
+    created_by: ref(p),
+    last_contacted_at: null,
+    archived_at: null,
+    created_at: "2026-10-03T04:42:00Z",
+    updated_at: "2026-10-03T04:42:00Z",
+    version: 1,
+    address_line_1: "",
+    address_line_2: "",
+    city: "",
+    state: "",
+    postal_code: "",
+    country: "",
+    description: "",
+    ...overrides,
+  };
+}
 
 export function opportunityOf(p: Person, overrides: Partial<Opportunity> = {}): Opportunity {
   return makeOpportunity({
@@ -125,6 +160,9 @@ export function workspaceWorld(people: Person[] = [RAHUL, PRIYA]) {
     let m: RegExpExecArray | null;
     if (rest === "") return ok({ kind: "user", subject: { id: p.id, full_name: p.name, status: p.status } });
     if (rest === "/dashboard") return ok(dashboardOf(p));
+    // Leads: the advisory duplicate check and a lead's read-only page (ADR-0028).
+    if (rest === "/leads/duplicates" && method === "GET") return ok({ results: [] });
+    if ((m = /^\/leads\/([^/]+)$/.exec(rest)) && method === "GET") return m[1] === p.leadId ? ok(leadOf(p)) : missing;
     if (rest === "/pipelines") return ok(PIPELINES); // this workspace's pipelines
     if (rest === "/pipeline-board") {
       const board = makeBoard([cardOf(p)]);
@@ -164,6 +202,8 @@ export function workspaceWorld(people: Person[] = [RAHUL, PRIYA]) {
       return json(204);
     }
     if (url.pathname === "/api/v1/config/pipelines") return json(200, PIPELINES);
+    // The New Opportunity form's instrument list: shared configuration, no workspace's data.
+    if (url.pathname === "/api/v1/config/opportunity-options") return json(200, OPPORTUNITY_OPTIONS);
     // Who can own records: shared, not any workspace's data.
     if (url.pathname === "/api/v1/assignees") {
       return json(200, { results: people.map((p) => ({ id: p.id, full_name: p.name, email: `${p.name.toLowerCase().replace(/\s+/g, ".")}@example.test` })), next: null, previous: null });

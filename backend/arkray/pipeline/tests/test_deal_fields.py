@@ -23,7 +23,6 @@ from .test_configuration import SHORT, created, pipeline_url
 pytestmark = pytest.mark.django_db
 
 FULL = {
-    "title": "HbA1c analyser for City Hospital",
     "value": "1250000.00",
     "opportunity_date": "2026-10-01",
     "account_name": "City Hospital Labs",
@@ -31,8 +30,9 @@ FULL = {
     "contact_phone": "+91 98765 43210",
     "contact_email": "meera@cityhospital.example",
     "address": "12 MG Road\nBengaluru 560001",
-    "instrument_name": "ADAMS A1c HA-8380V",
+    "instrument_name": "Adams 8380 V-lite",
     "work_load": "300 tests/day",
+    "expected_cpt": "Rs 42 per test",
     "expected_close_date": "2026-12-15",
 }
 
@@ -49,6 +49,8 @@ class TestDealFields:
         body = response.json()
         for field, value in FULL.items():
             assert body[field] == value, field
+        # Named by the server from the customer and the instrument (naming.py).
+        assert body["title"] == "Dr. Meera Iyer — Adams 8380 V-lite"
         card = user_a_client.get(opportunities_url()).json()["results"][0]
         assert card["account_name"] == "City Hospital Labs"
         assert "contact_email" not in card  # cards stay concise
@@ -56,10 +58,12 @@ class TestDealFields:
     def test_the_customer_defaults_to_the_lead_and_the_date_to_today(self, user_a, user_a_client):
         person = LeadFactory(owner=user_a, first_name="Asha", last_name="Rao", organization_name="")
         org = LeadFactory(owner=user_a, organization_name="Metro Diagnostics")
-        a = create(user_a_client, person, title="A", value="1").json()
-        b = create(user_a_client, org, title="B", value="1").json()
+        a = create(user_a_client, person, value="1").json()
+        b = create(user_a_client, org, value="1").json()
         assert (a["account_name"], a["customer_name"]) == ("Asha Rao", "Asha Rao")
         assert b["account_name"] == "Metro Diagnostics"
+        # ...and so does the name derived from them: the lead's name, without an instrument.
+        assert (a["title"], b["title"]) == ("Asha Rao", org.display_name)
         assert a["opportunity_date"] == business_date(timezone.now()).isoformat()
         assert a["expected_close_date"] is None  # a different date, never filled in for you
 
@@ -76,7 +80,10 @@ class TestDealFields:
             ("customer_name", ""),
             ("account_name", "x" * 201),
             ("instrument_name", "x" * 201),
+            ("instrument_name", "HbA1c analyser"),  # not one of the instruments
             ("work_load", "x" * 101),
+            ("expected_cpt", "x" * 101),
+            ("title", "Typed by the client"),  # the name is derived, never sent
             ("address", "x" * 1001),
             ("account_name", "Lab" + chr(0x202E) + "evil"),
             ("value", 12.5),
@@ -96,8 +103,9 @@ class TestDealFields:
             format="json",
         )
         assert response.status_code == 200, response.content
+        assert response.json()["title"] == "Dr. Kumar"  # renamed after its new customer
         event = AuditEvent.objects.get(action="opportunity.updated")
-        assert event.metadata["fields"] == ["customer_name", "work_load"]
+        assert event.metadata["fields"] == ["customer_name", "title", "work_load"]
         assert "Kumar" not in json.dumps(event.metadata)
 
     def test_a_name_cant_be_emptied(self, user_a, user_a_client):
@@ -182,7 +190,6 @@ class TestCustomFields:
         response = create(
             user_a_client,
             lead,
-            title="T",
             value="1",
             pipeline=pipeline["id"],
             custom_fields=values(ids, options),
@@ -217,7 +224,6 @@ class TestCustomFields:
         response = create(
             user_a_client,
             LeadFactory(owner=user_a),
-            title="T",
             value="1",
             pipeline=pipeline["id"],
             custom_fields=values(ids, options, **{name: bad}),
@@ -232,7 +238,6 @@ class TestCustomFields:
         response = create(
             user_a_client,
             lead,
-            title="T",
             value="1",
             pipeline=pipeline["id"],
             custom_fields=missing,
@@ -241,7 +246,6 @@ class TestCustomFields:
         opp = create(
             user_a_client,
             lead,
-            title="T",
             value="1",
             pipeline=pipeline["id"],
             custom_fields=values(ids, options),
@@ -271,13 +275,9 @@ class TestCustomFields:
         _, ids, _ = configured
         lead = LeadFactory(owner=user_a)
         # a field of the Tenders pipeline on a deal in the default pipeline
-        response = create(
-            user_a_client, lead, title="T", value="1", custom_fields={ids["Analysers"]: "1"}
-        )
+        response = create(user_a_client, lead, value="1", custom_fields={ids["Analysers"]: "1"})
         assert response.status_code == 400
-        response = create(
-            user_a_client, lead, title="T", value="1", custom_fields={"is_admin": True}
-        )
+        response = create(user_a_client, lead, value="1", custom_fields={"is_admin": True})
         assert response.status_code == 400
 
     def test_a_removed_field_keeps_its_values_hidden_and_its_type_never_changes(
@@ -288,7 +288,6 @@ class TestCustomFields:
         opp = create(
             user_a_client,
             lead,
-            title="T",
             value="1",
             pipeline=pipeline["id"],
             custom_fields=values(ids, options),
@@ -341,7 +340,6 @@ class TestCustomFields:
         response = create(
             user_a_client,
             LeadFactory(owner=user_a),
-            title="T",
             value="1",
             pipeline=pipeline["id"],
             custom_fields=big,

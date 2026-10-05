@@ -54,5 +54,9 @@ class DashboardView(ApiView):
         }
         # The activity rows render their lead only if it is visible in this scope, and
         # whether they are overdue at the same `now` the figures used.
-        context = {"scope": scope, "now": now}
+        context = {
+            "scope": scope,
+            "now": now,
+            "new_lead_opportunities": figures.new_lead_opportunities,
+        }
         return Response(s.DashboardSerializer(data, context=context).data)

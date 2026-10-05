@@ -17,6 +17,11 @@ export type Role = Schemas["RoleEnum"];
 export type UserStatus = Schemas["StatusEnum"];
 
 export type UserRef = Schemas["UserRef"];
+// The canonical customer record. No Leads module (ADR-0027): a read-only lead page, reached
+// from the dashboard, search and its opportunity (ADR-0028).
+export type Lead = Schemas["Lead"];
+export type LeadDuplicate = Schemas["LeadDuplicate"];
+export type LeadDuplicateList = Schemas["LeadDuplicateList"];
 export type Assignee = Schemas["Assignee"];
 export type AssigneePage = Schemas["AssigneePage"];
 export type LoginRequest = Schemas["LoginRequest"];
@@ -38,8 +43,9 @@ export type StageCategory = Schemas["StageCategoryEnum"];
 export type Opportunity = Schemas["Opportunity"];
 export type OpportunityCard = Schemas["OpportunityCard"];
 export type OpportunityPage = Schemas["OpportunityPage"];
-// An opportunity's customer record: the API still calls it a lead (ADR-0027).
+// An opportunity's lead (its customer record), or "restricted" outside this workspace.
 export type OpportunityLeadRef = Schemas["LeadRef"];
+export type OpportunityOptions = Schemas["OpportunityOptions"];
 export type Board = Schemas["Board"];
 export type BoardColumn = Schemas["BoardColumn"];
 export type PipelineTotals = Schemas["PipelineTotals"];
@@ -89,9 +95,11 @@ export type Attachment = Schemas["Attachment"];
 export type ScanStatus = Schemas["ScanStatusEnum"];
 
 export type Dashboard = Schemas["Dashboard"];
+export type DashboardLead = Schemas["DashboardLead"];
 export type DashboardActivity = Schemas["DashboardActivity"];
 
 export type SearchResults = Schemas["SearchResults"];
+export type SearchLead = Schemas["SearchLead"];
 export type SearchOpportunity = Schemas["SearchOpportunity"];
 export type SearchTask = Schemas["SearchTask"];
 export type SearchMeeting = Schemas["SearchMeeting"];

@@ -7,8 +7,10 @@ and custom fields added in the product enhancement phase.** Code:
 [ADR-0018](adr/0018-pipeline-integrity-by-composite-keys.md) (status and ownership enforced
 by composite foreign keys; lock order), [ADR-0019](adr/0019-lead-conversion.md) (what
 "Converted" means), [ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.md)
-(user pipelines, negotiation, custom fields) and [ADR-0027](adr/0027-leads-removed-from-the-ui.md)
-(Leads removed from the UI: a new opportunity brings its own customer record; "Change owner").
+(user pipelines, negotiation, custom fields), [ADR-0027](adr/0027-leads-removed-from-the-ui.md)
+(Leads removed from the UI: a new opportunity brings its own customer record; "Change owner")
+and [ADR-0028](adr/0028-opportunity-creates-its-lead.md) (a new opportunity creates its lead;
+derived names; the instrument list; Expected CPT; the read-only lead page).
 
 The canonical domain term is **opportunity** everywhere: models, API, services, events,
 audit and UI. ("Deal" appears only in sample titles.)
@@ -22,9 +24,11 @@ Opportunity 1 ── * StageHistory (append-only), * NegotiationPrice (append-on
 ```
 
 A lead has zero, one or many opportunities. There is still no Company, Account, Contact
-or Product: an opportunity is a potential sale **to one lead**. Since ADR-0027 the UI has no
-Leads: the lead is each opportunity's hidden **customer record**, made with the opportunity
-from its customer details, and users see only "the customer".
+or Product: an opportunity is a potential sale **to one lead**. The lead is each opportunity's
+canonical **customer record**: the New Opportunity form creates it with the opportunity from
+the customer details ([below](#the-lead-a-new-opportunity-creates)). There is no Leads module
+(ADR-0027), but the lead is shown read-only (its page, the dashboard's new leads, search,
+ADR-0028).
 
 ### Pipelines
 
@@ -183,7 +187,7 @@ pipeline, checked at commit so a reorder can swap positions in one transaction),
 
 | Field | Rules |
 |---|---|
-| `title` | required, one line, ≤ 200 characters (same text rules as lead names); shown as "Opportunity name" |
+| `title` | the opportunity's name, ≤ 200 characters: **derived, never sent by a client** ([The opportunity's name](#the-opportunitys-name)); read-only in the API |
 | `lead` | optional in the API: an existing lead **in the caller's workspace**; omitted (as the UI does), a new customer record is created from the customer details in the same transaction ([Ownership](#ownership)); fixed for the opportunity's lifetime |
 | `owner` | only when creating **without** a lead, organisation-wide, where it is required (`crm.assign_any`; elsewhere it is the workspace's user and may be omitted); otherwise refused: always the lead's owner (see [Ownership](#ownership)) |
 | `pipeline`, `stage` | the pipeline defaults to the default one, the stage to its first active open stage; stages change only through the move operation |
@@ -193,8 +197,9 @@ pipeline, checked at commit so a reorder can swap positions in one transaction),
 | `account_name`, `customer_name` | required, one line, ≤ 200; default to the lead's organisation (or name) and name: an editable snapshot (the lab buying may differ from the lead's organisation). Without a lead at least one is required: they make the customer record (customer name as the person, account name as the organisation) and are what global search matches besides the title |
 | `contact_phone`, `contact_email` | optional; checked exactly as a lead's phone and email (structured, never a free-form blob); copied to a new customer record |
 | `address` | optional, multi-line, ≤ 1,000 |
-| `instrument_name` | optional, ≤ 200 |
+| `instrument_name` | optional; one of the [instruments](#instruments) for a new opportunity or a changed instrument (stored in the list's spelling); older opportunities keep their free text (≤ 200) until it is changed |
 | `work_load` | optional, ≤ 100, free text such as "300 tests/day": the product has no workload unit semantics, so none is invented |
+| `expected_cpt` | optional, one line, ≤ 100, free text ([Expected CPT](#expected-cpt)) |
 | `custom_fields` | the pipeline's custom field values ([Custom fields](#custom-fields)) |
 | `negotiated_price`, `negotiated_at` | read-only: the latest negotiated price ([Negotiation](#negotiation)) |
 | `probability` | `NUMERIC(5,2)`, 0-100; see [Probability](#probability) |
@@ -211,6 +216,81 @@ Generated columns (never written): `open_owner_id` (the owner while open, else N
 key of the ownership foreign key), `expected_close_sort` (`COALESCE(expected_close_date,
 '9999-12-31')`) and `closed_sort` (`COALESCE(closed_at, '1900-01-01')`): NOT NULL sort keys,
 so keyset cursors bound index scans (the Phase 2 lesson from leads' last-contact sort).
+
+### The opportunity's name
+
+Nobody types it (ADR-0028). `pipeline/naming.py` derives it from the deal's own details, the
+same way every time, and the services store it as `title`:
+
+| Details | Name |
+|---|---|
+| customer "ABC Diagnostics Mumbai", instrument "Adams 8380 V-lite" | `ABC Diagnostics Mumbai — Adams 8380 V-lite` |
+| no customer name, account "ABC Diagnostics", instrument "Adams 8180 T" | `ABC Diagnostics — Adams 8180 T` |
+| customer "XYZ Laboratory", no instrument | `XYZ Laboratory` |
+
+The separator is an em dash between spaces; a name longer than 200 characters is shortened
+with "…" (the customer part first). It is set at creation and re-derived whenever the customer
+name, account name or instrument changes (audited as a change of `title` too); no other edit,
+move or price changes it. Opportunities named before this rule keep their typed name until one
+of those three changes. `title` is refused in every write request (400 "Unknown field(s):
+title."), so the rule has one writer.
+
+### Instruments
+
+The one list is [`pipeline/instruments.py`](../backend/arkray/pipeline/instruments.py):
+**Adams 8380 V-lite, Adams 8180 V, Adams 8180 T, PCBA with Printer**.
+`GET /api/v1/config/opportunity-options` (any signed-in user) returns it as
+`{"instruments": [{"name": ...}, ...]}`; the form shows exactly what it returns. The services
+accept a listed instrument (letter case and spacing aside; the list's spelling is stored) or
+none, when creating and when the instrument changes; anything else is
+`400 {"instrument_name": ["Choose an instrument from the list."]}`. An opportunity from before
+the list keeps its own text while it is unchanged (there is no database constraint for that
+reason). Adding an instrument is one line (no migration: nothing in the database lists them);
+renaming one would need a data migration of the stored names, so names stay stable.
+
+### Expected CPT
+
+`expected_cpt` is optional free text (one line, ≤ 100 characters), exactly like Work load.
+**Nothing in the CRM's documentation or data defines CPT, its type or its unit**, so none is
+invented: the salesperson's own words (for example "Rs 18 per test") are kept. It is in the
+API, the opportunity page, the edit panel, the update audit (by field name, never the value)
+and Ask Arkray's record details; not in search or the semantic index. *Open question for the
+business:* what CPT means and in which unit; once confirmed it can become a typed field.
+
+### The lead a new opportunity creates
+
+`POST …/opportunities` without `lead` (the form never sends one) creates, in **one
+transaction**, a lead through `leads.services.create_lead` (its own audit `lead.created`,
+`LeadCreated` event and owner rules) and then the opportunity linked to it; if anything fails
+both are rolled back (tested by failing the opportunity's history insert after the lead
+exists, and with a refused stage). One successful creation is exactly one new lead and one
+new opportunity; the Lead table is what counts leads ([dashboard.md](dashboard.md)). Retries
+and double submits with the form's Idempotency-Key replay the first creation (also when
+concurrent: tested with three threads), so they never make a second pair.
+
+| Opportunity | Lead |
+|---|---|
+| customer name | first and last name, cut at the last space that lets both fit their 100 characters, so its name reads exactly the same; a name over 100 characters with no such space is cut at 100 (nothing lost; the lead's name then has a space there) |
+| account name | organisation |
+| contact (phone), email | phone, email (checked as a lead's) |
+| address | address lines 1 and 2 when it fits them (≤ 2 lines of ≤ 200 characters); otherwise only on the opportunity: never cut, never guessed into city, state or postal code |
+| owner | owner (the same rules as a lead created in that workspace, [Ownership](#ownership)) |
+| instrument, work load, prices, Expected CPT, dates, custom fields | not copied: they describe the deal |
+
+The lead is **Converted**: it has entered the opportunity process ([ADR-0019](adr/0019-lead-conversion.md)),
+exactly as converting a lead leaves it, so "how many leads have converted?" counts it. The
+leads module's own status change does it, after the opportunity exists (`lead.status_changed`
+new → converted in the audit; skipped if no converted status is configured). Before the
+backend review these leads stayed "New".
+
+The lead is a snapshot made at creation: editing the opportunity's customer details later
+doesn't rewrite it (a lead may have several opportunities), and no edit, move, negotiated
+price, note or custom value ever creates another lead. `opportunity.created` records
+`lead_created: true`, the lead, the pipeline and the stage (no customer details).
+
+**Duplicates are never merged.** Names aren't identities, so every new opportunity gets a new
+lead. While typing, the form asks `GET …/leads/duplicates` (same phone or email, in the
+workspace only) and shows a non-blocking "Possible existing lead"; nothing is linked.
 
 ## Ownership
 
@@ -340,8 +420,9 @@ stage). `GET …/opportunities/{id}/history` pages it, newest first (50 per page
 ## Archive
 
 As for leads: no DELETE anywhere (FKs `PROTECT`); `…/archive` and `…/restore {version}`
-(audited, idempotent). Archived opportunities leave boards, lists (except the `archived`
-view) and **all totals**; the detail page still opens them, read-only (422 on edit or
+(audited, idempotent). Archiving an opportunity never archives or deletes its lead: the lead
+stays (and still counts as a lead) and its history, stage history and audit stay too.
+Archived opportunities leave boards, lists (except the `archived` view) and **all totals**; the detail page still opens them, read-only (422 on edit or
 move). An **archived lead** gets no new pipeline: creating, converting, reopening a closed
 opportunity and restoring an archived one are refused (422, "restore the lead first");
 its open opportunities can still be moved and closed. **Closed is not archived**: a won deal stays on the Won column and in history.
@@ -360,7 +441,7 @@ customer record).
 "Converted" now means **the lead has entered the opportunity process: it has at least one
 opportunity** ([ADR-0019](adr/0019-lead-conversion.md)).
 
-- **Convert** (`POST /api/v1/workspaces/{ws}/leads/{id}/convert {version, title, value,
+- **Convert** (`POST /api/v1/workspaces/{ws}/leads/{id}/convert {version, value,
   pipeline?, stage?, probability?, expected_close_date?, description?}`, with an
   `Idempotency-Key`): creates the opportunity **and** moves the lead to the first active
   status of category *converted*, in one transaction. It returns `{lead, opportunity}`
@@ -512,24 +593,38 @@ bumps the versions of the opportunities it moves.
   *Restore* in the actions menu) and three tabs:
   **Overview** (Deal: installation price, negotiated price with *Update price* while
   negotiating, probability, weighted value, dates; Customer (phone and email as safe `tel:`
-  and `mailto:` links); Instrument; More details: the custom fields; Description; open work
-  and record details, owner included), **Notes** (deal notes with files,
+  and `mailto:` links, and **Lead**: a link to its lead page, or "In another workspace");
+  Instrument (instrument, work load, Expected CPT); More details: the custom fields;
+  Description; open work and record details, owner included), **Notes** (deal notes with files,
   [activities.md](activities.md#attachments)) and **History** (negotiated prices, stage
   history, the timeline). *Change owner* is a dialog (the new owner; what else moves); a
   deal handed out of the user's workspace being viewed returns to that workspace's Pipeline
   with the notice.
-- **New and edit opportunity**: a right-side panel over the board or the deal (full width on
-  phones), grouped Basic (name, the owner organisation-wide only, pipeline, stage,
-  opportunity date; the negotiated price when the stage is a negotiation stage), Customer
-  (account, customer, phone, email, address: the new customer record), Instrument
-  (instrument, work load, installation price),
-  Closing (expected closing date, own probability, lost reason) and Additional (custom
-  fields, description). Amounts typed as `12,50,000`, `1,250,000` or `1250000.50`, sent as
+- **New and edit opportunity**: a right-side panel over the board or the deal (bounded width
+  from 640 px, the board visible beside it; full width on phones), with short section
+  headings and no name, lead or lead search (ADR-0028): **Customer** (account name, customer
+  name, contact, email, address; the "Possible existing lead" notice), **Instrument** (the
+  instrument picker, work load, installation price, Expected CPT), **Timeline** (opportunity
+  date, expected closing date), **Pipeline** (the owner organisation-wide only, pipeline,
+  stage; the negotiated price for a negotiation stage, the lost reason for a lost one; when
+  editing, the read-only pipeline and stage and the own probability) and **Additional** (the
+  pipeline's custom fields; the description when editing). A new opportunity needs the
+  customer or the account name and takes its stage's probability. The **instrument picker**
+  lists the server's instruments as a radio group (click or tap one; Tab in, arrow keys move
+  and choose, Space/Enter) beside a "Selected" box an instrument can be dragged into (a
+  shortcut on desktop only, never required; anything else dropped is ignored), with a remove
+  button. Amounts typed as `12,50,000`, `1,250,000` or `1250000.50`, sent as
   exact strings (misplaced commas refused). Idempotency key per identical body; an edit
   conflict (409) offers *Keep my changes* (merged onto the latest, someone else's manual
   probability kept) or *Discard mine*; closing the panel with unsaved typing asks first.
   Opened from a route (the header's *New opportunity*): saving lands on the new deal,
   cancelling returns to the board.
+- **Lead page** (ADR-0028; `/leads/{id}`, `/admin/users/{id}/leads/{leadId}`): read-only and
+  compact: the lead's name, organisation, owner and creation time; Contact (phone, email,
+  address); its opportunities in this workspace (name, value, stage or outcome, expected
+  close), each opening the deal. Reached from the dashboard's new leads, search, Ask Arkray
+  and the deal's "Lead" link; another workspace's lead is "not found". There is no Leads list
+  or lead form: `/leads`, `/leads/new` and `/leads/{id}/edit` still redirect to the Pipeline.
 - Filters: an inverted expected-close range is explained next to the dates and never sent;
   the board keeps the last valid range. Stage lists start from their first page whenever
   the filters change.
