@@ -1,10 +1,13 @@
-import type { Activity, Dashboard, DashboardActivity, DashboardLead } from "@/lib/api/types";
+import type { Activity, Dashboard, DashboardActivity } from "@/lib/api/types";
 
 import { makeActivity, makeMeeting } from "./activity-fixtures";
 import { LEAD_ID, PRIYA_ID, RAHUL_ID } from "./fixtures";
 
 export const RAHUL = { id: RAHUL_ID, full_name: "Rahul Sharma", is_active: true };
 export const PRIYA = { id: PRIYA_ID, full_name: "Priya Patel", is_active: true };
+
+/** The API still lists new leads; the UI shows none (ADR-0027). */
+type DashboardLead = Dashboard["new_leads"][number];
 
 export function makeDashboardLead(overrides: Partial<DashboardLead> = {}): DashboardLead {
   return {

@@ -910,6 +910,28 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/assign": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Change an open opportunity's owner (crm.assign_any). Ownership follows the customer
+         *     record, so its other open opportunities and current work move too (ADR-0027). The
+         *     response shows the opportunity as reassigned, even if it has thereby left the workspace
+         *     it was reassigned from (as leads' assign).
+         */
+        readonly post: operations["opportunities_assign"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/history": {
         readonly parameters: {
             readonly query?: never;
@@ -2026,6 +2048,14 @@ export interface components {
             readonly lost_reason: string;
             readonly created_by: components["schemas"]["UserRef"];
         };
+        readonly OpportunityAssignRequest: {
+            /**
+             * Format: uuid
+             * @description An active user who works in a CRM workspace.
+             */
+            readonly owner: string;
+            readonly version: number;
+        };
         /** @description A board card and a list row. */
         readonly OpportunityCard: {
             /** Format: uuid */
@@ -2088,9 +2118,14 @@ export interface components {
             readonly negotiated_price?: (string | number) | null;
             /**
              * Format: uuid
-             * @description The lead (in this workspace) the opportunity is for.
+             * @description The lead (in this workspace) the opportunity is for. Omitted (the UI, ADR-0027): a new hidden customer record is made from the customer details, which then need the customer or account name.
              */
-            readonly lead: string;
+            readonly lead?: string;
+            /**
+             * Format: uuid
+             * @description Without a lead: who owns the new opportunity. Required organisation-wide (crm.assign_any); elsewhere the workspace's user, so it may be omitted.
+             */
+            readonly owner?: string;
             /**
              * Format: uuid
              * @description The default pipeline if omitted.
@@ -2416,6 +2451,8 @@ export interface components {
             readonly title: string;
             readonly status: components["schemas"]["StageCategoryEnum"];
             readonly stage: components["schemas"]["SearchStage"];
+            readonly account_name: string;
+            readonly customer_name: string;
             readonly lead: components["schemas"]["LeadRef"];
             readonly owner: components["schemas"]["UserRef"];
         };
@@ -4541,6 +4578,39 @@ export interface operations {
         readonly requestBody: {
             readonly content: {
                 readonly "application/json": components["schemas"]["OpportunityVersionRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Opportunity"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly opportunities_assign: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly opportunity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["OpportunityAssignRequest"];
             };
         };
         readonly responses: {

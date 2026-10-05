@@ -45,13 +45,13 @@ export function Amount({ value, className = "" }: { value: string; className?: s
 }
 
 /**
- * The lead an opportunity is for. "Restricted" when the lead has moved to someone else's
- * workspace (a won or lost opportunity keeps the owner who closed it): its name is not
- * sent, so it can't be shown.
+ * The customer an opportunity is for (its customer record, the API's `lead`). "Restricted"
+ * when the record has moved to someone else's workspace (a won or lost opportunity keeps
+ * the owner who closed it): its name is not sent, so it can't be shown.
  */
-export function LeadName({ lead }: { lead: OpportunityLeadRef }) {
+export function CustomerName({ lead }: { lead: OpportunityLeadRef }) {
   if (lead.restricted || !lead.id) {
-    return <span className="italic text-slate-500">Lead in another workspace</span>;
+    return <span className="italic text-slate-500">Customer in another workspace</span>;
   }
   return <>{lead.display_name}</>;
 }

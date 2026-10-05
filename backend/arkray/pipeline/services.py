@@ -6,8 +6,13 @@ Authorization, applied here for every caller (API, conversion, future imports an
   it, NotFoundError (404), indistinguishable from a record that doesn't exist;
 - writing requires identity.workspaces.authorize_write (own workspace: crm.access_own;
   another user's or the organisation's: crm.manage_any), else 403;
-- nobody chooses an opportunity's owner: it is always the lead's owner (who must be an
-  active, assignable user), so creating an opportunity can never assign work to someone.
+- an opportunity's owner is always its lead's owner (who must be an active, assignable
+  user). Since Leads left the UI (ADR-0027) the lead is the opportunity's hidden customer
+  record: an opportunity created without one gets a new one, owned as a lead created in the
+  same workspace would be (the creator in their own workspace, the user in theirs, a chosen
+  active user organisation-wide: only that last is an assignment, crm.assign_any). Changing
+  the owner afterwards is `reassign_opportunity`, which reassigns the customer record
+  (crm.assign_any), so the customer's other open opportunities and current work move too.
 
 Lock order (docs/pipeline.md#lock-order), the same in every operation, so two operations
 can never wait for each other in a cycle:
@@ -55,7 +60,7 @@ from django.utils import timezone
 
 from arkray.audit import services as audit
 from arkray.core import idempotency
-from arkray.core.access import AccessScope
+from arkray.core.access import AccessScope, ScopeKind
 from arkray.core.context import current_support_session_id
 from arkray.core.domain_events import publish
 from arkray.core.errors import (
@@ -63,13 +68,15 @@ from arkray.core.errors import (
     ConflictError,
     InvalidInputError,
     NotFoundError,
+    PermissionDeniedError,
 )
 from arkray.identity.models import User
+from arkray.identity.policy import Capability, has_capability
 from arkray.identity.selectors import lock_assignable_user
 from arkray.identity.workspaces import authorize_write
 from arkray.leads import selectors as lead_selectors
 from arkray.leads import services as lead_services
-from arkray.leads.models import Lead, StatusCategory
+from arkray.leads.models import NAME_MAX_LENGTH, Lead, StatusCategory
 
 from . import events, selectors, validation
 from .models import (
@@ -100,18 +107,19 @@ IDEMPOTENT_CONVERT = "pipeline.convert_lead"
 
 ARCHIVED_READ_ONLY = "This opportunity is archived. Restore it to make changes."
 LEAD_ARCHIVED = "This lead is archived. Restore it before adding opportunities."
+# Users see a lead as the opportunity's customer (ADR-0027): messages they can meet say so.
 OWNER_NOT_ASSIGNABLE = (
-    "This lead's owner is deactivated. Reassign the lead to an active user first."
+    "This customer's owner is deactivated. Change the owner to an active user first."
 )
 CLOSED_TO_CLOSED = "This opportunity is closed. Reopen it by moving it to an open stage first."
 REOPEN_ELSEWHERE = (
-    "This opportunity's lead now belongs to someone else, so it can't be reopened here. "
+    "This opportunity's customer now belongs to someone else, so it can't be reopened here. "
     "Ask an administrator to reopen it."
 )
 # The same rule for an administrator in a user's workspace (Phase 6): they are the
 # administrator, and the organisation-wide view (whose scope includes the new owner) can.
 REOPEN_ELSEWHERE_DELEGATED = (
-    "This opportunity's lead now belongs to someone else, so it can't be reopened in this "
+    "This opportunity's customer now belongs to someone else, so it can't be reopened in this "
     "user's workspace. Reopen it from the organisation-wide Pipeline."
 )
 CLOSED_PROBABILITY = (
@@ -121,8 +129,21 @@ LOST_REASON_ONLY_WHEN_LOST = "Only lost opportunities have a lost reason."
 SAME_STAGE_LOST_REASON = (
     "The opportunity is already in this stage. Edit it to change the lost reason."
 )
-LEAD_ARCHIVED_REOPEN = "This lead is archived. Restore the lead before reopening its opportunities."
-LEAD_ARCHIVED_RESTORE = "This lead is archived. Restore the lead first."
+LEAD_ARCHIVED_REOPEN = "This customer's record is archived, so its opportunities can't be reopened."
+LEAD_ARCHIVED_RESTORE = (
+    "This customer's record is archived, so its opportunities can't be restored."
+)
+CUSTOMER_REQUIRED = "Enter the customer name or the account name."
+OWNER_FOLLOWS_LEAD = "An opportunity for an existing lead is owned by the lead's owner."
+OWNER_IS_SELF_ONLY = "Opportunities you create in your own workspace are owned by you."
+OWNER_IS_SUBJECT_ONLY = (
+    "Opportunities created in this workspace belong to the user whose workspace it is."
+)
+OWNER_REQUIRED = "Choose who owns this opportunity."
+CLOSED_OWNER = (
+    "Won and lost opportunities keep the owner who closed them; only open ones change owner."
+)
+LEAD_ARCHIVED_OWNER = "This customer's record is archived, so the owner can't be changed."
 ALREADY_CONVERTED = "This lead has already been converted."
 NO_CONVERTED_STATUS = "No lead status for converted leads is configured."
 NEEDS_OPPORTUNITY = (
@@ -505,27 +526,87 @@ def _creation_fields(fields: Mapping[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
+def _split_name(name: str) -> tuple[str, str]:
+    """A customer name as a lead's first and last name (each at most 100 characters; the
+    customer name may be 200), cut at a space so the lead's display name reads the same."""
+    if len(name) <= NAME_MAX_LENGTH:
+        return name, ""
+    cut = name.rfind(" ", 1, NAME_MAX_LENGTH + 1)
+    if cut <= 0:
+        cut = NAME_MAX_LENGTH
+    return name[:cut].rstrip(), name[cut:].strip()[:NAME_MAX_LENGTH]
+
+
+def _customer_record(cleaned: Mapping[str, Any]) -> dict[str, Any]:
+    """The fields of the hidden customer record (a lead, ADR-0027) a new opportunity without
+    a lead gets: its names, email and phone from the opportunity's customer details, already
+    cleaned by the opportunity's own rules (which are the lead's: pipeline.validation)."""
+    customer = cleaned.get("customer_name", "")
+    account = cleaned.get("account_name", "")
+    if not (customer or account):
+        raise InvalidInputError(details={"customer_name": [CUSTOMER_REQUIRED]})
+    first, last = _split_name(customer)
+    record = {"first_name": first, "last_name": last, "organization_name": account}
+    if cleaned.get("contact_email"):
+        record["email"] = cleaned["contact_email"]
+    if cleaned.get("contact_phone"):
+        record["phone"] = cleaned["contact_phone"]
+    return record
+
+
+def _check_new_owner(actor: User, scope: AccessScope, owner_id: UUID | None) -> None:
+    """The owner a request may name for a new customer record, checked up front so the
+    answer speaks of opportunities. leads.services.create_lead applies the same rules (and
+    the capability and active-user checks) under its locks."""
+    if scope.kind is ScopeKind.ORGANIZATION:
+        if owner_id is None:
+            raise InvalidInputError(details={"owner": [OWNER_REQUIRED]})
+        return
+    if owner_id is None:
+        return
+    if scope.kind is ScopeKind.SELF and owner_id != actor.pk:
+        raise InvalidInputError(details={"owner": [OWNER_IS_SELF_ONLY]})
+    if scope.kind is ScopeKind.USER and owner_id != scope.subject_user_id:
+        raise InvalidInputError(details={"owner": [OWNER_IS_SUBJECT_ONLY]})
+
+
 def create_opportunity(
     *,
     actor: User,
     scope: AccessScope,
-    lead_id: UUID,
+    lead_id: UUID | None,
     fields: Mapping[str, Any],
+    owner_id: UUID | None = None,
     pipeline_id: UUID | None = None,
     stage_id: UUID | None = None,
     negotiated_price: Any = None,
     idempotency_key: UUID | None = None,
 ) -> CreateResult:
-    """Create an opportunity for a lead in `scope`. Its owner is the lead's owner; the
-    pipeline defaults to the organisation's default pipeline and the stage to its first open
-    stage. Created in a negotiation stage, it needs the negotiated price."""
+    """Create an opportunity in `scope`, for a lead of the scope or (`lead_id` None: the UI
+    since ADR-0027) with a new hidden customer record made from its customer details, in the
+    same transaction. Its owner is the lead's owner: for a new record, as for a lead created
+    in `scope` (`owner_id` names it organisation-wide, where it is required). The pipeline
+    defaults to the organisation's default pipeline and the stage to its first open stage.
+    Created in a negotiation stage, it needs the negotiated price.
+
+    Lock order: a new record's owner is share-locked (leads.services.create_lead) before the
+    pipeline. That can't close a cycle: nothing locks a pipeline and then a user row in a mode
+    that conflicts with a share lock (configuration.py only share-locks owners), and the new
+    lead row is invisible to everyone else until this commits."""
     authorize_write(actor, scope)
     cleaned = _creation_fields(fields)
     price = _clean_price(negotiated_price)
+    customer: dict[str, Any] | None = None
+    if lead_id is not None and owner_id is not None:
+        raise InvalidInputError(details={"owner": [OWNER_FOLLOWS_LEAD]})
+    if lead_id is None:
+        _check_new_owner(actor, scope, owner_id)
+        customer = _customer_record(cleaned)
     digest = idempotency.request_digest(
         scope.kind.value,
         str(scope.subject_user_id),
         str(lead_id),
+        str(owner_id),
         cleaned,
         str(pipeline_id),
         str(stage_id),
@@ -539,7 +620,15 @@ def create_opportunity(
             return CreateResult(_replay(scope, earlier), replayed=True)
     try:
         with transaction.atomic():
-            lead = lead_selectors.lock_lead(scope, lead_id)
+            if customer is None:
+                assert lead_id is not None  # noqa: S101 — no customer record only with a lead
+                target = lead_id
+            else:
+                # The leads module's own operation: its audit event and LeadCreated included.
+                target = lead_services.create_lead(
+                    actor=actor, scope=scope, fields=customer, owner_id=owner_id
+                ).lead.pk
+            lead = lead_selectors.lock_lead(scope, target)
             opportunity = _insert(
                 actor=actor,
                 scope=scope,
@@ -1105,6 +1194,62 @@ def restore_opportunity(
             )
         )
     return selectors.opportunity_by_id(opportunity.pk)
+
+
+# --- owner -------------------------------------------------------------------------------------
+def reassign_opportunity(
+    *, actor: User, scope: AccessScope, opportunity_id: UUID, version: int, owner_id: UUID
+) -> Opportunity:
+    """Hand an open opportunity to another salesperson: "Change owner" on the deal, where
+    the Leads screen's Assign used to be (ADR-0027). An opportunity's owner is its customer
+    record's (lead's) owner, so this reassigns the lead through the leads module's own
+    operation (crm.assign_any, active owner, its audit and LeadReassigned): the customer's
+    other open opportunities and current work move too, in this transaction. Won and lost
+    opportunities keep the owner who closed them, so only an open one can be reassigned;
+    archived ones are read-only. Choosing the current owner changes nothing.
+
+    Lock order: the lead first (FOR UPDATE, as leads.services.reassign_lead takes it, so the
+    lock is never upgraded), then the opportunity; the subscribers lock the rest in order."""
+    if not has_capability(actor, Capability.CRM_ASSIGN_ANY):
+        raise PermissionDeniedError()
+    authorize_write(actor, scope)
+    with transaction.atomic():
+        found = (
+            scope.apply(Opportunity.objects.filter(pk=opportunity_id))
+            .values_list("lead_id", "status")
+            .first()
+        )
+        if found is None:
+            raise NotFoundError()
+        lead_id, status = found
+        if status != StageCategory.OPEN:
+            # Checked before the lead is looked up: a closed deal's lead may have moved on
+            # to someone outside this workspace, and that is not this caller's to learn.
+            raise BusinessRuleViolation(CLOSED_OWNER)
+        lead = lead_selectors.lock_lead(scope, lead_id, exclusive=True)
+        opportunity = (
+            scope.apply(
+                Opportunity.objects.select_for_update(no_key=True, of=("self",)).filter(
+                    pk=opportunity_id
+                )
+            )
+            .only("id", "lead_id", "owner_id", "status", "version", "archived_at")
+            .first()
+        )
+        if opportunity is None:
+            raise NotFoundError()
+        if opportunity.owner_id == owner_id:
+            return selectors.opportunity_by_id(opportunity.pk)
+        _require_version(opportunity, version)
+        _require_not_archived(opportunity)
+        if opportunity.status != StageCategory.OPEN:  # closed meanwhile
+            raise BusinessRuleViolation(CLOSED_OWNER)
+        if lead.archived_at is not None:
+            raise BusinessRuleViolation(LEAD_ARCHIVED_OWNER)
+        lead_services.reassign_lead(
+            actor=actor, scope=scope, lead_id=lead.pk, version=lead.version, owner_id=owner_id
+        )
+    return selectors.opportunity_by_id(opportunity_id)
 
 
 # --- reactions to lead changes (registered in subscribers.py) ----------------------------------

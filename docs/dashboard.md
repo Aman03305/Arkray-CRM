@@ -5,6 +5,11 @@ is a **read-only view over the authoritative domains**, not an analytics subsyst
 no tables, no cache and no formulas of its own. Every figure is the owning module's
 selector, called with the request's `AccessScope`.
 
+> **Since [ADR-0027](adr/0027-leads-removed-from-the-ui.md) the UI shows four figures and two
+> lists:** Leads left the UI, so "Total leads", "New leads today" and the "New leads today"
+> list are no longer shown. The API below still computes and returns them (unchanged,
+> tested); the page ignores them.
+
 Code: [`backend/arkray/dashboard/`](../backend/arkray/dashboard/) (module above
 `activities` in the [layering](architecture.md#dependency-rules)),
 [`frontend/src/features/dashboard/`](../frontend/src/features/dashboard/).
@@ -280,14 +285,15 @@ of the schedule index). Those tests vacuum their data first, as autovacuum keeps
 ## Frontend
 
 - **Layout:** the page header (Dashboard; Your records / Selected user's records /
-  Organization overview), "Key figures" (six cards: one column on phones, two on tablets,
-  three on desktops; amounts wrap only at their commas), then the three lists (stacked, two
-  columns on large screens, three on wide ones; names wrap rather than being cut off, so an
+  Organization overview), "Key figures" (four cards since ADR-0027: one column on phones,
+  two on tablets, four on desktops; amounts wrap only at their commas), then the two lists
+  (upcoming meetings, tasks requiring attention; stacked, two columns on large screens;
+  each row names its customer as text; names wrap rather than being cut off, so an
   assigned user's name and "(deactivated)" always show), then, on Admin Home, "Recently
   added users".
-- **Cards are links** to this workspace's Leads, Pipeline and Activities. A card opens the
+- **Cards are links** to this workspace's Pipeline and Activities. A card opens the
   list that shows exactly what it counts by presetting that list's in-memory filters
-  (`presetLeadList`, `presetActivityList`, `presetBoard`; the same presets as the Activities
+  (`presetActivityList`, `presetBoard`; the same presets as the Activities
   page's own shortcuts, now one function `summaryFilters`), never by putting filters in the
   URL. The preset runs only for a navigation in the same tab (`onNavigate`): a card opened
   in a new tab (Ctrl/Cmd/Shift- or middle-click) shows that module's default list and leaves
@@ -295,8 +301,7 @@ of the schedule index). Those tests vacuum their data first, as autovacuum keeps
   Rahul's Activities on the Tasks tab, not the organisation's.
 - **States:** a skeleton while loading (never zeros) and one persistent `role="status"`
   region that says "Loading the dashboard" / "Updating the dashboard"; real zeros with empty
-  states for a new user ("No new leads yet today.", "No upcoming meetings.", "No open
-  tasks."); errors as above; a 404 is the not-found page alone (one `h1`).
+  states for a new user ("No upcoming meetings.", "No open tasks."); errors as above; a 404 is the not-found page alone (one `h1`).
 - **Workspace isolation:** the view is keyed by workspace and every query key starts with
   `["dashboard", <workspace>]`; with `gcTime: 0` nothing of a previous workspace (or a
   previous signed-in user) can be shown. Tested: Rahul → Priya (slow, then failing), Back

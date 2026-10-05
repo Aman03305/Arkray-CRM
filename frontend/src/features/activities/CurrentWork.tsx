@@ -21,9 +21,9 @@ import { useActivityAction } from "./hooks";
 import { presetActivityList } from "./list-state";
 
 /**
- * A lead's or an opportunity's open tasks and scheduled meetings, soonest first, with
- * Complete at hand and + Task / + Meeting for this lead or opportunity. Only this
- * workspace's work is listed (the server scopes it).
+ * An opportunity's open tasks and scheduled meetings, soonest first, with Complete at hand
+ * and + Task / + Meeting for this opportunity. Only this workspace's work is listed (the
+ * server scopes it).
  */
 export function CurrentWork({
   workspace,
@@ -33,7 +33,7 @@ export function CurrentWork({
 }: {
   workspace: Workspace;
   target: CurrentWorkTarget;
-  /** What it is about, shown in the forms ("Asha Mehta", "Analyser upgrade"). */
+  /** What it is about, shown in the forms ("Analyser upgrade"). */
   label: string;
   canWrite: boolean;
 }) {
@@ -56,7 +56,6 @@ export function CurrentWork({
   });
   const action = useActivityAction(workspace);
   const rows = work.data?.results;
-  const preset = target.opportunity ? { opportunity: { id: target.opportunity, label } } : { lead: { id: target.lead ?? "", label } };
 
   const complete = (row: ActivityListItem) => {
     setNotice(null);
@@ -153,12 +152,12 @@ export function CurrentWork({
             // The rest of *this* record's current work, not the whole workspace's newest
             // activities (whole-software audit). onNavigate: same-tab navigations only.
             onNavigate={() =>
-              presetActivityList(
-                workspaceApiSegment(workspace),
-                target.opportunity
-                  ? { status: "current", ordering: "scheduled", opportunity: target.opportunity }
-                  : { status: "current", ordering: "scheduled", lead: target.lead ?? "", leadLabel: label },
-              )
+              presetActivityList(workspaceApiSegment(workspace), {
+                status: "current",
+                ordering: "scheduled",
+                opportunity: target.opportunity,
+                opportunityLabel: label,
+              })
             }
             className="font-medium text-brand-700 hover:underline"
           >
@@ -170,7 +169,7 @@ export function CurrentWork({
         <ActivityFormDialog
           workspace={workspace}
           kind={form}
-          mode={{ kind: "create", ...preset }}
+          mode={{ kind: "create", opportunity: { id: target.opportunity, label } }}
           onClose={() => setForm(null)}
           onSaved={(saved) => {
             setForm(null);

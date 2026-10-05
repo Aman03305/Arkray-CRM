@@ -23,7 +23,7 @@ from decimal import Decimal
 from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db import models
 from django.db.models import Case, F, Func, Q, Value, When
-from django.db.models.functions import Coalesce, Lower, Upper
+from django.db.models.functions import Coalesce, Concat, Lower, Upper
 from django.db.models.lookups import Exact
 from django.utils import timezone
 
@@ -270,11 +270,15 @@ def business_today() -> date:
 OPEN_OWNER = Case(When(status=StageCategory.OPEN, then=F("owner_id")), default=None)
 EXPECTED_CLOSE_SORT = Coalesce(F("expected_close_date"), Value(UNDATED))
 CLOSED_SORT = Coalesce(F("closed_at"), Value(NEVER_CLOSED))
-# What global search matches (docs/search.md#opportunities): the title only, upper-cased like
-# every search text so PostgreSQL folds both sides alike. Not the lead's name: a closed
-# opportunity's lead may since belong to someone else, and its name is then shown to the
-# opportunity's owner as "restricted" (matching on it would reveal it). Not amounts.
-SEARCH_TEXT = Upper("title")
+# What global search matches (docs/search.md#opportunities): the title and the opportunity's
+# own customer snapshot (account and customer names), upper-cased like every search text so
+# PostgreSQL folds both sides alike, separated by a space (search words never contain one, so
+# no word matches across two fields). The customer names are the opportunity's own fields,
+# shown to everyone who can see it; since Leads left the UI (ADR-0027) they are how people find
+# a customer's deals. Not the lead's name: a closed opportunity's lead may since belong to
+# someone else, and its name is then shown to the opportunity's owner as "restricted" (matching
+# on it would reveal it). Not amounts.
+SEARCH_TEXT = Upper(Concat("title", Value(" "), "account_name", Value(" "), "customer_name"))
 
 
 class Opportunity(UUIDPrimaryKeyModel, TimeStampedModel):
@@ -405,15 +409,16 @@ class Opportunity(UUIDPrimaryKeyModel, TimeStampedModel):
             # phase, 11.6 -> 1.8 ms and 10.4 -> 1.9 ms for an owner of 20,000 (docs/database.md).
             models.Index(F("owner"), F("pipeline"), name="pipeline_opp_owner_pipe_idx"),
             models.Index(F("created_at").desc(), F("id").desc(), name="pipeline_opp_created_idx"),
-            # Global search (Phase 7): a title substring, in any workspace. Without it an
-            # organisation-wide search read every opportunity (100-150 ms at 300,000) and one
-            # owner's walked all of theirs (30 ms at 20,000). Trigrams only: titles are short,
-            # so rechecking every owner's candidates costs little, and with the owner first
-            # (as the activity indexes) PostgreSQL also chose it for 17 pipeline list and
-            # board queries; docs/search.md#database-and-indexes.
+            # Global search (Phase 7; the customer names since ADR-0027): a substring of the
+            # title or customer, in any workspace. Without it an organisation-wide search read
+            # every opportunity (100-150 ms at 300,000) and one owner's walked all of theirs
+            # (30 ms at 20,000). Trigrams only: the text is short, so rechecking every owner's
+            # candidates costs little, and with the owner first (as the activity indexes)
+            # PostgreSQL also chose it for 17 pipeline list and board queries;
+            # docs/search.md#database-and-indexes.
             GinIndex(
                 OpClass(SEARCH_TEXT, name="gin_trgm_ops"),
-                name="pipeline_opp_search_trgm",
+                name="pipeline_opp_text_trgm",
                 condition=Q(archived_at__isnull=True),
             ),
         ]

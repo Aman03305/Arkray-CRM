@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import { Alert } from "@/components/ui/Alert";
@@ -8,8 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { Dialog, DialogActions } from "@/components/ui/Dialog";
 import { SelectField, TextAreaField, TextField } from "@/components/ui/Field";
 import { useFocusFirstInvalid } from "@/components/ui/useFocusFirstInvalid";
-import { pipelineApi, pipelineKeys } from "@/features/pipeline/api";
-import { LeadPicker } from "@/features/pipeline/LeadPicker";
+import { DealPicker } from "@/features/pipeline/DealPicker";
 import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
 import type { Activity, ActivityCreateRequest } from "@/lib/api/types";
 import { randomUuid } from "@/lib/random";
@@ -36,20 +35,20 @@ import { useActivityWriteSync } from "./hooks";
 export type FormMode =
   | {
       kind: "create";
-      /** Fixed when opened from a lead's or an opportunity's page. */
-      lead?: { id: string; label: string };
+      /** Fixed when opened from an opportunity's page. */
       opportunity?: { id: string; label: string };
       /** The day or time chosen on the calendar (a prefilled form closes without asking). */
       schedule?: Schedule;
     }
   | { kind: "edit"; activity: Activity };
 
-const KNOWN_FIELDS = new Set(["lead", "opportunity", "title", "description", "priority", "due_at", "starts_at", "ends_at", "location", "meeting_url"]);
+const KNOWN_FIELDS = new Set(["opportunity", "title", "description", "priority", "due_at", "starts_at", "ends_at", "location", "meeting_url"]);
 
 /**
- * Create or edit a task or a meeting, in a dialog over the page it was opened from. The
- * activity belongs to the lead's owner; nobody picks an owner. A create retried with exactly
- * the same request reuses its idempotency key (a timeout can't create two); an edit carries
+ * Create or edit a task or a meeting, in a dialog over the page it was opened from. It is
+ * about an opportunity (ADR-0027) and belongs to its customer's owner; nobody picks an
+ * owner. A create retried with exactly the same request reuses its idempotency key (a
+ * timeout can't create two); an edit carries
  * the version it started from, and a conflict (409) keeps the typing on screen and offers to
  * apply it to the latest version. With `onKindChange` (a new entry from the calendar) the
  * form can switch between a meeting and a task, keeping what was typed.
@@ -78,9 +77,8 @@ export function ActivityFormDialog({
   );
   const [version, setVersion] = useState(editing?.version ?? 0);
   const [draft, setDraft] = useState<Draft>(base);
-  const [lead, setLead] = useState(mode.kind === "create" ? (mode.lead?.id ?? "") : "");
-  const [leadLabel, setLeadLabel] = useState(mode.kind === "create" ? (mode.lead?.label ?? "") : "");
   const [opportunity, setOpportunity] = useState(mode.kind === "create" ? (mode.opportunity?.id ?? "") : "");
+  const [opportunityLabel, setOpportunityLabel] = useState(mode.kind === "create" ? (mode.opportunity?.label ?? "") : "");
   const [clientErrors, setClientErrors] = useState<Problems>({});
   const [conflict, setConflict] = useState<Activity | null>(null);
   const [blocked, setBlocked] = useState<string | null>(null);
@@ -94,19 +92,12 @@ export function ActivityFormDialog({
     return idempotency.current.key;
   };
 
-  const fixedLead = mode.kind === "create" && Boolean(mode.lead || mode.opportunity);
-  // The chosen lead's opportunities in this workspace (to link it, optionally).
-  const opportunities = useQuery({
-    queryKey: pipelineKeys.forLead(workspace, lead, null),
-    queryFn: () => pipelineApi.forLead(workspace, lead, null),
-    enabled: mode.kind === "create" && !mode.opportunity && Boolean(lead),
-  });
+  const fixedOpportunity = mode.kind === "create" && Boolean(mode.opportunity);
 
   const save = useMutation({
     mutationFn: () => {
       if (editing) return activitiesApi.update(workspace, editing.id, updateRequest(kind, base, draft, version));
-      const link = mode.kind === "create" && mode.opportunity ? { opportunity: mode.opportunity.id } : { lead, opportunity: opportunity || undefined };
-      const body = createRequest(kind, draft, link);
+      const body = createRequest(kind, draft, opportunity);
       return activitiesApi.create(workspace, body, keyFor(body));
     },
     onSuccess: (activity) => sync(activity),
@@ -141,8 +132,8 @@ export function ActivityFormDialog({
   const set = (field: keyof Draft) => (value: string) => setDraft((d) => ({ ...d, [field]: value }));
   const focusLater = (selector: string) => requestAnimationFrame(() => form.current?.querySelector<HTMLElement>(selector)?.focus());
 
-  const leadChosen = mode.kind === "create" && !mode.lead && !mode.opportunity && Boolean(lead);
-  const dirty = changedFields(kind, base, draft).length > 0 || leadChosen;
+  const opportunityChosen = mode.kind === "create" && !mode.opportunity && Boolean(opportunity);
+  const dirty = changedFields(kind, base, draft).length > 0 || opportunityChosen;
   const requestClose = () => {
     if (!dirty) onClose();
     else setDiscarding(true);
@@ -159,7 +150,7 @@ export function ActivityFormDialog({
       focusLater("[data-conflict-apply]");
       return;
     }
-    const problems = validateDraft(kind, draft, { requireLead: mode.kind === "create" && !mode.opportunity, lead });
+    const problems = validateDraft(kind, draft, { requireOpportunity: mode.kind === "create", opportunity });
     setClientErrors(problems);
     if (Object.keys(problems).length) return;
     if (editing && changedFields(kind, base, draft).length === 0) {
@@ -285,41 +276,31 @@ export function ActivityFormDialog({
 
         {editing ? (
           <p className="text-sm text-slate-600">
-            About: <strong className="font-medium text-slate-900">{editing.lead.restricted ? "A lead in another workspace" : editing.lead.display_name}</strong>
-            {editing.opportunity && !editing.opportunity.restricted ? ` · ${editing.opportunity.title}` : null}
+            About:{" "}
+            <strong className="font-medium text-slate-900">
+              {editing.opportunity && !editing.opportunity.restricted
+                ? editing.opportunity.title
+                : editing.lead.restricted
+                  ? "A customer in another workspace"
+                  : editing.lead.display_name}
+            </strong>
           </p>
-        ) : fixedLead && mode.kind === "create" ? (
+        ) : fixedOpportunity && mode.kind === "create" ? (
           <p className="text-sm text-slate-600">
-            About: <strong className="font-medium text-slate-900">{mode.opportunity?.label ?? mode.lead?.label}</strong>
+            About: <strong className="font-medium text-slate-900">{mode.opportunity?.label}</strong>
           </p>
         ) : (
-          <>
-            <LeadPicker
-              workspace={workspace}
-              value={lead}
-              valueLabel={leadLabel}
-              onChange={(id, label) => {
-                setLead(id);
-                setLeadLabel(label);
-                setOpportunity("");
-              }}
-              errors={errors.lead}
-            />
-            {lead && (opportunities.data?.results.length ?? 0) > 0 ? (
-              <SelectField
-                label="Opportunity"
-                name="opportunity"
-                optional
-                value={opportunity}
-                onChange={(e) => setOpportunity(e.target.value)}
-                options={[
-                  { value: "", label: "None (the lead only)" },
-                  ...(opportunities.data?.results ?? []).map((o) => ({ value: o.id, label: o.title })),
-                ]}
-                errors={errors.opportunity}
-              />
-            ) : null}
-          </>
+          <DealPicker
+            workspace={workspace}
+            value={opportunity}
+            valueLabel={opportunityLabel}
+            onChange={(id, label) => {
+              setOpportunity(id);
+              setOpportunityLabel(label);
+            }}
+            placeholder="Choose an opportunity"
+            errors={errors.opportunity}
+          />
         )}
 
         <TextField

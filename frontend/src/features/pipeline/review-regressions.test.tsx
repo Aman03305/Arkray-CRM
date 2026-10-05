@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EditOpportunityView, OpportunityView, PipelineView } from "@/features/workspace/views";
 import type { Board } from "@/lib/api/types";
 import { parseAmountInput } from "@/lib/money";
-import { LEAD_OPTIONS, salesViewer } from "@/test/fixtures";
+import { salesViewer } from "@/test/fixtures";
 import { makeBoard, makeCard, makeOpportunity, OPPORTUNITY_ID, OTHER_OPPORTUNITY_ID, PIPELINE_ROUTES, STAGES } from "@/test/pipeline-fixtures";
 import { apiError, mockApi, renderWithProviders, type RecordedCall } from "@/test/render";
 
@@ -22,10 +22,7 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: nav.push, replace: nav.replace, back: vi.fn(), prefetch: vi.fn() }),
 }));
 
-const CONFIG = {
-  ...PIPELINE_ROUTES,
-  "GET /api/v1/config/lead-options": { status: 200, body: LEAD_OPTIONS },
-};
+const CONFIG = PIPELINE_ROUTES;
 const ME_BOARD = "/api/v1/workspaces/me/pipeline-board";
 const ME = `/api/v1/workspaces/me/opportunities/${OPPORTUNITY_ID}`;
 const moveUrl = (id: string) => `/api/v1/workspaces/me/opportunities/${id}/move`;

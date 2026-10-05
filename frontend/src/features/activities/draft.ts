@@ -124,14 +124,14 @@ export function changedFields(kind: FormKind, before: Draft, after: Draft): stri
   return FIELDS[kind].filter((field) => a[field] !== b[field]);
 }
 
-export type Problems = Partial<Record<"lead" | "title" | "due_at" | "starts_at" | "ends_at" | "meeting_url", string[]>>;
+export type Problems = Partial<Record<"opportunity" | "title" | "due_at" | "starts_at" | "ends_at" | "meeting_url", string[]>>;
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Client-side checks (the server re-checks everything); each field's first problem. */
-export function validateDraft(kind: FormKind, draft: Draft, { requireLead = false, lead = "" } = {}): Problems {
+export function validateDraft(kind: FormKind, draft: Draft, { requireOpportunity = false, opportunity = "" } = {}): Problems {
   const problems: Problems = {};
-  if (requireLead && !lead) problems.lead = ["Choose the lead this is about."];
+  if (requireOpportunity && !opportunity) problems.opportunity = ["Choose the opportunity this is about."];
   if (!draft.title.trim()) problems.title = ["Enter a subject."];
   if (kind === "task" && draft.dueDate) {
     const due = dueAt(draft);
@@ -155,11 +155,10 @@ export function validateDraft(kind: FormKind, draft: Draft, { requireLead = fals
   return problems;
 }
 
-export function createRequest(kind: FormKind, draft: Draft, link: { lead?: string; opportunity?: string }): ActivityCreateRequest {
+/** `opportunity`: what it is about (its customer is implied, ADR-0027). */
+export function createRequest(kind: FormKind, draft: Draft, opportunity: string): ActivityCreateRequest {
   const values = apiValues(kind, draft);
-  const body: { -readonly [K in keyof ActivityCreateRequest]: ActivityCreateRequest[K] } = { type: kind, title: values.title ?? "" };
-  if (link.lead) body.lead = link.lead;
-  if (link.opportunity) body.opportunity = link.opportunity;
+  const body: { -readonly [K in keyof ActivityCreateRequest]: ActivityCreateRequest[K] } = { type: kind, title: values.title ?? "", opportunity };
   if (values.description) body.description = draft.description;
   if (kind === "task") {
     body.priority = draft.priority;

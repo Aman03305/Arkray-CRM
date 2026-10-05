@@ -83,32 +83,33 @@ from .spec import SPECS, TypeSpec
 
 IDEMPOTENT_CREATE = "activities.create"
 
-LINK_REQUIRED = "Choose the lead or opportunity this is about."
+LINK_REQUIRED = "Choose the opportunity this is about."
 INVALID_TYPE = "Choose task, meeting or note."
 OPPORTUNITY_OF_ANOTHER_LEAD = "This opportunity belongs to a different lead."
-LEAD_ARCHIVED = "This lead is archived. Restore it before adding activities."
-NOTE_LEAD_ARCHIVED = "This lead is archived. Restore it before changing its notes."
+# Users see a lead as the opportunity's customer (ADR-0027): messages they can meet say so.
+LEAD_ARCHIVED = "This customer's record is archived, so activities can't be added."
+NOTE_LEAD_ARCHIVED = "This customer's record is archived, so its notes can't be changed."
 OPPORTUNITY_ARCHIVED = "This opportunity is archived. Restore it before adding activities."
 LEAD_ELSEWHERE = (
-    "This opportunity's lead now belongs to someone else, so activities can't be added "
+    "This opportunity's customer now belongs to someone else, so activities can't be added "
     "here. Ask an administrator."
 )
 # The same rules for an administrator in a user's workspace (Phase 6): the organisation-wide
 # view, whose scope includes the lead's new owner, is where they can do it.
 LEAD_ELSEWHERE_DELEGATED = (
-    "This opportunity's lead now belongs to someone else, so activities can't be added in "
-    "this user's workspace. Add them from the organisation-wide view."
+    "This opportunity's customer now belongs to someone else, so activities can't be added "
+    "in this user's workspace. Add them from the organisation-wide view."
 )
 OWNER_NOT_ASSIGNABLE = (
-    "This lead's owner is deactivated. Reassign the lead to an active user first."
+    "This customer's owner is deactivated. Change the owner to an active user first."
 )
 AUTHOR_ONLY = "Only the note's author (or an administrator) can edit it."
 NO_LIFECYCLE = "Notes can't be completed, cancelled or reopened."
 NOT_STARTED = (
     "This meeting hasn't started yet. Change its time to when it took place, then complete it."
 )
-LEAD_ARCHIVED_REOPEN = "This lead is archived. Restore the lead before reopening its activities."
-LEAD_ARCHIVED_RESTORE = "This lead is archived. Restore the lead first."
+LEAD_ARCHIVED_REOPEN = "This customer's record is archived, so its activities can't be reopened."
+LEAD_ARCHIVED_RESTORE = "This customer's record is archived, so its activities can't be restored."
 OPPORTUNITY_ARCHIVED_REOPEN = (
     "This opportunity is archived. Restore the opportunity before reopening its activities."
 )

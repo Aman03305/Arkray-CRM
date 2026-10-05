@@ -106,15 +106,20 @@ export const SUMMARY: ActivitySummary = {
   upcoming_meetings: 3,
 };
 
+/** The opportunity a timeline entry is about (an opportunity's timeline names its own deal). */
+export const DEAL_REF = { id: OPPORTUNITY_ID, title: "Hospital Analyzer Project", status: "open", restricted: false } as const;
+
+/** By default the deal's first entry ("Opportunity … created in New"); customer-record
+ * (lead.*) events are on no opportunity's timeline (ADR-0027). */
 export function makeEntry(overrides: Partial<TimelineEntry> = {}): TimelineEntry {
   const base: TimelineEntry = {
     id: "e1",
-    kind: "lead.created",
+    kind: "opportunity.created",
     occurred_at: "2026-09-20T04:30:00Z",
     actor: RAHUL,
-    details: { status: "new", status_name: "New", owner: RAHUL },
+    details: { stage: "New" },
     activity: null,
-    opportunity: null,
+    opportunity: DEAL_REF,
   };
   return { ...base, ...overrides };
 }

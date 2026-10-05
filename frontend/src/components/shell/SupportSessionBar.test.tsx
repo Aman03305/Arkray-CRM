@@ -23,7 +23,7 @@ const NOW = new Date("2026-10-05T10:05:00Z");
 const SESSION: SupportSession = {
   id: "0a1b2c3d-0000-4000-8000-000000000001",
   target: { id: RAHUL_ID, fullName: "Rahul Sharma" },
-  reason: "Fixing a lead",
+  reason: "Fixing a deal",
   startedAt: "2026-10-05T10:00:00Z",
   expiresAt: "2026-10-05T10:30:00Z",
 };
@@ -116,7 +116,10 @@ describe("the shell during a support session", () => {
   it("replaces pages outside the supported user's workspace with theirs, without rendering them", async () => {
     mockApi(WORKSPACE);
     for (const [path, section] of [
-      ["/leads", "leads"],
+      ["/pipeline", "pipeline"],
+      ["/activities", "activities"],
+      // No Leads module any more: an old lead address lands on the supported user's Dashboard.
+      ["/leads", "dashboard"],
       ["/dashboard", "dashboard"],
       ["/admin/users", "dashboard"],
       ["/settings", "dashboard"],
@@ -133,19 +136,21 @@ describe("the shell during a support session", () => {
 
   it("shows the supported user's pages with one banner (not the workspace banner too), and no Users or Settings", async () => {
     mockApi(WORKSPACE);
-    nav.pathname = inRahul("leads");
+    nav.pathname = inRahul("activities");
     renderWithProviders(
       <AppShell>
-        <UserWorkspaceFrame userId={RAHUL_ID}>Rahul&apos;s leads</UserWorkspaceFrame>
+        <UserWorkspaceFrame userId={RAHUL_ID}>Rahul&apos;s activities</UserWorkspaceFrame>
       </AppShell>,
       { viewer: supporting },
     );
-    expect(await screen.findByText("Rahul's leads")).toBeInTheDocument();
+    expect(await screen.findByText("Rahul's activities")).toBeInTheDocument();
     expect(nav.replace).not.toHaveBeenCalled();
     expect(banner()).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Workspace context" })).not.toBeInTheDocument();
     const rail = screen.getAllByRole("navigation", { name: "Main" })[0]!;
-    expect(within(rail).getByRole("link", { name: "Leads" })).toHaveAttribute("href", inRahul("leads"));
+    expect(within(rail).getByRole("link", { name: "Activities" })).toHaveAttribute("href", inRahul("activities"));
+    expect(within(rail).getByRole("link", { name: "Pipeline" })).toHaveAttribute("href", inRahul("pipeline"));
+    expect(within(rail).queryByRole("link", { name: /leads/i })).not.toBeInTheDocument();
     expect(within(rail).queryByRole("link", { name: "Users" })).not.toBeInTheDocument();
     expect(within(rail).queryByRole("link", { name: "Settings" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Arkray CRM" })).toHaveAttribute("href", inRahul("dashboard"));

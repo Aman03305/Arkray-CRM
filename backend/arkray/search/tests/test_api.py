@@ -79,6 +79,8 @@ class TestShape:
             "title",
             "status",
             "stage",
+            "account_name",
+            "customer_name",
             "lead",
             "owner",
         }

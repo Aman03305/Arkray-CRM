@@ -1,6 +1,8 @@
 /**
- * Sidebar model. Deliberately contains only the four CRM modules, Ask Arkray (when it is
- * on and the viewer may ask), Settings, and Users for viewers who can manage users. There are no Companies or Products modules.
+ * Sidebar model. Deliberately contains only the CRM modules (Dashboard, Pipeline, Activities),
+ * Ask Arkray (when it is on and the viewer may ask), Settings, and Users for viewers who can
+ * manage users. There are no Leads, Companies or Products modules: a deal carries its customer
+ * (ADR-0027).
  *
  * During a support session the administrator works only in that one user's CRM: every link
  * leads into it, Users and Settings are not offered, and any other page is replaced by the
@@ -9,7 +11,6 @@
 import {
   CalendarCheck,
   MessageSquareText,
-  Contact,
   LayoutDashboard,
   type LucideIcon,
   Settings,
@@ -36,7 +37,7 @@ import {
  * id) shows "not found"; the links then lead back to the viewer's own top-level pages,
  * never into a guessed workspace. So does a selected user's workspace the viewer may not
  * open (a link shared by an administrator): its pages are "not found" for them, and so were
- * all five links (whole-software audit).
+ * all its links (whole-software audit).
  */
 export function navigationWorkspace(pathname: string, viewer: Viewer | null): Workspace {
   const session = viewer?.supportSession;
@@ -57,11 +58,10 @@ export interface NavItem {
 const SECTION_ICONS: Record<WorkspaceSection, LucideIcon> = {
   dashboard: LayoutDashboard,
   pipeline: SquareKanban,
-  leads: Contact,
   activities: CalendarCheck,
 };
 
-/** The four modules, every link inside `workspace` (a selected user's stay under their URL). */
+/** The modules, every link inside `workspace` (a selected user's stay under their URL). */
 export function workspaceNavigation(workspace: Workspace): NavItem[] {
   return WORKSPACE_SECTIONS.map((section) => ({
     key: section,
@@ -96,8 +96,8 @@ export function showsSettings(viewer: Viewer | null): boolean {
 
 /**
  * Where a page goes during a support session: null when it is already in the supported
- * user's workspace; otherwise the same module of that workspace (/leads/... -> their Leads,
- * another user's Pipeline -> theirs), or their Dashboard for anything else (Users, Settings,
+ * user's workspace; otherwise the same module of that workspace (/pipeline/... or another
+ * user's Pipeline -> theirs), or their Dashboard for anything else (Users, Settings,
  * the organisation dashboard). Records of other workspaces are never carried across.
  */
 export function supportSessionPath(pathname: string, session: SupportSession): string | null {

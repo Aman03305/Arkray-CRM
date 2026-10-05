@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { NotFoundView } from "@/components/ui/NotFoundView";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { PersonName } from "@/features/leads/LeadBits";
+import { PersonName } from "@/components/ui/PersonName";
 import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
 import type { Activity } from "@/lib/api/types";
 import { formatDateTime, formatRelative } from "@/lib/format";
@@ -18,7 +18,7 @@ import { useViewer } from "@/lib/viewer-context";
 import { sectionBack, type Workspace, workspaceHref } from "@/lib/workspace";
 
 import { activitiesApi, activityKeys, type LifecycleAction } from "./api";
-import { LeadLink, OpportunityLink, PriorityLabel, StatusBadge, TypeLabel, typeLabel } from "./ActivityBits";
+import { CustomerName, OpportunityLink, PriorityLabel, StatusBadge, TypeLabel, typeLabel } from "./ActivityBits";
 import { ActivityFormDialog } from "./ActivityFormDialog";
 import { canComplete, useClock } from "./clock";
 import { activityPermissions, canEditNote, useActivityAction, useActivityWriteSync } from "./hooks";
@@ -268,7 +268,7 @@ export function ActivityDetailView({ workspace, activityId }: { workspace: Works
               <Section title="Details">
                 <Fields
                   items={[
-                    ["Related lead", <LeadLink key="l" workspace={workspace} lead={activity.lead} />],
+                    ["Customer", <CustomerName key="l" lead={activity.lead} />],
                     ["Opportunity", activity.opportunity ? <OpportunityLink key="o" workspace={workspace} opportunity={activity.opportunity} /> : null],
                     ...(activity.type === "task"
                       ? ([
@@ -299,7 +299,7 @@ export function ActivityDetailView({ workspace, activityId }: { workspace: Works
             <Section title="About">
               <Fields
                 items={[
-                  ["Lead", <LeadLink key="l" workspace={workspace} lead={activity.lead} />],
+                  ["Customer", <CustomerName key="l" lead={activity.lead} />],
                   ["Opportunity", activity.opportunity ? <OpportunityLink key="o" workspace={workspace} opportunity={activity.opportunity} /> : null],
                 ]}
               />

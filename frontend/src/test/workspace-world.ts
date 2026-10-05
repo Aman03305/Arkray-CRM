@@ -1,6 +1,6 @@
 /**
  * A fake backend holding two users' CRMs whose every record is marked with its owner
- * (RAHUL-ONLY-LEAD, ₹1,11,111, ... / PRIYA-ONLY-LEAD, ₹8,88,888, ...), for the admin user
+ * (RAHUL-ONLY-OPPORTUNITY, ₹1,11,111, ... / PRIYA-ONLY-OPPORTUNITY, ₹8,88,888, ...), for the admin user
  * workspace tests (docs/admin-user-workspace.md). Any request outside those two workspaces
  * (the organisation's "all", "me", a third id) is recorded as a leak and answered with a
  * LEAK marker, so a test can assert it was neither requested nor shown.
@@ -9,11 +9,11 @@
  */
 import { vi } from "vitest";
 
-import type { Activity, Dashboard, Lead, Opportunity } from "@/lib/api/types";
+import type { Activity, Dashboard, Opportunity } from "@/lib/api/types";
 
 import { asListItem, makeActivity, makeMeeting, makeNote, page, SUMMARY } from "./activity-fixtures";
 import { asRow, makeDashboard, makeDashboardLead } from "./dashboard-fixtures";
-import { LEAD_OPTIONS, makeLead, makeLeadListItem, PRIYA_ID, RAHUL_ID } from "./fixtures";
+import { PRIYA_ID, RAHUL_ID } from "./fixtures";
 import { makeBoard, makeCard, makeOpportunity, PIPELINES, STAGES } from "./pipeline-fixtures";
 import { json, type RecordedCall } from "./render";
 
@@ -24,6 +24,7 @@ export interface Person {
   status: "active" | "invited" | "deactivated";
   amount: string;
   shown: string; // the amount as the UI shows it
+  /** Their customer record (the API's lead): named on their deals and work, never opened. */
   leadId: string;
   opportunityId: string;
   taskId: string;
@@ -68,21 +69,6 @@ export const ACTOR = { id: "a1", full_name: "Anita Admin", is_active: true };
 const ref = (p: Person) => ({ id: p.id, full_name: p.name, is_active: p.status === "active" });
 const leadRef = (p: Person) => ({ id: p.leadId, display_name: `${p.mark}-LEAD`, organization_name: "", restricted: false });
 
-export function leadOf(p: Person, overrides: Partial<Lead> = {}): Lead {
-  return makeLead({
-    id: p.leadId,
-    display_name: `${p.mark}-LEAD`,
-    first_name: `${p.mark}-LEAD`,
-    last_name: "",
-    organization_name: "",
-    email: "",
-    phone: "",
-    owner: ref(p),
-    created_by: ref(p),
-    ...overrides,
-  });
-}
-
 export function opportunityOf(p: Person, overrides: Partial<Opportunity> = {}): Opportunity {
   return makeOpportunity({
     id: p.opportunityId,
@@ -94,6 +80,11 @@ export function opportunityOf(p: Person, overrides: Partial<Opportunity> = {}): 
     weighted_value: p.amount,
     ...overrides,
   });
+}
+
+/** The person's opportunity as a board card or list row. */
+export function cardOf(p: Person) {
+  return makeCard({ id: p.opportunityId, title: `${p.mark}-OPPORTUNITY`, lead: leadRef(p), owner: ref(p), value: p.amount, weighted_value: p.amount, stage_id: STAGES.proposal.id });
 }
 
 export function activitiesOf(p: Person): Activity[] {
@@ -135,25 +126,21 @@ export function workspaceWorld(people: Person[] = [RAHUL, PRIYA]) {
     if (rest === "") return ok({ kind: "user", subject: { id: p.id, full_name: p.name, status: p.status } });
     if (rest === "/dashboard") return ok(dashboardOf(p));
     if (rest === "/pipelines") return ok(PIPELINES); // this workspace's pipelines
-    if (rest === "/leads" && method === "GET") return ok(page([makeLeadListItem({ ...leadOf(p) })]));
-    if (rest === "/leads" && method === "POST") return ok(leadOf(p, { id: `${p.leadId.slice(0, -1)}9`, created_by: ACTOR }), 201);
-    if (rest === "/leads/duplicates") return ok({ results: [] });
-    if ((m = /^\/leads\/([^/]+)(\/.*)?$/.exec(rest))) {
-      if (m[1] !== p.leadId && m[1] !== `${p.leadId.slice(0, -1)}9`) return missing; // another workspace's lead
-      if (!m[2]) return ok(leadOf(p, { id: m[1], version: method === "PATCH" ? 4 : 3 }));
-      if (m[2] === "/timeline") return ok(page([]));
-      return missing;
-    }
     if (rest === "/pipeline-board") {
-      const board = makeBoard([makeCard({ id: p.opportunityId, title: `${p.mark}-OPPORTUNITY`, lead: leadRef(p), owner: ref(p), value: p.amount, weighted_value: p.amount, stage_id: STAGES.proposal.id })]);
+      const board = makeBoard([cardOf(p)]);
       return ok({ ...board, totals: { pipeline_value: p.amount, weighted_pipeline: p.amount, open_count: 1 } });
     }
-    if (rest === "/opportunities" && method === "GET") return ok(page([]));
+    // The workspace's opportunities (e.g. the recent open ones an activity can be about).
+    if (rest === "/opportunities" && method === "GET") return ok(page([cardOf(p)]));
     if (rest === "/opportunities" && method === "POST") return ok(opportunityOf(p, { created_by: ACTOR }), 201);
     if ((m = /^\/opportunities\/([^/]+)(\/.*)?$/.exec(rest))) {
       if (m[1] !== p.opportunityId) return missing;
       if (!m[2]) return ok(opportunityOf(p, { version: method === "PATCH" ? 3 : 2 }));
       if (m[2] === "/history" || m[2] === "/timeline") return ok(page([]));
+      if (m[2] === "/assign" && method === "POST") {
+        const to = byId.get((call.body as { owner?: string } | undefined)?.owner ?? "");
+        return to ? ok(opportunityOf(p, { owner: ref(to), version: 3 })) : missing;
+      }
       return missing;
     }
     if (rest === "/activities" && method === "GET") return ok(page(activities.map((a) => asListItem(a))));
@@ -176,9 +163,12 @@ export function workspaceWorld(people: Person[] = [RAHUL, PRIYA]) {
       document.cookie = "arkray_csrftoken=test-csrf-token; path=/";
       return json(204);
     }
-    if (url.pathname === "/api/v1/config/lead-options") return json(200, LEAD_OPTIONS);
     if (url.pathname === "/api/v1/config/pipelines") return json(200, PIPELINES);
-    const m = /^\/api\/v1\/workspaces\/([^/]+)(\/.*)?$/.exec(url.pathname);
+    // Who can own records: shared, not any workspace's data.
+    if (url.pathname === "/api/v1/assignees") {
+      return json(200, { results: people.map((p) => ({ id: p.id, full_name: p.name, email: `${p.name.toLowerCase().replace(/\s+/g, ".")}@example.test` })), next: null, previous: null });
+    }
+    const m =/^\/api\/v1\/workspaces\/([^/]+)(\/.*)?$/.exec(url.pathname);
     const call = {
       method,
       path: url.pathname,

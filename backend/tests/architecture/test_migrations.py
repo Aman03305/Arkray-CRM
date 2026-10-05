@@ -32,6 +32,7 @@ CONCURRENT = [
     "core.0005_outbox_dead_index",  # Phase 10
     "ai.0003_question_finished_index",  # Phase 10 review
     "audit.0004_support_session_index",  # product enhancement phase
+    "pipeline.0007_search_customer_names",  # ADR-0027: Leads left the UI
 ]
 
 LIFT = "SET statement_timeout = 0; SET lock_timeout = 0;"

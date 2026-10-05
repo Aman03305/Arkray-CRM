@@ -28,6 +28,14 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return [{ source: "/api/:path*", destination: `${apiOrigin}/api/:path*` }];
   },
+  // Leads left the UI (ADR-0027): old links and bookmarks open the same workspace's Pipeline
+  // (never a lead's record: its id isn't carried anywhere).
+  async redirects() {
+    return [
+      { source: "/leads/:path*", destination: "/pipeline", permanent: false },
+      { source: "/admin/users/:userId/leads/:path*", destination: "/admin/users/:userId/pipeline", permanent: false },
+    ];
+  },
   async headers() {
     return [
       { source: "/:path*", headers: securityHeaders },

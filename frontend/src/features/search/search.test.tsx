@@ -39,9 +39,15 @@ const TASK = "11111111-1111-4111-8111-00000000000c";
 const MEETING = "11111111-1111-4111-8111-00000000000d";
 const NOTE = "11111111-1111-4111-8111-00000000000e";
 const person = (name: string) => ({ id: RAHUL_ID, full_name: name, is_active: true });
+/** A deal's customer record (the API's `lead`): shown as the customer, never as a lead. */
 const leadRef = (name: string) => ({ id: LEAD, display_name: name, organization_name: "", restricted: false });
+const RESTRICTED = { id: null, restricted: true } as const;
+type Deal = SearchResults["opportunities"]["results"][number];
 
-/** Results with one record of each kind, every text field carrying `mark`. */
+/**
+ * Results with one record of each kind, every text field carrying `mark`. The API still
+ * sends a Leads group (ADR-0027): the dialog must ignore it.
+ */
 function results(mark: string, overrides: Partial<SearchResults> = {}): SearchResults {
   return {
     query: mark,
@@ -65,7 +71,9 @@ function results(mark: string, overrides: Partial<SearchResults> = {}): SearchRe
           title: `${mark} Deal`,
           status: "won",
           stage: { id: "s1", name: "Won" },
-          lead: leadRef(`${mark} Lead`),
+          account_name: `${mark} Account`,
+          customer_name: `${mark} Customer`,
+          lead: leadRef(`${mark} Clinic`),
           owner: person("Rahul Sharma"),
         },
       ],
@@ -80,7 +88,7 @@ function results(mark: string, overrides: Partial<SearchResults> = {}): SearchRe
           priority: "normal",
           due_at: "2026-10-05T06:30:00Z",
           is_overdue: true,
-          lead: leadRef(`${mark} Lead`),
+          lead: leadRef(`${mark} Clinic`),
           owner: person("Rahul Sharma"),
         },
       ],
@@ -96,7 +104,7 @@ function results(mark: string, overrides: Partial<SearchResults> = {}): SearchRe
           ends_at: "2026-10-04T06:30:00Z",
           location: `${mark} Mumbai`,
           is_overdue: false,
-          lead: leadRef(`${mark} Lead`),
+          lead: leadRef(`${mark} Clinic`),
           owner: person("Rahul Sharma"),
         },
       ],
@@ -110,7 +118,7 @@ function results(mark: string, overrides: Partial<SearchResults> = {}): SearchRe
           preview_truncated: true,
           preview_starts_mid_text: true,
           created_at: "2026-10-01T05:30:00Z",
-          lead: leadRef(`${mark} Lead`),
+          lead: leadRef(`${mark} Clinic`),
         },
       ],
       has_more: false,
@@ -141,7 +149,7 @@ function setup(viewer = salesViewer, client = createTestQueryClient()) {
 
 async function openSearch(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole("button", { name: /search/i }));
-  return screen.getByRole("combobox", { name: /search leads, opportunities, tasks, meetings and notes/i });
+  return screen.getByRole("combobox", { name: /search opportunities, customers, tasks, meetings and notes/i });
 }
 
 describe("the Search entry", () => {
@@ -149,7 +157,8 @@ describe("the Search entry", () => {
     mockApi({});
     const { user } = setup();
     const button = screen.getByRole("button", { name: /search/i });
-    expect(button).toHaveTextContent("Search");
+    expect(button).toHaveTextContent("Search deals, customers, activities");
+    expect(button).not.toHaveTextContent(/lead/i);
     expect(button).toHaveAttribute("aria-haspopup", "dialog");
     expect(button).toHaveAttribute("aria-keyshortcuts", "Control+K Meta+K");
     const input = await openSearch(user);
@@ -208,7 +217,7 @@ describe("the Search entry", () => {
   });
 
   it("is disabled where the URL names no workspace", () => {
-    nav.pathname = "/admin/users/not-a-user/leads";
+    nav.pathname = "/admin/users/not-a-user/pipeline";
     mockApi({});
     setup(adminViewer);
     expect(screen.getByRole("button", { name: /search/i })).toBeDisabled();
@@ -223,7 +232,7 @@ describe("searching", () => {
     const { user } = setup();
     const input = await openSearch(user);
     await user.type(input, "Rahul");
-    await screen.findByRole("option", { name: /^Lead: Rahul Lead/ });
+    await screen.findByRole("option", { name: /^Opportunity: Rahul Deal/ });
     const calls = api.callsTo("GET", "/api/v1/workspaces/me/search");
     expect(calls).toHaveLength(1);
     expect(calls[0]!.query.get("q")).toBe("Rahul");
@@ -258,46 +267,141 @@ describe("searching", () => {
     const listbox = await screen.findByRole("listbox", { name: "Search results" });
     const groups = within(listbox).getAllByRole("group");
     expect(groups.map((g) => g.getAttribute("aria-labelledby") && document.getElementById(g.getAttribute("aria-labelledby")!)!.textContent)).toEqual([
-      "Leads",
       "Opportunities",
       "Tasks",
       "Meetings",
       "Notes",
     ]);
-    expect(within(groups[0]!).getByRole("option")).toHaveAccessibleName("Lead: Rahul Lead, Rahul Org, New");
-    expect(within(groups[1]!).getByRole("option")).toHaveAccessibleName("Opportunity: Rahul Deal, Rahul Lead, Won");
+    expect(within(groups[0]!).getByRole("option")).toHaveAccessibleName("Opportunity: Rahul Deal, Rahul Account, Rahul Customer, Won");
+    expect(within(groups[1]!).getByRole("option")).toHaveAccessibleName(
+      "Task: Rahul Task, Open, Due 5 Oct 2026, Overdue, Rahul Clinic",
+    );
     expect(within(groups[2]!).getByRole("option")).toHaveAccessibleName(
-      "Task: Rahul Task, Open, Due 5 Oct 2026, Overdue, Rahul Lead",
+      /^Meeting: Rahul Meeting, 4 Oct 2026, 11:00 am IST, Rahul Mumbai, Completed, Rahul Clinic$/i,
     );
-    expect(within(groups[3]!).getByRole("option")).toHaveAccessibleName(
-      /^Meeting: Rahul Meeting, 4 Oct 2026, 11:00 am IST, Rahul Mumbai, Completed, Rahul Lead$/i,
-    );
-    expect(within(groups[4]!).getByRole("option")).toHaveAccessibleName("Note: …prefers Rahul calls…, Rahul Lead, Added 1 Oct 2026");
-    expect(within(groups[4]!).getByRole("option")).toHaveTextContent("…prefers Rahul calls…");
-    expect(await screen.findByRole("status")).toHaveTextContent("5 results");
+    expect(within(groups[3]!).getByRole("option")).toHaveAccessibleName("Note: …prefers Rahul calls…, Rahul Clinic, Added 1 Oct 2026");
+    expect(within(groups[3]!).getByRole("option")).toHaveTextContent("…prefers Rahul calls…");
+    expect(await screen.findByRole("status")).toHaveTextContent("4 results");
   });
 
-  it("names a related lead it may not show as being in another workspace", async () => {
-    const body = results("Kept");
-    const restricted = { id: null, restricted: true } as unknown as SearchResults["opportunities"]["results"][number]["lead"];
+  it("has no Leads group, even when the API's answer contains leads", async () => {
+    const body = results("Ghost");
     mockApi({
       "GET /api/v1/workspaces/me/search": {
         status: 200,
-        body: { ...body, opportunities: { has_more: false, results: [{ ...body.opportunities.results[0]!, lead: restricted }] } },
+        body: { ...body, leads: { has_more: true, results: [...body.leads.results, { ...body.leads.results[0]!, id: DEAL }] } },
+      },
+    });
+    const { user } = setup();
+    await user.type(await openSearch(user), "Ghost");
+    const listbox = await screen.findByRole("listbox", { name: "Search results" });
+    await within(listbox).findByRole("option", { name: /^Opportunity: Ghost Deal/ });
+    const headings = within(listbox)
+      .getAllByRole("group")
+      .map((g) => document.getElementById(g.getAttribute("aria-labelledby")!)!.textContent);
+    expect(headings).not.toContain("Leads");
+    expect(within(listbox).getAllByRole("option")).toHaveLength(4);
+    expect(screen.queryByRole("option", { name: /^Lead:/ })).not.toBeInTheDocument();
+    expect(listbox).not.toHaveTextContent(/Ghost Lead|Ghost Org/);
+    expect(listbox).not.toHaveTextContent(/\bleads?\b/i);
+    expect(listbox.querySelector('a[href*="/leads"]')).toBeNull();
+    // The leads' "more matched" is not ours to announce either.
+    expect(screen.getByRole("status")).toHaveTextContent(/^4 results$/);
+  });
+
+  it("finds nothing to show when only leads matched", async () => {
+    mockApi({
+      "GET /api/v1/workspaces/me/search": {
+        status: 200,
+        body: { ...EMPTY, query: "Ghost", terms: ["Ghost"], leads: results("Ghost").leads },
+      },
+    });
+    const { user } = setup();
+    await user.type(await openSearch(user), "Ghost");
+    expect(await screen.findByText("No matching CRM records", { selector: "p:not([role])" })).toBeInTheDocument();
+    expect(screen.queryByRole("option")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Ghost Lead/)).not.toBeInTheDocument();
+  });
+
+  it("shows an opportunity's own account and customer names, once each, highlighted, else its customer's name", async () => {
+    const body = results("x");
+    const deal = body.opportunities.results[0]!;
+    const deals: Deal[] = [
+      // Both names, each with a matched word.
+      { ...deal, id: "22222222-2222-4222-8222-000000000001", title: "Analyser upgrade", status: "open", stage: { id: "s2", name: "Proposal" }, account_name: "Apollo Diagnostics", customer_name: "Dr Mehta" },
+      // The same name twice is shown once.
+      { ...deal, id: "22222222-2222-4222-8222-000000000002", title: "Reagent contract", status: "open", stage: { id: "s2", name: "Proposal" }, account_name: "Apollo Labs", customer_name: "Apollo Labs" },
+      // Only a customer name.
+      { ...deal, id: "22222222-2222-4222-8222-000000000003", title: "Service plan", status: "open", stage: { id: "s2", name: "Proposal" }, account_name: "", customer_name: "Mehta Clinic" },
+      // Neither: the customer record's name, highlighted too.
+      { ...deal, id: "22222222-2222-4222-8222-000000000004", title: "Old deal", status: "open", stage: { id: "s2", name: "Proposal" }, account_name: "", customer_name: "", lead: leadRef("Apollo Hospital") },
+      // Neither, and the customer record is in another workspace.
+      { ...deal, id: "22222222-2222-4222-8222-000000000005", title: "Hidden deal", status: "open", stage: { id: "s2", name: "Proposal" }, account_name: "", customer_name: "", lead: RESTRICTED },
+    ];
+    mockApi({
+      "GET /api/v1/workspaces/me/search": {
+        status: 200,
+        body: { ...EMPTY, query: "apollo mehta", terms: ["apollo", "mehta"], leads: body.leads, opportunities: { has_more: false, results: deals } },
+      },
+    });
+    const { user } = setup();
+    await user.type(await openSearch(user), "apollo mehta");
+    const options = await screen.findAllByRole("option");
+    expect(options.map((o) => o.getAttribute("aria-label"))).toEqual([
+      "Opportunity: Analyser upgrade, Apollo Diagnostics, Dr Mehta, Proposal, Open",
+      "Opportunity: Reagent contract, Apollo Labs, Proposal, Open",
+      "Opportunity: Service plan, Mehta Clinic, Proposal, Open",
+      "Opportunity: Old deal, Apollo Hospital, Proposal, Open",
+      "Opportunity: Hidden deal, Customer in another workspace, Proposal, Open",
+    ]);
+    const marks = (option: HTMLElement) => Array.from(option.querySelectorAll("mark")).map((m) => m.textContent);
+    expect(marks(options[0]!)).toEqual(["Apollo", "Mehta"]);
+    expect(options[1]!.textContent!.match(/Apollo Labs/g)).toHaveLength(1);
+    expect(marks(options[1]!)).toEqual(["Apollo"]);
+    expect(marks(options[2]!)).toEqual(["Mehta"]);
+    expect(marks(options[3]!)).toEqual(["Apollo"]);
+    expect(options[3]).toHaveTextContent("Apollo Hospital · Proposal · Open");
+    expect(options[4]).toHaveTextContent("Customer in another workspace");
+    expect(marks(options[4]!)).toEqual([]);
+    for (const option of options) expect(option).not.toHaveTextContent(/lead/i);
+  });
+
+  it("names a customer it may not show as being in another workspace, for tasks, meetings and notes", async () => {
+    const body = results("Kept");
+    mockApi({
+      "GET /api/v1/workspaces/me/search": {
+        status: 200,
+        body: {
+          ...body,
+          tasks: { has_more: false, results: [{ ...body.tasks.results[0]!, lead: RESTRICTED }] },
+          meetings: { has_more: false, results: [{ ...body.meetings.results[0]!, lead: RESTRICTED }] },
+          notes: { has_more: false, results: [{ ...body.notes.results[0]!, lead: RESTRICTED }] },
+        },
       },
     });
     const { user } = setup();
     await user.type(await openSearch(user), "Kept");
-    expect(await screen.findByRole("option", { name: /^Opportunity: Kept Deal/ })).toHaveTextContent("Lead in another workspace");
+    expect(await screen.findByRole("option", { name: /^Task: Kept Task/ })).toHaveAccessibleName(
+      "Task: Kept Task, Open, Due 5 Oct 2026, Overdue, Customer in another workspace",
+    );
+    expect(screen.getByRole("option", { name: /^Meeting: Kept Meeting/ })).toHaveTextContent("Customer in another workspace");
+    expect(screen.getByRole("option", { name: /^Note: / })).toHaveAccessibleName(
+      "Note: …prefers Kept calls…, Customer in another workspace, Added 1 Oct 2026",
+    );
+    // A deal with its own customer names shows them, whatever its customer record may be.
+    expect(screen.getByRole("option", { name: /^Opportunity: Kept Deal/ })).toHaveAccessibleName("Opportunity: Kept Deal, Kept Account, Kept Customer, Won");
+    expect(screen.queryByText(/lead in another workspace/i)).not.toBeInTheDocument();
   });
 
   it("says when more matched than are shown", async () => {
     const body = results("Bulk");
-    mockApi({ "GET /api/v1/workspaces/me/search": { status: 200, body: { ...body, leads: { ...body.leads, has_more: true } } } });
+    mockApi({
+      "GET /api/v1/workspaces/me/search": { status: 200, body: { ...body, opportunities: { ...body.opportunities, has_more: true } } },
+    });
     const { user } = setup();
     await user.type(await openSearch(user), "Bulk");
     expect(await screen.findByText("Top 1 shown")).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("5 results, more match");
+    expect(screen.getByRole("status")).toHaveTextContent("4 results, more match");
   });
 });
 
@@ -333,7 +437,7 @@ describe("states", () => {
     expect(screen.queryByRole("option")).not.toBeInTheDocument();
     fail = false;
     await user.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("option", { name: /^Lead: Again Lead/ })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: /^Opportunity: Again Deal/ })).toBeInTheDocument();
   });
 
   it("shows the API's reason for a refused query (no retry offered)", async () => {
@@ -363,7 +467,8 @@ describe("keyboard", () => {
     expect(input).toHaveAttribute("aria-activedescendant", options[2]!.id);
     expect(input).toHaveFocus();
     await user.keyboard("{ArrowUp}{ArrowUp}{ArrowUp}");
-    expect(options[4]).toHaveAttribute("aria-selected", "true"); // wraps
+    expect(options).toHaveLength(4);
+    expect(options[3]).toHaveAttribute("aria-selected", "true"); // wraps
     await user.keyboard("{Enter}");
     expect(nav.push).toHaveBeenCalledWith(`/activities/${NOTE}`);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -378,7 +483,7 @@ describe("result links stay in the current workspace", () => {
     const { user } = setup(salesViewer);
     await user.type(await openSearch(user), "Mine");
     await screen.findAllByRole("option");
-    expect(hrefs()).toEqual([`/leads/${LEAD}`, `/pipeline/${DEAL}`, `/activities/${TASK}`, `/activities/${MEETING}`, `/activities/${NOTE}`]);
+    expect(hrefs()).toEqual([`/pipeline/${DEAL}`, `/activities/${TASK}`, `/activities/${MEETING}`, `/activities/${NOTE}`]);
   });
 
   it("the organisation (an administrator's own pages), with owners named", async () => {
@@ -387,13 +492,13 @@ describe("result links stay in the current workspace", () => {
     await user.type(await openSearch(user), "Org");
     await screen.findAllByRole("option");
     expect(screen.getByText("Searching all users' records.")).toBeInTheDocument();
-    expect(hrefs()[0]).toBe(`/leads/${LEAD}`);
-    expect(screen.getAllByRole("option")[0]).toHaveTextContent("Rahul Sharma");
+    expect(hrefs()[0]).toBe(`/pipeline/${DEAL}`);
+    expect(screen.getAllByRole("option")[0]).toHaveAccessibleName("Opportunity: Org Deal, Org Account, Org Customer, Won, Rahul Sharma");
     expect(api.calls.every((c) => c.path === "/api/v1/workspaces/all/search")).toBe(true);
   });
 
   it("a selected user's workspace: every link and request names that user", async () => {
-    nav.pathname = `/admin/users/${RAHUL_ID}/leads`;
+    nav.pathname = `/admin/users/${RAHUL_ID}/activities`;
     const api = mockApi({
       [`GET /api/v1/workspaces/${RAHUL_ID}`]: subjectRoute(RAHUL_ID, "Rahul Sharma"),
       [`GET /api/v1/workspaces/${RAHUL_ID}/search`]: { status: 200, body: results("Omega") },
@@ -404,7 +509,6 @@ describe("result links stay in the current workspace", () => {
     expect(await screen.findByText("Searching Rahul Sharma's records.")).toBeInTheDocument();
     const base = `/admin/users/${RAHUL_ID}`;
     expect(hrefs()).toEqual([
-      `${base}/leads/${LEAD}`,
       `${base}/pipeline/${DEAL}`,
       `${base}/activities/${TASK}`,
       `${base}/activities/${MEETING}`,
@@ -412,11 +516,11 @@ describe("result links stay in the current workspace", () => {
     ]);
     expect(api.calls.filter((c) => c.path.endsWith("/search")).every((c) => c.path === `/api/v1/workspaces/${RAHUL_ID}/search`)).toBe(true);
     await user.keyboard("{Enter}");
-    expect(nav.push).toHaveBeenCalledWith(`${base}/leads/${LEAD}`);
+    expect(nav.push).toHaveBeenCalledWith(`${base}/pipeline/${DEAL}`);
   });
 
   it("an upper-case spelling of the user id searches the same (canonical) workspace", async () => {
-    nav.pathname = `/admin/users/${RAHUL_ID.toUpperCase()}/leads`;
+    nav.pathname = `/admin/users/${RAHUL_ID.toUpperCase()}/pipeline`;
     const api = mockApi({
       [`GET /api/v1/workspaces/${RAHUL_ID}`]: subjectRoute(RAHUL_ID, "Rahul Sharma"),
       [`GET /api/v1/workspaces/${RAHUL_ID}/search`]: { status: 200, body: results("Omega") },
@@ -425,7 +529,7 @@ describe("result links stay in the current workspace", () => {
     await user.type(await openSearch(user), "Omega");
     await screen.findAllByRole("option");
     expect(api.calls.some((c) => c.path === `/api/v1/workspaces/${RAHUL_ID}/search`)).toBe(true);
-    expect(hrefs()[0]).toBe(`/admin/users/${RAHUL_ID}/leads/${LEAD}`);
+    expect(hrefs()[0]).toBe(`/admin/users/${RAHUL_ID}/pipeline/${DEAL}`);
   });
 });
 
@@ -482,7 +586,7 @@ describe("workspace isolation", () => {
 
     await act(async () => pending["rahul:OMEGA"]!());
     await user.type(await openSearch(user), "ZETA");
-    expect(await screen.findByRole("option", { name: /^Lead: PRIYA-ZETA Lead/ })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: /^Opportunity: PRIYA-ZETA Deal/ })).toBeInTheDocument();
     expect(screen.getByText("Searching Priya Patel's records.")).toBeInTheDocument();
     expect(screenWatch.saw("RAHUL-OMEGA")).toBe(false);
     expect(screenWatch.saw(RAHUL_ID)).toBe(false);
@@ -498,11 +602,11 @@ describe("workspace isolation", () => {
 
   it("switching workspaces clears the dialog: what was typed and found stays behind", async () => {
     world();
-    nav.pathname = `/admin/users/${PRIYA_ID}/leads`;
+    nav.pathname = `/admin/users/${PRIYA_ID}/pipeline`;
     const { user, rerender } = setup(adminViewer);
     await user.type(await openSearch(user), "ZETA");
-    await screen.findByRole("option", { name: /^Lead: PRIYA-ZETA Lead/ });
-    nav.pathname = `/admin/users/${RAHUL_ID}/leads`;
+    await screen.findByRole("option", { name: /^Opportunity: PRIYA-ZETA Deal/ });
+    nav.pathname = `/admin/users/${RAHUL_ID}/pipeline`;
     rerender(<SearchLauncher />);
     expect(screen.queryByText(/PRIYA-ZETA/)).not.toBeInTheDocument();
     const input = await openSearch(user);
@@ -512,11 +616,11 @@ describe("workspace isolation", () => {
 
   it("keys every search by workspace and query, and keeps nothing in browser storage", async () => {
     world();
-    nav.pathname = `/admin/users/${PRIYA_ID}/leads`;
+    nav.pathname = `/admin/users/${PRIYA_ID}/pipeline`;
     const client = createTestQueryClient();
     const { user } = setup(adminViewer, client);
     await user.type(await openSearch(user), "ZETA");
-    await screen.findByRole("option", { name: /^Lead: PRIYA-ZETA Lead/ });
+    await screen.findByRole("option", { name: /^Opportunity: PRIYA-ZETA Deal/ });
     const keys = client.getQueryCache().findAll({ queryKey: searchKeys.all }).map((q) => q.queryKey);
     expect(keys).toContainEqual(["search", PRIYA_ID, "ZETA"]);
     expect(keys.every((key) => key[1] === PRIYA_ID)).toBe(true);
@@ -541,7 +645,10 @@ describe("nothing is interpreted", () => {
       query: payload,
       terms: ["img", "script"],
       leads: { has_more: false, results: [{ ...body.leads.results[0]!, display_name: payload, organization_name: payload }] },
-      opportunities: { has_more: false, results: [{ ...body.opportunities.results[0]!, title: payload }] },
+      opportunities: {
+        has_more: false,
+        results: [{ ...body.opportunities.results[0]!, title: payload, account_name: payload, customer_name: `${payload} customer` }],
+      },
       tasks: { has_more: false, results: [{ ...body.tasks.results[0]!, title: payload }] },
       meetings: { has_more: false, results: [{ ...body.meetings.results[0]!, title: payload, location: payload }] },
       notes: { has_more: false, results: [{ ...body.notes.results[0]!, preview: payload }] },
@@ -550,22 +657,28 @@ describe("nothing is interpreted", () => {
     const { user } = setup();
     await user.type(await openSearch(user), "hostile");
     const options = await screen.findAllByRole("option");
-    expect(options).toHaveLength(5);
+    expect(options).toHaveLength(4);
     const listbox = screen.getByRole("listbox");
     expect(listbox.querySelector("script, img, svg[onload], iframe, object, embed")).toBeNull();
     expect(listbox.querySelector("[onerror], [onload]")).toBeNull();
     expect(listbox.textContent).toContain(payload);
+    expect(options[0]!.textContent).toContain(`${payload} customer`);
     expect((window as { __pwned?: number }).__pwned).toBeUndefined();
-    for (const option of options) expect(option.getAttribute("href")).toMatch(/^\/(leads|pipeline|activities)\/[0-9a-f-]{36}$/);
+    for (const option of options) expect(option.getAttribute("href")).toMatch(/^\/(pipeline|activities)\/[0-9a-f-]{36}$/);
   });
 });
 
 describe("highlighting", () => {
   it("marks the searched words, case-insensitively, as text", async () => {
+    const body = results("x");
     mockApi({
       "GET /api/v1/workspaces/me/search": {
         status: 200,
-        body: { ...results("x"), terms: ["rahul", "SHA"], leads: { has_more: false, results: [{ ...results("x").leads.results[0]!, display_name: "Rahul Sharma" }] } },
+        body: {
+          ...body,
+          terms: ["rahul", "SHA"],
+          opportunities: { has_more: false, results: [{ ...body.opportunities.results[0]!, account_name: "", customer_name: "Rahul Sharma" }] },
+        },
       },
     });
     const { user } = setup();

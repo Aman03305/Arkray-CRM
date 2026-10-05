@@ -59,8 +59,9 @@ IDEMPOTENT_CREATE = "leads.create"
 ARCHIVED_READ_ONLY = "This lead is archived. Restore it to make changes."
 OWNER_NOT_ASSIGNABLE = "Choose an active user."
 # In a selected user's workspace nobody chooses the owner, so "choose" would mislead (Phase 6).
+# Also met when creating an opportunity, which brings its own customer record (ADR-0027).
 SUBJECT_NOT_ASSIGNABLE = (
-    "This user's account isn't active, so new leads can't be added to their workspace."
+    "This user's account isn't active, so nothing new can be added to their workspace."
 )
 OWNER_IS_SELF_ONLY = "Leads you create in your own workspace are owned by you."
 OWNER_IS_SUBJECT_ONLY = "Leads created in this workspace belong to the user whose workspace it is."

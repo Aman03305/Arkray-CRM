@@ -1,36 +1,32 @@
 /**
  * Phase 6: the administrator's journey through a selected user's CRM
  * (docs/admin-user-workspace.md). Admin -> Users -> Rahul's name -> Rahul's Dashboard,
- * Pipeline, Leads and Activities, without impersonation; and Rahul's records never, not for
- * one rendered frame, under Priya's banner (or the other way round).
+ * Pipeline and Activities (no Leads, ADR-0027), without impersonation; and Rahul's records
+ * never, not for one rendered frame, under Priya's banner (or the other way round).
  */
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactElement, ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import UserWorkspaceSection from "@/app/(app)/admin/users/[userId]/[section]/page";
 import { Sidebar } from "@/components/shell/Sidebar";
-import { leadKeys } from "@/features/leads/api";
-import { syncAfterLeadWrite } from "@/features/leads/hooks";
+import { pipelineKeys } from "@/features/pipeline/api";
 import { UsersPage } from "@/features/users/UsersPage";
 import { UsersTable } from "@/features/users/UsersTable";
 import { setFlash, useFlash } from "@/lib/flash";
 import { adminViewer, makeAdminUser, makeViewer, salesViewer } from "@/test/fixtures";
 import { createTestQueryClient, mockApi, renderWithProviders } from "@/test/render";
-import { ACTOR, inWorkspace, leadOf, markersOf, type Person, PRIYA, RAHUL, workspaceWorld } from "@/test/workspace-world";
+import { ACTOR, inWorkspace, markersOf, type Person, PRIYA, RAHUL, workspaceWorld } from "@/test/workspace-world";
 
 import { workspaceKeys } from "./api";
-
+import { SECTION_VIEWS } from "./section-views";
 import { UserWorkspaceFrame } from "./UserWorkspaceFrame";
 import {
   ActivitiesView,
   ActivityView,
   DashboardView,
-  EditLeadView,
   EditOpportunityView,
-  LeadsView,
-  LeadView,
-  NewLeadView,
   NewOpportunityView,
   OpportunityView,
   PipelineView,
@@ -40,6 +36,10 @@ const nav = vi.hoisted(() => ({ pathname: "/", push: vi.fn(), replace: vi.fn() }
 vi.mock("next/navigation", () => ({
   usePathname: () => nav.pathname,
   useRouter: () => ({ push: nav.push, replace: nav.replace, back: vi.fn(), forward: vi.fn(), prefetch: vi.fn() }),
+  // As Next.js does: notFound() throws, and the route renders its not-found page.
+  notFound: () => {
+    throw new Error("NEXT_NOT_FOUND");
+  },
 }));
 
 beforeEach(() => {
@@ -167,11 +167,7 @@ const PAGES: [string, (p: Person) => [string, ReactElement], (p: Person) => stri
   ["Pipeline", () => ["pipeline", <PipelineView key="p" />], (p) => `${p.mark}-OPPORTUNITY`],
   ["Opportunity", (p) => [`pipeline/${p.opportunityId}`, <OpportunityView key="o" opportunityId={p.opportunityId} />], (p) => `${p.mark}-OPPORTUNITY`],
   ["Edit opportunity", (p) => [`pipeline/${p.opportunityId}/edit`, <EditOpportunityView key="eo" opportunityId={p.opportunityId} />], () => null],
-  ["New opportunity", (p) => [`pipeline/new`, <NewOpportunityView key="no" leadId={p.leadId} />], () => null],
-  ["Leads", () => ["leads", <LeadsView key="l" />], (p) => `${p.mark}-LEAD`],
-  ["Lead", (p) => [`leads/${p.leadId}`, <LeadView key="ld" leadId={p.leadId} />], (p) => `${p.mark}-LEAD`],
-  ["Edit lead", (p) => [`leads/${p.leadId}/edit`, <EditLeadView key="el" leadId={p.leadId} />], () => null],
-  ["New lead", () => ["leads/new", <NewLeadView key="nl" />], () => null],
+  ["New opportunity", () => [`pipeline/new`, <NewOpportunityView key="no" />], () => null],
   ["Activities", () => ["activities", <ActivitiesView key="a" />], (p) => `${p.mark}-TASK`],
   ["Task", (p) => [`activities/${p.taskId}`, <ActivityView key="t" activityId={p.taskId} />], (p) => `${p.mark}-TASK`],
   ["Meeting", (p) => [`activities/${p.meetingId}`, <ActivityView key="m" activityId={p.meetingId} />], (p) => `${p.mark}-MEETING`],
@@ -199,49 +195,63 @@ describe.each(PAGES)("Rahul's %s, opened by the administrator", (_name, at, mark
   });
 });
 
+// --- the workspace's modules (ADR-0027: no Leads) -------------------------------------------------
+describe("Rahul's workspace has no Leads", () => {
+  it("its navigation lists Dashboard, Pipeline and Activities, each in Rahul's workspace", async () => {
+    workspaceWorld();
+    openAt(`${base(RAHUL)}/dashboard`, RAHUL.id, <DashboardView />);
+    const modules = await screen.findByRole("list", { name: "CRM for Rahul Sharma" });
+    const links = within(modules).getAllByRole("link");
+    expect(links.map((link) => link.textContent)).toEqual(["Dashboard", "Pipeline", "Activities"]);
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([
+      `${base(RAHUL)}/dashboard`,
+      `${base(RAHUL)}/pipeline`,
+      `${base(RAHUL)}/activities`,
+    ]);
+    expect(document.querySelector('a[href*="/leads"]')).toBeNull();
+  });
+
+  it("/admin/users/{id}/leads is not one of its sections: the route is not found", async () => {
+    const open = (section: string) =>
+      UserWorkspaceSection({ params: Promise.resolve({ userId: RAHUL.id, section }), searchParams: Promise.resolve({}) });
+    await expect(open("leads")).rejects.toThrow("NEXT_NOT_FOUND");
+    for (const section of ["dashboard", "pipeline", "activities"] as const) {
+      expect((await open(section)).type).toBe(SECTION_VIEWS[section]);
+    }
+    expect(Object.keys(SECTION_VIEWS)).toEqual(["dashboard", "pipeline", "activities"]);
+    // ...and no module of the sidebar claims that address as its page.
+    workspaceWorld();
+    nav.pathname = `${base(RAHUL)}/leads`;
+    renderWithProviders(<Sidebar />, { viewer: adminViewer });
+    for (const name of ["Dashboard", "Pipeline", "Activities"]) {
+      expect(screen.getByRole("link", { name })).not.toHaveAttribute("aria-current");
+    }
+    expect(screen.queryByRole("link", { name: "Leads" })).not.toBeInTheDocument();
+  });
+});
+
 // --- creating and editing stay in the workspace ---------------------------------------------------
 describe("create and edit flows return to Rahul's workspace", () => {
-  it("New lead -> save -> Rahul's new lead (created there, by the API's rules)", async () => {
-    const world = workspaceWorld();
-    openAt(`${base(RAHUL)}/leads/new`, RAHUL.id, <NewLeadView />);
-    const user = userEvent.setup();
-    await screen.findByRole("option", { name: "Referral" });
-    expect(screen.getByText(/Owner:/)).toHaveTextContent("Owner: Rahul Sharma");
-    await user.type(screen.getByLabelText("First name"), "Asha");
-    await user.click(screen.getByRole("button", { name: "Create lead" }));
-    await waitFor(() => expect(nav.push).toHaveBeenCalledWith(`${base(RAHUL)}/leads/${RAHUL.leadId.slice(0, -1)}9`));
-    const post = world.calls.find((c) => c.method === "POST")!;
-    expect(post.path).toBe(`/api/v1/workspaces/${RAHUL.id}/leads`);
-    // The workspace comes from the URL; the body never names an owner, creator or workspace.
-    expect(Object.keys(post.body as object)).not.toEqual(expect.arrayContaining(["owner"]));
-    expect(JSON.stringify(post.body)).not.toMatch(/created_by|workspace|user_id|actor/);
-  });
-
-  it("Edit lead -> save -> back on Rahul's lead", async () => {
-    const world = workspaceWorld();
-    openAt(`${base(RAHUL)}/leads/${RAHUL.leadId}/edit`, RAHUL.id, <EditLeadView leadId={RAHUL.leadId} />);
-    const user = userEvent.setup();
-    const city = await screen.findByLabelText(/^City/);
-    await user.clear(city);
-    await user.type(city, "Pune");
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
-    await waitFor(() => expect(nav.push).toHaveBeenCalledWith(`${base(RAHUL)}/leads/${RAHUL.leadId}`));
-    expect(world.calls.find((c) => c.method === "PATCH")!.path).toBe(`/api/v1/workspaces/${RAHUL.id}/leads/${RAHUL.leadId}`);
-    expect(world.foreignCalls(RAHUL.id)).toEqual([]);
-  });
-
   it("New opportunity -> save -> Rahul's opportunity; Edit -> save -> back on it", async () => {
     const world = workspaceWorld();
-    const view = openAt(`${base(RAHUL)}/pipeline/new`, RAHUL.id, <NewOpportunityView leadId={RAHUL.leadId} />);
+    const view = openAt(`${base(RAHUL)}/pipeline/new`, RAHUL.id, <NewOpportunityView />);
     const user = userEvent.setup();
     const create = await screen.findByRole("dialog", { name: "New opportunity" });
-    expect(await within(create).findByRole("combobox", { name: "Lead" })).toHaveValue(RAHUL.leadId);
-    await waitFor(() => expect(within(create).getByLabelText("Account name")).not.toHaveValue(""));
+    // Rahul owns what is created in his workspace: no Owner (or Lead) to choose.
+    expect(within(create).queryByRole("combobox", { name: /owner|lead/i })).not.toBeInTheDocument();
     await user.type(within(create).getByLabelText("Opportunity name"), "Lab upgrade");
+    await user.type(within(create).getByLabelText("Account name"), "City Lab");
+    await user.type(within(create).getByLabelText("Customer name"), "Dr. Iyer");
     await user.type(within(create).getByLabelText("Installation price (₹)"), "111111");
     await user.click(within(create).getByRole("button", { name: "Create opportunity" }));
     await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`${base(RAHUL)}/pipeline/${RAHUL.opportunityId}`));
-    expect(world.calls.find((c) => c.method === "POST")!.path).toBe(`/api/v1/workspaces/${RAHUL.id}/opportunities`);
+    const post = world.calls.find((c) => c.method === "POST")!;
+    expect(post.path).toBe(`/api/v1/workspaces/${RAHUL.id}/opportunities`);
+    // The workspace comes from the URL; the body never names an owner, creator, lead or workspace.
+    expect(post.body).toMatchObject({ account_name: "City Lab", customer_name: "Dr. Iyer" });
+    expect(Object.keys(post.body as object)).not.toEqual(expect.arrayContaining(["owner"]));
+    expect(Object.keys(post.body as object)).not.toEqual(expect.arrayContaining(["lead"]));
+    expect(JSON.stringify(post.body)).not.toMatch(/created_by|workspace|user_id|actor/);
 
     view.go(`${base(RAHUL)}/pipeline/${RAHUL.opportunityId}/edit`, RAHUL.id, <EditOpportunityView opportunityId={RAHUL.opportunityId} />);
     const edit = await screen.findByRole("dialog", { name: "Edit opportunity" });
@@ -262,28 +272,43 @@ describe("create and edit flows return to Rahul's workspace", () => {
     await screen.findAllByText("RAHUL-ONLY-TASK");
     await user.click(screen.getByRole("button", { name: "New task" }));
     const dialog = screen.getByRole("dialog", { name: "New task" });
-    await within(dialog).findByRole("option", { name: /RAHUL-ONLY-LEAD/ });
+    // What it is about: one of Rahul's opportunities (never anyone else's).
+    await within(dialog).findByRole("option", { name: "RAHUL-ONLY-OPPORTUNITY · RAHUL-ONLY-LEAD" });
     expect(within(dialog).queryByRole("option", { name: /PRIYA-ONLY/ })).not.toBeInTheDocument();
-    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Lead" }), RAHUL.leadId);
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Opportunity" }), RAHUL.opportunityId);
     await user.type(within(dialog).getByRole("textbox", { name: "Subject" }), "Call back");
     await user.click(within(dialog).getByRole("button", { name: "Create task" }));
     await waitFor(() => expect(world.calls.some((c) => c.method === "POST")).toBe(true));
     const post = world.calls.find((c) => c.method === "POST")!;
     expect(post.path).toBe(`/api/v1/workspaces/${RAHUL.id}/activities`);
+    expect(post.body).toMatchObject({ type: "task", title: "Call back", opportunity: RAHUL.opportunityId });
+    expect(post.body).not.toHaveProperty("lead");
     expect(JSON.stringify(post.body)).not.toMatch(/owner|created_by|workspace|user_id|actor/);
     expect(world.foreignCalls(RAHUL.id)).toEqual([]);
     expect(screenHoldsNothingOf(PRIYA)).toEqual([]);
   });
 
-  it("a deactivated user's workspace stays readable but offers no lead form that can't be saved", async () => {
+  it("a deactivated user's workspace stays readable, and the API's reason a new opportunity can't be added is shown", async () => {
+    const reason = "This user's account isn't active, so nothing new can be added to their workspace.";
     const world = workspaceWorld([{ ...RAHUL, status: "deactivated" }, PRIYA]);
-    openAt(`${base(RAHUL)}/leads/new`, RAHUL.id, <NewLeadView />);
-    expect(await screen.findByText("New leads can't be added for this user")).toBeInTheDocument();
-    expect(screen.getByText(/Rahul Sharma's account is deactivated/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Back to Leads" })).toHaveAttribute("href", `${base(RAHUL)}/leads`);
-    expect(screen.queryByRole("button", { name: "Create lead" })).not.toBeInTheDocument();
-    expect(banner()).toHaveTextContent("Status: Deactivated");
-    expect(world.calls.some((c) => c.method !== "GET")).toBe(false);
+    world.fail((c) => c.method === "POST" && c.rest === "/opportunities", {
+      status: 400,
+      body: { error: { code: "invalid_input", message: "Check the details and try again.", details: { owner: [reason] }, request_id: "req-400" } },
+    });
+    openAt(`${base(RAHUL)}/pipeline/new`, RAHUL.id, <NewOpportunityView />);
+    await waitFor(() => expect(banner()).toHaveTextContent("Status: Deactivated"));
+    expect(banner()).toHaveTextContent("new records can't be added for them");
+    expect((await screen.findAllByText("RAHUL-ONLY-OPPORTUNITY")).length).toBeGreaterThan(0); // still readable
+    const create = screen.getByRole("dialog", { name: "New opportunity" });
+    const user = userEvent.setup();
+    await user.type(within(create).getByLabelText("Opportunity name"), "Lab upgrade");
+    await user.type(within(create).getByLabelText("Account name"), "City Lab");
+    await user.type(within(create).getByLabelText("Customer name"), "Dr. Iyer");
+    await user.type(within(create).getByLabelText("Installation price (₹)"), "1");
+    await user.click(within(create).getByRole("button", { name: "Create opportunity" }));
+    expect(await within(create).findByRole("alert")).toHaveTextContent(reason);
+    expect(nav.replace).not.toHaveBeenCalled();
+    expect(world.foreignCalls(RAHUL.id)).toEqual([]);
   });
 });
 
@@ -291,7 +316,6 @@ describe("create and edit flows return to Rahul's workspace", () => {
 const MODULES: [string, (p: Person) => [string, ReactElement], (p: Person) => string][] = [
   ["Dashboard", () => ["dashboard", <DashboardView key="d" />], (p) => p.shown],
   ["Pipeline", () => ["pipeline", <PipelineView key="p" />], (p) => `${p.mark}-OPPORTUNITY`],
-  ["Leads", () => ["leads", <LeadsView key="l" />], (p) => `${p.mark}-LEAD`],
   ["Activities", () => ["activities", <ActivitiesView key="a" />], (p) => `${p.mark}-TASK`],
 ];
 
@@ -368,12 +392,12 @@ describe.each(MODULES)("%s: Rahul -> Priya", (_name, at, marker) => {
 });
 
 describe("Back and Forward", () => {
-  it("Users -> Rahul Dashboard -> Rahul Lead -> Priya Dashboard -> Priya Activity, then Back and Forward: banner and data always match the URL", async () => {
+  it("Users -> Rahul Dashboard -> Rahul Opportunity -> Priya Dashboard -> Priya Activity, then Back and Forward: banner and data always match the URL", async () => {
     workspaceWorld();
     const view = openAt(`${base(RAHUL)}/dashboard`, RAHUL.id, <DashboardView />);
     const steps: [Person, string, ReactElement, string][] = [
       [RAHUL, "dashboard", <DashboardView key="1" />, RAHUL.shown],
-      [RAHUL, `leads/${RAHUL.leadId}`, <LeadView key="2" leadId={RAHUL.leadId} />, "RAHUL-ONLY-LEAD"],
+      [RAHUL, `pipeline/${RAHUL.opportunityId}`, <OpportunityView key="2" opportunityId={RAHUL.opportunityId} />, "RAHUL-ONLY-OPPORTUNITY"],
       [PRIYA, "dashboard", <DashboardView key="3" />, PRIYA.shown],
       [PRIYA, `activities/${PRIYA.taskId}`, <ActivityView key="4" activityId={PRIYA.taskId} />, "PRIYA-ONLY-TASK"],
     ];
@@ -393,10 +417,10 @@ describe("Back and Forward", () => {
 });
 
 describe("refresh, deep links and tabs", () => {
-  it("a bookmarked lead URL rebuilds Rahul's workspace from the URL alone (fresh page, empty cache)", async () => {
+  it("a bookmarked opportunity URL rebuilds Rahul's workspace from the URL alone (fresh page, empty cache)", async () => {
     const world = workspaceWorld();
-    openAt(`${base(RAHUL)}/leads/${RAHUL.leadId}`, RAHUL.id, <LeadView leadId={RAHUL.leadId} />, adminViewer, createTestQueryClient());
-    expect(await screen.findByRole("heading", { level: 1, name: "RAHUL-ONLY-LEAD" })).toBeInTheDocument();
+    openAt(`${base(RAHUL)}/pipeline/${RAHUL.opportunityId}`, RAHUL.id, <OpportunityView opportunityId={RAHUL.opportunityId} />, adminViewer, createTestQueryClient());
+    expect(await screen.findByRole("heading", { level: 1, name: "RAHUL-ONLY-OPPORTUNITY" })).toBeInTheDocument();
     await waitFor(() => expect(banner()).toHaveTextContent("Viewing CRM for: Rahul Sharma"));
     expect(world.foreignCalls(RAHUL.id)).toEqual([]);
   });
@@ -406,8 +430,8 @@ describe("refresh, deep links and tabs", () => {
     workspaceWorld();
     const view = openAt(`${base(RAHUL)}/pipeline`, RAHUL.id, <PipelineView />);
     await screen.findAllByText("RAHUL-ONLY-OPPORTUNITY");
-    view.go(`${base(PRIYA)}/leads`, PRIYA.id, <LeadsView />);
-    await screen.findAllByText("PRIYA-ONLY-LEAD");
+    view.go(`${base(PRIYA)}/activities`, PRIYA.id, <ActivitiesView />);
+    await screen.findAllByText("PRIYA-ONLY-TASK");
     const written = setItem.mock.calls.map((call) => call.join("="));
     expect(written.filter((w) => w.includes(RAHUL.id) || w.includes(PRIYA.id))).toEqual([]);
     setItem.mockRestore();
@@ -415,11 +439,11 @@ describe("refresh, deep links and tabs", () => {
 
   it("two tabs (two pages, two caches) show their own users side by side", async () => {
     workspaceWorld();
-    const tab1 = openAt(`${base(RAHUL)}/leads`, RAHUL.id, <LeadsView />);
-    expect(await screen.findAllByText("RAHUL-ONLY-LEAD")).not.toHaveLength(0);
+    const tab1 = openAt(`${base(RAHUL)}/pipeline`, RAHUL.id, <PipelineView />);
+    expect(await screen.findAllByText("RAHUL-ONLY-OPPORTUNITY")).not.toHaveLength(0);
     tab1.unmount();
-    openAt(`${base(PRIYA)}/leads`, PRIYA.id, <LeadsView />);
-    expect(await screen.findAllByText("PRIYA-ONLY-LEAD")).not.toHaveLength(0);
+    openAt(`${base(PRIYA)}/pipeline`, PRIYA.id, <PipelineView />);
+    expect(await screen.findAllByText("PRIYA-ONLY-OPPORTUNITY")).not.toHaveLength(0);
     expect(screenHoldsNothingOf(RAHUL)).toEqual([]);
   });
 });
@@ -430,11 +454,11 @@ describe("URL canonicalisation (Phase 6 P1: banner of one workspace, data of ano
     const world = workspaceWorld();
     const encoded = `%${RAHUL.id.charCodeAt(0).toString(16)}${RAHUL.id.slice(1)}`;
     // Next.js decodes the layout's param; the pathname keeps the raw spelling.
-    openAt(`/admin/users/${encoded}/leads`, RAHUL.id, <LeadsView />);
-    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`${base(RAHUL)}/leads`));
-    expect(screen.queryByText("RAHUL-ONLY-LEAD")).not.toBeInTheDocument();
-    expect(world.leaks).toEqual([]); // before the fix: GET /api/v1/workspaces/all/leads
-    expect(world.calls.filter((c) => c.rest === "/leads")).toEqual([]);
+    openAt(`/admin/users/${encoded}/pipeline`, RAHUL.id, <PipelineView />);
+    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`${base(RAHUL)}/pipeline`));
+    expect(screen.queryByText("RAHUL-ONLY-OPPORTUNITY")).not.toBeInTheDocument();
+    expect(world.leaks).toEqual([]); // before the fix: GET /api/v1/workspaces/all/...
+    expect(world.calls.filter((c) => c.rest === "/pipeline-board")).toEqual([]);
   });
 
   it("an upper-case id is rewritten too (one address per workspace)", async () => {
@@ -445,7 +469,7 @@ describe("URL canonicalisation (Phase 6 P1: banner of one workspace, data of ano
 
   it("a URL whose workspace isn't the layout's user is not found, and nothing is requested for it", async () => {
     const world = workspaceWorld();
-    openAt(`${base(PRIYA)}/leads`, RAHUL.id, <LeadsView />);
+    openAt(`${base(PRIYA)}/pipeline`, RAHUL.id, <PipelineView />);
     expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
     expect(world.calls.filter((c) => c.rest !== "")).toEqual([]);
     expect(noRecordsOf(PRIYA)).toEqual([]);
@@ -453,8 +477,8 @@ describe("URL canonicalisation (Phase 6 P1: banner of one workspace, data of ano
 
   it("a malformed user id below /admin/users is not found: no fallback to the organisation", async () => {
     const world = workspaceWorld();
-    nav.pathname = "/admin/users/not-a-user/leads";
-    renderWithProviders(<LeadsView />, { viewer: adminViewer });
+    nav.pathname = "/admin/users/not-a-user/pipeline";
+    renderWithProviders(<PipelineView />, { viewer: adminViewer });
     expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
     expect(world.calls).toEqual([]);
   });
@@ -465,7 +489,7 @@ describe("the workspace frame", () => {
   it("never shows a name before the API has named the user, and names the actor separately", async () => {
     const world = workspaceWorld();
     const release = world.hold((c) => c.rest === "");
-    openAt(`${base(RAHUL)}/leads`, RAHUL.id, <LeadsView />);
+    openAt(`${base(RAHUL)}/activities`, RAHUL.id, <ActivitiesView />);
     expect(screen.getByText("Loading user name")).toBeInTheDocument();
     expect(banner()).not.toHaveTextContent("Rahul Sharma");
     act(() => release());
@@ -478,7 +502,7 @@ describe("the workspace frame", () => {
   it("an unknown or forbidden user is a plain 404 (never 'exists but not yours'), with no module data", async () => {
     const world = workspaceWorld();
     world.fail(inWorkspace(RAHUL), { status: 404, body: { error: { code: "not_found", message: "Not found.", details: null, request_id: "r" } } });
-    openAt(`${base(RAHUL)}/leads`, RAHUL.id, <LeadsView />);
+    openAt(`${base(RAHUL)}/activities`, RAHUL.id, <ActivitiesView />);
     // The module's own request may answer 404 first; the frame then replaces the whole page.
     await waitFor(() => expect(screen.queryByRole("region", { name: "Workspace context" })).not.toBeInTheDocument());
     expect(screen.getAllByRole("heading", { name: "Page not found" })).toHaveLength(1);
@@ -489,18 +513,18 @@ describe("the workspace frame", () => {
   it("a failure to open the workspace fails closed (no module, no fallback), and can be retried", async () => {
     const world = workspaceWorld();
     world.fail((c) => c.workspace === RAHUL.id && c.rest === "", { status: 503, body: { error: { code: "service_unavailable", message: "Try again.", details: null, request_id: "req-503" } } });
-    openAt(`${base(RAHUL)}/leads`, RAHUL.id, <LeadsView />);
+    openAt(`${base(RAHUL)}/activities`, RAHUL.id, <ActivitiesView />);
     expect(await screen.findByText("This workspace couldn't be opened")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
-    expect(screen.queryByText("RAHUL-ONLY-LEAD")).not.toBeInTheDocument();
+    expect(screen.queryByText("RAHUL-ONLY-TASK")).not.toBeInTheDocument();
     expect(world.leaks).toEqual([]);
   });
 
   it("a record of another workspace is 'not found', with the way back staying in this workspace", async () => {
     const world = workspaceWorld();
-    openAt(`${base(RAHUL)}/leads/${PRIYA.leadId}`, RAHUL.id, <LeadView leadId={PRIYA.leadId} />);
+    openAt(`${base(RAHUL)}/pipeline/${PRIYA.opportunityId}`, RAHUL.id, <OpportunityView opportunityId={PRIYA.opportunityId} />);
     expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Back to Leads" })).toHaveAttribute("href", `${base(RAHUL)}/leads`);
+    expect(screen.getByRole("link", { name: "Back to Pipeline" })).toHaveAttribute("href", `${base(RAHUL)}/pipeline`);
     expect(screenHoldsNothingOf(PRIYA)).toEqual([]);
     expect(world.calls.every((c) => c.workspace === RAHUL.id)).toBe(true);
   });
@@ -508,11 +532,13 @@ describe("the workspace frame", () => {
   it("a manager without users.manage goes back to their Dashboard instead of a Users page they can't open", async () => {
     workspaceWorld();
     const viewerOnly = makeViewer({ id: "v1", fullName: "Vik Viewer", capabilities: ["crm.access_own", "workspace.view_any"] });
-    openAt(`${base(RAHUL)}/leads`, RAHUL.id, <LeadsView />, viewerOnly);
+    openAt(`${base(RAHUL)}/pipeline`, RAHUL.id, <PipelineView />, viewerOnly);
     await waitFor(() => expect(banner()).toHaveTextContent("Rahul Sharma"));
     expect(within(banner()).getByRole("link", { name: "Back to Dashboard" })).toHaveAttribute("href", "/dashboard");
     // View-only: no create or edit actions are offered (the API refuses them anyway).
-    expect(screen.queryByRole("link", { name: /New lead/ })).not.toBeInTheDocument();
+    expect((await screen.findAllByText("RAHUL-ONLY-OPPORTUNITY")).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "New opportunity" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /New opportunity/ })).not.toBeInTheDocument();
   });
 
   it("a sales user typing another user's workspace URL gets 'not found' from the API, and nothing else", async () => {
@@ -567,8 +593,8 @@ describe("review: a notice belongs to the page it was sent to", () => {
   }
 
   it("a navigation that never landed leaves nothing of Rahul's for Priya's page (P1 under the brief's rule)", () => {
-    setFlash("RAHUL-ONLY-LEAD was converted. This is the new opportunity.", `${base(RAHUL)}/pipeline/${RAHUL.opportunityId}`);
-    nav.pathname = `${base(PRIYA)}/leads`; // Back pressed during the round trip: Priya's page mounts instead
+    setFlash("RAHUL-ONLY-OPPORTUNITY created.", `${base(RAHUL)}/pipeline/${RAHUL.opportunityId}`);
+    nav.pathname = `${base(PRIYA)}/pipeline`; // Back pressed during the round trip: Priya's page mounts instead
     const priya = renderWithProviders(<Notice />, { viewer: adminViewer });
     expect(screen.getByText("no notice")).toBeInTheDocument();
     priya.unmount();
@@ -579,33 +605,60 @@ describe("review: a notice belongs to the page it was sent to", () => {
   });
 
   it("the destination page shows it, once", () => {
-    setFlash("Lead created.", `${base(RAHUL)}/leads/${RAHUL.leadId}`);
-    nav.pathname = `${base(RAHUL)}/leads/${RAHUL.leadId}`;
+    setFlash("Changes saved.", `${base(RAHUL)}/pipeline/${RAHUL.opportunityId}`);
+    nav.pathname = `${base(RAHUL)}/pipeline/${RAHUL.opportunityId}`;
     const first = renderWithProviders(<Notice />, { viewer: adminViewer });
-    expect(screen.getByText("Lead created.")).toBeInTheDocument();
+    expect(screen.getByText("Changes saved.")).toBeInTheDocument();
     first.unmount();
     renderWithProviders(<Notice />, { viewer: adminViewer });
     expect(screen.getByText("no notice")).toBeInTheDocument();
   });
 });
 
-describe("review: a reassignment that finishes after its page was left", () => {
+// Was the lead reassignment review (P2); the owner now changes on the opportunity (ADR-0027).
+describe("review: handing Rahul's opportunity to Priya from Rahul's workspace", () => {
   const rahul = { kind: "user", userId: RAHUL.id } as const;
-  const priya = { kind: "user", userId: PRIYA.id } as const;
 
-  it("is not cached as the old workspace's fresh copy of a lead that now lives elsewhere (P2)", () => {
+  it("leaves Rahul's workspace for his Pipeline; nothing is cached as his fresh copy, and Priya's caches are untouched (P2)", async () => {
+    const world = workspaceWorld();
     const client = createTestQueryClient();
-    client.setQueryData(leadKeys.detail(priya, PRIYA.leadId), leadOf(PRIYA)); // left on screen earlier, no observer now
-    syncAfterLeadWrite(client, priya, leadOf(PRIYA, { owner: { id: RAHUL.id, full_name: RAHUL.name, is_active: true } }));
-    expect(client.getQueryData(leadKeys.detail(priya, PRIYA.leadId))).toBeUndefined();
-  });
+    const view = openAt(`${base(PRIYA)}/pipeline`, PRIYA.id, <PipelineView />, adminViewer, client);
+    await screen.findAllByText("PRIYA-ONLY-OPPORTUNITY");
+    const priyaKeyed = () => client.getQueryCache().findAll().filter((q) => JSON.stringify(q.queryKey).includes(PRIYA.id));
+    const priyaBefore = priyaKeyed().map((q) => JSON.stringify(q.state.data));
 
-  it("while its page still shows it, the page keeps its copy until it leaves (unchanged)", () => {
-    const client = createTestQueryClient();
-    const shown = client.getQueryCache().build(client, { queryKey: leadKeys.detail(rahul, RAHUL.leadId) });
-    vi.spyOn(shown, "getObserversCount").mockReturnValue(1); // the lead page, still mounted
-    syncAfterLeadWrite(client, rahul, leadOf(RAHUL, { owner: { id: PRIYA.id, full_name: PRIYA.name, is_active: true } }));
-    expect(client.getQueryData(leadKeys.detail(rahul, RAHUL.leadId))).toMatchObject({ owner: { id: PRIYA.id } });
+    view.go(`${base(RAHUL)}/pipeline/${RAHUL.opportunityId}`, RAHUL.id, <OpportunityView opportunityId={RAHUL.opportunityId} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "More actions for RAHUL-ONLY-OPPORTUNITY" }));
+    await user.click(screen.getByRole("menuitem", { name: "Change owner" }));
+    const dialog = screen.getByRole("dialog", { name: "Change owner" });
+    const owner = within(dialog).getByRole("combobox", { name: "New owner" });
+    await within(owner).findByRole("option", { name: /^Priya Patel/ });
+    await user.selectOptions(owner, PRIYA.id);
+    await user.click(within(dialog).getByRole("button", { name: "Change owner" }));
+    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`${base(RAHUL)}/pipeline`));
+    const assign = world.calls.find((c) => c.method === "POST")!;
+    expect(assign.path).toBe(`/api/v1/workspaces/${RAHUL.id}/opportunities/${RAHUL.opportunityId}/assign`);
+    expect(assign.body).toEqual({ owner: PRIYA.id, version: 2 });
+
+    // Rahul's copy of the deal is stale (it lives in Priya's workspace now), never refreshed as his.
+    expect(client.getQueryState(pipelineKeys.detail(rahul, RAHUL.opportunityId))?.isInvalidated).toBe(true);
+    for (const q of client.getQueryCache().findAll().filter((q) => JSON.stringify(q.queryKey).includes(RAHUL.id))) {
+      expect(JSON.stringify(q.state.data ?? null)).not.toContain(PRIYA.id);
+    }
+    // ...and nothing was written into Priya's workspace from Rahul's.
+    expect(priyaKeyed().map((q) => JSON.stringify(q.state.data))).toEqual(priyaBefore);
+
+    // Rahul's Pipeline shows the notice and loads afresh.
+    const boardsBefore = world.calls.filter((c) => c.workspace === RAHUL.id && c.rest === "/pipeline-board").length;
+    view.go(`${base(RAHUL)}/pipeline`, RAHUL.id, <PipelineView />);
+    expect(await screen.findByText("“RAHUL-ONLY-OPPORTUNITY” now belongs to Priya Patel.")).toBeInTheDocument();
+    // Once its page is gone, Rahul's workspace keeps no copy of the deal at all.
+    expect(client.getQueryState(pipelineKeys.detail(rahul, RAHUL.opportunityId))).toBeUndefined();
+    await waitFor(() =>
+      expect(world.calls.filter((c) => c.workspace === RAHUL.id && c.rest === "/pipeline-board").length).toBeGreaterThan(boardsBefore),
+    );
+    expect(world.leaks).toEqual([]);
   });
 });
 
@@ -633,24 +686,25 @@ describe("review: accessibility of the workspace's own states", () => {
   it("a workspace that can't be opened still has its one h1", async () => {
     const world = workspaceWorld();
     world.fail((c) => c.workspace === RAHUL.id && c.rest === "", { status: 503, body: { error: { code: "service_unavailable", message: "Try again.", details: null, request_id: "r" } } });
-    openAt(`${base(RAHUL)}/leads`, RAHUL.id, <LeadsView />);
+    openAt(`${base(RAHUL)}/activities`, RAHUL.id, <ActivitiesView />);
     await screen.findByText("This workspace couldn't be opened");
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
   });
 
-  it("the deactivated user's New lead page has its h1", async () => {
+  it("the deactivated user's New opportunity page has its one h1", async () => {
     workspaceWorld([{ ...RAHUL, status: "deactivated" }, PRIYA]);
-    openAt(`${base(RAHUL)}/leads/new`, RAHUL.id, <NewLeadView />);
-    await screen.findByText("New leads can't be added for this user");
-    expect(screen.getByRole("heading", { level: 1, name: "New lead" })).toBeInTheDocument();
+    openAt(`${base(RAHUL)}/pipeline/new`, RAHUL.id, <NewOpportunityView />);
+    await waitFor(() => expect(banner()).toHaveTextContent("Status: Deactivated"));
+    await screen.findByRole("dialog", { name: "New opportunity" });
+    await waitFor(() => expect(screen.getAllByRole("heading", { level: 1, hidden: true }).map((h) => h.textContent)).toEqual(["Pipeline"]));
   });
 
   it("screen readers hear whose CRM opened (titles don't name users)", async () => {
     workspaceWorld();
-    const view = openAt(`${base(RAHUL)}/leads`, RAHUL.id, <LeadsView />);
+    const view = openAt(`${base(RAHUL)}/activities`, RAHUL.id, <ActivitiesView />);
     const region = () => document.querySelector('main p[aria-live="polite"]')!;
     await waitFor(() => expect(region()).toHaveTextContent("Viewing CRM for Rahul Sharma"));
-    view.go(`${base(PRIYA)}/leads`, PRIYA.id, <LeadsView key="priya" />);
+    view.go(`${base(PRIYA)}/activities`, PRIYA.id, <ActivitiesView key="priya" />);
     await waitFor(() => expect(region()).toHaveTextContent("Viewing CRM for Priya Patel"));
   });
 

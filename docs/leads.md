@@ -1,7 +1,14 @@
 # Leads
 
-**Built in Phase 2.** Code: [`backend/arkray/leads/`](../backend/arkray/leads/) and
-[`frontend/src/features/leads/`](../frontend/src/features/leads/). Decisions:
+> **Removed from the UI on 2026-10-05 ([ADR-0027](adr/0027-leads-removed-from-the-ui.md)).**
+> There is no Leads screen, picker, conversion or dashboard figure any more. The lead remains
+> the backend's customer record: every opportunity and activity still has one, a new
+> opportunity created without one makes one from its customer details, and a deal's
+> *Change owner* reassigns it. This page describes the model and the API, which are
+> unchanged; the frontend parts below are history.
+
+**Built in Phase 2.** Code: [`backend/arkray/leads/`](../backend/arkray/leads/) (the frontend
+`features/leads/` was removed by ADR-0027). Decisions:
 [ADR-0015](adr/0015-leads-domain-model.md) (model, configurable statuses and sources),
 [ADR-0016](adr/0016-composite-keyset-pagination.md) (pagination),
 [ADR-0017](adr/0017-in-transaction-domain-events.md) (domain events).

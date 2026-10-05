@@ -3,8 +3,9 @@
 **Built in Phase 4.** Code: [`backend/arkray/activities/`](../backend/arkray/activities/) and
 [`frontend/src/features/activities/`](../frontend/src/features/activities/). Decisions:
 [ADR-0009](adr/0009-unified-activity-model.md) (one table), [ADR-0020](adr/0020-activity-integrity.md)
-(lead-bound, ownership, composite keys) and [ADR-0021](adr/0021-materialized-timeline.md)
-(the timeline).
+(lead-bound, ownership, composite keys), [ADR-0021](adr/0021-materialized-timeline.md)
+(the timeline) and [ADR-0027](adr/0027-leads-removed-from-the-ui.md) (Leads removed from the
+UI: tasks and meetings are created from an opportunity; its lead is shown as the customer).
 
 Phase 4 supports exactly three types: **task**, **meeting** and **note**. Call, email and
 WhatsApp are prepared for (see [Adding a type](#adding-a-type)), not built.
@@ -43,6 +44,8 @@ organisation-wide sort only; see [Performance](#performance)).
 
 Every activity is about a lead: from the lead's page, or from one of its opportunities
 (the lead is then implied). Links never change; to fix a wrong link, archive and recreate.
+Since ADR-0027 the UI has no lead pages: it creates activities about an opportunity only,
+and shows the lead as the opportunity's customer; the API still accepts a lead alone.
 
 Statuses are stable keys; labels are the UI's. Due dates are timestamps: the form asks for
 a date and a time (pre-filled with 18:00, the end of the working day, in India time).
@@ -89,7 +92,7 @@ a date and a time (pre-filled with 18:00, the end of the working day, in India t
 - A note is its text (required) about a lead or one of its opportunities. No title, status,
   due date or times (CHECK-enforced). There is no `Lead.notes` or `Opportunity.notes`
   column: notes live in the activity and timeline system.
-- Adding one is two steps on the lead or opportunity page: type, **Save note**.
+- Adding one is two steps on the opportunity page (its Notes tab): type, **Save note**.
 - **Author vs owner**: `created_by` is the author, forever (an admin's note in Rahul's
   workspace says *written by the admin*). The note's owner is the lead's owner: a note is
   the lead's context and follows it on reassignment, so the new owner can read it, while the
@@ -172,7 +175,7 @@ Files on notes ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.
 Nobody chooses an owner: the API has no `owner` field (a 400), and the services have no
 parameter for one. Current work is always the lead's owner's, which PostgreSQL enforces
 ([ADR-0020](adr/0020-activity-integrity.md)). A lead owned by a deactivated user takes no new
-activities (422 "Reassign the lead…").
+activities (422 "…Change the owner to an active user first.": the deal's *Change owner*).
 
 **Historical attribution never changes**: `created_by`, `completed_by`, `cancelled_by`,
 timeline actors and audit actors stay as they were, through reassignments, renames and
@@ -426,12 +429,13 @@ figure counts (meetings today: `cancelled=false` and today's dates; upcoming mee
   URL. Views are keyed by workspace (and activity), and every query key starts with
   `["activities" | "timeline", kind, <workspace>]`; "keep the previous data while loading"
   applies only within the same workspace. Tested: Rahul's activities → Priya's, Back, Rahul's
-  lead timeline → Priya's lead: nothing of Rahul's ever shows. A timeline refetch the server
-  refuses (403/404) removes the entries from the screen.
+  opportunity timeline → Priya's: nothing of Rahul's ever shows. A timeline refetch the
+  server refuses (403/404) removes the entries from the screen.
 - **Activities page**: summary shortcuts (open, overdue, due today, today's meetings,
   upcoming), tabs All / Tasks / Meetings / Notes (each starting from a sensible status and
   sort), status and sort, and under "More filters" the date range (an inverted range is
-  explained and never sent), lead, owner (organisation-wide) and the archived view. Filters
+  explained and never sent), opportunity (the opportunity picker below), owner
+  (organisation-wide) and the archived view. Filters
   live in memory per workspace (never in the URL or storage). Table on tablets and desktops,
   cards on phones; type, status, "Overdue" and "Awaiting outcome" are written out. Complete
   is a button on each row (keyboard and touch, using the row's version; a 409 is explained
@@ -459,17 +463,19 @@ figure counts (meetings today: `cancelled=false` and today's dates; upcoming mee
   `["activities", "calendar", <workspace>]`, so every activity write marks it stale. The
   view and the calendar's position are remembered per workspace in memory, like the
   filters; a summary shortcut or a dashboard figure shows the list.
-- **+ Task / + Meeting** open a dialog (lead picker limited to this workspace, optional
-  opportunity of that lead, due date and time or start and end in India time, priority,
+- **+ Task / + Meeting** open a dialog (from the Activities page or the calendar: an
+  opportunity picker limited to this workspace, required: recent open opportunities, or any
+  found by typing its title or customer, through global search; from an opportunity: that
+  one, fixed. Then due date and time or start and end in India time, priority,
   location, https link, description/agenda). Errors sit under their fields and focus moves
   to the first; an identical retry reuses its idempotency key; an edit conflict keeps the
   typing and offers "Apply my changes to the latest version" or "Discard"; a refused create
   shows the server's reason. Moving a meeting's start moves its end (the length is kept).
   Escape, a click outside, Close or Cancel with unsaved typing asks "Discard what you
   typed?" first.
-- **Lead page**: *Open work* (open tasks and scheduled meetings with Complete, + Task,
-  + Meeting) replaces the Phase 2 placeholder; the *Timeline* has the note box on top.
-  **Opportunity page**: the same, scoped to the opportunity.
+- **Opportunity page**: *Open work* (open tasks and scheduled meetings with Complete, + Task,
+  + Meeting), its *Timeline* (History tab) and its notes (Notes tab). Activity rows, pages and
+  the dashboard name the customer as text (there is no customer page to link to).
 - **Activity page**: details, record (created by, completed/cancelled by and when), actions
   (complete, cancel, reopen, edit, archive/restore); meeting links open in a new tab with
   `rel="noopener noreferrer"`; a note is edited in place by its author only, and a conflict
@@ -483,9 +489,9 @@ figure counts (meetings today: `cancelled=false` and today's dates; upcoming mee
   (Complete, Reopen), "Edit note" after saving a note, the first entry "Show older" added.
   Controls repeated per row are told apart ("Actions for note: Prefers morning calls";
   "New task", "New meeting").
-- After a reassignment moves a lead out of the workspace being viewed, the page leaving it
-  doesn't refetch the lead's timeline or open work there (a 404 that flashed up as an error
-  in the live walkthrough); they are dropped from the cache once the page is gone.
+- After *Change owner* hands a deal out of the user's workspace being viewed, the deal page
+  marks that workspace's data stale without refetching what it shows (a 404 that flashed up
+  as an error in the Phase 6 live walkthrough of lead reassignment) and goes to its Pipeline.
 
 ## Performance
 

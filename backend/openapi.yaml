@@ -2059,6 +2059,45 @@ paths:
           description: ''
         '404':
           description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/assign:
+    post:
+      operationId: opportunities_assign
+      description: |-
+        Change an open opportunity's owner (crm.assign_any). Ownership follows the customer
+        record, so its other open opportunities and current work move too (ADR-0027). The
+        response shows the opportunity as reassigned, even if it has thereby left the workspace
+        it was reassigned from (as leads' assign).
+      parameters:
+      - in: path
+        name: opportunity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpportunityAssignRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Opportunity'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
   /api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/history:
     get:
       operationId: opportunities_history
@@ -4992,6 +5031,19 @@ components:
       - version
       - weighted_value
       - work_load
+    OpportunityAssignRequest:
+      type: object
+      properties:
+        owner:
+          type: string
+          format: uuid
+          description: An active user who works in a CRM workspace.
+        version:
+          type: integer
+          minimum: 1
+      required:
+      - owner
+      - version
     OpportunityCard:
       type: object
       description: A board card and a list row.
@@ -5164,7 +5216,14 @@ components:
         lead:
           type: string
           format: uuid
-          description: The lead (in this workspace) the opportunity is for.
+          description: 'The lead (in this workspace) the opportunity is for. Omitted
+            (the UI, ADR-0027): a new hidden customer record is made from the customer
+            details, which then need the customer or account name.'
+        owner:
+          type: string
+          format: uuid
+          description: 'Without a lead: who owns the new opportunity. Required organisation-wide
+            (crm.assign_any); elsewhere the workspace''s user, so it may be omitted.'
         pipeline:
           type: string
           format: uuid
@@ -5177,7 +5236,6 @@ components:
           type: string
           maxLength: 500
       required:
-      - lead
       - title
       - value
     OpportunityMoveRequest:
@@ -5922,6 +5980,12 @@ components:
           allOf:
           - $ref: '#/components/schemas/SearchStage'
           readOnly: true
+        account_name:
+          type: string
+          readOnly: true
+        customer_name:
+          type: string
+          readOnly: true
         lead:
           allOf:
           - $ref: '#/components/schemas/LeadRef'
@@ -5931,6 +5995,8 @@ components:
           - $ref: '#/components/schemas/UserRef'
           readOnly: true
       required:
+      - account_name
+      - customer_name
       - id
       - lead
       - owner

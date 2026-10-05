@@ -2,8 +2,10 @@
 
 An administrator opens a user's CRM by clicking the user's **name** on the Users page,
 and lands on that user's Dashboard.
-From there they move through the user's Dashboard, Pipeline, Leads and Activities
-without signing out and without impersonating the user. Phase 6 completed and hardened
+From there they move through the user's Dashboard, Pipeline and Activities
+without signing out and without impersonating the user (there are no Leads since
+[ADR-0027](adr/0027-leads-removed-from-the-ui.md); old `/admin/users/{id}/leads…` links
+redirect to the user's Pipeline). Phase 6 completed and hardened
 this journey. The design decisions are [ADR-0005](adr/0005-admin-workspace-without-impersonation.md)
 (scoped, audited access instead of impersonation) and [ADR-0010](adr/0010-frontend-workspace-routing.md)
 (URL-derived workspaces, shared module views). This page describes how the pieces fit
@@ -86,13 +88,11 @@ unchanged; a support session is the explicit, time-boxed form of it.
 | `/admin/users/{id}` | Redirects to `/admin/users/{id}/dashboard` (only a valid id is ever redirected; anything else is 404) |
 | `/admin/users/{id}/dashboard` | The user's Dashboard (Phase 5 view) |
 | `/admin/users/{id}/pipeline`, `…/pipeline/new`, `…/pipeline/{opportunityId}`, `…/{opportunityId}/edit` | Pipeline |
-| `/admin/users/{id}/leads`, `…/leads/new`, `…/leads/{leadId}`, `…/{leadId}/edit` | Leads |
 | `/admin/users/{id}/activities`, `…/activities/{activityId}` | Activities (tasks and meetings are created and edited in dialogs) |
 
 - **One builder.** Every workspace link comes from `frontend/src/lib/workspace.ts`
-  (`workspaceHref`, `leadHref`, `opportunityHref`, `activityHref`, `newLeadHref`,
-  `newOpportunityHref`, `userWorkspaceHref`, `sectionBack`). No component hardcodes `/leads`,
-  `/pipeline` or `/activities`. A test walks every link on every workspace page and fails if
+  (`workspaceHref`, `opportunityHref`, `activityHref`, `newOpportunityHref`,
+  `userWorkspaceHref`, `sectionBack`). No component hardcodes `/pipeline` or `/activities`. A test walks every link on every workspace page and fails if
   one leaves `/admin/users/{id}/` (apart from Users and Settings).
 - **The URL is parsed once.** `userIdFromPathname` percent-decodes the user segment exactly
   once, which is how Next.js decodes the layout's `userId` param, and accepts only a UUID. Any
@@ -114,7 +114,7 @@ convenience.
 |---|---|---|
 | `workspace.view_any` | Opening any user's workspace (`resolve_workspace`, audited) | 404 for every `/workspaces/{uuid}/…`, the same as for a user who doesn't exist; user names on the Users page are plain text, not links |
 | `crm.manage_any` | Creating and changing records in another user's workspace (`authorize_write`) | 403 on writes; the UI hides create, edit and lifecycle actions |
-| `crm.assign_any` | Creating leads for another user, reassigning | 403; no Reassign button |
+| `crm.assign_any` | Creating records for another user, changing a deal's owner (ADR-0027) | 403; no *Change owner* action |
 | `users.manage` | The Users page | The banner offers "Back to Dashboard" instead of "Back to Users" |
 
 Today only the Admin role holds these. A future role that may only *view* workspaces (an
@@ -214,11 +214,10 @@ order; Priya's request failing; and Back/Forward across Users → Rahul Dashboar
   key. It is needed because a change in Rahul's workspace also changes the organisation's
   view, and on reassignment the new owner's. Inactive stale entries refetch only when their
   page is opened again. The dashboard is always read afresh.
-- **Reassignment out of the workspace** (Phase 4 behaviour, unchanged): the lead page
-  returns to the workspace's Leads list (`/admin/users/{id}/leads`) with a notice. The lead's
-  cached copy under this workspace is dropped once the page is gone. There is no 404 flash
-  and no refetch loop (`features/leads/lead-detail.test.tsx`,
-  `features/activities/review-regressions.test.tsx`).
+- **A change of owner out of the workspace** (ADR-0027; it replaced the lead page's
+  reassignment): the deal page marks the workspace's data stale without refetching what it
+  shows and returns to the workspace's Pipeline (`/admin/users/{id}/pipeline`) with a notice.
+  There is no 404 flash and no refetch loop (`features/pipeline/opportunity-pages.test.tsx`).
 
 ## Audit behaviour
 
@@ -246,7 +245,7 @@ order; Priya's request failing; and Back/Forward across Users → Rahul Dashboar
 | 401 | The session ended: the whole app reloads onto sign-in (dropping every cached record) and returns to the same URL afterwards (`safe-redirect.ts`) |
 | 403 | "You don't have permission to do that." on the action; the page stays |
 | 404 (workspace) | One "Page not found" page, identical for a missing user and one the admin may not open, with no banner and no module data |
-| 404 (record) | "Page not found" with a way back to *this workspace's* module (for example "Back to Leads" → `/admin/users/{id}/leads`) |
+| 404 (record) | "Page not found" with a way back to *this workspace's* module (for example "Back to Pipeline" → `/admin/users/{id}/pipeline`) |
 | 409 | The module's existing conflict handling (reload the latest version, keep the user's edits) |
 | 422 | The domain's message (for example the deactivated-owner rule) |
 | 500, timeout, network | The error and a retry in place of the data. Never another workspace's data, never the organisation's |

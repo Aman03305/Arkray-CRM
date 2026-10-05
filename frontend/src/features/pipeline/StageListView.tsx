@@ -6,7 +6,7 @@ import { useState } from "react";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { cursorOf } from "@/features/leads/api";
+import { cursorOf } from "@/lib/api/pagination";
 import { describeError } from "@/lib/api/errors";
 import type { BoardColumn, OpportunityCard, Stage } from "@/lib/api/types";
 import { type Workspace, workspaceApiSegment } from "@/lib/workspace";

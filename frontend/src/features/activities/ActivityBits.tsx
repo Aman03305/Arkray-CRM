@@ -10,7 +10,7 @@ import type {
   ActivityType,
 } from "@/lib/api/types";
 import { formatDateTime } from "@/lib/format";
-import { leadHref, opportunityHref, type Workspace } from "@/lib/workspace";
+import { opportunityHref, type Workspace } from "@/lib/workspace";
 
 const TYPES: Record<ActivityType, { label: string; icon: typeof ListTodo }> = {
   task: { label: "Task", icon: ListTodo },
@@ -98,14 +98,13 @@ export function scheduleOf(activity: { type: ActivityType; due_at: string | null
   return activity.created_at;
 }
 
-/** The lead an activity is about: a link, or "in another workspace" (its name isn't sent). */
-export function LeadLink({ workspace, lead }: { workspace: Workspace; lead: ActivityLeadRef }) {
-  if (lead.restricted || !lead.id) return <span className="italic text-slate-500">Lead in another workspace</span>;
-  return (
-    <Link href={leadHref(workspace, lead.id)} className="text-brand-700 hover:underline">
-      {lead.display_name}
-    </Link>
-  );
+/**
+ * The customer an activity is about (its customer record, the API's `lead`; ADR-0027: there
+ * is no page of its own to link to), or "in another workspace" (its name isn't sent).
+ */
+export function CustomerName({ lead }: { lead: ActivityLeadRef }) {
+  if (lead.restricted || !lead.id) return <span className="italic text-slate-500">Customer in another workspace</span>;
+  return <>{lead.display_name}</>;
 }
 
 export function OpportunityLink({ workspace, opportunity }: { workspace: Workspace; opportunity: ActivityOpportunityRef | null }) {

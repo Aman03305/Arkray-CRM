@@ -309,6 +309,8 @@ _SEARCH_RESULT_FIELDS = (
     "title",
     "status",
     "created_at",
+    "account_name",
+    "customer_name",
     "stage__id",
     "stage__name",
     "lead__id",
@@ -322,10 +324,10 @@ _SEARCH_RESULT_FIELDS = (
 
 
 def search(scope: AccessScope, query: SearchQuery, *, limit: int) -> Matches[Opportunity]:
-    """Global search's opportunities: every search word occurs in the title (models.SEARCH_TEXT,
-    case-insensitive substring), over the opportunities `scope` may list, archived ones left
-    out; open, won and lost alike (closed deals are history people look for). Ranked by
-    core.ranking against the title, newest first among equals."""
+    """Global search's opportunities: every search word occurs in the title or the customer
+    snapshot (models.SEARCH_TEXT, case-insensitive substring), over the opportunities `scope`
+    may list, archived ones left out; open, won and lost alike (closed deals are history
+    people look for). Ranked by core.ranking against the title, newest first among equals."""
     scoped = scope.apply(Opportunity.objects.filter(archived_at__isnull=True)).annotate(
         search_text=SEARCH_TEXT
     )

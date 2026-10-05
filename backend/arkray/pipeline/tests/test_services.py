@@ -3,7 +3,6 @@ the services enforce scope, capabilities, ownership and the stage rules themselv
 
 from __future__ import annotations
 
-import inspect
 from datetime import date
 from decimal import Decimal
 
@@ -557,10 +556,13 @@ class TestArchive:
             )
 
 
-def test_owners_of_new_opportunities_are_never_chosen_by_the_payload():
-    """There is no owner parameter at all: the service API has no way to express one."""
-    assert "owner_id" not in inspect.signature(services.create_opportunity).parameters
+def test_owners_of_new_opportunities_follow_the_lead(user_a, user_b, stages):
+    """An owner is named only for a new customer record (ADR-0027, test_customer_record.py),
+    never for an existing lead's opportunity, and is never an editable field."""
     assert "owner" not in services.validation.EDITABLE_FIELDS
+    with pytest.raises(InvalidInputError) as caught:
+        create(user_a, OWN(user_a.pk), LeadFactory(owner=user_a), owner_id=user_b.pk)
+    assert caught.value.details == {"owner": [services.OWNER_FOLLOWS_LEAD]}
 
 
 def test_created_by_is_the_actor_even_organisation_wide(user_b, stages):

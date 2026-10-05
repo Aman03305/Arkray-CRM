@@ -96,7 +96,7 @@ def test_restoring_kept_work_does_not_depend_on_the_other_leads_state(
 def test_in_the_leads_own_workspace_an_archived_lead_still_blocks_restoring(user_b):
     lead = LeadFactory(owner=user_b, archived_at=timezone.now())
     task = TaskFactory(lead=lead, archived_at=timezone.now())
-    with pytest.raises(BusinessRuleViolation, match="Restore the lead"):
+    with pytest.raises(BusinessRuleViolation, match="record is archived"):
         services.restore_activity(
             actor=user_b, scope=OWN(user_b.pk), activity_id=task.pk, version=1
         )
@@ -171,5 +171,5 @@ def test_an_archived_leads_open_work_can_still_be_edited_and_closed(user_a):
         actor=user_a, scope=OWN(user_a.pk), activity_id=task.pk, version=2
     )
     assert done.status == "completed"
-    with pytest.raises(BusinessRuleViolation, match="lead is archived"):
+    with pytest.raises(BusinessRuleViolation, match="customer's record is archived"):
         services.reopen_activity(actor=user_a, scope=OWN(user_a.pk), activity_id=task.pk, version=3)

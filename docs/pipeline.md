@@ -6,8 +6,9 @@ and custom fields added in the product enhancement phase.** Code:
 [`frontend/src/features/pipeline/`](../frontend/src/features/pipeline/). Decisions:
 [ADR-0018](adr/0018-pipeline-integrity-by-composite-keys.md) (status and ownership enforced
 by composite foreign keys; lock order), [ADR-0019](adr/0019-lead-conversion.md) (what
-"Converted" means) and [ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.md)
-(user pipelines, negotiation, custom fields).
+"Converted" means), [ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.md)
+(user pipelines, negotiation, custom fields) and [ADR-0027](adr/0027-leads-removed-from-the-ui.md)
+(Leads removed from the UI: a new opportunity brings its own customer record; "Change owner").
 
 The canonical domain term is **opportunity** everywhere: models, API, services, events,
 audit and UI. ("Deal" appears only in sample titles.)
@@ -21,7 +22,9 @@ Opportunity 1 ── * StageHistory (append-only), * NegotiationPrice (append-on
 ```
 
 A lead has zero, one or many opportunities. There is still no Company, Account, Contact
-or Product: an opportunity is a potential sale **to one lead**.
+or Product: an opportunity is a potential sale **to one lead**. Since ADR-0027 the UI has no
+Leads: the lead is each opportunity's hidden **customer record**, made with the opportunity
+from its customer details, and users see only "the customer".
 
 ### Pipelines
 
@@ -181,14 +184,14 @@ pipeline, checked at commit so a reorder can swap positions in one transaction),
 | Field | Rules |
 |---|---|
 | `title` | required, one line, ≤ 200 characters (same text rules as lead names); shown as "Opportunity name" |
-| `lead` | required; a lead **in the caller's workspace**; fixed for the opportunity's lifetime |
-| `owner` | never sent by clients: always the lead's owner (see [Ownership](#ownership)) |
+| `lead` | optional in the API: an existing lead **in the caller's workspace**; omitted (as the UI does), a new customer record is created from the customer details in the same transaction ([Ownership](#ownership)); fixed for the opportunity's lifetime |
+| `owner` | only when creating **without** a lead, organisation-wide, where it is required (`crm.assign_any`; elsewhere it is the workspace's user and may be omitted); otherwise refused: always the lead's owner (see [Ownership](#ownership)) |
 | `pipeline`, `stage` | the pipeline defaults to the default one, the stage to its first active open stage; stages change only through the move operation |
 | `status` | `open` / `won` / `lost` = the stage's category, database-enforced; read-only |
 | `value` | `NUMERIC(14,2)`, 0 to 999,999,999,999.99, in INR; shown as **Installation price** (the instrument installation price: the deal's amount) |
 | `opportunity_date` | required **date**, 2000-2099: when the opportunity arose (default: today, business time zone). Not the expected closing date |
-| `account_name`, `customer_name` | required, one line, ≤ 200; default to the lead's organisation (or name) and name: an editable snapshot (the lab buying may differ from the lead's organisation) |
-| `contact_phone`, `contact_email` | optional; checked exactly as a lead's phone and email (structured, never a free-form blob) |
+| `account_name`, `customer_name` | required, one line, ≤ 200; default to the lead's organisation (or name) and name: an editable snapshot (the lab buying may differ from the lead's organisation). Without a lead at least one is required: they make the customer record (customer name as the person, account name as the organisation) and are what global search matches besides the title |
+| `contact_phone`, `contact_email` | optional; checked exactly as a lead's phone and email (structured, never a free-form blob); copied to a new customer record |
 | `address` | optional, multi-line, ≤ 1,000 |
 | `instrument_name` | optional, ≤ 200 |
 | `work_load` | optional, ≤ 100, free text such as "300 tests/day": the product has no workload unit semantics, so none is invented |
@@ -211,9 +214,23 @@ so keyset cursors bound index scans (the Phase 2 lesson from leads' last-contact
 
 ## Ownership
 
-**An open opportunity is always owned by its lead's owner.** Nobody picks an owner: the
-create and convert operations take none (an `owner` field is a 400), and the service API
-has no parameter for one.
+**An open opportunity is always owned by its lead's owner.** Nobody picks an owner for an
+existing lead's opportunity: convert takes none, and create refuses one alongside `lead`
+(422). An opportunity created **without** a lead (the UI, ADR-0027) gets a new customer
+record owned as a lead created in that workspace would be: by the creator in their own
+workspace, by the user in theirs (an administrator, `crm.assign_any`), and organisation-wide
+by the active user the request names in `owner` (required there). The record is created by
+`leads.services.create_lead` in the opportunity's transaction (its audit and `LeadCreated`
+included), its owner share-locked before the pipeline: a documented exception to the lock
+order below that can't close a cycle (nothing locks a pipeline and then a user row in a
+conflicting mode, and the new lead row is invisible until commit).
+
+**Changing the owner** is `POST …/opportunities/{id}/assign {owner, version}`
+(`crm.assign_any`; open, unarchived opportunities only; 409 on a stale version; the current
+owner is a no-op). It reassigns the customer record through `leads.services.reassign_lead`
+(lead first, FOR UPDATE, then the opportunity), so everything below applies: the customer's
+other open opportunities and current work move too, won and lost ones stay. The deal page
+offers it as **Change owner** and says so.
 
 - **Enforced by PostgreSQL**: `FOREIGN KEY (lead_id, open_owner_id) REFERENCES
   leads_lead (id, owner_id) DEFERRABLE INITIALLY DEFERRED`. An open opportunity whose owner
@@ -337,6 +354,9 @@ covers them).
 
 ## Conversion
 
+API only since ADR-0027 (the UI has no lead to convert: a new opportunity brings its own
+customer record).
+
 "Converted" now means **the lead has entered the opportunity process: it has at least one
 opportunity** ([ADR-0019](adr/0019-lead-conversion.md)).
 
@@ -458,7 +478,7 @@ bumps the versions of the opportunities it moves.
 
 | Route | Workspace |
 |---|---|
-| `/pipeline`, `/pipeline/new[?lead=]`, `/pipeline/{id}`, `/pipeline/{id}/edit` | own (sales users); organisation-wide (admins) |
+| `/pipeline`, `/pipeline/new`, `/pipeline/{id}`, `/pipeline/{id}/edit` | own (sales users); organisation-wide (admins) |
 | `/admin/users/{id}/pipeline`, `…/new`, `…/{opportunityId}`, `…/edit` | that user's, under the "Viewing CRM for" banner |
 
 - **Wide screens (≥ 1024 px)**: the Kanban board (horizontal controlled scrolling), totals
@@ -488,38 +508,40 @@ bumps the versions of the opportunities it moves.
   are one request; a partial save (rename saved, stages refused) is retried from what was
   saved, at its version.
 - **Deal page**: a header (status, stage, account, owner; *Won*, *Lost*, *Move* or
-  *Reopen*, *Edit*, and *Delete (archive)* / *Restore* in the actions menu) and three tabs:
+  *Reopen*, *Edit*, and *Change owner* (open deals, `crm.assign_any`) and *Delete (archive)* /
+  *Restore* in the actions menu) and three tabs:
   **Overview** (Deal: installation price, negotiated price with *Update price* while
-  negotiating, probability, weighted value, dates; Customer; Instrument; More details: the
-  custom fields; Description; the lead, open work and record details), **Notes** (deal
-  notes with files, [activities.md](activities.md#attachments)) and **History** (negotiated
-  prices, stage history, the timeline).
+  negotiating, probability, weighted value, dates; Customer (phone and email as safe `tel:`
+  and `mailto:` links); Instrument; More details: the custom fields; Description; open work
+  and record details, owner included), **Notes** (deal notes with files,
+  [activities.md](activities.md#attachments)) and **History** (negotiated prices, stage
+  history, the timeline). *Change owner* is a dialog (the new owner; what else moves); a
+  deal handed out of the user's workspace being viewed returns to that workspace's Pipeline
+  with the notice.
 - **New and edit opportunity**: a right-side panel over the board or the deal (full width on
-  phones), grouped Basic (name, lead, pipeline, stage, opportunity date; the negotiated price
-  when the stage is a negotiation stage), Customer (account, customer, phone, email,
-  address; prefilled from the lead), Instrument (instrument, work load, installation price),
+  phones), grouped Basic (name, the owner organisation-wide only, pipeline, stage,
+  opportunity date; the negotiated price when the stage is a negotiation stage), Customer
+  (account, customer, phone, email, address: the new customer record), Instrument
+  (instrument, work load, installation price),
   Closing (expected closing date, own probability, lost reason) and Additional (custom
   fields, description). Amounts typed as `12,50,000`, `1,250,000` or `1250000.50`, sent as
   exact strings (misplaced commas refused). Idempotency key per identical body; an edit
   conflict (409) offers *Keep my changes* (merged onto the latest, someone else's manual
   probability kept) or *Discard mine*; closing the panel with unsaved typing asks first.
-  Opened from a route (a lead's *New opportunity*, the header): saving lands on the new deal,
-  cancelling returns to the lead (or the board).
-- **Convert** asks what a new deal needs: the negotiated price when its stage is a
-  negotiation stage, and the pipeline's required custom fields.
+  Opened from a route (the header's *New opportunity*): saving lands on the new deal,
+  cancelling returns to the board.
 - Filters: an inverted expected-close range is explained next to the dates and never sent;
   the board keeps the last valid range. Stage lists start from their first page whenever
   the filters change.
-- Lead page: an **Opportunities** section (this workspace's opportunities of the lead,
-  10 per page, "+ Opportunity") and **Convert** (a dialog; lands on the new opportunity).
 - Since Phase 4 the opportunity page also shows its **open work** (+ Task, + Meeting) and its
-  **timeline** (creation, stage changes, won/lost/reopened and its activities) with a note
-  box; opportunity writes mark timelines and activity views stale.
+  **timeline** (creation, stage changes, won/lost/reopened and its activities); opportunity
+  writes mark timelines and activity views stale.
 - **No stale data across workspaces**: views are keyed by workspace, every query key
   starts with `["pipeline", kind, <workspace>]`, and "keep the previous data while loading"
   applies only within the same workspace (and, for stage lists, the same stage). Tested:
   Rahul's board → Priya's never shows a Rahul card or total, even while Priya's loads;
-  Back to Rahul likewise. Lead writes (reassignment) mark pipeline data stale too.
+  Back to Rahul likewise. A change of owner marks pipeline, activity and timeline data stale
+  (the customer's other deals and work moved too).
 - Status and outcome are always written out (Open / Won / Lost with icons); colour only
   reinforces them.
 

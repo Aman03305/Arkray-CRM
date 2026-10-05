@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ActivitiesView } from "@/features/workspace/views";
 import type { ActivityListItem } from "@/lib/api/types";
 import { asListItem, makeActivity, makeMeeting, page, SUMMARY } from "@/test/activity-fixtures";
-import { adminViewer, LEAD_ID, makeLeadListItem, makeViewer, RAHUL_ID, salesViewer } from "@/test/fixtures";
+import { adminViewer, makeViewer, RAHUL_ID, salesViewer } from "@/test/fixtures";
+import { makeCard, OPPORTUNITY_ID } from "@/test/pipeline-fixtures";
 import { mockApi, type RecordedCall, renderWithProviders } from "@/test/render";
 
 import { CALENDAR_MAX_PAGES } from "./api";
@@ -168,11 +169,11 @@ describe("the Activities calendar", () => {
     expect(task.closest("li")).toHaveStyle({ top: `${15 * 48}px`, height: "24px" });
   });
 
-  it("choosing a day opens a prefilled form that can schedule a meeting or a task", async () => {
+  it("choosing a day opens a prefilled form that can schedule a meeting or a task, about an opportunity", async () => {
     const api = mockApi({
       ...routes(ME),
-      [`GET ${ME}/leads`]: { status: 200, body: page([makeLeadListItem()]) },
-      [`GET ${ME}/opportunities`]: { status: 200, body: page([]) },
+      // The picker's recent open opportunities (before anything is typed).
+      [`GET ${ME}/opportunities`]: { status: 200, body: page([makeCard()]) },
       [`POST ${LIST}`]: { status: 201, body: makeActivity({ title: "Call back", due_at: "2026-10-07T12:30:00Z" }) },
     });
     renderWithProviders(<ActivitiesView />, { viewer: salesViewer });
@@ -191,14 +192,21 @@ describe("the Activities calendar", () => {
     expect(within(dialog).getByLabelText(/^Due date/)).toHaveValue("2026-10-07");
     expect(within(dialog).getByLabelText("Due time")).toHaveValue("18:00");
 
-    await within(dialog).findByRole("option", { name: /Asha Mehta/ });
-    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Lead" }), LEAD_ID);
+    // Like any task outside a deal, it must say which opportunity it is about.
+    await user.click(within(dialog).getByRole("button", { name: "Create task" }));
+    expect(within(dialog).getByText("Choose the opportunity this is about.")).toBeInTheDocument();
+    expect(api.callsTo("POST", LIST)).toHaveLength(0);
+    expect(within(dialog).getByLabelText(/^Due date/)).toHaveValue("2026-10-07");
+
+    const deal = within(dialog).getByRole("combobox", { name: "Opportunity" });
+    await within(deal).findByRole("option", { name: "Hospital Analyzer Project · Asha Mehta" });
+    await user.selectOptions(deal, OPPORTUNITY_ID);
     await user.click(within(dialog).getByRole("button", { name: "Create task" }));
     await waitFor(() => expect(api.callsTo("POST", LIST)).toHaveLength(1));
     expect(api.callsTo("POST", LIST)[0]!.body).toEqual({
       type: "task",
       title: "Call back",
-      lead: LEAD_ID,
+      opportunity: OPPORTUNITY_ID,
       priority: "normal",
       due_at: "2026-10-07T12:30:00.000Z", // 18:00 in India
     });
@@ -208,7 +216,7 @@ describe("the Activities calendar", () => {
   });
 
   it("an untouched prefilled form closes without asking", async () => {
-    mockApi({ ...routes(ME), [`GET ${ME}/leads`]: { status: 200, body: page([]) } });
+    mockApi({ ...routes(ME), [`GET ${ME}/opportunities`]: { status: 200, body: page([makeCard()]) } });
     renderWithProviders(<ActivitiesView />, { viewer: salesViewer });
     const user = await openCalendar();
     await user.click(screen.getByRole("button", { name: "Schedule on Wednesday, 7 October 2026" }));
@@ -216,8 +224,8 @@ describe("the Activities calendar", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("clicking a time in the week view starts the meeting then", async () => {
-    mockApi({ ...routes(ME), [`GET ${ME}/leads`]: { status: 200, body: page([]) } });
+  it("clicking a time in the week view starts the meeting then; it still needs an opportunity", async () => {
+    const api = mockApi({ ...routes(ME), [`GET ${ME}/opportunities`]: { status: 200, body: page([makeCard()]) } });
     renderWithProviders(<ActivitiesView />, { viewer: salesViewer });
     const user = await openCalendar();
     await user.click(screen.getByRole("button", { name: "Week" }));
@@ -227,6 +235,14 @@ describe("the Activities calendar", () => {
     const dialog = screen.getByRole("dialog", { name: "Schedule a meeting" });
     expect(within(dialog).getByLabelText("Start")).toHaveValue("2026-10-07T14:30");
     expect(within(dialog).getByLabelText("End")).toHaveValue("2026-10-07T15:00");
+    expect(within(dialog).getByRole("combobox", { name: "Opportunity" })).toHaveValue("");
+
+    await user.type(within(dialog).getByRole("textbox", { name: "Subject" }), "Site visit");
+    await user.click(within(dialog).getByRole("button", { name: "Schedule meeting" }));
+    expect(within(dialog).getByText("Choose the opportunity this is about.")).toBeInTheDocument();
+    expect(within(dialog).getByRole("combobox", { name: "Opportunity" })).toHaveFocus();
+    expect(within(dialog).getByLabelText("Start")).toHaveValue("2026-10-07T14:30");
+    expect(api.callsTo("POST", LIST)).toHaveLength(0);
   });
 
   it("organisation-wide: everyone's by default with owners named; My calendar narrows to the viewer's", async () => {

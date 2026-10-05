@@ -7,7 +7,8 @@
  * React text node. There is no HTML, no markdown parser and no URL from the answer: a link
  * is built here only from a `ref` the server resolved against this question's tool
  * results, and always points into the workspace on screen (Rahul's answer links stay in
- * Rahul's workspace).
+ * Rahul's workspace). A customer record (the API's "lead") has no page of its own
+ * (ADR-0027): it is named, not linked.
  */
 import { Quote } from "lucide-react";
 import Link from "next/link";
@@ -15,20 +16,21 @@ import type { ReactNode } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import type { AskAnswer, AskAnswerBlock, AskAnswerPart, AskRecordKind, AskSource } from "@/lib/api/types";
-import { activityHref, leadHref, opportunityHref, type Workspace } from "@/lib/workspace";
+import { activityHref, opportunityHref, type Workspace } from "@/lib/workspace";
 
 const KIND_LABELS: Record<AskRecordKind, string> = {
-  lead: "Lead",
+  lead: "Customer",
   opportunity: "Opportunity",
   task: "Task",
   meeting: "Meeting",
   note: "Note",
 };
 
-export function recordHref(workspace: Workspace, kind: AskRecordKind, id: string): string {
+/** Where a cited record opens, or null when it has no page (a customer record). */
+export function recordHref(workspace: Workspace, kind: AskRecordKind, id: string): string | null {
   switch (kind) {
     case "lead":
-      return leadHref(workspace, id);
+      return null;
     case "opportunity":
       return opportunityHref(workspace, id);
     default:
@@ -37,9 +39,11 @@ export function recordHref(workspace: Workspace, kind: AskRecordKind, id: string
 }
 
 function RecordLink({ workspace, source }: { workspace: Workspace; source: AskSource }) {
+  const href = recordHref(workspace, source.kind, source.id);
+  if (href === null) return <span className="font-medium text-slate-900 [overflow-wrap:anywhere]">{source.label}</span>;
   return (
     <Link
-      href={recordHref(workspace, source.kind, source.id)}
+      href={href}
       className="font-medium text-brand-700 underline decoration-brand-200 underline-offset-2 [overflow-wrap:anywhere] hover:decoration-brand-600"
     >
       {source.label}

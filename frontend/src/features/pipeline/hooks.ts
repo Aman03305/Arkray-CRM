@@ -56,15 +56,21 @@ export function firstOpenStage(pipeline: PipelineDto | undefined): Stage | undef
 export interface PipelinePermissions {
   /** Create, edit, move, archive and restore opportunities in this workspace. */
   canWrite: boolean;
+  /** Change an open opportunity's owner (crm.assign_any). */
+  canAssign: boolean;
+  /** The organisation-wide workspace: a new opportunity's owner must be chosen. */
+  choosesOwner: boolean;
 }
 
 /**
  * What the UI offers in this workspace (mirroring identity.workspaces.authorize_write on
- * the server). Nobody picks an opportunity's owner (it follows the lead), so creating needs
- * no assigning rights. Presentation only: the API decides.
+ * the server). An opportunity's owner follows its customer record (ADR-0027): in one's own
+ * or a user's workspace a new one is that user's; organisation-wide its owner is chosen.
+ * Presentation only: the API decides.
  */
 export function pipelinePermissions(viewer: Viewer | null, workspace: Workspace): PipelinePermissions {
-  return { canWrite: hasCapability(viewer, workspace.kind === "self" ? "crm.access_own" : "crm.manage_any") };
+  const canWrite = hasCapability(viewer, workspace.kind === "self" ? "crm.access_own" : "crm.manage_any");
+  return { canWrite, canAssign: canWrite && hasCapability(viewer, "crm.assign_any"), choosesOwner: workspace.kind === "organization" };
 }
 
 /** The card as the server now has it (version included), from its full representation. */
@@ -129,9 +135,8 @@ export function patchCachedCards(queryClient: QueryClient, workspace: Workspace,
 /**
  * After any opportunity write: cache the returned opportunity for this workspace, patch it
  * into cached boards and stage lists, and mark every pipeline query stale (boards, totals,
- * stage lists, a lead's opportunities, history), so no page shows it as it was, and the
- * timelines and activity views that show it (stage changes, opportunity titles). (Writes
- * that change a lead, such as a conversion, sync the lead's queries themselves.)
+ * stage lists, history), so no page shows it as it was, and the timelines and activity views
+ * that show it (stage changes, opportunity titles, owners after a change of owner).
  */
 export function syncAfterOpportunityWrite(queryClient: QueryClient, workspace: Workspace, opportunity?: Opportunity): void {
   const key = opportunity ? pipelineKeys.detail(workspace, opportunity.id) : null;
@@ -156,7 +161,7 @@ export function useOpportunityWriteSync(workspace: Workspace) {
 }
 
 // --- the board's filters and stage view, remembered per workspace for this page load -------
-// In memory only (like the Leads list): an admin's filters in Rahul's pipeline never carry
+// In memory only (like the activity list's): an admin's filters in Rahul's pipeline never carry
 // over to Priya's, and nothing lands in history or storage that outlives a sign-out.
 interface BoardState {
   /** What the filter controls show. */

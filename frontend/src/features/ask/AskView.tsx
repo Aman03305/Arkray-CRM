@@ -41,7 +41,7 @@ const SUGGESTIONS = [
 
 const FAILURES: Record<string, string> = {
   ai_unavailable:
-    "Ask Arkray couldn't take this question right now. Pipeline, lead, task and meeting questions (like the suggestions) still work.",
+    "Ask Arkray couldn't take this question right now. Pipeline, customer, task and meeting questions (like the suggestions) still work.",
   timeout: "This question took too long to answer. Please try again.",
   not_permitted: "You no longer have access to this workspace's records.",
   ai_disabled: "Ask Arkray has been turned off for this CRM.",
@@ -266,7 +266,7 @@ export function AskView({ workspace }: { workspace: Workspace }) {
 
         {status.data?.summaries === "none" ? (
           <div className="mb-4">
-            <Alert>Ask Arkray runs without an AI model here: it answers pipeline, lead, task and meeting questions, and otherwise shows the records that best match.</Alert>
+            <Alert>Ask Arkray runs without an AI model here: it answers pipeline, customer, task and meeting questions, and otherwise shows the records that best match.</Alert>
           </div>
         ) : status.data?.summaries === "unavailable" ? (
           <div className="mb-4">

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { mailtoHref } from "./LeadBits";
+import { mailtoHref } from "./contact-links";
 
 describe("mailtoHref (Phase 9 review: mailto header injection)", () => {
   it("links an ordinary address as is", () => {

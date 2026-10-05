@@ -145,7 +145,7 @@ class TestCreate:
 
     def test_archived_leads_and_opportunities_take_no_new_activities(self, user_a):
         lead = LeadFactory(owner=user_a, archived_at=timezone.now())
-        with pytest.raises(BusinessRuleViolation, match="lead is archived"):
+        with pytest.raises(BusinessRuleViolation, match="customer's record is archived"):
             create(user_a, OWN(user_a.pk), lead_id=lead.pk)
         opportunity = OpportunityFactory(lead=LeadFactory(owner=user_a), archived_at=timezone.now())
         with pytest.raises(BusinessRuleViolation, match="opportunity is archived"):
@@ -507,7 +507,7 @@ class TestLifecycle:
     def test_reopening_needs_an_unarchived_lead_and_an_active_owner(self, admin, user_a):
         archived = LeadFactory(owner=user_a, archived_at=timezone.now())
         done = TaskFactory(lead=archived, status=ActivityStatus.COMPLETED)
-        with pytest.raises(BusinessRuleViolation, match="lead is archived"):
+        with pytest.raises(BusinessRuleViolation, match="customer's record is archived"):
             services.reopen_activity(
                 actor=admin, scope=ORG(admin.pk), activity_id=done.pk, version=1
             )
@@ -574,7 +574,7 @@ class TestArchive:
     def test_restoring_needs_the_lead_restored_first(self, user_a):
         lead = LeadFactory(owner=user_a, archived_at=timezone.now())
         note = NoteFactory(lead=lead, archived_at=timezone.now())
-        with pytest.raises(BusinessRuleViolation, match="Restore the lead"):
+        with pytest.raises(BusinessRuleViolation, match="record is archived"):
             services.restore_activity(
                 actor=user_a, scope=OWN(user_a.pk), activity_id=note.pk, version=1
             )

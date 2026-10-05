@@ -4,7 +4,8 @@ A sales CRM built from scratch as a **modular monolith**: Django 5.2 LTS + DRF +
 PostgreSQL 16 (pgvector) + Redis + Celery on the backend, Next.js 16 + TypeScript on the
 frontend.
 
-Normal users work in four modules — **Dashboard, Pipeline, Leads, Activities**. Admins
+Normal users work in three modules — **Dashboard, Pipeline, Activities** (each deal carries
+its customer; Leads were removed from the UI, [ADR-0027](docs/adr/0027-leads-removed-from-the-ui.md)). Admins
 additionally manage **Users** and can open any user's CRM workspace
 (`/admin/users/{id}/dashboard`), with every such access authorised and audited server-side.
 **Ask Arkray** answers questions about CRM data strictly within the asker's permissions.
@@ -61,7 +62,7 @@ scripts/check.sh      # backend: ruff, mypy (strict), import contracts, pytest, 
 | Topic | Document |
 |---|---|
 | System design, module boundaries, phases | [architecture.md](docs/architecture.md) |
-| Leads: model, ownership, statuses, search, concurrency | [leads.md](docs/leads.md) |
+| Leads (the backend customer record; not in the UI since ADR-0027): model, ownership, statuses, search, concurrency | [leads.md](docs/leads.md) |
 | Pipeline: stages, opportunities, transitions, conversion, money, lock order | [pipeline.md](docs/pipeline.md) |
 | Activities: tasks, meetings, notes, the timeline | [activities.md](docs/activities.md) |
 | Schema, ERD, constraints, indexes | [database.md](docs/database.md) |

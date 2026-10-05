@@ -43,7 +43,7 @@ function NavLink({ item, active, onNavigate }: { item: NavItem; active: boolean;
   );
 }
 
-/** Whose CRM the four module links open, in a selected user's workspace (desktop and drawer). */
+/** Whose CRM the module links open, in a selected user's workspace (desktop and drawer). */
 function WorkspaceLabel({ id, userId }: { id: string; userId: string }) {
   const subject = useWorkspaceSubject(userId);
   return (

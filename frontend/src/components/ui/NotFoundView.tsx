@@ -3,7 +3,7 @@ import Link from "next/link";
 /**
  * One view for "does not exist" and "not yours": like the API's 404s, it never reveals
  * whether something exists but is off-limits. Inside a workspace the way back stays in that
- * workspace (e.g. back to the selected user's leads), never the organisation's pages.
+ * workspace (e.g. back to the selected user's Pipeline), never the organisation's pages.
  */
 export function NotFoundView({
   fullPage = false,

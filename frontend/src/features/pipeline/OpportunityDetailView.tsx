@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ArrowRight, Pencil } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { type FormEvent, type KeyboardEvent, type ReactNode, useId, useRef, useState } from "react";
+import { type FormEvent, type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
 
 import { ActionMenu } from "@/components/ui/ActionMenu";
 import { Alert } from "@/components/ui/Alert";
@@ -13,25 +13,28 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Dialog, DialogActions } from "@/components/ui/Dialog";
 import { TextField } from "@/components/ui/Field";
 import { NotFoundView } from "@/components/ui/NotFoundView";
+import { PersonName } from "@/components/ui/PersonName";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { activityKeys, timelineKeys } from "@/features/activities/api";
 import { CurrentWork } from "@/features/activities/CurrentWork";
 import { DealNotes } from "@/features/activities/DealNotes";
 import { Timeline } from "@/features/activities/Timeline";
-import { cursorOf } from "@/features/leads/api";
-import { PersonName } from "@/features/leads/LeadBits";
+import { OwnerSelect } from "@/features/users/OwnerSelect";
 import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
+import { cursorOf } from "@/lib/api/pagination";
 import type { Opportunity, Stage, StageHistoryEntry } from "@/lib/api/types";
+import { mailtoHref, telHref } from "@/lib/contact-links";
 import { setFlash, useFlash } from "@/lib/flash";
 import { businessToday, formatDateOnly, formatDateTime, formatRelative } from "@/lib/format";
 import { formatPercent, parseAmountInput } from "@/lib/money";
 import { useViewer } from "@/lib/viewer-context";
-import { leadHref, opportunityHref, sectionBack, type Workspace, workspaceHref } from "@/lib/workspace";
+import { opportunityHref, sectionBack, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
 
 import { pipelineApi, pipelineKeys } from "./api";
 import { formatCustomValue } from "./CustomFields";
 import { isNegotiation, pipelinePermissions, useOpportunityWriteSync, usePipeline } from "./hooks";
 import { OpportunityDrawer } from "./OpportunityDrawer";
-import { Amount, CloseDate, LeadName, OutcomeBadge, StageName } from "./PipelineBits";
+import { Amount, CloseDate, OutcomeBadge, StageName } from "./PipelineBits";
 import { TransitionDialog } from "./TransitionDialog";
 import { moveErrorMessage, useMoveOpportunity } from "./useMoveOpportunity";
 
@@ -100,12 +103,23 @@ export function OpportunityDetailView({
   const [lifecycleDialog, setLifecycleDialog] = useState<"archive" | "restore" | null>(null);
   const [editing, setEditing] = useState(editOnOpen);
   const [priceDialog, setPriceDialog] = useState(false);
+  const [ownerDialog, setOwnerDialog] = useState(false);
   const [tab, setTab] = useState<Tab>("overview");
   const detail = useQuery({
     queryKey: pipelineKeys.detail(workspace, opportunityId),
     queryFn: () => pipelineApi.get(workspace, opportunityId),
   });
   const pipeline = usePipeline(workspace, detail.data?.pipeline.id);
+  // After "Change owner" handed the deal out of this workspace: what this page cached for it
+  // here is dropped once the page is gone, so coming back never shows it as it was before
+  // the "not found" (as the lead page did after a reassignment, Phase 6 review).
+  const leftBehind = useRef<(readonly unknown[])[]>([]);
+  useEffect(
+    () => () => {
+      for (const queryKey of leftBehind.current) queryClient.removeQueries({ queryKey });
+    },
+    [queryClient],
+  );
   const move = useMoveOpportunity(workspace);
   const sync = useOpportunityWriteSync(workspace);
   const lifecycle = useMutation({
@@ -163,9 +177,11 @@ export function OpportunityDetailView({
 
   const archived = opportunity.archived_at !== null;
   const canChange = permissions.canWrite && !archived;
-  // New work on an opportunity belongs to its lead's owner: only while the lead is here.
+  // New work on an opportunity belongs to its customer's owner: only while the customer is here.
   const canAddWork = canChange && !opportunity.lead.restricted;
   const open = opportunity.status === "open";
+  // Won and lost deals keep the owner who closed them (the API refuses those too).
+  const canChangeOwner = permissions.canAssign && canChange && open;
   const stages = pipeline.data?.stages ?? [opportunity.stage];
   const won = stages.find((s) => s.category === "won" && s.is_active);
   const lost = stages.find((s) => s.category === "lost" && s.is_active);
@@ -204,6 +220,7 @@ export function OpportunityDetailView({
 
   const menu = permissions.canWrite
     ? [
+        ...(canChangeOwner ? [{ key: "owner", label: "Change owner", onSelect: () => setOwnerDialog(true) }] : []),
         ...(archived
           ? [{ key: "restore", label: "Restore", onSelect: () => (lifecycle.reset(), setLifecycleDialog("restore")) }]
           : [{ key: "archive", label: "Delete (archive)", tone: "danger" as const, onSelect: () => (lifecycle.reset(), setLifecycleDialog("archive")) }]),
@@ -326,7 +343,7 @@ export function OpportunityDetailView({
                     [
                       "Phone",
                       opportunity.contact_phone ? (
-                        <a key="t" href={`tel:${opportunity.contact_phone.replace(/[^\d+]/g, "")}`} className="text-brand-700 hover:underline">
+                        <a key="t" href={telHref(opportunity.contact_phone)} className="text-brand-700 hover:underline">
                           {opportunity.contact_phone}
                         </a>
                       ) : null,
@@ -334,7 +351,7 @@ export function OpportunityDetailView({
                     [
                       "Email",
                       opportunity.contact_email ? (
-                        <a key="e" href={`mailto:${opportunity.contact_email}`} className="break-all text-brand-700 hover:underline">
+                        <a key="e" href={mailtoHref(opportunity.contact_email)} className="break-all text-brand-700 hover:underline">
                           {opportunity.contact_email}
                         </a>
                       ) : null,
@@ -363,25 +380,13 @@ export function OpportunityDetailView({
               ) : null}
             </div>
             <div className="space-y-4">
-              <Section title="Lead">
-                {opportunity.lead.restricted || !opportunity.lead.id ? (
-                  <p className="text-sm">
-                    <LeadName lead={opportunity.lead} />
-                  </p>
-                ) : (
-                  <p className="text-sm">
-                    <Link href={leadHref(workspace, opportunity.lead.id)} className="font-medium text-brand-700 hover:underline">
-                      {opportunity.lead.display_name}
-                    </Link>
-                  </p>
-                )}
-              </Section>
               {opportunity.lead.restricted ? null : (
                 <CurrentWork workspace={workspace} target={{ opportunity: opportunity.id }} label={opportunity.title} canWrite={canAddWork} />
               )}
               <Section title="Record">
                 <Fields
                   items={[
+                    ["Owner", <PersonName key="ow" person={opportunity.owner} />],
                     ["Created by", <PersonName key="cb" person={opportunity.created_by} />],
                     ["Created", <When key="ca" iso={opportunity.created_at} />],
                     ["Updated", <When key="ua" iso={opportunity.updated_at} />],
@@ -396,7 +401,7 @@ export function OpportunityDetailView({
           <div className="space-y-4">
             <NegotiationHistory workspace={workspace} opportunityId={opportunity.id} version={opportunity.version} />
             <StageHistory workspace={workspace} opportunityId={opportunity.id} version={opportunity.version} />
-            <Timeline workspace={workspace} subject={{ kind: "opportunity", id: opportunity.id }} composer={null} />
+            <Timeline workspace={workspace} subject={{ kind: "opportunity", id: opportunity.id }} />
           </div>
         )}
       </div>
@@ -431,6 +436,41 @@ export function OpportunityDetailView({
           onClose={() => {
             setPending(null);
             setMoveError(null);
+          }}
+        />
+      ) : null}
+      {ownerDialog ? (
+        <OwnerDialog
+          workspace={workspace}
+          opportunity={opportunity}
+          onClose={() => setOwnerDialog(false)}
+          onSaved={(updated) => {
+            setOwnerDialog(false);
+            const message = `“${updated.title}” now belongs to ${updated.owner.full_name}.`;
+            const owner = workspace.kind === "user" ? workspace.userId : workspace.kind === "self" ? viewer?.id : undefined;
+            if (owner === undefined || updated.owner.id === owner) {
+              sync(updated);
+              setNotice(message);
+              return;
+            }
+            // Handed out of this user's workspace: here it would only be found gone now.
+            // Mark this workspace's data stale without refetching what this page shows, and
+            // go to the Pipeline, which loads afresh.
+            for (const queryKey of [pipelineKeys.all, activityKeys.all, timelineKeys.all]) {
+              void queryClient.invalidateQueries({ queryKey, refetchType: "none" });
+            }
+            const segment = workspaceApiSegment(workspace);
+            leftBehind.current = [
+              ["pipeline", "detail", segment, updated.id],
+              ["pipeline", "history", segment, updated.id],
+              ["pipeline", "negotiation", segment, updated.id],
+              timelineKeys.subject(workspace, { kind: "opportunity", id: updated.id }),
+              ["activities", "current", segment, updated.id],
+              activityKeys.dealNotes(workspace, updated.id),
+            ];
+            const href = workspaceHref(workspace, "pipeline");
+            setFlash(message, href);
+            router.replace(href);
           }}
         />
       ) : null}
@@ -518,6 +558,99 @@ function Tabs({ tab, onChange }: { tab: Tab; onChange: (tab: Tab) => void }) {
         );
       })}
     </div>
+  );
+}
+
+/**
+ * Change an open deal's owner. The owner is the customer's (ADR-0027), so the customer's
+ * other open deals and current work (open tasks, scheduled meetings, notes) move to them too;
+ * won and lost deals, and completed or cancelled work, keep the owner who had them.
+ */
+function OwnerDialog({
+  workspace,
+  opportunity,
+  onClose,
+  onSaved,
+}: {
+  workspace: Workspace;
+  opportunity: Opportunity;
+  onClose: () => void;
+  onSaved: (opportunity: Opportunity) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [owner, setOwner] = useState("");
+  const [ownerLabel, setOwnerLabel] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const save = useMutation({
+    mutationFn: (to: string) => pipelineApi.assign(workspace, opportunity.id, to, opportunity.version),
+    onSuccess: onSaved,
+    // Someone changed the deal meanwhile: load it, so a retry sends its new version.
+    onError: (failure) => {
+      if (isApiError(failure, 409)) void queryClient.invalidateQueries({ queryKey: pipelineKeys.detail(workspace, opportunity.id) });
+    },
+  });
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (!owner) {
+      setError("Choose the new owner.");
+      return;
+    }
+    if (owner === opportunity.owner.id) {
+      onClose();
+      return;
+    }
+    setError(null);
+    save.mutate(owner);
+  };
+  const server = fieldErrors(save.error);
+  const problem = save.isError && !server.owner ? describeError(save.error) : null;
+  return (
+    <Dialog
+      open
+      title="Change owner"
+      description={
+        <p>
+          {opportunity.title} · now <PersonName person={opportunity.owner} />
+        </p>
+      }
+      onClose={onClose}
+      busy={save.isPending}
+      size="sm"
+    >
+      <form onSubmit={submit} noValidate className="space-y-4">
+        {problem ? (
+          <Alert tone="error" requestId={problem.requestId}>
+            {isApiError(save.error, 409) ? "It changed a moment ago. The latest version is loaded now: try again." : problem.message}
+          </Alert>
+        ) : null}
+        <OwnerSelect
+          label="New owner"
+          name="owner"
+          placeholder="Choose an owner"
+          value={owner}
+          valueLabel={ownerLabel}
+          onChange={(id, label) => {
+            setOwner(id);
+            setOwnerLabel(label);
+            setError(null);
+          }}
+          errors={error ? [error] : server.owner}
+          autoFocus
+        />
+        <p className="text-sm text-slate-600">
+          The customer&apos;s other open opportunities, open tasks, scheduled meetings and notes move to the new owner too. Won and lost
+          opportunities, and completed or cancelled work, keep their owner.
+        </p>
+        <DialogActions>
+          <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
+            Cancel
+          </Button>
+          <Button type="submit" loading={save.isPending}>
+            Change owner
+          </Button>
+        </DialogActions>
+      </form>
+    </Dialog>
   );
 }
 

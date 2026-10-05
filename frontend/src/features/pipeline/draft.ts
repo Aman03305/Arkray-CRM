@@ -102,16 +102,20 @@ export function changedFields(before: Draft, after: Draft): DraftField[] {
   return DRAFT_FIELDS.filter((f) => comparable(f, before[f]) !== comparable(f, after[f]));
 }
 
-export type Problems = Partial<Record<DraftField | "lead" | "stage" | "negotiated_price" | `custom_fields.${string}`, string[]>>;
+export type Problems = Partial<Record<DraftField | "owner" | "stage" | "negotiated_price" | `custom_fields.${string}`, string[]>>;
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const inRange = (date: string) => DATE.test(date) && date >= "2000-01-01" && date <= "2099-12-31";
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/** Client-side checks (the server re-checks everything); each field's first problem. */
-export function validateDraft(draft: Draft, { requireLead = false, lead = "" } = {}): Problems {
+/**
+ * Client-side checks (the server re-checks everything); each field's first problem. The
+ * customer details are required: a new opportunity's customer record is made from them
+ * (ADR-0027).
+ */
+export function validateDraft(draft: Draft, { requireOwner = false, owner = "" } = {}): Problems {
   const problems: Problems = {};
-  if (requireLead && !lead) problems.lead = ["Choose the lead this opportunity is for."];
+  if (requireOwner && !owner) problems.owner = ["Choose who owns this opportunity."];
   if (!draft.title.trim()) problems.title = ["Enter a name."];
   if (!draft.account_name.trim()) problems.account_name = ["Enter the account name."];
   if (!draft.customer_name.trim()) problems.customer_name = ["Enter the customer name."];
@@ -147,7 +151,8 @@ const OPTIONAL_TEXT = ["contact_phone", "contact_email", "address", "instrument_
 export function createRequest(
   draft: Draft,
   target: {
-    lead: string;
+    /** Organisation-wide only: who owns it (elsewhere the workspace's user does). */
+    owner?: string;
     pipeline?: string;
     stage?: string;
     stageProbability?: string;
@@ -157,7 +162,6 @@ export function createRequest(
   },
 ): OpportunityCreateRequest {
   const body: { -readonly [K in keyof OpportunityCreateRequest]: OpportunityCreateRequest[K] } = {
-    lead: target.lead,
     title: draft.title.trim(),
     value: amount(draft.value),
     opportunity_date: draft.opportunity_date,
@@ -167,6 +171,7 @@ export function createRequest(
   for (const field of OPTIONAL_TEXT) {
     if (draft[field].trim()) body[field] = MULTILINE.has(field) ? draft[field] : draft[field].trim();
   }
+  if (target.owner) body.owner = target.owner;
   if (target.pipeline) body.pipeline = target.pipeline;
   if (target.stage) body.stage = target.stage;
   const probability = percent(draft.probability);

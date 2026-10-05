@@ -103,14 +103,15 @@ describe("the board", () => {
     expect(await screen.findByText("(overdue)")).toBeInTheDocument();
   });
 
-  it("shows restricted leads without their name", async () => {
+  it("shows a restricted customer without their name", async () => {
     mockApi({
       ...CONFIG,
       [`GET ${ME_BOARD}`]: { status: 200, body: makeBoard([makeCard({ account_name: "", lead: { id: null, restricted: true } })]) },
     });
     renderWithProviders(<PipelineView />, { viewer: salesViewer });
-    expect(await screen.findByText("Lead in another workspace")).toBeInTheDocument();
+    expect(await screen.findByText("Customer in another workspace")).toBeInTheDocument();
     expect(screen.queryByText("Asha Mehta")).not.toBeInTheDocument();
+    expect(document.querySelector('a[href*="/leads"]')).toBeNull(); // no Leads pages (ADR-0027)
   });
 
   it("an empty pipeline says so, without invented data", async () => {

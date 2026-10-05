@@ -10,9 +10,9 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { NotFoundView } from "@/components/ui/NotFoundView";
 import { PageHeader } from "@/components/ui/PageHeader";
-import { cursorOf } from "@/features/leads/api";
-import { OwnerSelect } from "@/features/leads/OwnerSelect";
-import { LeadPicker } from "@/features/pipeline/LeadPicker";
+import { cursorOf } from "@/lib/api/pagination";
+import { OwnerSelect } from "@/features/users/OwnerSelect";
+import { DealPicker } from "@/features/pipeline/DealPicker";
 import { describeError, isApiError } from "@/lib/api/errors";
 import type { ActivityListItem, ActivityOrdering } from "@/lib/api/types";
 import { useFlash } from "@/lib/flash";
@@ -238,7 +238,7 @@ export function ActivitiesListView({ workspace }: { workspace: Workspace }) {
                 ? "Activities you archive are kept here and can be restored."
                 : workspace.kind === "user"
                   ? "This user has no tasks, meetings or notes here yet."
-                  : "Tasks, meetings and notes about your leads will appear here. Add notes from a lead's page."
+                  : "Tasks, meetings and notes about your opportunities will appear here. Add notes from an opportunity's page."
             }
           />
         )
@@ -308,7 +308,7 @@ function Labelled({ id, label, children }: { id: string; label: string; children
 }
 
 /** The tabs (the calendar, or the list of all / tasks / meetings / notes); for the list, the
- * status and sort up front, and dates, lead, owner (organisation-wide) and the archived view
+ * status and sort up front, and dates, opportunity, owner (organisation-wide) and the archived view
  * under "More filters". Only filters the API accepts exist here. */
 function FiltersBar({ workspace, list }: { workspace: Workspace; list: ReturnType<typeof useActivityListState> }) {
   const ids = { status: useId(), sort: useId(), from: useId(), to: useId(), panel: useId(), range: useId() };
@@ -412,11 +412,13 @@ function FiltersBar({ workspace, list }: { workspace: Workspace; list: ReturnTyp
                 />
               </Labelled>
               <div className="sm:col-span-2">
-                <LeadPicker
+                <DealPicker
                   workspace={workspace}
-                  value={filters.lead}
-                  valueLabel={filters.leadLabel}
-                  onChange={(lead, leadLabel) => list.setFilters({ lead, leadLabel, opportunity: "" })}
+                  value={filters.opportunity}
+                  valueLabel={filters.opportunityLabel}
+                  onChange={(opportunity, opportunityLabel) => list.setFilters({ opportunity, opportunityLabel })}
+                  placeholder="Any opportunity"
+                  name="filter-opportunity"
                 />
               </div>
               {workspace.kind === "organization" ? (

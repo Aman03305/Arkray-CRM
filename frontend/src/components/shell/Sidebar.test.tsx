@@ -23,16 +23,16 @@ describe("Sidebar", () => {
     navigation.pathname = "/dashboard";
   });
 
-  it("shows the product name, four modules, Settings and the current user", () => {
+  it("shows the product name, the three modules (no Leads), Settings and the current user", () => {
     renderSidebar(salesUser);
     expect(screen.getByText("Arkray CRM")).toBeInTheDocument();
     const nav = screen.getByRole("navigation", { name: "Main" });
     expect(within(nav).getAllByRole("link").map((l) => l.textContent)).toEqual([
       "Dashboard",
       "Pipeline",
-      "Leads",
       "Activities",
     ]);
+    expect(screen.queryByRole("link", { name: /leads/i })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/settings");
     expect(screen.getByText("Priya Patel")).toBeInTheDocument();
   });
@@ -49,18 +49,25 @@ describe("Sidebar", () => {
   });
 
   it("marks the active module", () => {
+    navigation.pathname = "/activities";
+    renderSidebar(salesUser);
+    expect(screen.getByRole("link", { name: "Activities" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "Dashboard" })).not.toHaveAttribute("aria-current");
+  });
+
+  it("marks no module on an old Leads address", () => {
     navigation.pathname = "/leads";
     renderSidebar(salesUser);
-    expect(screen.getByRole("link", { name: "Leads" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("link", { name: "Dashboard" })).not.toHaveAttribute("aria-current");
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    for (const link of within(nav).getAllByRole("link")) expect(link).not.toHaveAttribute("aria-current");
   });
 
   it("leads a sales user on an administrator's link back to their own workspace", () => {
     // Whole-software audit: every link pointed into the user's workspace, all "not found".
-    navigation.pathname = `/admin/users/${RAHUL}/leads`;
+    navigation.pathname = `/admin/users/${RAHUL}/pipeline`;
     renderSidebar(salesUser);
     const nav = screen.getByRole("navigation", { name: "Main" });
-    expect(within(nav).getByRole("link", { name: "Leads" })).toHaveAttribute("href", "/leads");
+    expect(within(nav).getByRole("link", { name: "Pipeline" })).toHaveAttribute("href", "/pipeline");
     expect(within(nav).getByRole("link", { name: "Dashboard" })).toHaveAttribute("href", "/dashboard");
     expect(within(nav).queryByText(/selected user/i)).not.toBeInTheDocument();
   });
@@ -69,8 +76,28 @@ describe("Sidebar", () => {
     navigation.pathname = `/admin/users/${RAHUL}/dashboard`;
     renderSidebar(admin);
     expect(screen.getByRole("link", { name: "Pipeline" })).toHaveAttribute("href", `/admin/users/${RAHUL}/pipeline`);
-    expect(screen.getByRole("link", { name: "Leads" })).toHaveAttribute("href", `/admin/users/${RAHUL}/leads`);
+    expect(screen.getByRole("link", { name: "Activities" })).toHaveAttribute("href", `/admin/users/${RAHUL}/activities`);
     expect(screen.getByRole("link", { name: "Dashboard" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it.each([
+    ["own", salesUser, "/dashboard", ""],
+    ["organisation", admin, "/dashboard", ""],
+    ["a selected user's", admin, `/admin/users/${RAHUL}/dashboard`, `/admin/users/${RAHUL}`],
+  ])("shows exactly Dashboard, Pipeline and Activities in the %s workspace", (_name, viewer, pathname, prefix) => {
+    navigation.pathname = pathname;
+    renderSidebar(viewer);
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    const modules = within(nav)
+      .getAllByRole("link")
+      .filter((l) => l.textContent !== "Users");
+    expect(modules.map((l) => l.textContent)).toEqual(["Dashboard", "Pipeline", "Activities"]);
+    expect(modules.map((l) => l.getAttribute("href"))).toEqual([
+      `${prefix}/dashboard`,
+      `${prefix}/pipeline`,
+      `${prefix}/activities`,
+    ]);
+    expect(within(nav).queryByRole("link", { name: /leads/i })).not.toBeInTheDocument();
   });
 
   it("renders a loading state instead of guessing while the viewer loads", () => {

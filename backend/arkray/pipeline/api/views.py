@@ -25,7 +25,8 @@ from arkray.core.api import ApiView, idempotency_key, validated
 from arkray.core.errors import InvalidInputError, PermissionDeniedError
 from arkray.core.keyset import CursorBinding, KeysetPaginator, page_links
 from arkray.identity.models import User
-from arkray.identity.permissions import IsActiveUser
+from arkray.identity.permissions import IsActiveUser, requires
+from arkray.identity.policy import Capability
 from arkray.identity.workspaces import authorize_write, resolve_workspace, workspace_segment
 from arkray.leads.api.views import IDEMPOTENCY_PARAMETER, NOT_FOUND, OWNER_FILTER_ORG_ONLY
 
@@ -395,7 +396,8 @@ class OpportunityListView(ApiView):
     def post(self, request: Request, workspace: str) -> Response:
         actor, scope = _scope(request, workspace)
         data = validated(s.OpportunityCreateSerializer, request.data)
-        lead_id = data.pop("lead")
+        lead_id = data.pop("lead", None)
+        owner_id = data.pop("owner", None)
         pipeline_id = data.pop("pipeline", None)
         stage_id = data.pop("stage", None)
         negotiated_price = data.pop("negotiated_price", None)
@@ -403,6 +405,7 @@ class OpportunityListView(ApiView):
             actor=actor,
             scope=scope,
             lead_id=lead_id,
+            owner_id=owner_id,
             fields=data,
             pipeline_id=pipeline_id,
             stage_id=stage_id,
@@ -551,6 +554,32 @@ class OpportunityRestoreView(ApiView):
         data = validated(s.OpportunityVersionSerializer, request.data)
         opportunity = services.restore_opportunity(
             actor=actor, scope=scope, opportunity_id=opportunity_id, version=data["version"]
+        )
+        return Response(_opportunity(opportunity, scope))
+
+
+class OpportunityAssignView(ApiView):
+    """Change an open opportunity's owner (crm.assign_any). Ownership follows the customer
+    record, so its other open opportunities and current work move too (ADR-0027). The
+    response shows the opportunity as reassigned, even if it has thereby left the workspace
+    it was reassigned from (as leads' assign)."""
+
+    permission_classes = [requires(Capability.CRM_ASSIGN_ANY)]
+
+    @extend_schema(
+        operation_id="opportunities_assign",
+        request=s.OpportunityAssignSerializer,
+        responses={200: s.OpportunitySerializer, 404: NOT_FOUND},
+    )
+    def post(self, request: Request, workspace: str, opportunity_id: UUID) -> Response:
+        actor, scope = _scope(request, workspace)
+        data = validated(s.OpportunityAssignSerializer, request.data)
+        opportunity = services.reassign_opportunity(
+            actor=actor,
+            scope=scope,
+            opportunity_id=opportunity_id,
+            version=data["version"],
+            owner_id=data["owner"],
         )
         return Response(_opportunity(opportunity, scope))
 

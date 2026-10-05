@@ -1,7 +1,7 @@
 /**
  * Whose workspace this is: GET /api/v1/workspaces/{userId} (id, name, status, nothing more).
- * The banner, the sidebar and the lead form share this one query (one request per user
- * workspace, which the API authorises and audits); its key carries the user id, so one
+ * The banner, the sidebar and the header's create menu share this one query (one request
+ * per user workspace, which the API authorises and audits); its key carries the user id, so one
  * user's name can never be shown in another user's workspace.
  */
 import { useQuery } from "@tanstack/react-query";
@@ -34,7 +34,7 @@ export function selectedUserId(workspace: Workspace | null): string | null {
   return workspace?.kind === "user" ? workspace.userId : null;
 }
 
-/** Can new work (leads, opportunities, activities) be given to this workspace's user? */
+/** Can new work (opportunities, activities) be given to this workspace's user? */
 export function receivesNewWork(subject: WorkspaceSubject | undefined): boolean {
   return subject === undefined || subject.status === "active";
 }

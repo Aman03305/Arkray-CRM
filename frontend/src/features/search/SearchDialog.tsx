@@ -11,7 +11,7 @@ import { selectedUserId, useWorkspaceSubject } from "@/features/workspace/api";
 import { ApiError } from "@/lib/api/client";
 import type { SearchResults } from "@/lib/api/types";
 import { formatDate, formatDateTime } from "@/lib/format";
-import { activityHref, leadHref, opportunityHref, type Workspace } from "@/lib/workspace";
+import { activityHref, opportunityHref, type Workspace } from "@/lib/workspace";
 
 import { useGlobalSearch } from "./api";
 import { Highlight } from "./Highlight";
@@ -20,10 +20,11 @@ import { queryState, SEARCH_MAX_LENGTH } from "./query";
 /** Typing pauses this long before a request is sent: one request per pause, not per key. */
 export const SEARCH_DEBOUNCE_MS = 250;
 
-type GroupKey = "leads" | "opportunities" | "tasks" | "meetings" | "notes";
+// No Leads group: there are no lead pages to open (ADR-0027). The API still sends one; a
+// customer is found through its opportunities, which match on their customer names too.
+type GroupKey = "opportunities" | "tasks" | "meetings" | "notes";
 
 const GROUPS: { key: GroupKey; label: string; one: string }[] = [
-  { key: "leads", label: "Leads", one: "Lead" },
   { key: "opportunities", label: "Opportunities", one: "Opportunity" },
   { key: "tasks", label: "Tasks", one: "Task" },
   { key: "meetings", label: "Meetings", one: "Meeting" },
@@ -31,7 +32,7 @@ const GROUPS: { key: GroupKey; label: string; one: string }[] = [
 ];
 
 const OUTCOMES = { open: "Open", won: "Won", lost: "Lost" } as const;
-const ELSEWHERE = "Lead in another workspace";
+const ELSEWHERE = "Customer in another workspace";
 
 interface Option {
   key: string;
@@ -44,7 +45,8 @@ interface Option {
 }
 
 /** Build an option from plain text parts: shown with the words highlighted, announced as
- * "Lead: Rahul Sharma, Apollo Diagnostics, New" (never relying on markup for spacing). */
+ * "Opportunity: Analyser upgrade, Apollo Diagnostics, Proposal, Open" (never relying on
+ * markup for spacing). */
 function option(
   base: { key: string; group: GroupKey; href: string },
   title: string,
@@ -69,8 +71,16 @@ interface Group {
   options: Option[];
 }
 
-function leadName(lead: { restricted: boolean; display_name?: string }): string {
+/** The customer a task, meeting or note is about (its customer record, the API's `lead`). */
+function customerName(lead: { restricted: boolean; display_name?: string }): string {
   return lead.restricted || !lead.display_name ? ELSEWHERE : lead.display_name;
+}
+
+/** Whom an opportunity is for: its own account and customer names (what a search may have
+ * matched besides the title), else its customer record's name. */
+function dealCustomer(deal: SearchResults["opportunities"]["results"][number]): string[] {
+  const names = [deal.account_name, deal.customer_name].filter((name, i, all) => name && all.indexOf(name) === i);
+  return names.length ? names : [customerName(deal.lead)];
 }
 
 /** Every result as an option, in group order. Text only: React escapes all of it. */
@@ -79,30 +89,22 @@ function toGroups(data: SearchResults, workspace: Workspace): Group[] {
   const owner = (person: { full_name: string }) => (workspace.kind === "organization" ? [person.full_name] : []);
   const hl = (text: string) => <Highlight text={text} terms={terms} />;
   const build: Record<GroupKey, Option[]> = {
-    leads: data.leads.results.map((lead) => {
-      const organisation = lead.organization_name && lead.organization_name !== lead.display_name;
+    opportunities: data.opportunities.results.map((deal) => {
+      const customer = dealCustomer(deal);
       return option(
-        { key: `lead-${lead.id}`, group: "leads", href: leadHref(workspace, lead.id) },
-        lead.display_name,
-        [...(organisation ? [lead.organization_name] : []), lead.status.name, ...owner(lead.owner)],
-        hl,
-        organisation ? [0] : [],
-      );
-    }),
-    opportunities: data.opportunities.results.map((deal) =>
-      option(
         { key: `opportunity-${deal.id}`, group: "opportunities", href: opportunityHref(workspace, deal.id) },
         deal.title,
         [
-          leadName(deal.lead),
+          ...customer,
           deal.stage.name,
           // "Proposal · Open", but just "Won" for the Won stage.
           ...(deal.stage.name === OUTCOMES[deal.status] ? [] : [OUTCOMES[deal.status] ?? deal.status]),
           ...owner(deal.owner),
         ],
         hl,
-      ),
-    ),
+        customer.map((_, i) => i),
+      );
+    }),
     tasks: data.tasks.results.map((task) =>
       option(
         { key: `task-${task.id}`, group: "tasks", href: activityHref(workspace, task.id) },
@@ -111,7 +113,7 @@ function toGroups(data: SearchResults, workspace: Workspace): Group[] {
           task.status ? statusLabel(task.status) : "Task",
           task.due_at ? `Due ${formatDate(task.due_at)}` : "No due date",
           ...(task.is_overdue ? ["Overdue"] : []),
-          leadName(task.lead),
+          customerName(task.lead),
           ...owner(task.owner),
         ],
         hl,
@@ -126,7 +128,7 @@ function toGroups(data: SearchResults, workspace: Workspace): Group[] {
           ...(meeting.location ? [meeting.location] : []),
           meeting.status ? statusLabel(meeting.status) : "Meeting",
           ...(meeting.is_overdue ? ["Awaiting outcome"] : []),
-          leadName(meeting.lead),
+          customerName(meeting.lead),
           ...owner(meeting.owner),
         ],
         hl,
@@ -138,7 +140,7 @@ function toGroups(data: SearchResults, workspace: Workspace): Group[] {
       const built = option(
         { key: `note-${note.id}`, group: "notes", href: activityHref(workspace, note.id) },
         text,
-        [leadName(note.lead), `Added ${formatDate(note.created_at)}`],
+        [customerName(note.lead), `Added ${formatDate(note.created_at)}`],
         hl,
       );
       return { ...built, title: <span className="line-clamp-2 [overflow-wrap:anywhere]">{hl(text)}</span> };
@@ -267,7 +269,7 @@ export function SearchDialog({ workspace, onClose }: { workspace: Workspace; onC
   return (
     <Dialog open title="Search" description={scopeText(workspace, subject.data?.full_name)} onClose={onClose} size="lg">
       <label htmlFor={inputId} className="sr-only">
-        Search leads, opportunities, tasks, meetings and notes
+        Search opportunities, customers, tasks, meetings and notes
       </label>
       <input
         id={inputId}

@@ -6,11 +6,10 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ConvertLeadDialog } from "@/features/pipeline/ConvertLeadDialog";
 import { forgetBoardState } from "@/features/pipeline/hooks";
 import { OpportunityView, PipelineView } from "@/features/workspace/views";
 import type { PipelineDto, PipelineList } from "@/lib/api/types";
-import { LEAD_ID, makeLead, salesViewer } from "@/test/fixtures";
+import { salesViewer } from "@/test/fixtures";
 import { makeBoard, makeOpportunity, OPPORTUNITY_ID, PIPELINE, PIPELINE_ROUTES, STAGES } from "@/test/pipeline-fixtures";
 import { apiError, mockApi, type RecordedCall, renderWithProviders } from "@/test/render";
 
@@ -131,8 +130,10 @@ describe("pipeline settings", () => {
   });
 });
 
-describe("converting a lead", () => {
-  const CONVERT = `/api/v1/workspaces/me/leads/${LEAD_ID}/convert`;
+// Was "converting a lead" (the Convert dialog is gone with Leads, ADR-0027): the same rules
+// hold for a new opportunity created straight into a stage.
+describe("creating an opportunity into a stage", () => {
+  const CREATE = "/api/v1/workspaces/me/opportunities";
 
   it("P1: into a negotiation stage asks for the price, and a pipeline's required field is asked too", async () => {
     const withField: PipelineDto = {
@@ -141,29 +142,34 @@ describe("converting a lead", () => {
     };
     const api = mockApi({
       [`GET ${PIPELINES_URL}`]: { status: 200, body: { results: [withField] } },
-      [`POST ${CONVERT}`]: { status: 201, body: { lead: makeLead({ version: 4 }), opportunity: makeOpportunity() } },
+      [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) },
+      [`POST ${CREATE}`]: { status: 201, body: makeOpportunity() },
     });
-    renderWithProviders(<ConvertLeadDialog workspace={{ kind: "self" }} lead={makeLead()} onClose={() => undefined} onConverted={() => undefined} />, {
-      viewer: salesViewer,
-    });
+    renderWithProviders(<PipelineView />, { viewer: salesViewer });
     const user = userEvent.setup();
-    const dialog = await screen.findByRole("dialog");
-    await user.selectOptions(await within(dialog).findByLabelText("Stage"), STAGES.negotiation.id);
-    await user.type(within(dialog).getByLabelText("Value (₹)"), "12,50,000");
-    await user.click(within(dialog).getByRole("button", { name: "Convert lead" }));
-    expect(await within(dialog).findByText("Enter the negotiated price.")).toBeInTheDocument();
-    expect(within(dialog).getByText("Enter Tender number.")).toBeInTheDocument();
-    expect(api.callsTo("POST", CONVERT)).toHaveLength(0);
-    await user.type(within(dialog).getByLabelText("Negotiated price (₹)"), "11,00,000");
-    await user.type(within(dialog).getByLabelText(/^Tender number/), "GEM/2026/7");
-    await user.click(within(dialog).getByRole("button", { name: "Convert lead" }));
-    await waitFor(() => expect(api.callsTo("POST", CONVERT)).toHaveLength(1));
-    expect(api.callsTo("POST", CONVERT)[0]!.body).toMatchObject({
+    await user.click((await screen.findAllByRole("button", { name: "New opportunity" }))[0]!);
+    const panel = screen.getByRole("dialog", { name: "New opportunity" });
+    await user.selectOptions(within(panel).getByLabelText("Stage"), STAGES.negotiation.id);
+    await user.type(within(panel).getByLabelText("Opportunity name"), "Tender deal");
+    await user.type(within(panel).getByLabelText("Account name"), "City Lab");
+    await user.type(within(panel).getByLabelText("Customer name"), "Dr. Iyer");
+    await user.type(within(panel).getByLabelText("Installation price (₹)"), "12,50,000");
+    await user.click(within(panel).getByRole("button", { name: "Create opportunity" }));
+    expect(await within(panel).findByText("Enter the negotiated price.")).toBeInTheDocument();
+    expect(within(panel).getByText("Enter Tender number.")).toBeInTheDocument();
+    expect(api.callsTo("POST", CREATE)).toHaveLength(0);
+    await user.type(within(panel).getByLabelText("Negotiated price (₹)"), "11,00,000");
+    await user.type(within(panel).getByLabelText(/^Tender number/), "GEM/2026/7");
+    await user.click(within(panel).getByRole("button", { name: "Create opportunity" }));
+    await waitFor(() => expect(api.callsTo("POST", CREATE)).toHaveLength(1));
+    const body = api.callsTo("POST", CREATE)[0]!.body;
+    expect(body).toMatchObject({
       stage: STAGES.negotiation.id,
       value: "1250000",
       negotiated_price: "1100000",
       custom_fields: { "f-tender": "GEM/2026/7" },
     });
+    expect(body).not.toHaveProperty("lead");
   });
 });
 

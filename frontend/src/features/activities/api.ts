@@ -4,7 +4,7 @@
  * that workspace segment, so one user's activities, counts or timeline can never be served
  * from the cache under another user's workspace.
  */
-import { cursorOf } from "@/features/leads/api";
+import { cursorOf } from "@/lib/api/pagination";
 import { apiFetch, apiUpload } from "@/lib/api/client";
 import type {
   Activity,
@@ -47,9 +47,9 @@ export interface ActivityFilters {
   /** Inclusive business dates "YYYY-MM-DD" of the due time / start / creation. */
   dateFrom: string;
   dateTo: string;
-  lead: string;
-  leadLabel: string;
   opportunity: string;
+  /** The chosen opportunity's title, shown while the picker's list doesn't include it (UI only). */
+  opportunityLabel: string;
   owner: string;
   ownerLabel: string;
   archived: boolean;
@@ -61,9 +61,8 @@ export const NO_FILTERS: ActivityFilters = {
   status: "",
   dateFrom: "",
   dateTo: "",
-  lead: "",
-  leadLabel: "",
   opportunity: "",
+  opportunityLabel: "",
   owner: "",
   ownerLabel: "",
   archived: false,
@@ -127,7 +126,7 @@ export const ORDERING_OPTIONS: readonly { value: ActivityOrdering; label: string
 
 /** Narrowing filters in use (the tab, sort and archive view don't count). */
 export function activeFilterCount(filters: ActivityFilters): number {
-  return [filters.dateFrom, filters.dateTo, filters.lead, filters.opportunity, filters.owner].filter(Boolean).length;
+  return [filters.dateFrom, filters.dateTo, filters.opportunity, filters.owner].filter(Boolean).length;
 }
 
 export function invalidRange(filters: Pick<ActivityFilters, "dateFrom" | "dateTo">): boolean {
@@ -144,7 +143,6 @@ export function listParams(workspace: Workspace, filters: ActivityFilters, curso
   else if (filters.status) params.set("status", filters.status);
   if (filters.dateFrom) params.set("date_from", filters.dateFrom);
   if (filters.dateTo) params.set("date_to", filters.dateTo);
-  if (filters.lead) params.set("lead", filters.lead);
   if (filters.opportunity) params.set("opportunity", filters.opportunity);
   if (filters.owner && workspace.kind === "organization") params.set("owner", filters.owner);
   if (filters.archived) params.set("archived", "true");
@@ -154,16 +152,14 @@ export function listParams(workspace: Workspace, filters: ActivityFilters, curso
   return params;
 }
 
-/** A lead's or an opportunity's current work: open tasks and scheduled meetings, soonest first. */
+/** An opportunity's current work: open tasks and scheduled meetings, soonest first. */
 export interface CurrentWorkTarget {
-  lead?: string;
-  opportunity?: string;
+  opportunity: string;
 }
 
 function currentWorkPath(workspace: Workspace, target: CurrentWorkTarget): string {
   const params = new URLSearchParams({ current: "true", ordering: "scheduled", page_size: String(CURRENT_WORK_PAGE_SIZE) });
-  if (target.lead) params.set("lead", target.lead);
-  if (target.opportunity) params.set("opportunity", target.opportunity);
+  params.set("opportunity", target.opportunity);
   return `${workspaceApiPath(workspace, "activities")}?${params.toString()}`;
 }
 
@@ -211,13 +207,12 @@ async function calendarEntries(workspace: Workspace, type: "task" | "meeting", r
   return { items, truncated: true };
 }
 
-export type TimelineSubject = { kind: "lead" | "opportunity"; id: string };
+export type TimelineSubject = { kind: "opportunity"; id: string };
 
 function timelinePath(workspace: Workspace, subject: TimelineSubject, cursor: string | null): string {
-  const resource = subject.kind === "lead" ? "leads" : "opportunities";
   const params = new URLSearchParams({ page_size: String(TIMELINE_PAGE_SIZE) });
   if (cursor) params.set("cursor", cursor);
-  return `${workspaceApiPath(workspace, `${resource}/${encodeURIComponent(subject.id)}/timeline`)}?${params.toString()}`;
+  return `${workspaceApiPath(workspace, `opportunities/${encodeURIComponent(subject.id)}/timeline`)}?${params.toString()}`;
 }
 
 export const activityKeys = {
@@ -230,17 +225,17 @@ export const activityKeys = {
   summary: (workspace: Workspace) => ["activities", "summary", workspaceApiSegment(workspace)] as const,
   /** Under "activities", so any activity write marks every cached range stale. */
   calendar: (workspace: Workspace, range: CalendarRange) => ["activities", "calendar", workspaceApiSegment(workspace), range] as const,
-  /** Every lead's and opportunity's current work cached for this workspace. */
+  /** Every opportunity's current work cached for this workspace. */
   currentWork: (workspace: Workspace) => ["activities", "current", workspaceApiSegment(workspace)] as const,
   current: (workspace: Workspace, target: CurrentWorkTarget) =>
-    ["activities", "current", workspaceApiSegment(workspace), target.lead ?? "", target.opportunity ?? ""] as const,
+    ["activities", "current", workspaceApiSegment(workspace), target.opportunity] as const,
   /** A deal's Notes (whole texts and files); under "activities", so any activity write marks it stale. */
   dealNotes: (workspace: Workspace, opportunityId: string) =>
     ["activities", "deal-notes", workspaceApiSegment(workspace), opportunityId] as const,
 };
 
 export const timelineKeys = {
-  /** Every timeline (marked stale after any lead, opportunity or activity write). */
+  /** Every timeline (marked stale after any opportunity or activity write). */
   all: ["timeline"] as const,
   subject: (workspace: Workspace, subject: TimelineSubject) =>
     ["timeline", subject.kind, workspaceApiSegment(workspace), subject.id] as const,

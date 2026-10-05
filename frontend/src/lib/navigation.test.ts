@@ -4,27 +4,31 @@ import { makeViewer } from "@/test/fixtures";
 
 import { administrationNavigation, navigationWorkspace, showsSettings, supportSessionPath, workspaceNavigation } from "./navigation";
 import type { Viewer } from "./viewer";
+import type { Workspace } from "./workspace";
 
 const salesUser: Viewer = makeViewer({ id: "u1", firstName: "Priya", lastName: "", email: "p@x.test", capabilities: ["crm.access_own"] });
 const admin: Viewer = makeViewer({ id: "a1", firstName: "Admin", lastName: "", email: "a@x.test", capabilities: ["crm.access_own", "users.manage"] });
 
 describe("navigation", () => {
-  it("offers exactly the four CRM modules", () => {
-    expect(workspaceNavigation({ kind: "self" }).map((i) => i.label)).toEqual([
-      "Dashboard",
-      "Pipeline",
-      "Leads",
-      "Activities",
-    ]);
+  const RAHUL = "3f2b8c1e-9a4d-4e2f-8b7a-1c2d3e4f5a6b";
+
+  it.each<[string, Workspace, string]>([
+    ["own", { kind: "self" }, ""],
+    ["organisation", { kind: "organization" }, ""],
+    ["a selected user's", { kind: "user", userId: RAHUL }, `/admin/users/${RAHUL}`],
+  ])("offers exactly Dashboard, Pipeline and Activities in the %s workspace (no Leads)", (_name, workspace, prefix) => {
+    const items = workspaceNavigation(workspace);
+    expect(items.map((i) => i.label)).toEqual(["Dashboard", "Pipeline", "Activities"]);
+    expect(items.map((i) => i.href)).toEqual([`${prefix}/dashboard`, `${prefix}/pipeline`, `${prefix}/activities`]);
   });
 
-  it("never includes Companies or Products", () => {
-    const labels = [
-      ...workspaceNavigation({ kind: "self" }),
-      ...administrationNavigation(admin),
-    ].map((i) => i.label.toLowerCase());
+  it("never includes Leads, Companies or Products", () => {
+    const items = [...workspaceNavigation({ kind: "self" }), ...administrationNavigation(admin)];
+    const labels = items.map((i) => i.label.toLowerCase());
+    expect(labels).not.toContain("leads");
     expect(labels).not.toContain("companies");
     expect(labels).not.toContain("products");
+    expect(items.some((i) => i.href.includes("/leads"))).toBe(false);
   });
 
   it("shows Users only to viewers who can manage users", () => {
@@ -51,8 +55,8 @@ describe("during a support session", () => {
   });
 
   it("keeps every module link in the supported user's workspace", () => {
-    expect(navigationWorkspace("/leads", supporting)).toEqual({ kind: "user", userId: TARGET });
-    expect(navigationWorkspace(`/admin/users/${OTHER}/leads`, supporting)).toEqual({ kind: "user", userId: TARGET });
+    expect(navigationWorkspace("/pipeline", supporting)).toEqual({ kind: "user", userId: TARGET });
+    expect(navigationWorkspace(`/admin/users/${OTHER}/pipeline`, supporting)).toEqual({ kind: "user", userId: TARGET });
   });
 
   it("hides Users and Settings", () => {
@@ -63,22 +67,25 @@ describe("during a support session", () => {
 
   it.each([
     ["/dashboard", "dashboard"],
-    ["/leads", "leads"],
-    ["/leads/9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2c", "leads"],
     ["/pipeline", "pipeline"],
+    ["/pipeline/9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2c", "pipeline"],
     ["/activities", "activities"],
     ["/ask", "ask"],
     ["/admin", "dashboard"],
     ["/admin/users", "dashboard"],
     ["/settings", "dashboard"],
     [`/admin/users/${OTHER}/pipeline`, "pipeline"],
-    [`/admin/users/${OTHER}/leads/9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2c`, "leads"],
+    [`/admin/users/${OTHER}/pipeline/9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2c`, "pipeline"],
+    // There is no Leads module any more: an old lead link lands on the supported user's Dashboard.
+    ["/leads", "dashboard"],
+    ["/leads/9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2c", "dashboard"],
+    [`/admin/users/${OTHER}/leads/9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2c`, "dashboard"],
   ])("sends %s to the supported user's %s", (path, section) => {
     expect(supportSessionPath(path, session)).toBe(`/admin/users/${TARGET}/${section}`);
   });
 
   it("leaves the supported user's own pages alone", () => {
-    expect(supportSessionPath(`/admin/users/${TARGET}/leads`, session)).toBeNull();
+    expect(supportSessionPath(`/admin/users/${TARGET}/activities`, session)).toBeNull();
     expect(supportSessionPath(`/admin/users/${TARGET.toUpperCase()}/pipeline/new`, session)).toBeNull();
   });
 });

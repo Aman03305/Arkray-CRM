@@ -70,17 +70,16 @@ beforeEach(() => {
 
 describe("the navigation rail", () => {
   it("shows each module with its name and marks the current one", () => {
-    navigation.pathname = "/leads";
+    navigation.pathname = "/activities";
     renderWithProviders(<NavRail />, { viewer: salesViewer });
     const nav = screen.getByRole("navigation", { name: "Main" });
     expect(within(nav).getAllByRole("link").map((l) => l.textContent)).toEqual([
       "Dashboard",
       "Pipeline",
-      "Leads",
       "Activities",
       "Settings",
     ]);
-    expect(within(nav).getByRole("link", { name: "Leads" })).toHaveAttribute("aria-current", "page");
+    expect(within(nav).getByRole("link", { name: "Activities" })).toHaveAttribute("aria-current", "page");
     expect(within(nav).getByRole("link", { name: "Dashboard" })).not.toHaveAttribute("aria-current");
     expect(within(nav).queryByRole("link", { name: "Users" })).not.toBeInTheDocument();
   });
@@ -90,10 +89,30 @@ describe("the navigation rail", () => {
     navigation.pathname = `/admin/users/${RAHUL_ID}/pipeline`;
     renderWithProviders(<NavRail />, { viewer: adminViewer });
     const nav = screen.getByRole("navigation", { name: "Main" });
-    expect(within(nav).getByRole("link", { name: "Leads" })).toHaveAttribute("href", `/admin/users/${RAHUL_ID}/leads`);
+    expect(within(nav).getByRole("link", { name: "Activities" })).toHaveAttribute("href", `/admin/users/${RAHUL_ID}/activities`);
     expect(within(nav).getByRole("link", { name: "Pipeline" })).toHaveAttribute("aria-current", "page");
     expect(within(nav).getByRole("link", { name: "Users" })).toHaveAttribute("href", "/admin/users");
     expect(await within(nav).findByRole("list", { name: "CRM for Rahul" })).toBeInTheDocument();
+  });
+
+  it.each([
+    ["own", salesViewer, "/dashboard", ""],
+    ["organisation", adminViewer, "/dashboard", ""],
+    ["a selected user's", adminViewer, `/admin/users/${RAHUL_ID}/dashboard`, `/admin/users/${RAHUL_ID}`],
+  ])("offers exactly Dashboard, Pipeline and Activities in the %s workspace, and no Leads", async (_name, viewer, pathname, prefix) => {
+    mockApi(rahul("active"));
+    navigation.pathname = pathname;
+    renderWithProviders(<NavRail />, { viewer });
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    const modules = within(nav).getAllByRole("list")[0]!;
+    if (prefix) await within(nav).findByRole("list", { name: "CRM for Rahul" });
+    expect(within(modules).getAllByRole("link").map((l) => [l.textContent, l.getAttribute("href")])).toEqual([
+      ["Dashboard", `${prefix}/dashboard`],
+      ["Pipeline", `${prefix}/pipeline`],
+      ["Activities", `${prefix}/activities`],
+    ]);
+    expect(within(nav).queryByRole("link", { name: /leads/i })).not.toBeInTheDocument();
+    expect(nav.querySelector('a[href*="/leads"]')).toBeNull();
   });
 });
 
@@ -105,21 +124,36 @@ describe("the header", () => {
     expect(create).toHaveAttribute("aria-expanded", "false");
     await user.click(create);
     expect(create).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByRole("link", { name: "New lead" })).toHaveAttribute("href", "/leads/new");
     expect(screen.getByRole("link", { name: "New opportunity" })).toHaveAttribute("href", "/pipeline/new");
 
     await user.keyboard("{Escape}");
-    expect(screen.queryByRole("link", { name: "New lead" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "New opportunity" })).not.toBeInTheDocument();
     expect(create).toHaveFocus();
+  });
+
+  it.each([
+    ["own", salesViewer, "/dashboard", "/pipeline/new"],
+    ["organisation", adminViewer, "/dashboard", "/pipeline/new"],
+    ["a selected user's", adminViewer, `/admin/users/${RAHUL_ID}/activities`, `/admin/users/${RAHUL_ID}/pipeline/new`],
+  ])("the + menu offers New opportunity and no New lead, in the %s workspace", async (_name, viewer, pathname, href) => {
+    const user = userEvent.setup();
+    mockApi(rahul("active"));
+    navigation.pathname = pathname;
+    renderWithProviders(<Topbar onMenuClick={() => undefined} />, { viewer });
+    await user.click(await screen.findByRole("button", { name: "Create" }));
+    const links = screen.getAllByRole("link").filter((l) => /^New /.test(l.textContent ?? ""));
+    expect(links.map((l) => [l.textContent, l.getAttribute("href")])).toEqual([["New opportunity", href]]);
+    expect(screen.queryByRole("link", { name: /new lead/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/\blead\b/i)).not.toBeInTheDocument();
   });
 
   it("creates in the selected user's workspace, and not at all for a deactivated user", async () => {
     const user = userEvent.setup();
     mockApi(rahul("active"));
-    navigation.pathname = `/admin/users/${RAHUL_ID}/leads`;
+    navigation.pathname = `/admin/users/${RAHUL_ID}/pipeline`;
     const { unmount } = renderWithProviders(<Topbar onMenuClick={() => undefined} />, { viewer: adminViewer });
-    await user.click(screen.getByRole("button", { name: "Create" }));
-    expect(screen.getByRole("link", { name: "New lead" })).toHaveAttribute("href", `/admin/users/${RAHUL_ID}/leads/new`);
+    await user.click(await screen.findByRole("button", { name: "Create" }));
+    expect(screen.getByRole("link", { name: "New opportunity" })).toHaveAttribute("href", `/admin/users/${RAHUL_ID}/pipeline/new`);
     unmount();
 
     mockApi(rahul("deactivated"));

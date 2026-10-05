@@ -8,9 +8,6 @@ import { ActivitiesListView } from "@/features/activities/ActivitiesListView";
 import { ActivityDetailView } from "@/features/activities/ActivityDetailView";
 import { AskView } from "@/features/ask/AskView";
 import { WorkspaceDashboard } from "@/features/dashboard/DashboardView";
-import { LeadDetailView } from "@/features/leads/LeadDetailView";
-import { LeadFormView } from "@/features/leads/LeadFormView";
-import { LeadsListView } from "@/features/leads/LeadsListView";
 import { OpportunityDetailView } from "@/features/pipeline/OpportunityDetailView";
 import { PipelineBoardView } from "@/features/pipeline/PipelineBoardView";
 import { AdminHome } from "@/features/users/AdminHome";
@@ -71,36 +68,6 @@ export function PipelineView() {
   return <InWorkspace>{(workspace, segment) => <PipelineBoardView key={segment} workspace={workspace} />}</InWorkspace>;
 }
 
-export function LeadsView() {
-  return <InWorkspace>{(workspace, segment) => <LeadsListView key={segment} workspace={workspace} />}</InWorkspace>;
-}
-
-export function NewLeadView() {
-  return (
-    <InWorkspace>
-      {(workspace, segment) => <LeadFormView key={segment} workspace={workspace} mode={{ kind: "create" }} />}
-    </InWorkspace>
-  );
-}
-
-export function LeadView({ leadId }: { leadId: string }) {
-  return (
-    <InWorkspace>
-      {(workspace, segment) => <LeadDetailView key={`${segment}/${leadId}`} workspace={workspace} leadId={leadId} />}
-    </InWorkspace>
-  );
-}
-
-export function EditLeadView({ leadId }: { leadId: string }) {
-  return (
-    <InWorkspace>
-      {(workspace, segment) => (
-        <LeadFormView key={`${segment}/${leadId}`} workspace={workspace} mode={{ kind: "edit", leadId }} />
-      )}
-    </InWorkspace>
-  );
-}
-
 export function OpportunityView({ opportunityId }: { opportunityId: string }) {
   return (
     <InWorkspace>
@@ -112,12 +79,10 @@ export function OpportunityView({ opportunityId }: { opportunityId: string }) {
 }
 
 /** New opportunity: the board, with the new-opportunity panel open over it. */
-export function NewOpportunityView({ leadId }: { leadId?: string }) {
+export function NewOpportunityView() {
   return (
     <InWorkspace>
-      {(workspace, segment) => (
-        <PipelineBoardView key={`${segment}/new/${leadId ?? ""}`} workspace={workspace} create={{ leadId }} />
-      )}
+      {(workspace, segment) => <PipelineBoardView key={`${segment}/new`} workspace={workspace} create />}
     </InWorkspace>
   );
 }

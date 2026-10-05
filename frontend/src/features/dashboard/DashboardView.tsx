@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarClock, Contact, IndianRupee, ListTodo, type LucideIcon, Scale, UserPlus } from "lucide-react";
+import { CalendarClock, IndianRupee, ListTodo, type LucideIcon, Scale } from "lucide-react";
 import Link from "next/link";
 import { Fragment, type ReactNode, useEffect, useId, useRef } from "react";
 
@@ -9,30 +9,25 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { NotFoundView } from "@/components/ui/NotFoundView";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { PersonName } from "@/components/ui/PersonName";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { LeadLink, When } from "@/features/activities/ActivityBits";
+import { CustomerName, When } from "@/features/activities/ActivityBits";
 import { summaryFilters } from "@/features/activities/api";
 import { presetActivityList } from "@/features/activities/list-state";
-import { PersonName } from "@/features/leads/LeadBits";
-import { presetLeadList } from "@/features/leads/list-state";
 import { presetBoard } from "@/features/pipeline/hooks";
 import { describeError, isApiError } from "@/lib/api/errors";
-import type { Dashboard, DashboardActivity, DashboardLead } from "@/lib/api/types";
-import { businessToday, formatDateOnly, formatTime } from "@/lib/format";
+import type { Dashboard, DashboardActivity } from "@/lib/api/types";
+import { businessToday, formatDateOnly } from "@/lib/format";
 import { formatInr } from "@/lib/money";
-import {
-  activityHref,
-  leadHref,
-  type Workspace,
-  workspaceApiSegment,
-  workspaceHref,
-} from "@/lib/workspace";
+import { activityHref, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
 
 import { useDashboard } from "./api";
 
 /*
  * The dashboard of one workspace: a salesperson's own (/dashboard), one user's opened by an
  * administrator (/admin/users/{id}/dashboard) and, inside Admin Home, the organisation's.
+ * Pipeline and activity figures only: there are no leads in the UI (ADR-0027; the API still
+ * sends its lead figures, which are not shown).
  * Every figure comes from the server as it is shown (counts, and money as exact decimal
  * strings): nothing is computed here, and amounts never pass through a JavaScript number.
  */
@@ -72,13 +67,9 @@ interface Target {
 
 function targets(workspace: Workspace, today: string) {
   const segment = workspaceApiSegment(workspace);
-  const leads = workspaceHref(workspace, "leads");
   const activities = workspaceHref(workspace, "activities");
   const opens = summaryFilters(today);
   return {
-    leads: { href: leads, preset: () => presetLeadList(segment) },
-    leadsPage: { href: leads },
-    newLeads: { href: leads, preset: () => presetLeadList(segment, { createdFrom: today, createdTo: today }) },
     pipeline: { href: workspaceHref(workspace, "pipeline"), preset: () => presetBoard(segment) },
     meetingsToday: { href: activities, preset: () => presetActivityList(segment, opens.meetings_today) },
     upcomingMeetings: { href: activities, preset: () => presetActivityList(segment, opens.upcoming_meetings) },
@@ -142,7 +133,7 @@ function Figure({
 }
 
 function Figures({ dashboard, go, updating }: { dashboard: Dashboard; go: Targets; updating: boolean }) {
-  const { leads, pipeline, activities } = dashboard;
+  const { pipeline, activities } = dashboard;
   const heading = useId();
   return (
     <section aria-labelledby={heading} aria-busy={updating || undefined}>
@@ -155,9 +146,7 @@ function Figures({ dashboard, go, updating }: { dashboard: Dashboard; go: Target
           <time dateTime={dashboard.business_date}>{formatDateOnly(dashboard.business_date)}</time>
         </p>
       </div>
-      <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        <Figure label="Total leads" icon={Contact} value={count(leads.total)} detail="" to={go.leads} />
-        <Figure label="New leads today" icon={UserPlus} value={count(leads.new_today)} detail="" to={go.newLeads} />
+      <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Figure
           label="Pipeline value"
           icon={IndianRupee}
@@ -218,61 +207,8 @@ function Panel({ title, footer, children }: { title: string; footer: ReactNode; 
 const FOOTER_LINK = "font-medium text-brand-700 underline underline-offset-2 hover:text-brand-800";
 const NONE = "py-6 text-center text-sm text-slate-500";
 // Names wrap rather than being cut off: the lists are short, and a truncated row could hide
-// who a lead is assigned to, or that they are deactivated (review).
+// whose work it is, or that they are deactivated (review).
 const WRAP = "[overflow-wrap:anywhere]";
-
-function NewLeads({ dashboard, workspace, go }: { dashboard: Dashboard; workspace: Workspace; go: Targets }) {
-  const rows: readonly DashboardLead[] = dashboard.new_leads;
-  const total = dashboard.leads.new_today;
-  // The organisation's list names whose each lead is; in one person's workspace it is theirs.
-  const withOwner = workspace.kind === "organization";
-  return (
-    <Panel
-      title="New leads today"
-      footer={
-        total > 0 ? (
-          <TargetLink to={go.newLeads} className={FOOTER_LINK}>
-            {total > rows.length ? `View all ${counted(total, "new lead", "new leads")}` : "View today's new leads"}
-          </TargetLink>
-        ) : (
-          <TargetLink to={go.leadsPage} className={FOOTER_LINK}>
-            Go to Leads
-          </TargetLink>
-        )
-      }
-    >
-      {rows.length === 0 ? (
-        <p className={NONE}>No new leads yet today.</p>
-      ) : (
-        <ul className="divide-y divide-slate-100">
-          {rows.map((lead) => (
-            <li key={lead.id} className="flex items-start justify-between gap-3 py-3">
-              <div className="min-w-0">
-                <Link
-                  href={leadHref(workspace, lead.id)}
-                  className={`block text-sm font-medium text-slate-900 hover:text-brand-700 hover:underline ${WRAP}`}
-                >
-                  {lead.display_name}
-                </Link>
-                {lead.organization_name && lead.organization_name !== lead.display_name ? (
-                  <span className={`block text-xs text-slate-500 ${WRAP}`}>{lead.organization_name}</span>
-                ) : null}
-                {withOwner ? (
-                  <span className={`block text-xs text-slate-500 ${WRAP}`}>
-                    Assigned to <PersonName person={lead.owner} />
-                  </span>
-                ) : null}
-              </div>
-              <time dateTime={lead.created_at} className="shrink-0 pt-0.5 text-xs text-slate-500 tabular-nums">
-                {formatTime(lead.created_at)}
-              </time>
-            </li>
-          ))}
-        </ul>
-      )}
-    </Panel>
-  );
-}
 
 function ActivityRows({
   rows,
@@ -307,7 +243,7 @@ function ActivityRows({
               </>
             )}
             {" · "}
-            <LeadLink workspace={workspace} lead={activity.lead} />
+            <CustomerName lead={activity.lead} />
             {withOwner ? (
               <>
                 {" · "}
@@ -370,8 +306,8 @@ function DashboardSkeleton() {
   return (
     <div aria-busy="true" aria-hidden="true">
       <Skeleton className="mb-3 h-4 w-28" />
-      <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {Array.from({ length: 6 }, (_, i) => (
+      <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {Array.from({ length: 4 }, (_, i) => (
           <li key={i} className="space-y-3 rounded-lg border border-slate-200 bg-white p-4">
             <Skeleton className="h-4 w-24" />
             <div>
@@ -383,8 +319,8 @@ function DashboardSkeleton() {
           </li>
         ))}
       </ul>
-      <div className="mt-6 grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
-        {Array.from({ length: 3 }, (_, i) => (
+      <div className="mt-6 grid gap-4 lg:grid-cols-2">
+        {Array.from({ length: 2 }, (_, i) => (
           <div key={i} className="space-y-4 rounded-lg border border-slate-200 bg-white p-4">
             <Skeleton className="h-4 w-32" />
             {Array.from({ length: 3 }, (_, j) => (
@@ -465,8 +401,7 @@ export function DashboardContent({ workspace, header }: { workspace: Workspace; 
     body = (
       <div className="space-y-6">
         <Figures dashboard={data} go={go} updating={updating} />
-        <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
-          <NewLeads dashboard={data} workspace={workspace} go={go} />
+        <div className="grid gap-4 lg:grid-cols-2">
           <UpcomingMeetings dashboard={data} workspace={workspace} go={go} />
           <TasksNeedingAttention dashboard={data} workspace={workspace} go={go} />
         </div>

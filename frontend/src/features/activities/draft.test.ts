@@ -16,17 +16,18 @@ import {
 } from "./draft";
 
 describe("task drafts", () => {
-  it("send the due time typed in India time as a UTC instant", () => {
-    const body = createRequest("task", { ...EMPTY_DRAFT, title: "  Call   back ", dueDate: "2026-10-03", dueTime: "00:15" }, { lead: "L" });
-    expect(body).toEqual({ type: "task", title: "Call back", lead: "L", priority: "normal", due_at: "2026-10-02T18:45:00.000Z" });
+  it("send the due time typed in India time as a UTC instant, for the opportunity (never a lead)", () => {
+    const body = createRequest("task", { ...EMPTY_DRAFT, title: "  Call   back ", dueDate: "2026-10-03", dueTime: "00:15" }, "O");
+    expect(body).toEqual({ type: "task", title: "Call back", opportunity: "O", priority: "normal", due_at: "2026-10-02T18:45:00.000Z" });
+    expect(body).not.toHaveProperty("lead");
   });
 
   it("default the due time to the end of the working day and send no due date when empty", () => {
     expect(EMPTY_DRAFT.dueTime).toBe(DEFAULT_DUE_TIME);
-    expect(createRequest("task", { ...EMPTY_DRAFT, title: "x", dueDate: "2026-10-03", dueTime: "" }, { lead: "L" }).due_at).toBe(
+    expect(createRequest("task", { ...EMPTY_DRAFT, title: "x", dueDate: "2026-10-03", dueTime: "" }, "O").due_at).toBe(
       "2026-10-03T12:30:00.000Z",
     );
-    expect(createRequest("task", { ...EMPTY_DRAFT, title: "x" }, { lead: "L" })).not.toHaveProperty("due_at");
+    expect(createRequest("task", { ...EMPTY_DRAFT, title: "x" }, "O")).not.toHaveProperty("due_at");
   });
 
   it("round-trip an activity's due time in India time", () => {
@@ -46,10 +47,13 @@ describe("task drafts", () => {
   });
 
   it("validate before sending", () => {
-    expect(validateDraft("task", EMPTY_DRAFT, { requireLead: true })).toEqual({
-      lead: ["Choose the lead this is about."],
+    expect(validateDraft("task", EMPTY_DRAFT, { requireOpportunity: true })).toEqual({
+      opportunity: ["Choose the opportunity this is about."],
       title: ["Enter a subject."],
     });
+    expect(validateDraft("task", { ...EMPTY_DRAFT, title: "x" }, { requireOpportunity: true, opportunity: "O" })).toEqual({});
+    // An edit (or a form opened from a deal) doesn't ask for one.
+    expect(validateDraft("task", { ...EMPTY_DRAFT, title: "x" })).toEqual({});
     expect(validateDraft("task", { ...EMPTY_DRAFT, title: "x", dueDate: "1999-12-31" }).due_at).toBeDefined();
   });
 });
@@ -57,7 +61,7 @@ describe("task drafts", () => {
 describe("meeting drafts", () => {
   it("send start and end as UTC instants and only filled optional fields", () => {
     const draft = { ...EMPTY_DRAFT, title: "Demo", startsAt: "2026-10-06T11:00", endsAt: "2026-10-06T12:00", location: " Andheri " };
-    expect(createRequest("meeting", draft, { opportunity: "O" })).toEqual({
+    expect(createRequest("meeting", draft, "O")).toEqual({
       type: "meeting",
       title: "Demo",
       opportunity: "O",

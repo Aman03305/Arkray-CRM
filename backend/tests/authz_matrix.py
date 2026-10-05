@@ -76,12 +76,14 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     "api/v1/assignees": _rule(ASSIGN_ANY, "GET"),
     # --- pipeline (Phase 3). Same workspace rules as leads: the scope decides which
     # opportunities (and which totals) exist; writes in delegated workspaces need
-    # crm.manage_any. Nobody chooses an owner: it follows the lead. ------------------------
+    # crm.manage_any. The owner follows the lead: chosen only for a new opportunity's new
+    # customer record organisation-wide, changed only by "assign" (ADR-0027). ---------------
     "api/v1/workspaces/<str:workspace>/pipeline-board": _rule("workspace", "GET"),
     "api/v1/workspaces/<str:workspace>/pipeline-summary": _rule("workspace", "GET"),
     "api/v1/workspaces/<str:workspace>/opportunities": _rule("workspace", "GET", "POST"),
     f"{OPPORTUNITY}": _rule("workspace", "GET", "PATCH"),
     f"{OPPORTUNITY}/move": _rule("workspace", "POST"),
+    f"{OPPORTUNITY}/assign": _rule(ASSIGN_ANY, "POST"),
     f"{OPPORTUNITY}/archive": _rule("workspace", "POST"),
     f"{OPPORTUNITY}/restore": _rule("workspace", "POST"),
     f"{OPPORTUNITY}/history": _rule("workspace", "GET"),

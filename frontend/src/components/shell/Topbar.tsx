@@ -1,20 +1,19 @@
 "use client";
 
-import { ChevronDown, Contact, LogOut, Menu, Plus, SquareKanban } from "lucide-react";
+import { ChevronDown, LogOut, Menu, Plus, SquareKanban } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Spinner } from "@/components/ui/Spinner";
 import { useSignOut } from "@/features/auth/useSignOut";
-import { leadPermissions } from "@/features/leads/hooks";
 import { pipelinePermissions } from "@/features/pipeline/hooks";
 import { SearchLauncher } from "@/features/search/SearchLauncher";
 import { receivesNewWork, selectedUserId, useWorkspaceSubject } from "@/features/workspace/api";
 import { navigationWorkspace, settingsNavItem, showsSettings } from "@/lib/navigation";
 import { initials } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
-import { newLeadHref, newOpportunityHref, userWorkspaceHref } from "@/lib/workspace";
+import { newOpportunityHref, userWorkspaceHref } from "@/lib/workspace";
 
 import { BrandMark } from "./BrandMark";
 import { HEADER_MENU_ITEM, HeaderMenu } from "./HeaderMenu";
@@ -73,9 +72,6 @@ function QuickCreate() {
   const subject = useWorkspaceSubject(selectedUserId(workspace));
   if (!viewer || !receivesNewWork(subject.data)) return null;
   const items = [
-    leadPermissions(viewer, workspace).canCreate
-      ? { key: "lead", label: "New lead", href: newLeadHref(workspace), icon: Contact }
-      : null,
     pipelinePermissions(viewer, workspace).canWrite
       ? { key: "opportunity", label: "New opportunity", href: newOpportunityHref(workspace), icon: SquareKanban }
       : null,

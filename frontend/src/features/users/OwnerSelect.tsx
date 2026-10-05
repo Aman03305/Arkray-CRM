@@ -5,9 +5,9 @@ import { useId, useState } from "react";
 
 import { SelectField } from "@/components/ui/Field";
 import { describeError } from "@/lib/api/errors";
+import { useDebounced } from "@/lib/use-debounced";
 
-import { leadKeys, leadsApi, SEARCH_MIN_LENGTH } from "./api";
-import { useDebounced } from "./hooks";
+import { ASSIGNEE_SEARCH_MIN_LENGTH, assigneeKeys, assigneesApi } from "./assignees";
 
 interface OwnerSelectProps {
   label: string;
@@ -21,6 +21,8 @@ interface OwnerSelectProps {
   /** First option, e.g. "Choose an owner" or "Anyone". */
   placeholder: string;
   autoFocus?: boolean;
+  /** The form field name (server errors are focused by it). */
+  name?: string;
 }
 
 /**
@@ -40,14 +42,15 @@ export function OwnerSelect({
   hint,
   placeholder,
   autoFocus,
+  name,
 }: OwnerSelectProps) {
   const [search, setSearch] = useState("");
   const [picked, setPicked] = useState<{ id: string; label: string } | null>(null);
   const searchId = useId();
-  const q = useDebounced(search.trim().length >= SEARCH_MIN_LENGTH ? search.trim() : "", 300);
+  const q = useDebounced(search.trim().length >= ASSIGNEE_SEARCH_MIN_LENGTH ? search.trim() : "", 300);
   const assignees = useQuery({
-    queryKey: leadKeys.assignees(q),
-    queryFn: () => leadsApi.assignees(q),
+    queryKey: assigneeKeys.list(q),
+    queryFn: () => assigneesApi.list(q),
     staleTime: 60_000,
   });
   const users = assignees.data?.results ?? [];
@@ -88,6 +91,7 @@ export function OwnerSelect({
       ) : null}
       <SelectField
         label={label}
+        name={name}
         value={value}
         onChange={(e) => choose(e.target.value)}
         options={options}

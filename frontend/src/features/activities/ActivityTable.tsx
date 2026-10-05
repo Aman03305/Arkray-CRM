@@ -6,13 +6,13 @@ import { useRouter } from "next/navigation";
 import { ActionMenu, type MenuAction } from "@/components/ui/ActionMenu";
 import { Button } from "@/components/ui/Button";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { PersonName } from "@/features/leads/LeadBits";
+import { PersonName } from "@/components/ui/PersonName";
 import type { ActivityListItem } from "@/lib/api/types";
 import { formatDateTime, formatRelative } from "@/lib/format";
 import { activityHref, type Workspace } from "@/lib/workspace";
 
 import type { LifecycleAction } from "./api";
-import { activityName, LeadLink, OpportunityLink, scheduleOf, StatusBadge, TypeLabel, When } from "./ActivityBits";
+import { activityName, CustomerName, OpportunityLink, scheduleOf, StatusBadge, TypeLabel, When } from "./ActivityBits";
 import { canComplete, useClock } from "./clock";
 
 interface ActivityTableProps {
@@ -127,7 +127,7 @@ export function ActivityTable({ activities, loading, workspace, showOwner, canWr
                 </td>
                 <td className={`${TD} hidden max-w-60 lg:table-cell`}>
                   <span className="block truncate">
-                    <LeadLink workspace={workspace} lead={activity.lead} />
+                    <CustomerName lead={activity.lead} />
                   </span>
                   {activity.opportunity ? (
                     <span className="block truncate text-xs">
@@ -176,7 +176,7 @@ export function ActivityTable({ activities, loading, workspace, showOwner, canWr
             <dl className="mt-3 grid grid-cols-1 gap-y-1 text-xs text-slate-600">
               <dt className="sr-only">Related to</dt>
               <dd className="truncate">
-                <LeadLink workspace={workspace} lead={activity.lead} />
+                <CustomerName lead={activity.lead} />
                 {activity.opportunity ? (
                   <>
                     {" · "}

@@ -17,24 +17,8 @@ export type Role = Schemas["RoleEnum"];
 export type UserStatus = Schemas["StatusEnum"];
 
 export type UserRef = Schemas["UserRef"];
-export type Lead = Schemas["Lead"];
-export type LeadListItem = Schemas["LeadListItem"];
-export type LeadPage = Schemas["LeadPage"];
-export type LeadOptions = Schemas["LeadOptions"];
-export type LeadStatusOption = Schemas["LeadStatusOption"];
-export type LeadSourceOption = Schemas["LeadSourceOption"];
-export type LeadStatusRef = Schemas["StatusRef"];
-export type LeadDuplicate = Schemas["LeadDuplicate"];
-export type LeadDuplicateList = Schemas["LeadDuplicateList"];
-export type Rating = Schemas["RatingEnum"];
-export type StatusCategory = Schemas["CategoryEnum"];
 export type Assignee = Schemas["Assignee"];
 export type AssigneePage = Schemas["AssigneePage"];
-export type LeadListQuery = NonNullable<paths["/api/v1/workspaces/{workspace}/leads"]["get"]["parameters"]["query"]>;
-export type LeadOrdering = NonNullable<LeadListQuery["ordering"]>;
-
-export type LeadCreateRequest = Schemas["LeadCreateRequest"];
-export type LeadUpdateRequest = Schemas["PatchedLeadUpdateRequest"];
 export type LoginRequest = Schemas["LoginRequest"];
 export type UserCreateRequest = Schemas["UserCreateRequest"];
 export type UserUpdateRequest = Schemas["PatchedUserUpdateRequest"];
@@ -54,6 +38,7 @@ export type StageCategory = Schemas["StageCategoryEnum"];
 export type Opportunity = Schemas["Opportunity"];
 export type OpportunityCard = Schemas["OpportunityCard"];
 export type OpportunityPage = Schemas["OpportunityPage"];
+// An opportunity's customer record: the API still calls it a lead (ADR-0027).
 export type OpportunityLeadRef = Schemas["LeadRef"];
 export type Board = Schemas["Board"];
 export type BoardColumn = Schemas["BoardColumn"];
@@ -61,12 +46,10 @@ export type PipelineTotals = Schemas["PipelineTotals"];
 export type PipelineSummary = Schemas["PipelineSummary"];
 export type StageHistoryEntry = Schemas["StageHistory"];
 export type StageHistoryPage = Schemas["StageHistoryPage"];
-export type Conversion = Schemas["Conversion"];
 export type OpportunityListQuery = NonNullable<paths["/api/v1/workspaces/{workspace}/opportunities"]["get"]["parameters"]["query"]>;
 export type OpportunityOrdering = NonNullable<OpportunityListQuery["ordering"]>;
 export type OpportunityCreateRequest = Schemas["OpportunityCreateRequest"];
 export type OpportunityUpdateRequest = Schemas["PatchedOpportunityUpdateRequest"];
-export type LeadConvertRequest = Schemas["LeadConvertRequest"];
 export type OpportunityMoveRequest = Schemas["OpportunityMoveRequest"];
 export type StageType = Schemas["StageTypeEnum"];
 export type CustomField = Schemas["CustomField"];
@@ -106,11 +89,9 @@ export type Attachment = Schemas["Attachment"];
 export type ScanStatus = Schemas["ScanStatusEnum"];
 
 export type Dashboard = Schemas["Dashboard"];
-export type DashboardLead = Schemas["DashboardLead"];
 export type DashboardActivity = Schemas["DashboardActivity"];
 
 export type SearchResults = Schemas["SearchResults"];
-export type SearchLead = Schemas["SearchLead"];
 export type SearchOpportunity = Schemas["SearchOpportunity"];
 export type SearchTask = Schemas["SearchTask"];
 export type SearchMeeting = Schemas["SearchMeeting"];

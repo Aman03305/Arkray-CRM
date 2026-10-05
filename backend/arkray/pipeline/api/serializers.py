@@ -6,9 +6,10 @@ opportunity's lead is shown only if the lead is visible in the same workspace; o
 (a closed opportunity whose lead has since been reassigned) it is
 {"id": null, "restricted": true} (docs/authorization.md#related-records-and-timelines).
 
-Input: strict (undeclared keys are a 400). Nobody sends an owner, status, closed_at,
-created_by or archive state: ownership follows the lead, status follows the stage, and
-stage changes, archiving and conversion are their own audited operations.
+Input: strict (undeclared keys are a 400). Nobody sends a status, closed_at, created_by or
+archive state, nor an owner in an edit: ownership follows the lead (named only for a new
+opportunity's new customer record organisation-wide, or changed by "assign"), status follows
+the stage, and stage changes, archiving and conversion are their own audited operations.
 """
 
 from __future__ import annotations
@@ -404,7 +405,17 @@ class OpportunityFieldsSerializer(DealFieldsMixin, StrictInputSerializer):
 
 
 class OpportunityCreateSerializer(OpportunityFieldsSerializer):
-    lead = serializers.UUIDField(help_text="The lead (in this workspace) the opportunity is for.")
+    lead = serializers.UUIDField(
+        required=False,
+        help_text="The lead (in this workspace) the opportunity is for. Omitted (the UI, "
+        "ADR-0027): a new hidden customer record is made from the customer details, which "
+        "then need the customer or account name.",
+    )
+    owner = serializers.UUIDField(
+        required=False,
+        help_text="Without a lead: who owns the new opportunity. Required organisation-wide "
+        "(crm.assign_any); elsewhere the workspace's user, so it may be omitted.",
+    )
     pipeline = serializers.UUIDField(required=False, help_text="The default pipeline if omitted.")
     stage = serializers.UUIDField(
         required=False, help_text="A stage of the pipeline; its first open stage if omitted."
@@ -517,6 +528,11 @@ class PipelineListQuerySerializer(StrictInputSerializer):
 
 
 class OpportunityVersionSerializer(StrictInputSerializer):
+    version = serializers.IntegerField(min_value=1)
+
+
+class OpportunityAssignSerializer(StrictInputSerializer):
+    owner = serializers.UUIDField(help_text="An active user who works in a CRM workspace.")
     version = serializers.IntegerField(min_value=1)
 
 

@@ -1,42 +1,30 @@
 "use client";
 
-import { useInfiniteQuery, useMutation } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import Link from "next/link";
-import { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useRef } from "react";
 
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { cursorOf } from "@/features/leads/api";
-import { PersonName } from "@/features/leads/LeadBits";
-import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
-import type { ActivityCreateRequest, TimelineEntry, UserRef } from "@/lib/api/types";
+import { PersonName } from "@/components/ui/PersonName";
+import { describeError, isApiError } from "@/lib/api/errors";
+import { cursorOf } from "@/lib/api/pagination";
+import type { TimelineEntry } from "@/lib/api/types";
 import { formatDateTime } from "@/lib/format";
-import { randomUuid } from "@/lib/random";
 import { activityHref, opportunityHref, type Workspace } from "@/lib/workspace";
 
 import { activitiesApi, timelineKeys, type TimelineSubject } from "./api";
 import { TypeIcon } from "./ActivityBits";
-import { useActivityWriteSync } from "./hooks";
-
-const NOTE_MAX = 10_000;
 
 /**
- * A lead's or an opportunity's history, newest first, 20 at a time ("Show older" adds the
- * next page). Each entry was written when it happened; activities and opportunities are
- * shown only while this workspace may see them (the server decides), and a note appears as
- * a bounded preview with a link to the whole note.
+ * An opportunity's history, newest first, 20 at a time ("Show older" adds the next page).
+ * Each entry was written when it happened; activities are shown only while this workspace
+ * may see them (the server decides), and a note appears as a bounded preview with a link to
+ * the whole note. (Its customer record's own events, the old Leads timeline, are on no
+ * opportunity's timeline: ADR-0027.)
  */
-export function Timeline({
-  workspace,
-  subject,
-  composer,
-}: {
-  workspace: Workspace;
-  subject: TimelineSubject;
-  /** The quick note form above the history, when the viewer may add notes here. */
-  composer?: ReactNode;
-}) {
+export function Timeline({ workspace, subject }: { workspace: Workspace; subject: TimelineSubject }) {
   const headingId = useId();
   const timeline = useInfiniteQuery({
     queryKey: timelineKeys.subject(workspace, subject),
@@ -65,7 +53,6 @@ export function Timeline({
       <h2 id={headingId} className="mb-3 text-sm font-semibold text-slate-900">
         Timeline
       </h2>
-      {composer}
       {timeline.isError && (refused || entries.length === 0) ? (
         <Alert
           tone="error"
@@ -113,15 +100,6 @@ export function Timeline({
   );
 }
 
-function person(details: TimelineEntry["details"], key: string): UserRef | null {
-  const value = details[key];
-  if (!value || typeof value !== "object") return null;
-  const candidate = value as Partial<UserRef>;
-  return typeof candidate.id === "string" && typeof candidate.full_name === "string"
-    ? { id: candidate.id, full_name: candidate.full_name, is_active: candidate.is_active !== false }
-    : null;
-}
-
 function text(details: TimelineEntry["details"], key: string): string {
   const value = details[key];
   return typeof value === "string" ? value : "";
@@ -150,40 +128,6 @@ function TimelineItem({ entry, workspace }: { entry: TimelineEntry; workspace: W
 
   let summary: ReactNode;
   switch (entry.kind) {
-    case "lead.created": {
-      const owner = person(details, "owner");
-      summary = (
-        <>
-          Lead created{owner && owner.id !== entry.actor?.id ? <> for <Strong><PersonName person={owner} /></Strong></> : null}
-          {text(details, "status_name") ? <> as <Strong>{text(details, "status_name")}</Strong></> : null}
-        </>
-      );
-      break;
-    }
-    case "lead.status_changed":
-      summary = (
-        <>
-          Status changed from <Strong>{text(details, "from_name")}</Strong> to <Strong>{text(details, "to_name")}</Strong>
-        </>
-      );
-      break;
-    case "lead.reassigned": {
-      const from = person(details, "from_owner");
-      const to = person(details, "to_owner");
-      summary = (
-        <>
-          Reassigned{from ? <> from <Strong><PersonName person={from} /></Strong></> : null}
-          {to ? <> to <Strong><PersonName person={to} /></Strong></> : null}
-        </>
-      );
-      break;
-    }
-    case "lead.archived":
-      summary = "Lead archived";
-      break;
-    case "lead.restored":
-      summary = "Lead restored";
-      break;
     case "opportunity.created":
       summary = (
         <>
@@ -234,6 +178,12 @@ function TimelineItem({ entry, workspace }: { entry: TimelineEntry; workspace: W
     default: {
       // task.created / completed / cancelled / reopened, meeting.completed / cancelled / reopened
       const [type, verb] = entry.kind.split(".");
+      if (type !== "task" && type !== "meeting") {
+        // A customer record's own events (lead.*) are on no opportunity's timeline; should one
+        // ever arrive, it is described plainly, never as a task or a meeting.
+        summary = "Customer record updated";
+        break;
+      }
       const label = type === "task" ? "Task" : "Meeting";
       summary = (
         <>
@@ -270,89 +220,5 @@ function TimelineItem({ entry, workspace }: { entry: TimelineEntry; workspace: W
         {entry.actor ? <PersonName person={entry.actor} /> : "System"} · <time dateTime={entry.occurred_at}>{formatDateTime(entry.occurred_at)}</time>
       </p>
     </li>
-  );
-}
-
-/**
- * Type, save: a note in two steps. The note belongs to the lead's owner and is signed by
- * whoever writes it. A save retried with the same text reuses its idempotency key; a
- * failure keeps the text in the box.
- */
-export function NoteComposer({ workspace, link, disabled = false }: { workspace: Workspace; link: { lead?: string; opportunity?: string }; disabled?: boolean }) {
-  const sync = useActivityWriteSync(workspace);
-  const [text, setText] = useState("");
-  const [problem, setProblem] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
-  const fieldId = useId();
-  const box = useRef<HTMLTextAreaElement>(null);
-  const idempotency = useRef<{ body: string; key: string } | null>(null);
-  const save = useMutation({
-    mutationFn: (body: ActivityCreateRequest) => {
-      const serialised = JSON.stringify(body);
-      if (idempotency.current?.body !== serialised) idempotency.current = { body: serialised, key: randomUuid() };
-      return activitiesApi.create(workspace, body, idempotency.current.key);
-    },
-    onSuccess: (note) => {
-      sync(note);
-      setText("");
-      setSaved(true);
-      idempotency.current = null;
-      box.current?.focus();
-    },
-  });
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    if (save.isPending) return;
-    setSaved(false);
-    if (!text.trim()) {
-      setProblem("Write the note first.");
-      box.current?.focus();
-      return;
-    }
-    setProblem(null);
-    save.mutate({ type: "note", ...link, description: text });
-  };
-  const serverProblem = save.isError ? (fieldErrors(save.error).description?.join(" ") ?? describeError(save.error).message) : null;
-  const message = problem ?? serverProblem;
-
-  return (
-    <form onSubmit={submit} noValidate className="mb-5 space-y-2">
-      <label htmlFor={fieldId} className="block text-sm font-medium text-slate-700">
-        Add a note
-      </label>
-      <textarea
-        ref={box}
-        id={fieldId}
-        rows={3}
-        maxLength={NOTE_MAX}
-        value={text}
-        disabled={disabled}
-        // Read-only while saving: what is typed then would not be in the saved note (and
-        // the box is emptied once it is saved).
-        readOnly={save.isPending}
-        aria-busy={save.isPending || undefined}
-        onChange={(e) => {
-          setText(e.target.value);
-          setSaved(false);
-        }}
-        aria-invalid={message ? true : undefined}
-        aria-describedby={message ? `${fieldId}-error` : undefined}
-        placeholder="What happened? What did they say?"
-        className="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 read-only:bg-slate-50 focus-visible:outline-brand-600 disabled:bg-slate-50"
-      />
-      {message ? (
-        <p id={`${fieldId}-error`} role="alert" className="text-xs text-red-600">
-          {message}
-        </p>
-      ) : null}
-      <div className="flex items-center justify-end gap-3">
-        <span aria-live="polite" className="text-xs text-emerald-700">
-          {saved ? "Note saved." : ""}
-        </span>
-        <Button type="submit" size="sm" loading={save.isPending} disabled={disabled}>
-          Save note
-        </Button>
-      </div>
-    </form>
   );
 }

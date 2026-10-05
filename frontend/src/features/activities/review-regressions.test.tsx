@@ -2,32 +2,40 @@
  * Regression tests for the Phase 4 adversarial frontend review (docs/testing.md): one per
  * confirmed finding, each reproducing the reviewer's scenario and asserting the corrected
  * behaviour. Plus the live-walkthrough finding about reassignments (an administrator's
- * lead page refetching its timeline where the lead no longer is).
+ * page refetching a record's timeline where the record no longer is; since ADR-0027 that
+ * is a deal whose owner is changed out of the user's workspace).
  */
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { forgetActivityListState } from "@/features/activities/list-state";
-import { ActivitiesView, ActivityView, LeadView } from "@/features/workspace/views";
+import { ActivitiesView, ActivityView, OpportunityView } from "@/features/workspace/views";
 import type { Activity } from "@/lib/api/types";
 import { asListItem, makeActivity, makeEntry, makeMeeting, makeNote, MEETING_ID, NOTE_ID, page, SUMMARY, TASK_ID } from "@/test/activity-fixtures";
-import { adminViewer, LEAD_ID, LEAD_OPTIONS, makeLead, makeLeadListItem, PRIYA_ID, RAHUL_ID, salesViewer } from "@/test/fixtures";
+import { adminViewer, PRIYA_ID, RAHUL_ID, salesViewer } from "@/test/fixtures";
+import { makeCard, makeOpportunity, OPPORTUNITY_ID, PIPELINE_ROUTES } from "@/test/pipeline-fixtures";
 import { apiError, createTestQueryClient, mockApi, renderWithProviders, type RecordedCall } from "@/test/render";
 
-const nav = vi.hoisted(() => ({ pathname: "/activities", push: vi.fn() }));
+const nav = vi.hoisted(() => ({ pathname: "/activities", push: vi.fn(), replace: vi.fn() }));
 vi.mock("next/navigation", () => ({
   usePathname: () => nav.pathname,
-  useRouter: () => ({ push: nav.push, replace: vi.fn(), back: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => ({ push: nav.push, replace: nav.replace, back: vi.fn(), prefetch: vi.fn() }),
 }));
 
 const ME = "/api/v1/workspaces/me";
 const LIST = `${ME}/activities`;
 const SUMMARY_ROUTE = { [`GET ${ME}/activity-summary`]: { status: 200, body: SUMMARY } };
-const LEAD_ROUTES = {
-  "GET /api/v1/config/lead-options": { status: 200, body: LEAD_OPTIONS },
-  [`GET ${ME}/leads/${LEAD_ID}`]: { status: 200, body: makeLead() },
+const DEAL = `${ME}/opportunities/${OPPORTUNITY_ID}`;
+/** A deal's page: the deal, its pipeline, and its History tab's other sections. */
+const DEAL_ROUTES = {
+  ...PIPELINE_ROUTES,
+  [`GET ${DEAL}`]: { status: 200, body: makeOpportunity() },
+  [`GET ${DEAL}/history`]: { status: 200, body: page([]) },
+  [`GET ${DEAL}/negotiated-prices`]: { status: 200, body: page([]) },
 };
+/** The task/meeting form's picker: the recent open opportunities. */
+const RECENT_ROUTE = { [`GET ${ME}/opportunities`]: { status: 200, body: page([makeCard()]) } };
 const activityUrl = (id: string, action = "") => `${ME}/activities/${id}${action ? `/${action}` : ""}`;
 const SALES = { ...salesViewer, id: RAHUL_ID };
 const SALES_REF = { id: RAHUL_ID, full_name: "Rahul Sharma", is_active: true };
@@ -50,6 +58,7 @@ function productionLikeClient() {
 beforeEach(() => {
   nav.pathname = "/activities";
   nav.push.mockReset();
+  nav.replace.mockReset();
   forgetActivityListState();
 });
 
@@ -188,19 +197,18 @@ describe("focus stays on the page after in-page actions (P2-2)", () => {
     await waitFor(() => expect(document.activeElement).toContainElement(message));
   });
 
-  it("Complete in a lead's Open work card moves focus to the card's message", async () => {
-    nav.pathname = `/leads/${LEAD_ID}`;
+  it("Complete in a deal's Open work card moves focus to the card's message", async () => {
+    nav.pathname = `/pipeline/${OPPORTUNITY_ID}`;
     let done = false;
     mockApi({
-      ...LEAD_ROUTES,
-      [`GET ${ME}/leads/${LEAD_ID}/timeline`]: { status: 200, body: page([]) },
+      ...DEAL_ROUTES,
       [`GET ${LIST}`]: () => ({ status: 200, body: page(done ? [] : [asListItem(makeActivity())]) }),
       [`POST ${activityUrl(TASK_ID, "complete")}`]: () => {
         done = true;
         return { status: 200, body: makeActivity({ status: "completed", completable: false, version: 2 }) };
       },
     });
-    renderWithProviders(<LeadView leadId={LEAD_ID} />, { viewer: SALES });
+    renderWithProviders(<OpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: SALES });
     const user = userEvent.setup();
     const openWork = await screen.findByRole("region", { name: "Open work" });
     (await within(openWork).findByRole("button", { name: "Complete Send the revised quotation" })).focus();
@@ -228,46 +236,55 @@ describe("focus stays on the page after in-page actions (P2-2)", () => {
   });
 
   it("Show older moves focus to the first entry it added (the button may be gone)", async () => {
-    nav.pathname = `/leads/${LEAD_ID}`;
+    nav.pathname = `/pipeline/${OPPORTUNITY_ID}`;
     mockApi({
-      ...LEAD_ROUTES,
+      ...DEAL_ROUTES,
       [`GET ${LIST}`]: { status: 200, body: page([]) },
-      [`GET ${ME}/leads/${LEAD_ID}/timeline`]: (call: RecordedCall) =>
+      [`GET ${DEAL}/timeline`]: (call: RecordedCall) =>
         call.query.get("cursor")
           ? { status: 200, body: page([makeEntry({ id: "e1" })]) }
-          : { status: 200, body: page([makeEntry({ id: "e2", kind: "lead.archived", details: {} })], `http://testserver${ME}/leads/${LEAD_ID}/timeline?cursor=abc`) },
+          : {
+              status: 200,
+              body: page(
+                [makeEntry({ id: "e2", kind: "opportunity.stage_changed", details: { from_stage: "New", to_stage: "Proposal" } })],
+                `http://testserver${DEAL}/timeline?cursor=abc`,
+              ),
+            },
     });
-    renderWithProviders(<LeadView leadId={LEAD_ID} />, { viewer: SALES });
+    renderWithProviders(<OpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: SALES });
     const user = userEvent.setup();
+    await user.click(await screen.findByRole("tab", { name: "History" }));
     (await screen.findByRole("button", { name: "Show older" })).focus();
     await user.keyboard("{Enter}");
-    const added = await screen.findByText(/Lead created/);
+    const added = await screen.findByText(/created in/);
     await waitFor(() => expect(document.activeElement).toContainElement(added));
     expect(screen.queryByRole("button", { name: "Show older" })).not.toBeInTheDocument();
   });
 });
 
 describe("a note box is read-only while it saves (P2-3)", () => {
-  it("the quick note box on a lead page: nothing typed meanwhile is lost", async () => {
-    nav.pathname = `/leads/${LEAD_ID}`;
+  it("the note box on a deal's Notes tab: nothing typed meanwhile is lost", async () => {
+    nav.pathname = `/pipeline/${OPPORTUNITY_ID}`;
     const post = deferred<Reply>();
-    mockApi({
-      ...LEAD_ROUTES,
-      [`GET ${ME}/leads/${LEAD_ID}/timeline`]: { status: 200, body: page([]) },
+    const api = mockApi({
+      ...DEAL_ROUTES,
+      [`GET ${DEAL}/notes`]: { status: 200, body: page([]) },
       [`GET ${LIST}`]: { status: 200, body: page([]) },
       [`POST ${LIST}`]: () => post.promise,
     });
-    renderWithProviders(<LeadView leadId={LEAD_ID} />, { viewer: SALES });
+    renderWithProviders(<OpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: SALES });
     const user = userEvent.setup();
-    const box = await screen.findByRole("textbox", { name: "Add a note" });
+    await user.click(await screen.findByRole("tab", { name: "Notes" }));
+    await user.click(await screen.findByRole("button", { name: "Add note" }));
+    const box = screen.getByRole("textbox", { name: "Note" });
     await user.type(box, "Called Asha.");
-    await user.click(screen.getByRole("button", { name: "Save note" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
     expect(box).toHaveAttribute("readonly");
     await user.type(box, " She wants the AMC quote by Friday.");
     expect(box).toHaveValue("Called Asha.");
     await act(async () => post.resolve({ status: 201, body: makeNote({ description: "Called Asha." }) }));
     await screen.findByText("Note saved.");
-    expect(box).not.toHaveAttribute("readonly");
+    expect(api.callsTo("POST", LIST)[0]!.body).toEqual({ type: "note", opportunity: OPPORTUNITY_ID, description: "Called Asha." });
   });
 
   it("editing a note in place", async () => {
@@ -296,8 +313,7 @@ describe("a refused create is explained (R5, P3)", () => {
     const api = mockApi({
       ...SUMMARY_ROUTE,
       [`GET ${LIST}`]: { status: 200, body: page([]) },
-      [`GET ${ME}/leads`]: { status: 200, body: page([makeLeadListItem()]) },
-      [`GET ${ME}/opportunities`]: { status: 200, body: page([]) },
+      ...RECENT_ROUTE,
       [`POST ${LIST}`]: apiError(409, "conflict", "This was already created by an earlier request and has since left this workspace."),
     });
     renderWithProviders(<ActivitiesView />, { viewer: SALES });
@@ -305,8 +321,9 @@ describe("a refused create is explained (R5, P3)", () => {
     await screen.findByText("No activities yet");
     await user.click(screen.getByRole("button", { name: "New task" }));
     const dialog = screen.getByRole("dialog", { name: "New task" });
-    await within(dialog).findByRole("option", { name: /Asha Mehta/ });
-    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Lead" }), LEAD_ID);
+    const deal = within(dialog).getByRole("combobox", { name: "Opportunity" });
+    await within(deal).findByRole("option", { name: /Asha Mehta/ });
+    await user.selectOptions(deal, OPPORTUNITY_ID);
     await user.type(within(dialog).getByRole("textbox", { name: "Subject" }), "Call back");
     await user.click(within(dialog).getByRole("button", { name: "Create task" }));
     await waitFor(() => expect(api.callsTo("POST", LIST)).toHaveLength(1));
@@ -431,7 +448,7 @@ describe("a meeting that has started is offered Complete without a reload (R9, P
 
 describe("the task/meeting dialog asks before discarding typing (R10, P3)", () => {
   it("Escape with unsaved input asks; Keep editing keeps it; Discard closes", async () => {
-    mockApi({ ...SUMMARY_ROUTE, [`GET ${LIST}`]: { status: 200, body: page([]) }, [`GET ${ME}/leads`]: { status: 200, body: page([]) } });
+    mockApi({ ...SUMMARY_ROUTE, [`GET ${LIST}`]: { status: 200, body: page([]) }, ...RECENT_ROUTE });
     renderWithProviders(<ActivitiesView />, { viewer: SALES });
     const user = userEvent.setup();
     await screen.findByText("No activities yet");
@@ -450,13 +467,29 @@ describe("the task/meeting dialog asks before discarding typing (R10, P3)", () =
   });
 
   it("an untouched dialog closes at once", async () => {
-    mockApi({ ...SUMMARY_ROUTE, [`GET ${LIST}`]: { status: 200, body: page([]) }, [`GET ${ME}/leads`]: { status: 200, body: page([]) } });
+    mockApi({ ...SUMMARY_ROUTE, [`GET ${LIST}`]: { status: 200, body: page([]) }, ...RECENT_ROUTE });
     renderWithProviders(<ActivitiesView />, { viewer: SALES });
     const user = userEvent.setup();
     await screen.findByText("No activities yet");
     await user.click(screen.getByRole("button", { name: "New task" }));
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog", { name: "New task" })).not.toBeInTheDocument();
+  });
+
+  it("an opportunity chosen (nothing typed) is something to discard too", async () => {
+    mockApi({ ...SUMMARY_ROUTE, [`GET ${LIST}`]: { status: 200, body: page([]) }, ...RECENT_ROUTE });
+    renderWithProviders(<ActivitiesView />, { viewer: SALES });
+    const user = userEvent.setup();
+    await screen.findByText("No activities yet");
+    await user.click(screen.getByRole("button", { name: "New task" }));
+    const dialog = screen.getByRole("dialog", { name: "New task" });
+    const deal = within(dialog).getByRole("combobox", { name: "Opportunity" });
+    await within(deal).findByRole("option", { name: /Hospital Analyzer Project/ });
+    await user.selectOptions(deal, OPPORTUNITY_ID);
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(within(dialog).getByText("Discard what you typed?")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Keep editing" }));
+    expect(within(dialog).getByRole("combobox", { name: "Opportunity" })).toHaveValue(OPPORTUNITY_ID);
   });
 });
 
@@ -483,42 +516,64 @@ describe("rescheduling a meeting moves its end too (R11, P3)", () => {
   });
 });
 
-describe("a reassignment out of the viewed workspace (live walkthrough)", () => {
-  it("doesn't refetch the lead's timeline or open work where the lead no longer is", async () => {
-    const RAHUL = `/api/v1/workspaces/${RAHUL_ID}`;
-    nav.pathname = `/admin/users/${RAHUL_ID}/leads/${LEAD_ID}`;
+describe("a change of owner out of the viewed workspace (live walkthrough)", () => {
+  const RAHUL = `/api/v1/workspaces/${RAHUL_ID}`;
+  const RAHULS_DEAL = `${RAHUL}/opportunities/${OPPORTUNITY_ID}`;
+
+  // Open work is on the Overview tab, the timeline on History: each is checked where it is shown.
+  it.each([
+    ["Overview", "open work", `${RAHUL}/activities`, ["activities", "current", RAHUL_ID, OPPORTUNITY_ID]],
+    ["History", "timeline", `${RAHULS_DEAL}/timeline`, ["timeline", "opportunity", RAHUL_ID, OPPORTUNITY_ID]],
+  ])("from the %s tab: doesn't refetch the deal or its %s where the deal no longer is", async (tab, _what, shown, cached) => {
+    nav.pathname = `/admin/users/${RAHUL_ID}/pipeline/${OPPORTUNITY_ID}`;
     const api = mockApi({
-      "GET /api/v1/config/lead-options": { status: 200, body: LEAD_OPTIONS },
-      [`GET ${RAHUL}/leads/${LEAD_ID}`]: { status: 200, body: makeLead() },
-      [`GET ${RAHUL}/leads/${LEAD_ID}/timeline`]: { status: 200, body: page([makeEntry()]) },
-      [`GET ${RAHUL}/activities`]: { status: 200, body: page([]) },
+      ...PIPELINE_ROUTES,
+      [`GET ${RAHULS_DEAL}`]: { status: 200, body: makeOpportunity() },
+      [`GET ${RAHULS_DEAL}/history`]: { status: 200, body: page([]) },
+      [`GET ${RAHULS_DEAL}/negotiated-prices`]: { status: 200, body: page([]) },
+      [`GET ${RAHULS_DEAL}/timeline`]: { status: 200, body: page([makeEntry()]) },
+      [`GET ${RAHUL}/activities`]: { status: 200, body: page([asListItem(makeActivity())]) },
       "GET /api/v1/assignees": {
         status: 200,
         body: { results: [{ id: PRIYA_ID, full_name: "Priya Patel", email: "priya@example.test" }], next: null, previous: null },
       },
-      [`POST ${RAHUL}/leads/${LEAD_ID}/assign`]: {
+      [`POST ${RAHULS_DEAL}/assign`]: {
         status: 200,
-        body: makeLead({ owner: { id: PRIYA_ID, full_name: "Priya Patel", is_active: true }, version: 4 }),
+        body: makeOpportunity({ owner: { id: PRIYA_ID, full_name: "Priya Patel", is_active: true }, version: 3 }),
       },
     });
-    const view = renderWithProviders(<LeadView leadId={LEAD_ID} />, { viewer: adminViewer });
+    const view = renderWithProviders(<OpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: adminViewer });
     const user = userEvent.setup();
-    await screen.findByText(/Lead created/);
-    await waitFor(() => expect(api.callsTo("GET", `${RAHUL}/activities`)).toHaveLength(1));
-    await user.click(screen.getByRole("button", { name: "Reassign" }));
-    const dialog = screen.getByRole("dialog", { name: "Reassign Asha Mehta" });
+    await screen.findByRole("region", { name: "Open work" });
+    if (tab === "History") {
+      await user.click(screen.getByRole("tab", { name: "History" }));
+      await screen.findByText(/created in/);
+    } else {
+      await screen.findByText("Send the revised quotation");
+    }
+    await waitFor(() => expect(api.callsTo("GET", shown)).toHaveLength(1));
+    await user.click(screen.getByRole("button", { name: "More actions for Hospital Analyzer Project" }));
+    await user.click(screen.getByRole("menuitem", { name: "Change owner" }));
+    const dialog = screen.getByRole("dialog", { name: "Change owner" });
     const owner = within(dialog).getByRole("combobox", { name: "New owner" });
-    await waitFor(() => expect(owner).toBeEnabled());
+    await within(owner).findByRole("option", { name: /Priya Patel/ });
     await user.selectOptions(owner, PRIYA_ID);
-    await user.click(within(dialog).getByRole("button", { name: "Reassign lead" }));
-    await waitFor(() => expect(nav.push).toHaveBeenCalledWith(`/admin/users/${RAHUL_ID}/leads`));
+    await user.click(within(dialog).getByRole("button", { name: "Change owner" }));
+    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`/admin/users/${RAHUL_ID}/pipeline`));
+    expect(api.callsTo("POST", `${RAHULS_DEAL}/assign`)[0]!.body).toEqual({ owner: PRIYA_ID, version: 2 });
     await new Promise((resolve) => setTimeout(resolve, 50));
-    // Each was requested once, before the reassignment: the timeline would now be a 404.
-    expect(api.callsTo("GET", `${RAHUL}/leads/${LEAD_ID}/timeline`)).toHaveLength(1);
-    expect(api.callsTo("GET", `${RAHUL}/activities`)).toHaveLength(1);
-    expect(screen.queryByText(/timeline couldn't be loaded/)).not.toBeInTheDocument();
+    // Each was requested once, before the change: here they would now be 404s.
+    expect(api.callsTo("GET", shown)).toHaveLength(1);
+    expect(api.callsTo("GET", RAHULS_DEAL)).toHaveLength(1);
+    expect(screen.queryByText(/couldn't be loaded/)).not.toBeInTheDocument();
+    // While the page is still on screen its data stays (stale, not refetched)...
+    expect(view.client.getQueryState(cached)!.isInvalidated).toBe(true);
+    expect(view.client.getQueryState(["pipeline", "detail", RAHUL_ID, OPPORTUNITY_ID])!.isInvalidated).toBe(true);
     view.unmount();
-    expect(view.client.getQueryData(["timeline", "lead", RAHUL_ID, LEAD_ID])).toBeUndefined();
-    expect(view.client.getQueryData(["activities", "current", RAHUL_ID, LEAD_ID, ""])).toBeUndefined();
+    // ...and once it is gone, what was cached for the deal in Rahul's workspace is dropped, so
+    // coming back never shows it as it was before the "not found".
+    expect(view.client.getQueryState(cached)).toBeUndefined();
+    expect(view.client.getQueryState(["pipeline", "detail", RAHUL_ID, OPPORTUNITY_ID])).toBeUndefined();
+    expect(view.client.getQueryState(["activities", "deal-notes", RAHUL_ID, OPPORTUNITY_ID])).toBeUndefined();
   });
 });

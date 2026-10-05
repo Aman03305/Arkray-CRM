@@ -4,7 +4,7 @@
  * The URL is the single source of truth, so the selected-user context survives navigation,
  * reloads and shared links without any client state:
  *
- *   /dashboard, /leads, ...                 -> own workspace ("me"), or the whole
+ *   /dashboard, /pipeline, ...              -> own workspace ("me"), or the whole
  *                                              organisation ("all") for viewers with crm.view_all
  *   /admin/users/{userId}/dashboard, ...    -> that user's workspace (admin, audited server-side)
  *
@@ -17,13 +17,13 @@
  */
 import { hasCapability, type Viewer } from "./viewer";
 
-export const WORKSPACE_SECTIONS = ["dashboard", "pipeline", "leads", "activities"] as const;
+// No Leads: a deal carries its customer (ADR-0027).
+export const WORKSPACE_SECTIONS = ["dashboard", "pipeline", "activities"] as const;
 export type WorkspaceSection = (typeof WORKSPACE_SECTIONS)[number];
 
 export const SECTION_LABELS: Record<WorkspaceSection, string> = {
   dashboard: "Dashboard",
   pipeline: "Pipeline",
-  leads: "Leads",
   activities: "Activities",
 };
 
@@ -82,7 +82,7 @@ export function workspaceHref(workspace: Workspace, section: WorkspaceSection): 
     : `/${section}`;
 }
 
-/** The way back to a module of this workspace, e.g. from a lead that isn't found. */
+/** The way back to a module of this workspace, e.g. from a deal that isn't found. */
 export function sectionBack(workspace: Workspace, section: WorkspaceSection): { href: string; label: string } {
   return { href: workspaceHref(workspace, section), label: `Back to ${SECTION_LABELS[section]}` };
 }
@@ -90,15 +90,6 @@ export function sectionBack(workspace: Workspace, section: WorkspaceSection): { 
 /** A user's CRM workspace, opened by an administrator (their Dashboard unless stated). */
 export function userWorkspaceHref(userId: string, section: WorkspaceSection = "dashboard"): string {
   return workspaceHref({ kind: "user", userId: userId.toLowerCase() }, section);
-}
-
-/** A lead's page in this workspace, e.g. /leads/{id} or /admin/users/{userId}/leads/{id}. */
-export function leadHref(workspace: Workspace, leadId: string, action?: "edit"): string {
-  return `${workspaceHref(workspace, "leads")}/${encodeURIComponent(leadId)}${action ? `/${action}` : ""}`;
-}
-
-export function newLeadHref(workspace: Workspace): string {
-  return `${workspaceHref(workspace, "leads")}/new`;
 }
 
 export function workspaceApiSegment(workspace: Workspace): string {
@@ -132,10 +123,9 @@ export function opportunityHref(workspace: Workspace, opportunityId: string, act
   return `${workspaceHref(workspace, "pipeline")}/${encodeURIComponent(opportunityId)}${action ? `/${action}` : ""}`;
 }
 
-/** The new-opportunity form, optionally for one lead (a UUID, never a name, in the URL). */
-export function newOpportunityHref(workspace: Workspace, leadId?: string): string {
-  const base = `${workspaceHref(workspace, "pipeline")}/new`;
-  return leadId ? `${base}?lead=${encodeURIComponent(leadId)}` : base;
+/** The new-opportunity form (over the board). */
+export function newOpportunityHref(workspace: Workspace): string {
+  return `${workspaceHref(workspace, "pipeline")}/new`;
 }
 
 /** Ask Arkray in this workspace: /ask, or /admin/users/{userId}/ask. */

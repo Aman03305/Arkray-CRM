@@ -184,8 +184,10 @@ sequenceDiagram
 - Authenticated pages are client-rendered against the same-origin API; the session cookie
   is HTTP-only and never visible to JavaScript ([ADR-0003](adr/0003-session-authentication.md)).
 - **The URL is the source of truth for the workspace** ([ADR-0010](adr/0010-frontend-workspace-routing.md)):
-  `/leads` is the viewer's own workspace (organisation-wide for admins), while
-  `/admin/users/{id}/leads` is that user's. The same module views render in every workspace
+  `/pipeline` is the viewer's own workspace (organisation-wide for admins), while
+  `/admin/users/{id}/pipeline` is that user's. The modules are Dashboard, Pipeline and
+  Activities: Leads left the UI ([ADR-0027](adr/0027-leads-removed-from-the-ui.md)); the lead
+  stays in the backend as each deal's hidden customer record. The same module views render in every workspace
   and only change the API path (`/api/v1/workspaces/{me|all|id}/...`). A path below
   `/admin/users/` whose id is not a user id names no workspace, so it renders "not found",
   never a fallback to other records. The selected-user frame renders a page only when the

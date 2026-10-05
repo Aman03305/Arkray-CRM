@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
 
 import { Alert } from "@/components/ui/Alert";
@@ -9,12 +9,13 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Drawer } from "@/components/ui/Drawer";
 import { SelectField, TextAreaField, TextField } from "@/components/ui/Field";
 import { useFocusFirstInvalid } from "@/components/ui/useFocusFirstInvalid";
-import { leadKeys, leadsApi } from "@/features/leads/api";
+import { OwnerSelect } from "@/features/users/OwnerSelect";
 import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
-import type { CustomField, Lead, Opportunity, OpportunityCreateRequest } from "@/lib/api/types";
+import type { CustomField, Opportunity, OpportunityCreateRequest } from "@/lib/api/types";
 import { businessToday } from "@/lib/format";
 import { formatPercent, parseAmountInput } from "@/lib/money";
 import { randomUuid } from "@/lib/random";
+import { useViewer } from "@/lib/viewer-context";
 import type { Workspace } from "@/lib/workspace";
 
 import { pipelineApi, pipelineKeys } from "./api";
@@ -36,9 +37,17 @@ import {
   validateCustom,
   validateDraft,
 } from "./draft";
-import { activeStages, defaultPipeline, firstOpenStage, isNegotiation, useOpportunityWriteSync, usePipeline, usePipelines } from "./hooks";
-import { LeadPicker } from "./LeadPicker";
-import { StageName } from "./PipelineBits";
+import {
+  activeStages,
+  defaultPipeline,
+  firstOpenStage,
+  isNegotiation,
+  pipelinePermissions,
+  useOpportunityWriteSync,
+  usePipeline,
+  usePipelines,
+} from "./hooks";
+import { CustomerName, StageName } from "./PipelineBits";
 
 const FORM_ID = "opportunity-drawer-form";
 const NO_FIELDS: readonly CustomField[] = [];
@@ -47,8 +56,7 @@ interface OpportunityDrawerProps {
   workspace: Workspace;
   /** null: create. */
   opportunity: Opportunity | null;
-  /** Create: a lead chosen beforehand (its page), and the pipeline the board shows. */
-  leadId?: string;
+  /** Create: the pipeline the board shows. */
   pipelineId?: string;
   onClose: () => void;
   onSaved: (opportunity: Opportunity, created: boolean) => void;
@@ -57,10 +65,13 @@ interface OpportunityDrawerProps {
 /**
  * New or edit opportunity, in a panel on the right: the board (or the deal) stays visible
  * behind it on wide screens; full width on phones. Grouped: basics, customer, instrument,
- * closing, additional (the pipeline's custom fields).
+ * closing, additional (the pipeline's custom fields). A new opportunity's customer details
+ * are its customer (ADR-0027: there is no Leads screen to pick one from); organisation-wide
+ * its owner is chosen here, elsewhere it is the workspace's user.
  */
-export function OpportunityDrawer({ workspace, opportunity, leadId, pipelineId: boardPipeline, onClose, onSaved }: OpportunityDrawerProps) {
+export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPipeline, onClose, onSaved }: OpportunityDrawerProps) {
   const queryClient = useQueryClient();
+  const choosesOwner = pipelinePermissions(useViewer(), workspace).choosesOwner;
   const pipelines = usePipelines(workspace);
   const sync = useOpportunityWriteSync(workspace);
   const editing = opportunity !== null;
@@ -71,8 +82,8 @@ export function OpportunityDrawer({ workspace, opportunity, leadId, pipelineId: 
   );
   const [version, setVersion] = useState(opportunity?.version ?? 0);
   const [draft, setDraft] = useState<Draft>(base);
-  const [lead, setLead] = useState(leadId ?? "");
-  const [leadLabel, setLeadLabel] = useState("");
+  const [owner, setOwner] = useState("");
+  const [ownerLabel, setOwnerLabel] = useState("");
   const [pipelineId, setPipelineId] = useState(boardPipeline ?? "");
   const [stageId, setStageId] = useState("");
   const [negotiatedPrice, setNegotiatedPrice] = useState("");
@@ -114,25 +125,10 @@ export function OpportunityDrawer({ workspace, opportunity, leadId, pipelineId: 
     setCustom(initial);
   }, [pipeline?.id, fields, editing, opportunity]);
 
-  // A lead chosen here or given (its page): fill the customer details still empty.
-  const chosenLead = useQuery({
-    queryKey: leadKeys.detail(workspace, lead),
-    queryFn: () => leadsApi.get(workspace, lead),
-    enabled: Boolean(lead) && !editing,
-  });
-  const prefilledFor = useRef<string | null>(null);
-  useEffect(() => {
-    const found = chosenLead.data;
-    if (!found || editing || prefilledFor.current === found.id) return;
-    prefilledFor.current = found.id;
-    setDraft((d) => ({ ...d, ...customerFromLead(found, d) }));
-  }, [chosenLead.data, editing]);
-  const shownLeadLabel = leadLabel || (chosenLead.data && chosenLead.data.id === lead ? chosenLead.data.display_name : "");
-
   const dirty =
     changedFields(base, draft).length > 0 ||
     Object.keys(changedCustomValues(customBase, custom)).length > 0 ||
-    (!editing && (lead !== (leadId ?? "") || stageId !== ""));
+    (!editing && (owner !== "" || stageId !== ""));
 
   const save = useMutation({
     mutationFn: () => {
@@ -146,7 +142,7 @@ export function OpportunityDrawer({ workspace, opportunity, leadId, pipelineId: 
       }
       const price = parseAmountInput(negotiatedPrice);
       const body = createRequest(manualDraft(), {
-        lead,
+        owner: choosesOwner ? owner : undefined,
         pipeline: pipeline?.id,
         stage: stageId || undefined,
         stageProbability: stage?.probability,
@@ -204,7 +200,7 @@ export function OpportunityDrawer({ workspace, opportunity, leadId, pipelineId: 
       return;
     }
     const problems: Problems = {
-      ...validateDraft(manualDraft(), { requireLead: !editing, lead }),
+      ...validateDraft(manualDraft(), { requireOwner: !editing && choosesOwner, owner }),
       ...validateCustom(fields, custom, !editing),
     };
     if (!editing && isNegotiation(stage)) {
@@ -251,7 +247,9 @@ export function OpportunityDrawer({ workspace, opportunity, leadId, pipelineId: 
     save.reset();
   };
 
-  const known = new Set([...Object.keys(EMPTY_DRAFT), "lead", "stage", "pipeline", "negotiated_price"]);
+  // An owner error shows under the Owner field organisation-wide; elsewhere there is none (a
+  // deactivated user's workspace takes nothing new), so it is the banner's.
+  const known = new Set([...Object.keys(EMPTY_DRAFT), ...(choosesOwner ? ["owner"] : []), "stage", "pipeline", "negotiated_price"]);
   const unmapped =
     save.isError && !isApiError(save.error, 409) && !Object.keys(server).some((f) => known.has(f) || f.startsWith("custom_fields"));
   const banner = describeError(save.error);
@@ -310,7 +308,7 @@ export function OpportunityDrawer({ workspace, opportunity, leadId, pipelineId: 
           )
         ) : unmapped ? (
           <Alert tone="error" requestId={banner.requestId}>
-            {server.non_field_errors?.join(" ") ?? banner.message}
+            {(server.non_field_errors ?? server.owner)?.join(" ") ?? banner.message}
           </Alert>
         ) : null}
         {reviewFields.length ? (
@@ -333,24 +331,29 @@ export function OpportunityDrawer({ workspace, opportunity, leadId, pipelineId: 
           />
           {editing ? (
             <p className="text-sm text-slate-600 sm:col-span-2">
-              {opportunity.lead.restricted ? "Lead in another workspace" : opportunity.lead.display_name}
+              <CustomerName lead={opportunity.lead} />
               {" · "}
               {opportunity.pipeline.name} · <StageName stage={opportunity.stage} />
             </p>
           ) : (
             <>
-              <div className="sm:col-span-2">
-                <LeadPicker
-                  workspace={workspace}
-                  value={lead}
-                  valueLabel={shownLeadLabel}
-                  onChange={(id, label) => {
-                    setLead(id);
-                    setLeadLabel(label);
-                  }}
-                  errors={errors.lead}
-                />
-              </div>
+              {choosesOwner ? (
+                <div className="sm:col-span-2">
+                  <OwnerSelect
+                    label="Owner"
+                    name="owner"
+                    placeholder="Choose an owner"
+                    value={owner}
+                    valueLabel={ownerLabel}
+                    onChange={(id, label) => {
+                      setOwner(id);
+                      setOwnerLabel(label);
+                    }}
+                    errors={errors.owner}
+                    hint="The salesperson responsible for this customer and opportunity."
+                  />
+                </div>
+              ) : null}
               {usable.length > 1 ? (
                 <SelectField
                   label="Pipeline"
@@ -476,19 +479,3 @@ function Group({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-/** The customer details a lead suggests, for the fields still empty. */
-function customerFromLead(lead: Lead, draft: Draft): Partial<Draft> {
-  const address = [lead.address_line_1, lead.address_line_2, [lead.city, lead.state, lead.postal_code].filter(Boolean).join(" ")]
-    .filter((line) => line.trim())
-    .join("\n");
-  const suggested: Partial<Draft> = {
-    account_name: lead.organization_name || lead.display_name,
-    customer_name: lead.display_name,
-    contact_phone: lead.mobile || lead.phone,
-    contact_email: lead.email,
-    address,
-  };
-  return Object.fromEntries(
-    Object.entries(suggested).filter(([key, value]) => value && !draft[key as keyof Draft].trim()),
-  ) as Partial<Draft>;
-}

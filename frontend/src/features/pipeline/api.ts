@@ -7,9 +7,7 @@
 import { apiFetch } from "@/lib/api/client";
 import type {
   Board,
-  Conversion,
   FieldInput,
-  LeadConvertRequest,
   NegotiationPricePage,
   Opportunity,
   OpportunityCreateRequest,
@@ -26,7 +24,8 @@ import { type Workspace, workspaceApiPath, workspaceApiSegment } from "@/lib/wor
 
 export const CARDS_PER_STAGE = 20;
 export const PAGE_SIZE = 25;
-export const LEAD_OPPORTUNITIES_PAGE_SIZE = 10;
+/** How many recent open opportunities a picker lists before anything is typed. */
+export const RECENT_OPEN_PAGE_SIZE = 20;
 
 /** The board's filters (allowlisted server-side; owner only organisation-wide). */
 export interface BoardFilters {
@@ -74,12 +73,6 @@ export function stageListPath(workspace: Workspace, filters: BoardFilters, reque
   return `${workspaceApiPath(workspace, "opportunities")}?${params.toString()}`;
 }
 
-export function leadOpportunitiesPath(workspace: Workspace, leadId: string, cursor: string | null): string {
-  const params = new URLSearchParams({ lead: leadId, page_size: String(LEAD_OPPORTUNITIES_PAGE_SIZE) });
-  if (cursor) params.set("cursor", cursor);
-  return `${workspaceApiPath(workspace, "opportunities")}?${params.toString()}`;
-}
-
 export const pipelineKeys = {
   /** Everything workspace-scoped in the pipeline (invalidated after any CRM write). */
   all: ["pipeline"] as const,
@@ -91,8 +84,8 @@ export const pipelineKeys = {
   detail: (workspace: Workspace, id: string) => ["pipeline", "detail", workspaceApiSegment(workspace), id] as const,
   history: (workspace: Workspace, id: string, cursor: string | null) =>
     ["pipeline", "history", workspaceApiSegment(workspace), id, cursor] as const,
-  forLead: (workspace: Workspace, leadId: string, cursor: string | null) =>
-    ["pipeline", "for-lead", workspaceApiSegment(workspace), leadId, cursor] as const,
+  /** Recent open opportunities, to choose one (a new task or meeting). */
+  recentOpen: (workspace: Workspace) => ["pipeline", "recent-open", workspaceApiSegment(workspace)] as const,
   /** The pipelines this workspace may use (shared, its owner's own, and any holding its
    * deals): under the workspace root, so a user's pipelines never show in another's. */
   pipelines: (workspace: Workspace, archived = false) =>
@@ -138,8 +131,8 @@ export const pipelineApi = {
     apiFetch<Board>(boardPath(workspace, filters, cardsPerStage)),
   stageList: (workspace: Workspace, filters: BoardFilters, request: StageListRequest) =>
     apiFetch<OpportunityPage>(stageListPath(workspace, filters, request)),
-  forLead: (workspace: Workspace, leadId: string, cursor: string | null) =>
-    apiFetch<OpportunityPage>(leadOpportunitiesPath(workspace, leadId, cursor)),
+  recentOpen: (workspace: Workspace) =>
+    apiFetch<OpportunityPage>(`${workspaceApiPath(workspace, "opportunities")}?status=open&page_size=${RECENT_OPEN_PAGE_SIZE}`),
   get: (workspace: Workspace, id: string) => apiFetch<Opportunity>(opportunity(workspace, id)),
   history: (workspace: Workspace, id: string, cursor: string | null) => {
     const params = new URLSearchParams({ page_size: "50" });
@@ -172,10 +165,8 @@ export const pipelineApi = {
     apiFetch<Opportunity>(opportunity(workspace, id, "archive"), { method: "POST", body: { version } }),
   restore: (workspace: Workspace, id: string, version: number) =>
     apiFetch<Opportunity>(opportunity(workspace, id, "restore"), { method: "POST", body: { version } }),
-  convert: (workspace: Workspace, leadId: string, body: LeadConvertRequest, idempotencyKey: string) =>
-    apiFetch<Conversion>(workspaceApiPath(workspace, `leads/${encodeURIComponent(leadId)}/convert`), {
-      method: "POST",
-      body,
-      headers: { "Idempotency-Key": idempotencyKey },
-    }),
+  /** Change an open opportunity's owner: its customer, with its other open deals and
+   * current work, moves to them (crm.assign_any). */
+  assign: (workspace: Workspace, id: string, owner: string, version: number) =>
+    apiFetch<Opportunity>(opportunity(workspace, id, "assign"), { method: "POST", body: { owner, version } }),
 };

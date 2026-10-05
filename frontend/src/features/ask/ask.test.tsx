@@ -14,6 +14,8 @@ import type { AskAnswer, AskQuestion } from "@/lib/api/types";
 import { adminViewer, makeViewer } from "@/test/fixtures";
 import { apiError, createTestQueryClient, mockApi, renderWithProviders } from "@/test/render";
 
+import { recordHref } from "./Answer";
+
 const nav = vi.hoisted(() => ({ pathname: "/ask" }));
 vi.mock("next/navigation", () => ({
   usePathname: () => nav.pathname,
@@ -29,6 +31,8 @@ const RAHUL = "3f2b8c1e-9a4d-4e2f-8b7a-1c2d3e4f5a6b";
 const PRIYA = "7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
 const LEAD = "11111111-1111-4111-8111-111111111111";
 const NOTE = "22222222-2222-4222-8222-222222222222";
+const DEAL = "33333333-3333-4333-8333-333333333333";
+const TASK = "44444444-4444-4444-8444-444444444444";
 const asker = makeViewer({ features: { ask: true } });
 const admin = { ...adminViewer, features: { ask: true } };
 
@@ -101,12 +105,18 @@ describe("answers", () => {
             type: "paragraph",
             parts: [
               { text: '<img src=x onerror="alert(1)"> see ' },
+              { ref: `opportunity:${DEAL}` },
+              { text: " for " },
               { ref: `lead:${LEAD}` },
               { ref: "note:99999999-9999-4999-8999-999999999999" },
             ],
           },
         ],
-        sources: [{ ref: `lead:${LEAD}`, kind: "lead", id: LEAD, label: "Dr Mehta <b>bold</b>", detail: "" }],
+        sources: [
+          { ref: `opportunity:${DEAL}`, kind: "opportunity", id: DEAL, label: "Analyser <i>upgrade</i>", detail: "" },
+          { ref: `lead:${LEAD}`, kind: "lead", id: LEAD, label: "Dr Mehta <b>bold</b>", detail: "" },
+          { ref: `note:${NOTE}`, kind: "note", id: NOTE, label: "Call notes", detail: "" },
+        ],
         citations: [{ ref: `note:${NOTE}`, kind: "note", label: "Note", snippet: "Asked <script>x()</script> about price", when: "3 Oct 2026, 10:30 AM" }],
         provenance: { mode: "llm", tools: ["search_notes"], grounded: true, model: "m" },
       }),
@@ -118,15 +128,90 @@ describe("answers", () => {
     const { container } = renderWithProviders(<AskWorkspaceView />, { viewer: admin });
     expect(await screen.findByText("Answers come only from Rahul Sharma's records.")).toBeInTheDocument();
     await askFor("Tell me about Dr Mehta");
-    const link = await screen.findByRole("link", { name: "Dr Mehta <b>bold</b>" });
-    expect(link).toHaveAttribute("href", `/admin/users/${RAHUL}/leads/${LEAD}`);
-    expect(container.querySelector("img, script, b")).toBeNull();
+    const thread = await screen.findByRole("list", { name: "Questions and answers" });
+    expect(await within(thread).findByRole("link", { name: "Analyser <i>upgrade</i>" })).toHaveAttribute(
+      "href",
+      `/admin/users/${RAHUL}/pipeline/${DEAL}`,
+    );
+    expect(within(thread).getByRole("link", { name: "Call notes" })).toHaveAttribute("href", `/admin/users/${RAHUL}/activities/${NOTE}`);
+    // The customer (the API's lead) has no page: named, never linked.
+    expect(within(thread).getByText("Dr Mehta <b>bold</b>").closest("a")).toBeNull();
+    expect(container.querySelector("img, script, b, i")).toBeNull();
     expect(screen.getByText(/<img src=x onerror="alert\(1\)"> see/)).toBeInTheDocument();
     // A reference the server didn't resolve is not rendered at all.
     expect(screen.getAllByRole("link").map((l) => l.getAttribute("href"))).not.toContain(
       `/admin/users/${RAHUL}/activities/99999999-9999-4999-8999-999999999999`,
     );
+    expect(screen.getAllByRole("link").some((l) => l.getAttribute("href")?.includes("/leads"))).toBe(false);
     expect(screen.getByText("Asked <script>x()</script> about price")).toBeInTheDocument();
+  });
+
+  it("names a cited customer (the API's lead) as plain text labelled Customer, never as a link", async () => {
+    nav.pathname = "/ask";
+    const reply = question({
+      answer: answer({
+        blocks: [{ type: "paragraph", parts: [{ text: "They asked about price." }] }],
+        sources: [
+          { ref: `lead:${LEAD}`, kind: "lead", id: LEAD, label: "Dr Mehta", detail: "" },
+          { ref: `note:${NOTE}`, kind: "note", id: NOTE, label: "Call notes", detail: "" },
+        ],
+        citations: [
+          { ref: `lead:${LEAD}`, kind: "lead", label: "Dr Mehta", snippet: "Prefers morning calls", when: "" },
+          { ref: `note:${NOTE}`, kind: "note", label: "Call notes", snippet: "Asked about price", when: "3 Oct 2026, 10:30 AM" },
+        ],
+        provenance: { mode: "llm", tools: ["search_notes"], grounded: true, model: "m" },
+      }),
+    });
+    mockApi(routesFor("me", { "POST /api/v1/workspaces/me/ask": { status: 201, body: reply } }));
+    renderWithProviders(<AskWorkspaceView />, { viewer: asker });
+    await askFor("What did Dr Mehta ask?");
+    const quote = (await screen.findByText("Prefers morning calls")).closest("li")!;
+    expect(within(quote).getByText("Customer")).toBeInTheDocument();
+    expect(within(quote).getByText("Dr Mehta")).toBeInTheDocument();
+    expect(within(quote).queryByRole("link")).not.toBeInTheDocument();
+    expect(quote).not.toHaveTextContent(/lead/i);
+    // The note quoted next to it still opens in this workspace.
+    const note = screen.getByText("Asked about price").closest("li")!;
+    expect(within(note).getByText("Note")).toBeInTheDocument();
+    expect(within(note).getByRole("link", { name: "Call notes" })).toHaveAttribute("href", `/activities/${NOTE}`);
+  });
+
+  it("lists a customer source as Customer without a link; opportunity and activity sources link in this workspace", async () => {
+    nav.pathname = `/admin/users/${RAHUL}/ask`;
+    const reply = question({
+      answer: answer({
+        sources: [
+          { ref: `lead:${LEAD}`, kind: "lead", id: LEAD, label: "Dr Mehta", detail: "" },
+          { ref: `opportunity:${DEAL}`, kind: "opportunity", id: DEAL, label: "Analyser upgrade", detail: "" },
+          { ref: `task:${TASK}`, kind: "task", id: TASK, label: "Send the quote", detail: "" },
+        ],
+      }),
+    });
+    mockApi({
+      ...routesFor(RAHUL, { [`POST /api/v1/workspaces/${RAHUL}/ask`]: { status: 201, body: reply } }),
+      [`GET /api/v1/workspaces/${RAHUL}`]: subject(RAHUL, "Rahul Sharma"),
+    });
+    renderWithProviders(<AskWorkspaceView />, { viewer: admin });
+    await askFor("Which deals are open?");
+    const heading = await screen.findByRole("heading", { name: "Sources" });
+    const items = within(heading.parentElement!).getAllByRole("listitem");
+    expect(items.map((item) => item.textContent)).toEqual([
+      "Customer: Dr Mehta",
+      "Opportunity: Analyser upgrade",
+      "Task: Send the quote",
+    ]);
+    expect(within(items[0]!).queryByRole("link")).not.toBeInTheDocument();
+    expect(within(items[1]!).getByRole("link", { name: "Analyser upgrade" })).toHaveAttribute("href", `/admin/users/${RAHUL}/pipeline/${DEAL}`);
+    expect(within(items[2]!).getByRole("link", { name: "Send the quote" })).toHaveAttribute("href", `/admin/users/${RAHUL}/activities/${TASK}`);
+  });
+
+  it("recordHref gives a customer record no page, and keeps the others in the workspace", () => {
+    const rahul = { kind: "user", userId: RAHUL } as const;
+    expect(recordHref(rahul, "lead", LEAD)).toBeNull();
+    expect(recordHref({ kind: "self" }, "lead", LEAD)).toBeNull();
+    expect(recordHref(rahul, "opportunity", DEAL)).toBe(`/admin/users/${RAHUL}/pipeline/${DEAL}`);
+    expect(recordHref(rahul, "meeting", TASK)).toBe(`/admin/users/${RAHUL}/activities/${TASK}`);
+    expect(recordHref({ kind: "organization" }, "note", NOTE)).toBe(`/activities/${NOTE}`);
   });
 
   it("polls a pending question until it is answered", async () => {
@@ -162,7 +247,7 @@ describe("answers", () => {
     );
     renderWithProviders(<AskWorkspaceView />, { viewer: asker });
     await askFor("Why did we lose?");
-    expect(await screen.findByRole("alert")).toHaveTextContent("Pipeline, lead, task and meeting questions");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Pipeline, customer, task and meeting questions");
   });
 
   it("explains a refused question (rate limit)", async () => {

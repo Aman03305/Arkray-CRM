@@ -8,7 +8,7 @@ import type { OpportunityCard, Stage } from "@/lib/api/types";
 import { formatPercent } from "@/lib/money";
 import { opportunityHref, type Workspace } from "@/lib/workspace";
 
-import { Amount, CloseDate, LeadName } from "./PipelineBits";
+import { Amount, CloseDate, CustomerName } from "./PipelineBits";
 import { moveLabel, moveTargets, transitionKind } from "./transitions";
 
 export const DRAG_TYPE = "application/x-arkray-opportunity";
@@ -65,7 +65,7 @@ export function OpportunityCardView({ card, workspace, stages, showOwner, canWri
             </Link>
           </h3>
           <p className="mt-0.5 truncate text-xs text-slate-600" title={card.account_name}>
-            {card.account_name || <LeadName lead={card.lead} />}
+            {card.account_name || <CustomerName lead={card.lead} />}
           </p>
         </div>
         {actions.length ? (

@@ -76,7 +76,18 @@ class SearchOpportunitySerializer(serializers.ModelSerializer[Opportunity]):
 
     class Meta:
         model = Opportunity
-        fields = ["id", "title", "status", "stage", "lead", "owner"]
+        # The customer snapshot is the opportunity's own (shown on its card and page), and
+        # what a search may have matched besides the title (ADR-0027).
+        fields = [
+            "id",
+            "title",
+            "status",
+            "stage",
+            "account_name",
+            "customer_name",
+            "lead",
+            "owner",
+        ]
         read_only_fields = fields
 
     @extend_schema_field(LeadRefSerializer)

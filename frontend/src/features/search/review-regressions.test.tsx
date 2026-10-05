@@ -30,27 +30,30 @@ afterEach(() => {
 
 const empty = { results: [], has_more: false };
 
-/** One lead named after the query, with an id derived from it. */
-function leadFor(q: string): SearchResults {
+/** One opportunity named after the query, with an id derived from it. */
+function dealFor(q: string): SearchResults {
   const id = q.toLowerCase().startsWith("apollo")
     ? "aaaaaaaa-aaaa-4aaa-8aaa-000000000001"
     : "bbbbbbbb-bbbb-4bbb-8bbb-000000000002";
   return {
     query: q,
     terms: [q],
-    leads: {
+    leads: empty,
+    opportunities: {
       has_more: false,
       results: [
         {
           id,
-          display_name: `${q} Lead`,
-          organization_name: "",
-          status: { key: "new", name: "New", category: "open" },
+          title: `${q} Deal`,
+          status: "open",
+          stage: { id: "s1", name: "Proposal" },
+          account_name: `${q} Account`,
+          customer_name: `${q} Customer`,
+          lead: { id: "cccccccc-cccc-4ccc-8ccc-000000000003", display_name: `${q} Customer`, organization_name: "", restricted: false },
           owner: { id: RAHUL_ID, full_name: "Rahul Sharma", is_active: true },
         },
       ],
     },
-    opportunities: empty,
     tasks: empty,
     meetings: empty,
     notes: empty,
@@ -64,7 +67,7 @@ function holdable() {
     "GET /api/v1/workspaces/me/search": async (call: RecordedCall) => {
       const q = call.query.get("q")!;
       if (hold.has(q)) await new Promise<void>((resolve) => gates.set(q, resolve));
-      return { status: 200, body: leadFor(q) };
+      return { status: 200, body: dealFor(q) };
     },
   });
   /** Let the held request for `q` answer, once it has been sent. */
@@ -87,12 +90,12 @@ describe("F1: Enter opens a result of what is in the box, never of the previous 
     const user = userEvent.setup();
     const input = await openDialog(user);
     await user.type(input, "Apollo");
-    await screen.findByRole("option", { name: /^Lead: Apollo Lead/ });
+    await screen.findByRole("option", { name: /^Opportunity: Apollo Deal/ });
     hold.add("Zeta");
     await user.keyboard("{Control>}a{/Control}Zeta{Enter}");
-    expect(nav.push).not.toHaveBeenCalled(); // not Apollo's lead
+    expect(nav.push).not.toHaveBeenCalled(); // not Apollo's deal
     await release("Zeta");
-    await waitFor(() => expect(nav.push).toHaveBeenCalledWith("/leads/bbbbbbbb-bbbb-4bbb-8bbb-000000000002"));
+    await waitFor(() => expect(nav.push).toHaveBeenCalledWith("/pipeline/bbbbbbbb-bbbb-4bbb-8bbb-000000000002"));
     expect(nav.push).toHaveBeenCalledTimes(1);
   });
 
@@ -101,7 +104,7 @@ describe("F1: Enter opens a result of what is in the box, never of the previous 
     const user = userEvent.setup();
     const input = await openDialog(user);
     await user.type(input, "Apollo");
-    await screen.findByRole("option", { name: /^Lead: Apollo Lead/ });
+    await screen.findByRole("option", { name: /^Opportunity: Apollo Deal/ });
     hold.add("Zeta");
     await user.clear(input);
     await user.type(input, "Zeta");
@@ -116,15 +119,15 @@ describe("F1: Enter opens a result of what is in the box, never of the previous 
     const user = userEvent.setup();
     const input = await openDialog(user);
     await user.type(input, "Apollo");
-    await screen.findByRole("option", { name: /^Lead: Apollo Lead/ });
+    await screen.findByRole("option", { name: /^Opportunity: Apollo Deal/ });
     hold.add("Apollo Labs");
     await user.type(input, " Labs");
     await new Promise((resolve) => setTimeout(resolve, 350));
-    expect(screen.getByRole("option", { name: /^Lead: Apollo Lead/ })).toBeInTheDocument(); // dimmed
+    expect(screen.getByRole("option", { name: /^Opportunity: Apollo Deal/ })).toBeInTheDocument(); // dimmed
     await user.keyboard("{Enter}");
     expect(nav.push).not.toHaveBeenCalled();
     await release("Apollo Labs");
-    await waitFor(() => expect(nav.push).toHaveBeenCalledWith("/leads/aaaaaaaa-aaaa-4aaa-8aaa-000000000001"));
+    await waitFor(() => expect(nav.push).toHaveBeenCalledWith("/pipeline/aaaaaaaa-aaaa-4aaa-8aaa-000000000001"));
   });
 });
 
@@ -192,14 +195,14 @@ describe("F4: no guessed workspace", () => {
   });
 
   it("a user's workspace the viewer may not open has no search", () => {
-    nav.pathname = `/admin/users/${RAHUL_ID}/leads`;
+    nav.pathname = `/admin/users/${RAHUL_ID}/pipeline`;
     mockApi({});
     renderWithProviders(<SearchLauncher />, { viewer: salesViewer });
     expect(screen.getByRole("button", { name: /search/i })).toBeDisabled();
   });
 
   it("an administrator's selected workspace does", () => {
-    nav.pathname = `/admin/users/${RAHUL_ID}/leads`;
+    nav.pathname = `/admin/users/${RAHUL_ID}/pipeline`;
     mockApi({});
     renderWithProviders(<SearchLauncher />, { viewer: adminViewer });
     expect(screen.getByRole("button", { name: /search/i })).toBeEnabled();

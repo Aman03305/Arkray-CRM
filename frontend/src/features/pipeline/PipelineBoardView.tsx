@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { NotFoundView } from "@/components/ui/NotFoundView";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { OwnerSelect } from "@/features/leads/OwnerSelect";
+import { OwnerSelect } from "@/features/users/OwnerSelect";
 import { describeError, isApiError } from "@/lib/api/errors";
 import type { Board, BoardColumn, OpportunityCard, PipelineTotals, Stage } from "@/lib/api/types";
 import { setFlash, useFlash } from "@/lib/flash";
@@ -18,7 +18,7 @@ import { businessToday } from "@/lib/format";
 import { formatPercent } from "@/lib/money";
 import { hasCapability } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
-import { leadHref, opportunityHref, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
+import { opportunityHref, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
 
 import { activeBoardFilterCount, type BoardFilters, CARDS_PER_STAGE, pipelineApi, pipelineKeys } from "./api";
 import { choosePipeline, isNegotiation, pipelinePermissions, useBoardState, usePipelines, useWideLayout } from "./hooks";
@@ -39,11 +39,11 @@ type Problem = { message: string; requestId: string | null };
  * administrator (/admin/users/{id}/pipeline). Only the API path differs, and every query
  * key carries the workspace, so one user's cards or totals never appear under another's.
  */
-export function PipelineBoardView({ workspace, create }: { workspace: Workspace; create?: { leadId?: string } }) {
+export function PipelineBoardView({ workspace, create = false }: { workspace: Workspace; create?: boolean }) {
   const viewer = useViewer();
   const router = useRouter();
   // New opportunity: a panel over the board (also opened by the /pipeline/new route).
-  const [creating, setCreating] = useState<{ leadId?: string } | null>(create ?? null);
+  const [creating, setCreating] = useState(create);
   const [settings, setSettings] = useState<"edit" | "new" | null>(null);
   const segment = workspaceApiSegment(workspace);
   const permissions = pipelinePermissions(viewer, workspace);
@@ -153,7 +153,7 @@ export function PipelineBoardView({ workspace, create }: { workspace: Workspace;
   if (isApiError(board.error, 404)) return <NotFoundView />;
 
   const newOpportunity = permissions.canWrite ? (
-    <Button icon={<Plus aria-hidden="true" className="size-4" />} onClick={() => setCreating({})}>
+    <Button icon={<Plus aria-hidden="true" className="size-4" />} onClick={() => setCreating(true)}>
       New opportunity
     </Button>
   ) : null;
@@ -162,11 +162,11 @@ export function PipelineBoardView({ workspace, create }: { workspace: Workspace;
   // A pipeline of one's own (or, organisation-wide, a shared one) can be created here.
   const canCreatePipeline =
     workspace.kind === "organization" ? hasCapability(viewer, "config.manage") : permissions.canWrite;
-  // Opened by a route (a lead's "New opportunity", the header's): closing returns to where
-  // that came from (the lead, else the board); saving lands on the new deal, with its notice.
+  // Opened by a route (the header's "New opportunity"): closing returns to the board; saving
+  // lands on the new deal, with its notice.
   const closeCreate = () => {
-    setCreating(null);
-    if (create) router.replace(create.leadId ? leadHref(workspace, create.leadId) : workspaceHref(workspace, "pipeline"));
+    setCreating(false);
+    if (create) router.replace(workspaceHref(workspace, "pipeline"));
   };
   const total = columns.reduce((sum, c) => sum + c.count, 0);
   const filtered = activeBoardFilterCount(filters) > 0;
@@ -342,7 +342,6 @@ export function PipelineBoardView({ workspace, create }: { workspace: Workspace;
         <OpportunityDrawer
           workspace={workspace}
           opportunity={null}
-          leadId={creating.leadId}
           pipelineId={data?.pipeline.id}
           onClose={closeCreate}
           onSaved={(saved) => {
@@ -352,7 +351,7 @@ export function PipelineBoardView({ workspace, create }: { workspace: Workspace;
               router.replace(href);
               return;
             }
-            setCreating(null);
+            setCreating(false);
             state.setFilters({ pipeline: saved.pipeline.id });
             setNotice(`“${saved.title}” created.`);
             focusCard.current = { id: saved.id, stageId: saved.stage.id };

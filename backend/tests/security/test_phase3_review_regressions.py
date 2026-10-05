@@ -214,7 +214,7 @@ class TestArchivedLeads:
         lead = LeadFactory(owner=user_a)
         won = OpportunityFactory(lead=lead, stage=default_stage("won"))
         Lead.objects.filter(pk=lead.pk).update(archived_at=timezone.now())
-        with pytest.raises(BusinessRuleViolation, match="Restore the lead"):
+        with pytest.raises(BusinessRuleViolation, match="record is archived"):
             move(user_a, won, "negotiation")
         won.refresh_from_db()
         assert won.status == "won"
@@ -223,7 +223,7 @@ class TestArchivedLeads:
         lead = LeadFactory(owner=user_a)
         archived = OpportunityFactory(lead=lead, archived_at=timezone.now())
         Lead.objects.filter(pk=lead.pk).update(archived_at=timezone.now())
-        with pytest.raises(BusinessRuleViolation, match="Restore the lead"):
+        with pytest.raises(BusinessRuleViolation, match="record is archived"):
             services.restore_opportunity(
                 actor=user_a, scope=OWN(user_a.pk), opportunity_id=archived.pk, version=1
             )

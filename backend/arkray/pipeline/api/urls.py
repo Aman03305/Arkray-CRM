@@ -23,6 +23,7 @@ workspace_urlpatterns = [
     path("opportunities", views.OpportunityListView.as_view(), name="opportunities"),
     path(OPPORTUNITY, views.OpportunityDetailView.as_view(), name="opportunity"),
     path(f"{OPPORTUNITY}/move", views.OpportunityMoveView.as_view(), name="opportunity-move"),
+    path(f"{OPPORTUNITY}/assign", views.OpportunityAssignView.as_view(), name="opportunity-assign"),
     path(
         f"{OPPORTUNITY}/archive", views.OpportunityArchiveView.as_view(), name="opportunity-archive"
     ),

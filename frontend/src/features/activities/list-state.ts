@@ -11,9 +11,9 @@ import type { CalendarView } from "./calendar";
  * The Activities list's tab, filters and page, remembered per workspace for this page load,
  * so opening an activity and coming back restores the list as it was.
  *
- * In memory only, never in the URL or browser storage (like the Leads list): a lead filter
- * shows a lead's name, which must not end up in history or storage that outlives a
- * sign-out. Keyed by workspace, so an admin's filters in Rahul's activities never carry
+ * In memory only, never in the URL or browser storage: an opportunity filter shows the
+ * opportunity's title and customer, which must not end up in history or storage that
+ * outlives a sign-out. Keyed by workspace, so an admin's filters in Rahul's activities never carry
  * over into Priya's. An inverted date range is shown as a problem and never sent: the list
  * keeps the last valid filters (`applied`).
  */

@@ -3,7 +3,6 @@
 import { type QueryClient, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 
-import { leadKeys } from "@/features/leads/api";
 import type { Activity, ActivityListItem, ActivityPage } from "@/lib/api/types";
 import { hasCapability, type Viewer } from "@/lib/viewer";
 import type { Workspace } from "@/lib/workspace";
@@ -17,8 +16,8 @@ export interface ActivityPermissions {
 
 /**
  * What the UI offers in this workspace (mirroring identity.workspaces.authorize_write on
- * the server). Nobody picks an activity's owner (current work follows the lead), so
- * creating needs no assigning rights. Presentation only: the API decides.
+ * the server). Nobody picks an activity's owner (current work follows its opportunity's
+ * customer), so creating needs no assigning rights. Presentation only: the API decides.
  */
 export function activityPermissions(viewer: Viewer | null, workspace: Workspace): ActivityPermissions {
   return { canWrite: hasCapability(viewer, workspace.kind === "self" ? "crm.access_own" : "crm.manage_any") };
@@ -35,7 +34,7 @@ const PREVIEW_LENGTH = 240;
 /**
  * A cached list row brought up to date with the activity a write returned: its state and
  * version (the next action from that row must carry the new version, not a stale one that
- * the server would refuse with a 409). The row keeps its own lead and opportunity
+ * the server would refuse with a 409). The row keeps its own customer and opportunity
  * references: they are what the workspace it was listed in may see.
  */
 function updatedRow(row: ActivityListItem, activity: Activity): ActivityListItem {
@@ -65,8 +64,7 @@ function updatedRow(row: ActivityListItem, activity: Activity): ActivityListItem
  * wherever this workspace's lists and current-work cards hold it (so a list shown again
  * before its reload offers the right actions with the right version), and mark every
  * other activity query (lists, counts, current work) and every timeline stale, so no page
- * shows it as it was. Completing a meeting records a contact on the lead (a new version
- * and last-contacted time), so the lead's queries are marked stale too.
+ * shows it as it was.
  */
 export function syncAfterActivityWrite(queryClient: QueryClient, workspace: Workspace, activity?: Activity): void {
   const key = activity ? activityKeys.detail(workspace, activity.id) : null;
@@ -84,9 +82,6 @@ export function syncAfterActivityWrite(queryClient: QueryClient, workspace: Work
     predicate: (query) => key === null || JSON.stringify(query.queryKey) !== JSON.stringify(key),
   });
   void queryClient.invalidateQueries({ queryKey: timelineKeys.all });
-  if (!activity || (activity.type === "meeting" && activity.status === "completed")) {
-    void queryClient.invalidateQueries({ queryKey: leadKeys.all });
-  }
 }
 
 export function useActivityWriteSync(workspace: Workspace) {

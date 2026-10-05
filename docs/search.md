@@ -5,6 +5,11 @@ notes. It is **deterministic lexical search in PostgreSQL**: no AI, no embedding
 external service (semantic retrieval is Ask Arkray, Phase 8). The design decision is
 [ADR-0022](adr/0022-global-search.md).
 
+> **Since [ADR-0027](adr/0027-leads-removed-from-the-ui.md)** the UI has no Leads: the dialog
+> shows no Leads group (the API still returns one, unchanged), and an opportunity also
+> matches on its own **account and customer names**, which its results now carry. That is how
+> a customer is found: through their deals.
+
 Code: [`backend/arkray/search/`](../backend/arkray/search/) (module beside `dashboard`
 above `activities` in the [layering](architecture.md#dependency-rules)),
 [`backend/arkray/core/ranking.py`](../backend/arkray/core/ranking.py) (ranking and the
@@ -16,7 +21,7 @@ window), each module's `selectors.search`, and
 | Kind | A word matches when it occurs in | Never searched | Result shows |
 |---|---|---|---|
 | Leads | first and last name, organisation, email, phone digits (the Leads list's own rule, `leads.selectors.match_condition`) | description, address, city, amounts | name, organisation, status, owner (organisation workspace) |
-| Opportunities | title | the lead's name, description, amounts, history | title, lead, stage, Open/Won/Lost, owner (organisation workspace) |
+| Opportunities | title, account name, customer name (the opportunity's own snapshot; ADR-0027) | the lead's name, description, amounts, history | title, account and customer names (the lead's name when both are empty), stage, Open/Won/Lost, owner (organisation workspace) |
 | Tasks | title (subject) | description, the lead's name | title, status, due date, overdue, lead, owner (organisation workspace) |
 | Meetings | title and location | agenda, meeting link, the lead's name | title, start, location, status, lead, owner (organisation workspace) |
 | Notes | body | the lead's name, the author | a 240-character preview around the first search word, the lead, when it was added |
@@ -26,11 +31,12 @@ window), each module's `selectors.search`, and
   Wildcards (`%`, `_`), quotes, backslashes and SQL or regex syntax are just characters.
 - **Archived records are left out.** Won and lost opportunities, completed and cancelled
   tasks and meetings are history and are found, with their status written out.
-- **Not by the lead's name.** An opportunity, task or meeting is found by its own title,
+- **Not by the lead's name.** An opportunity, task or meeting is found by its own text,
   never its lead's name: a closed deal or completed task its owner kept after the lead was
-  reassigned shows that lead as "Lead in another workspace" (Phases 3-4), and matching on
-  the lead's name would reveal whose lead it is. Search the lead itself instead (the Leads
-  group).
+  reassigned shows that lead as "Customer in another workspace" (Phases 3-4), and matching
+  on the lead's name would reveal whose lead it is. An opportunity's account and customer
+  names are its own fields, shown to whoever sees it, so matching them reveals nothing
+  (ADR-0027).
 - No Companies or Products exist; users, audit logs, timelines and configuration are not
   searched.
 
@@ -207,7 +213,7 @@ marks trusted, created by `activities.0008` and kept on rollback like `pg_trgm`)
 
 | Index | Columns | Rows (benchmark) | Size | Build (CONCURRENTLY) |
 |---|---|---|---|---|
-| `pipeline_opp_search_trgm` | `upper(title)` where not archived | 300,000 opportunities | 17 MB | 4.1-4.5 s |
+| `pipeline_opp_text_trgm` (was `pipeline_opp_search_trgm`, title only, until `pipeline.0007`) | `upper(title \|\| ' ' \|\| account_name \|\| ' ' \|\| customer_name)` where not archived | 300,000 opportunities | 17 MB (title only; larger with the names, not re-measured) | 4.1-4.5 s (title only) |
 | `activities_task_search_trgm` | `owner_id`, `upper(title)` where task, not archived | 900,000 tasks | 47 MB | |
 | `activities_meeting_search_trgm` | `owner_id`, `upper(coalesce(title, '') \|\| coalesce(' ' \|\| coalesce(location, ''), ''))` where meeting, not archived | 600,000 meetings | 36 MB | 46-73 s for the three (four runs) |
 | `activities_note_search_trgm` | `owner_id`, `upper(description)` where note, not archived | 500,000 notes (avg 300, max 3,000 characters) | 119-122 MB | |
@@ -394,8 +400,9 @@ the `SET TRANSACTION` isn't sent (7 / 8 / 7).
 
 ## Frontend
 
-- **Entry**: a search field-like button in the top bar on every page ("Search leads, deals,
-  activities", `Ctrl K` / `⌘K` shown from tablet width up), always visible as a touch target;
+- **Entry**: a search field-like button in the top bar on every page ("Search deals,
+  customers, activities", `Ctrl K` / `⌘K` shown from tablet width up), always visible as a
+  touch target;
   `Ctrl+K` / `Cmd+K` opens it too, except while another dialog or the mobile menu is open,
   while typing in a multi-line field, or during IME composition. A URL that names no
   workspace (a malformed user id) disables it.
@@ -405,7 +412,8 @@ the `SET TRANSACTION` isn't sent (7 / 8 / 7).
   Ctrl/⌘-click opens a new tab. The dialog says whose records it searches ("Searching Rahul
   Sharma's records.", from the banner's own request).
 - **Results**: a listbox with one group per kind under its written-out heading; each option
-  has an explicit label ("Lead: Rahul Sharma, Apollo Diagnostics, New"); "Top 5 shown" when
+  has an explicit label ("Opportunity: Analyser upgrade, Apollo Diagnostics, Proposal,
+  Open"); there is no Leads group (ADR-0027); "Top 5 shown" when
   more matched. A polite status line announces "Searching…" (also while results update, so
   every finished search is announced), "5 results, more match", "No matching CRM records",
   or why the query can't be searched (with `aria-invalid`). Nothing suggests hidden results
@@ -431,8 +439,8 @@ the `SET TRANSACTION` isn't sent (7 / 8 / 7).
   node and link that reaches the DOM while a delayed Rahul search finishes after the switch
   to Priya: nothing of Rahul's appears.
 - **Links stay in the workspace**: every result opens through the Phase 6 route builders
-  (`leadHref`, `opportunityHref`, `activityHref`): `/leads/{id}` in one's own or the
-  organisation's workspace, `/admin/users/{id}/leads/{id}` in a user's.
+  (`opportunityHref`, `activityHref`): `/pipeline/{id}` in one's own or the organisation's
+  workspace, `/admin/users/{id}/pipeline/{id}` in a user's.
 - **Cache**: TanStack Query in memory only (15 s fresh, gone a minute after its last use);
   nothing in browser storage; sign-out reloads the page, dropping all of it.
 - **XSS**: everything is rendered as React text. Highlighting wraps the searched words in
