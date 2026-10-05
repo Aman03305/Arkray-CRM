@@ -13,25 +13,48 @@ import {
 } from "./draft";
 
 const LEAD = "9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2c";
+const COMPLETE = { ...EMPTY_DRAFT, title: "x", value: "1", opportunity_date: "2026-10-01", account_name: "City Lab", customer_name: "Dr. Iyer" };
 
 describe("creating", () => {
   it("sends amounts as exact decimal strings and omits empty fields", () => {
     const body = createRequest(
-      { ...EMPTY_DRAFT, title: "  Lab upgrade ", value: "12,50,000.5" },
+      { ...COMPLETE, title: "  Lab upgrade ", value: "12,50,000.5" },
       { lead: LEAD, stage: "s1", stageProbability: "50.00" },
     );
-    expect(body).toEqual({ lead: LEAD, title: "Lab upgrade", value: "1250000.5", stage: "s1" });
+    expect(body).toEqual({
+      lead: LEAD,
+      title: "Lab upgrade",
+      value: "1250000.5",
+      stage: "s1",
+      opportunity_date: "2026-10-01",
+      account_name: "City Lab",
+      customer_name: "Dr. Iyer",
+    });
+  });
+
+  it("sends the deal's details, the negotiated price and only non-empty custom values", () => {
+    const body = createRequest(
+      { ...COMPLETE, value: "1", contact_phone: " +91 98765 43210 ", address: "Line 1\nLine 2", work_load: "300 tests/day" },
+      { lead: LEAD, negotiatedPrice: "950000", customFields: { f1: "GEM/1", f2: "", f3: [], f4: false } },
+    );
+    expect(body).toMatchObject({
+      contact_phone: "+91 98765 43210",
+      address: "Line 1\nLine 2",
+      work_load: "300 tests/day",
+      negotiated_price: "950000",
+      custom_fields: { f1: "GEM/1", f4: false },
+    });
   });
 
   it("sends a probability only when it differs from the stage's default", () => {
-    const same = createRequest({ ...EMPTY_DRAFT, title: "x", value: "1", probability: "50" }, { lead: LEAD, stageProbability: "50.00" });
+    const same = createRequest({ ...COMPLETE, probability: "50" }, { lead: LEAD, stageProbability: "50.00" });
     expect(same).not.toHaveProperty("probability");
-    const override = createRequest({ ...EMPTY_DRAFT, title: "x", value: "1", probability: "62.5" }, { lead: LEAD, stageProbability: "50.00" });
+    const override = createRequest({ ...COMPLETE, probability: "62.5" }, { lead: LEAD, stageProbability: "50.00" });
     expect(override.probability).toBe("62.5");
   });
 
   it("sends a lost reason only for a lost stage", () => {
-    const draft = { ...EMPTY_DRAFT, title: "x", value: "1", lost_reason: "Budget" };
+    const draft = { ...COMPLETE, lost_reason: "Budget" };
     expect(createRequest(draft, { lead: LEAD })).not.toHaveProperty("lost_reason");
     expect(createRequest(draft, { lead: LEAD, lost: true }).lost_reason).toBe("Budget");
   });
@@ -39,17 +62,26 @@ describe("creating", () => {
 
 describe("validating", () => {
   it("reports every problem", () => {
-    expect(validateDraft({ ...EMPTY_DRAFT, value: "1e6", probability: "101", expected_close_date: "1999-01-01" }, { requireLead: true })).toEqual({
+    expect(
+      validateDraft(
+        { ...EMPTY_DRAFT, value: "1e6", probability: "101", expected_close_date: "1999-01-01", contact_email: "nope" },
+        { requireLead: true },
+      ),
+    ).toEqual({
       lead: ["Choose the lead this opportunity is for."],
-      title: ["Enter a title."],
+      title: ["Enter a name."],
+      account_name: ["Enter the account name."],
+      customer_name: ["Enter the customer name."],
+      opportunity_date: ["Enter a date between 2000 and 2099."],
       value: [expect.stringContaining("at most 2 decimal places")],
       probability: [expect.stringContaining("0 to 100")],
       expected_close_date: ["Enter a date between 2000 and 2099."],
+      contact_email: ["Enter a valid email address."],
     });
   });
 
   it("accepts a complete draft", () => {
-    expect(validateDraft({ ...EMPTY_DRAFT, title: "x", value: "0" })).toEqual({});
+    expect(validateDraft({ ...COMPLETE, value: "0" })).toEqual({});
   });
 });
 

@@ -1,7 +1,7 @@
 # Admin user workspace
 
-An administrator opens a user's CRM by clicking the user's **name** on the Users page
-(or under "Recently added users" on Admin Home), and lands on that user's Dashboard.
+An administrator opens a user's CRM by clicking the user's **name** on the Users page,
+and lands on that user's Dashboard.
 From there they move through the user's Dashboard, Pipeline, Leads and Activities
 without signing out and without impersonating the user. Phase 6 completed and hardened
 this journey. The design decisions are [ADR-0005](adr/0005-admin-workspace-without-impersonation.md)
@@ -20,7 +20,7 @@ Example: Anita Rao (admin) opens Rahul Sharma's workspace.
 
 | | Who | Where it shows |
 |---|---|---|
-| **Actor**: the authenticated user | Anita | The session, `request.user`, every `created_by`, `completed_by`, `cancelled_by`, stage-history `actor` and audit `actor_id`; "Signed in as Anita Rao" in the banner; the sidebar's account block |
+| **Actor**: the authenticated user | Anita | The session, `request.user`, every `created_by`, `completed_by`, `cancelled_by`, stage-history `actor` and audit `actor_id`; "Signed in as Anita Rao" in the banner; the header's account menu (the drawer's account block on phones) |
 | **Subject**: whose records these are | Rahul | The URL (`/admin/users/{rahul}/…`), the `AccessScope` (`kind=user`, `owner_ids={rahul}`), the owner of everything created here, audit `subject_user_id`; "Viewing CRM for: Rahul Sharma" in the banner |
 
 | Anita does this in Rahul's workspace | Owner | Created / completed by | Audit |
@@ -42,6 +42,42 @@ admin's session is the only session. Selected-user access is always *the admin's
 `resolve_workspace` + an explicit `AccessScope`*. Tests assert that the session key and
 `/auth/me` stay the admin's through a whole workspace visit, and that no URL route matches
 `impersonat|login-as|become|switch-user|sudo|act-as`.
+
+## Support sessions
+
+The business asked that an administrator can "log in as any user". That is met **without
+anyone learning, using or resetting the user's password and without impersonation**
+([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.md),
+`backend/arkray/identity/support.py`):
+
+- **Start**: Users → a user → *Access as user* (optional reason) →
+  `POST /api/v1/admin/support-sessions {user, reason}` (`support.access`). Only for an
+  **active, non-administrator** user with a CRM (422 otherwise: deactivated users stay
+  inaccessible this way). The session is bound to the administrator's browser session (a
+  SHA-256 of its key) and lasts `SUPPORT_SESSION_TTL_S` (30 min), never extended; starting one
+  ends any earlier one of the same administrator (at most one live: a partial unique index).
+- **During it** the administrator is still themselves: `/auth/me` returns them (plus
+  `support_session`), the session key never changes. Only the target's workspace opens
+  (`resolve_workspace` refuses `me`, `all` and any other user: 403
+  `support_session_active`), and identity and security operations are refused (user
+  administration, setting passwords, changing one's own password, security events, another
+  support session). The UI shows a persistent banner — *Support session · Rahul Sharma ·
+  24 min left · Exit · Signed in as Anita Rao* — and keeps navigation inside that workspace.
+- **Every change** records the administrator as the actor and the user as the subject, plus
+  the session's id: a `support_session_id` column on audit events and negotiated prices.
+  Nothing is ever recorded as the user's own act.
+- **Ending**: *Exit* (`DELETE /api/v1/admin/support-sessions/current`), signing out, expiry,
+  the browser session changing (a new sign-in rotates its key: a copied marker in another
+  session is worthless), or conditions failing (the user deactivated or made an administrator,
+  the administrator losing the capability) — checked on every request, so nothing outlives
+  its conditions. An hourly sweep closes expired sessions nobody used again.
+- **Audit**: `support_session.started` (administrator, user, reason, expiry) and
+  `support_session.ended` (how: exited, expired, signed_out, not_allowed, session_changed;
+  the system is the actor when it ended it), both carrying the session id; they appear in the
+  security events feed.
+
+The existing selected-user workspace (`/admin/users/{id}/…`, "Viewing CRM for") is
+unchanged; a support session is the explicit, time-boxed form of it.
 
 ## Routing
 
@@ -99,8 +135,10 @@ id (`/admin/users/{self}`) resolves to one's own workspace (SELF scope) and the 
    a placeholder, never a name. The banner is rendered by the layout, so it stays on every
    list, detail, create and edit page. It is a labelled region (`Workspace context`) with no
    heading of its own, so each page keeps its single `h1`.
-3. **Navigate.** The sidebar labels its four modules "CRM for Rahul Sharma" and links them
-   inside the workspace. The current module is marked with `aria-current="page"`, a bar and
+3. **Navigate.** The navigation (the desktop rail, or the drawer on phones) labels its four
+   modules "CRM for Rahul" ("CRM for Rahul Sharma" in the drawer) and links them inside the
+   workspace; the header's "+" creates records in Rahul's workspace, and not at all while
+   their account is invited or deactivated. The current module is marked with `aria-current="page"`, a bar and
    a heavier weight, and Users is not marked at the same time. Companies and Products don't
    exist. Settings stays the administrator's own profile.
 4. **Leave.** "Back to Users" (or "Back to Dashboard" without `users.manage`), the sidebar's

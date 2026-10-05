@@ -127,17 +127,6 @@ export function activeSection(pathname: string): WorkspaceSection | null {
   return (WORKSPACE_SECTIONS as readonly string[]).includes(segment) ? (segment as WorkspaceSection) : null;
 }
 
-export function describeWorkspace(workspace: Workspace): string {
-  switch (workspace.kind) {
-    case "self":
-      return "Your records";
-    case "organization":
-      return "All users' records";
-    case "user":
-      return "Selected user's records";
-  }
-}
-
 /** An opportunity's page in this workspace, e.g. /pipeline/{id} or /admin/users/{userId}/pipeline/{id}. */
 export function opportunityHref(workspace: Workspace, opportunityId: string, action?: "edit"): string {
   return `${workspaceHref(workspace, "pipeline")}/${encodeURIComponent(opportunityId)}${action ? `/${action}` : ""}`;

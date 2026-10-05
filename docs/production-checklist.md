@@ -31,6 +31,14 @@ the system can't verify them.
       `/health/ready`; the web tier `GET /login` ([deployment.md](deployment.md#production-topology)).
 - [ ] Real SMTP with SPF, DKIM and DMARC on the sender's domain
       ([deployment.md](deployment.md#email)).
+- [ ] Note attachments: a **private** S3 bucket (block public access, versioning,
+      server-side encryption, replication) with `ATTACHMENT_STORAGE=s3` and its
+      credentials; verify upload, download, delete and an outage against it (R99); the
+      proxy's 11 MB limit on the upload route only
+      ([deployment.md](deployment.md#attachments-storage)).
+- [ ] A ClamAV daemon reachable from the workers and `ATTACHMENT_SCANNER=clamd://…`
+      (R94); upload the EICAR test file once: it must be blocked.
+- [ ] The bucket's backups on the database's schedule and retention (R93).
 
 **Secrets** (from the secret manager, never in the repository or an image)
 

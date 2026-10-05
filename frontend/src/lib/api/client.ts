@@ -10,6 +10,7 @@
  * - Every request has a timeout, so a hung backend surfaces as an error, not a frozen UI.
  * - Errors are normalised to `ApiError` from the backend envelope
  *   `{"error": {"code", "message", "details", "request_id"}}`.
+ * - JSON bodies go through `apiFetch`; a file goes through `apiUpload` (same rules).
  */
 
 /**
@@ -20,6 +21,7 @@
 export const CSRF_COOKIE_NAMES = ["__Host-arkray_csrftoken", "arkray_csrftoken"] as const;
 export const CSRF_ENDPOINT = "/api/v1/auth/csrf";
 const DEFAULT_TIMEOUT_MS = 15_000;
+const UPLOAD_TIMEOUT_MS = 120_000;
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 export class ApiError extends Error {
@@ -101,15 +103,21 @@ function toApiError(response: Response, payload: unknown): ApiError {
   );
 }
 
+/** A request body and its type; encoded per attempt (a retry sends it again). */
+interface Payload {
+  encode: () => BodyInit;
+  contentType: string;
+}
+
 async function send(
   path: string,
   method: string,
-  body: unknown,
+  payload: Payload | undefined,
   signal: AbortSignal,
   extraHeaders: Record<string, string> = {},
 ): Promise<Response> {
   const headers: Record<string, string> = { ...extraHeaders, Accept: "application/json" };
-  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (payload !== undefined) headers["Content-Type"] = payload.contentType;
   if (!SAFE_METHODS.has(method)) {
     const token = readCsrfToken();
     if (token) headers["X-CSRFToken"] = token;
@@ -117,7 +125,7 @@ async function send(
   return fetch(path, {
     method,
     headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: payload === undefined ? undefined : payload.encode(),
     credentials: "same-origin",
     signal,
   });
@@ -127,11 +135,12 @@ async function refreshCsrfCookie(signal: AbortSignal): Promise<void> {
   await fetch(CSRF_ENDPOINT, { method: "GET", credentials: "same-origin", signal });
 }
 
-export async function apiFetch<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
-  if (!path.startsWith("/api/")) {
-    throw new Error(`apiFetch only calls same-origin API paths, got: ${path}`);
-  }
-  const { method = "GET", body, signal, timeoutMs = DEFAULT_TIMEOUT_MS, headers } = options;
+async function request<T>(
+  path: string,
+  method: string,
+  body: Payload | undefined,
+  { signal, timeoutMs, headers }: { signal?: AbortSignal; timeoutMs: number; headers?: Record<string, string> },
+): Promise<T> {
   const timeout = AbortSignal.timeout(timeoutMs);
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
   const unsafe = !SAFE_METHODS.has(method);
@@ -165,4 +174,37 @@ export async function apiFetch<T>(path: string, options: ApiRequestOptions = {})
   if (response.status === 204) return undefined as T;
   if (!response.ok) throw toApiError(response, payload);
   return payload as T;
+}
+
+export async function apiFetch<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+  if (!path.startsWith("/api/")) {
+    throw new Error(`apiFetch only calls same-origin API paths, got: ${path}`);
+  }
+  const { method = "GET", body, signal, timeoutMs = DEFAULT_TIMEOUT_MS, headers } = options;
+  const payload = body === undefined ? undefined : { encode: () => JSON.stringify(body), contentType: "application/json" };
+  return request<T>(path, method, payload, { signal, timeoutMs, headers });
+}
+
+export interface ApiUploadOptions {
+  signal?: AbortSignal;
+  /** Defaults to 2 minutes: a 10 MB file on a slow connection. */
+  timeoutMs?: number;
+  headers?: Record<string, string>;
+}
+
+/**
+ * POSTs one file as the raw request body (application/octet-stream), its name in the
+ * X-Filename header (percent-encoded UTF-8). CSRF, retries, timeouts and errors as apiFetch.
+ */
+export async function apiUpload<T>(path: string, file: Blob, filename: string, options: ApiUploadOptions = {}): Promise<T> {
+  if (!path.startsWith("/api/")) {
+    throw new Error(`apiUpload only calls same-origin API paths, got: ${path}`);
+  }
+  const { signal, timeoutMs = UPLOAD_TIMEOUT_MS, headers } = options;
+  return request<T>(
+    path,
+    "POST",
+    { encode: () => file, contentType: "application/octet-stream" },
+    { signal, timeoutMs, headers: { ...headers, "X-Filename": encodeURIComponent(filename) } },
+  );
 }

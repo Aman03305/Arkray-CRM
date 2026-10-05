@@ -206,7 +206,7 @@ def submit(actor: User, scope: AccessScope, text: Any, conversation_id: UUID | N
                 created_at=now,
                 updated_at=now,
             )
-        routed = router.route(question_text)
+        routed = _route(question_text, scope)
         erasures = 0
         if routed is not None:
             # A routed answer is read and stored in this transaction, holding the erasure
@@ -388,7 +388,7 @@ def answer(question_id: UUID) -> None:
     provider = get_provider()
     mode, result = "retrieval", None
     time_left = (question.expires_at - timezone.now()).total_seconds() - 2
-    routed = router.route(question.text)
+    routed = _route(question.text, scope)
     if routed is not None:
         # A routed question queued instead of answered at once (an erasure was running):
         # the same answer it would have had.
@@ -509,6 +509,14 @@ def _more(total: int, shown: int) -> list[dict[str, Any]]:
     return [answers.text_block(f"Showing the first {shown} of {total:,}.")] if total > shown else []
 
 
+def _route(text: str, scope: AccessScope) -> router.Route | None:
+    return router.route(
+        text,
+        stage_names=lambda: router.active_stage_names(scope),
+        pipeline_names=lambda: router.pipeline_names(scope),
+    )
+
+
 def answer_routed(
     ctx: tools.ToolContext, routed: router.Route, *, workspace: WorkspaceWords
 ) -> dict[str, Any]:
@@ -524,7 +532,16 @@ def answer_routed(
             blocks.append(answers.ref_bullet(row["ref"], detail(row)))
             cited.append(row["ref"])
 
-    if intent in {"pipeline_value", "weighted_pipeline"}:
+    if intent == "pipeline_named":
+        value, weighted = first["pipeline_value"]["display"], first["weighted_pipeline"]["display"]
+        count = _plural(first["open_opportunities"], "open opportunity", "open opportunities")
+        blocks.append(
+            answers.text_block(
+                f"The {routed.pipeline} pipeline's value is {value} across {count}"
+                f" ({w.possessive.lower()} opportunities). The weighted pipeline is {weighted}."
+            )
+        )
+    elif intent in {"pipeline_value", "weighted_pipeline"}:
         value, weighted = first["pipeline_value"]["display"], first["weighted_pipeline"]["display"]
         count = _plural(first["open_opportunities"], "open opportunity", "open opportunities")
         if intent == "pipeline_value":
@@ -615,9 +632,13 @@ def answer_routed(
         )
         bullets(first["meetings"], lambda r: r["starts"]["display"] if r.get("starts") else "")
         blocks.extend(_more(total, first["shown"]))
-    elif intent in {"deals_in_stage", "deals_closing_this_month"}:
+    elif intent in {"deals_in_stage", "deals_closing_this_month", "deals_in_negotiation"}:
         total = first["total_matching"]
-        if intent == "deals_in_stage":
+        if intent == "deals_in_negotiation":
+            deals = _plural(total, "opportunity", "opportunities")
+            ctx.count("Opportunities in negotiation", total)
+            blocks.append(answers.text_block(f"{w.subject} {w.has} {deals} in negotiation."))
+        elif intent == "deals_in_stage":
             deals = _plural(total, "opportunity", "opportunities")
             ctx.count(f"Opportunities in {routed.stage}", total)
             blocks.append(answers.text_block(f"{w.subject} {w.has} {deals} in {routed.stage}."))
@@ -631,6 +652,11 @@ def answer_routed(
             first["opportunities"],
             lambda r: (
                 r["value"]["display"]
+                + (
+                    f", negotiated {r['negotiated_price']['display']}"
+                    if intent == "deals_in_negotiation" and r.get("negotiated_price")
+                    else ""
+                )
                 + (
                     f", expected to close {r['expected_close']['display']}"
                     if r.get("expected_close")

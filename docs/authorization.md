@@ -85,6 +85,49 @@ Every rule is a CHECK constraint on `identity_user` ([database.md](database.md#i
 Users are **never deleted**: foreign keys are `PROTECT`, and history and ownership
 references stay intact.
 
+### Admin-set passwords
+
+Since the product enhancement phase an administrator may create a user **with an initial
+password** (`POST /admin/users {…, password}`) instead of an invitation, and may **set a new
+password** for a user (`POST /admin/users/{id}/set-password {version, new_password}`). In
+both cases ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.md)):
+
+- the plaintext exists only in that request: the password policy runs, the hash is stored,
+  and the password is never stored, logged, audited, queued, emailed or returned by any API
+  (tested on logs, audit, outbox, mail and every response);
+- the user **must choose their own password at first sign-in**
+  (`password_change_required`): until then every API call except `GET /auth/me`, `POST
+  /auth/password/change` and sign-out answers 403 `password_change_required`, and the UI
+  shows only the change-password screen. An unchanged temporary password expires after
+  `TEMPORARY_PASSWORD_TTL_S` (72 h; sign-in answers `temporary_password_expired`);
+- setting a password ends the user's sessions and voids outstanding reset links; it is
+  refused for oneself (Settings), for another administrator (that would let one administrator
+  sign in as another), and for invited or deactivated users; audited as
+  `auth.password_set_by_admin` (actor, user; never the password);
+- **administrators are always invited** (a password on create is refused for a role that
+  manages users), and a user whose administrator-set password is still unchanged **can't be
+  made an administrator** until they choose their own (422): otherwise demote, set,
+  promote would let one administrator sign in as another (adversarial review);
+- a sign-in with a password an administrator set (before the user changed it) is recorded as
+  `auth.login_with_temporary_password` and shown in the security events: an administrator
+  using it is visible there, before the user's own change;
+- the user detail shows *when* a password was set (`password_changed_at`) and whether it must
+  be changed, never anything about the password itself. **Administrators cannot retrieve or
+  receive user plaintext passwords.** Residual risk (R92): until the user changes it, the
+  administrator knows the temporary password; the forced change, its expiry and the audit
+  trail bound that.
+
+### Password change notification
+
+The request "if a user updates their password, the admin gets the updated password" is **not
+implemented literally**: no administrator ever receives a plaintext password. Instead every
+password change is a security event administrators see (`GET /admin/security-events`,
+`audit.view`; the organisation dashboard's *Security activity*): **who** changed their
+password and **when** (`auth.password_changed`, `auth.password_reset_completed`,
+`auth.password_set_by_admin`), plus users created, deactivated, reactivated, given a new role
+or email, and support sessions started and ended. The feed is an allowlist of actions and of
+metadata keys; never a password, a hash, a token or a link.
+
 ### Invitation flow (admins never choose or see passwords)
 
 ```mermaid
@@ -204,6 +247,7 @@ Code checks **capabilities**, never role names
 | `config.manage` | pipelines, stages, lead statuses and sources | ✓ | |
 | `audit.view` | read the audit log | ✓ | |
 | `ai.query` | use Ask Arkray within one's own scope | ✓ | ✓ |
+| `support.access` | start a support session in one user's CRM ([admin-user-workspace.md](admin-user-workspace.md#support-sessions)) | ✓ | |
 
 - Inactive users, anonymous users and **unknown roles get nothing**.
 - Adding a role (for example a *sales manager* who sees a team) means adding one mapping

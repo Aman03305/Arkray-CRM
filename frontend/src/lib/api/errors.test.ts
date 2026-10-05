@@ -33,6 +33,15 @@ describe("describeError", () => {
     );
   });
 
+  it("explains support-session and password-change refusals plainly", () => {
+    expect(describeError(new ApiError(403, "support_session_active", "Not allowed in a support session.")).message).toBe(
+      "Not available during a support session. Exit it first.",
+    );
+    expect(describeError(new ApiError(403, "password_change_required", "Change your password.")).message).toBe(
+      "Choose a new password to continue.",
+    );
+  });
+
   it("passes safe envelope messages through", () => {
     const error = new ApiError(429, "rate_limited", "Too many sign-in attempts. Try again in 1 minute.");
     expect(describeError(error).message).toBe("Too many sign-in attempts. Try again in 1 minute.");

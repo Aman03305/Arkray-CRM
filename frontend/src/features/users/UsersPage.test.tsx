@@ -1,12 +1,27 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AdminUser } from "@/lib/api/types";
+import { setFlash } from "@/lib/flash";
+import { formatDate } from "@/lib/format";
+import { VIEWER_QUERY_KEY } from "@/lib/query-client";
+import type { Viewer } from "@/lib/viewer";
 import { adminViewer, makeAdminUser } from "@/test/fixtures";
-import { apiError, mockApi, renderWithProviders, type RecordedCall } from "@/test/render";
+import { apiError, createTestQueryClient, mockApi, renderWithProviders, type RecordedCall } from "@/test/render";
 
 import { UsersPage } from "./UsersPage";
+
+const nav = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/admin/users",
+  useRouter: () => ({ push: nav.push, replace: nav.replace, back: vi.fn(), prefetch: vi.fn() }),
+}));
+
+beforeEach(() => {
+  nav.push.mockReset();
+  nav.replace.mockReset();
+});
 
 const LIST = "GET /api/v1/admin/users";
 const rahul = makeAdminUser();
@@ -52,15 +67,15 @@ describe("UsersPage: states", () => {
     renderPage();
     expect(screen.getByRole("table", { name: /users \(loading\)/i })).toHaveAttribute("aria-busy", "true");
 
-    const row = (await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" })).closest("tr")!;
+    const row = (await screen.findByRole("button", { name: "Rahul Sharma" })).closest("tr")!;
     expect(within(row).getByText("rahul@example.test")).toBeInTheDocument();
     expect(within(row).getByText("User")).toBeInTheDocument();
     expect(within(row).getByText("Active")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Rahul Sharma, open CRM workspace" })).toHaveAttribute(
+    expect(within(row).getByRole("link", { name: "Open CRM for Rahul Sharma" })).toHaveAttribute(
       "href",
       `/admin/users/${rahul.id}/dashboard`,
     );
-    const invitedRow = screen.getByRole("link", { name: "Neha Verma, open CRM workspace" }).closest("tr")!;
+    const invitedRow = screen.getByRole("button", { name: "Neha Verma" }).closest("tr")!;
     expect(within(invitedRow).getByText("Invited")).toBeInTheDocument();
     expect(within(invitedRow).getByText(/Link expires/)).toBeInTheDocument();
     expect(within(invitedRow).getByText("Never")).toBeInTheDocument();
@@ -70,7 +85,7 @@ describe("UsersPage: states", () => {
   it("shows the table columns the brief asks for, and no invented CRM metrics", async () => {
     mockApi({ [LIST]: page([rahul]) });
     renderPage();
-    await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" });
+    await screen.findByRole("button", { name: "Rahul Sharma" });
     const headers = screen.getAllByRole("columnheader").map((h) => h.textContent);
     expect(headers).toEqual(["Name", "Email", "Role", "Status", "Last login", "Created", "Actions"]);
     expect(screen.queryByText(/pipeline value|active leads/i)).not.toBeInTheDocument();
@@ -85,12 +100,12 @@ describe("UsersPage: states", () => {
   it("offers to clear filters when nothing matches", async () => {
     const api = mockApi({ [LIST]: (call: RecordedCall) => page(call.query.get("status") ? [] : [rahul]) });
     renderPage();
-    await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" });
+    await screen.findByRole("button", { name: "Rahul Sharma" });
     const user = userEvent.setup();
     await user.selectOptions(screen.getByLabelText("Filter by status"), "deactivated");
     expect(await screen.findByText("No users match your filters")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Clear filters" }));
-    expect(await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Rahul Sharma" })).toBeInTheDocument();
     expect(api.calls.at(-1)!.query.get("status")).toBeNull();
   });
 
@@ -108,7 +123,7 @@ describe("UsersPage: states", () => {
     expect(alert).toHaveTextContent("Reference: req-test-1");
     expect(alert).not.toHaveTextContent("Boom");
     await userEvent.setup().click(within(alert).getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Rahul Sharma" })).toBeInTheDocument();
   });
 
   it("explains an authorization error", async () => {
@@ -122,7 +137,7 @@ describe("UsersPage: search, filters and pagination", () => {
   it("sends allowlisted filters, debounces search and ignores 1-character searches", async () => {
     const api = mockApi({ [LIST]: page([rahul]) });
     renderPage();
-    await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" });
+    await screen.findByRole("button", { name: "Rahul Sharma" });
     const user = userEvent.setup();
 
     await user.type(screen.getByLabelText("Search users"), "r");
@@ -144,45 +159,161 @@ describe("UsersPage: search, filters and pagination", () => {
           : page([rahul], "http://backend:8000/api/v1/admin/users?cursor=page2"),
     });
     renderPage();
-    await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" });
+    await screen.findByRole("button", { name: "Rahul Sharma" });
     const user = userEvent.setup();
     expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Next" }));
-    expect(await screen.findByRole("link", { name: "Neha Verma, open CRM workspace" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Neha Verma" })).toBeInTheDocument();
     expect(api.fetchMock.mock.calls.every(([url]) => String(url).startsWith("/api/"))).toBe(true);
     expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
   });
 });
 
 describe("UsersPage: creating a user", () => {
-  async function fillCreateForm(email = "new@example.test") {
+  const PASSWORD = "harbour-lantern-91";
+  const neha = makeAdminUser({
+    id: "7c6f7f1e-2222-4222-8333-444455556666",
+    email: "new@example.test",
+    first_name: "Neha",
+    last_name: "Verma",
+    full_name: "Neha Verma",
+    role: "sales_user",
+    role_label: "Sales user",
+    last_login: null,
+    password_change_required: true,
+  });
+
+  async function fillCreateForm({ email = "new@example.test", password = PASSWORD as string | null } = {}) {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "New user" }));
     const dialog = screen.getByRole("dialog", { name: "New user" });
     await user.type(within(dialog).getByLabelText("First name"), "Neha");
     await user.type(within(dialog).getByLabelText(/Last name/), "Verma");
     await user.type(within(dialog).getByLabelText("Email"), email);
-    await user.selectOptions(within(dialog).getByLabelText("Role"), "admin");
-    await user.click(within(dialog).getByRole("button", { name: "Create and invite" }));
-    return dialog;
+    if (password === null) {
+      await user.click(within(dialog).getByRole("button", { name: "Email an invitation instead" }));
+      await user.click(within(dialog).getByRole("button", { name: "Create and invite" }));
+    } else {
+      await user.type(within(dialog).getByLabelText("Initial password"), password);
+      await user.click(within(dialog).getByRole("button", { name: "Create user" }));
+    }
+    return { dialog, user };
   }
 
-  it("creates an invited user (no password field) and confirms the invitation", async () => {
-    const api = mockApi({
-      [LIST]: page([rahul]),
-      "POST /api/v1/admin/users": { status: 201, body: { ...invited, email: "new@example.test", role: "admin" } },
-    });
+  it("an administrator is always invited: no password can be set for one", async () => {
+    const api = mockApi({ [LIST]: page([rahul]), "POST /api/v1/admin/users": { status: 201, body: { ...neha, role: "admin" } } });
     renderPage();
-    await fillCreateForm();
-    expect(await screen.findByText(/An invitation is on its way to new@example.test/)).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "New user" }));
+    const dialog = screen.getByRole("dialog", { name: "New user" });
+    await user.type(within(dialog).getByLabelText("First name"), "Neha");
+    await user.type(within(dialog).getByLabelText("Email"), "new@example.test");
+    expect(within(dialog).getByLabelText("Initial password")).toBeInTheDocument();
+    await user.selectOptions(within(dialog).getByLabelText("Role"), "admin");
+    expect(within(dialog).queryByLabelText("Initial password")).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/Administrators are invited/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Create and invite" }));
+    await waitFor(() => expect(api.callsTo("POST", "/api/v1/admin/users")).toHaveLength(1));
+    expect(api.callsTo("POST", "/api/v1/admin/users")[0]!.body).not.toHaveProperty("password");
+  });
+
+  it("creates a user who can sign in at once with the initial password, which is then forgotten", async () => {
+    const api = mockApi({ [LIST]: page([rahul]), "POST /api/v1/admin/users": { status: 201, body: neha } });
+    renderPage();
+    const { user } = await fillCreateForm();
+    expect(
+      await screen.findByText("Neha Verma can sign in now. They'll choose their own password at first sign-in."),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(api.callsTo("POST", "/api/v1/admin/users")[0]!.body).toEqual({
       first_name: "Neha",
       last_name: "Verma",
       email: "new@example.test",
-      role: "admin",
+      role: "sales_user",
+      password: PASSWORD,
+    });
+    expect(document.body.innerHTML).not.toContain(PASSWORD);
+    // Nothing of it survives into the next user's form either.
+    await user.click(screen.getByRole("button", { name: "New user" }));
+    expect(within(screen.getByRole("dialog")).getByLabelText("Initial password")).toHaveValue("");
+  });
+
+  it("asks for an initial password by default, hidden unless shown, and can generate a strong one", async () => {
+    mockApi({ [LIST]: page([]) });
+    renderPage();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "New user" }));
+    const dialog = screen.getByRole("dialog", { name: "New user" });
+    const field = within(dialog).getByLabelText("Initial password");
+    expect(field).toHaveAttribute("type", "password");
+    expect(field).toHaveAttribute("autocomplete", "off");
+    await user.click(within(dialog).getByRole("button", { name: "Show initial password" }));
+    expect(field).toHaveAttribute("type", "text");
+    await user.click(within(dialog).getByRole("button", { name: "Generate password" }));
+    expect((field as HTMLInputElement).value).toMatch(/^[a-hjkmnp-zA-HJ-NP-Z2-9]{4}(-[a-hjkmnp-zA-HJ-NP-Z2-9]{4}){3}$/);
+    expect(dialog).toHaveTextContent("Password generated");
+  });
+
+  it("checks the length before sending anything", async () => {
+    const api = mockApi({ [LIST]: page([]) });
+    renderPage();
+    const { dialog } = await fillCreateForm({ password: "short" });
+    expect(within(dialog).getByLabelText("Initial password")).toHaveAccessibleDescription(
+      expect.stringContaining("Use at least 12 characters."),
+    );
+    expect(within(dialog).getByLabelText("Initial password")).toHaveFocus();
+    expect(api.callsTo("POST", "/api/v1/admin/users")).toHaveLength(0);
+  });
+
+  it("shows the server's password rule under the password field", async () => {
+    mockApi({
+      [LIST]: page([]),
+      "POST /api/v1/admin/users": apiError(400, "validation_error", "Invalid input.", {
+        password: ["This password is too common."],
+      }),
+    });
+    renderPage();
+    const { dialog } = await fillCreateForm();
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText("Initial password")).toHaveAccessibleDescription(
+        expect.stringContaining("This password is too common."),
+      ),
+    );
+    expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "New user" })).toBeInTheDocument();
+  });
+
+  it("can email an invitation instead (no password is sent)", async () => {
+    const api = mockApi({
+      [LIST]: page([rahul]),
+      "POST /api/v1/admin/users": { status: 201, body: { ...invited, email: "new@example.test", role: "sales_user" } },
+    });
+    renderPage();
+    await fillCreateForm({ password: null });
+    expect(await screen.findByText(/An invitation is on its way to new@example.test/)).toBeInTheDocument();
+    expect(api.callsTo("POST", "/api/v1/admin/users")[0]!.body).toEqual({
+      first_name: "Neha",
+      last_name: "Verma",
+      email: "new@example.test",
+      role: "sales_user",
     });
     await waitFor(() => expect(api.callsTo("GET", "/api/v1/admin/users").length).toBeGreaterThan(1));
+  });
+
+  it("switching to an invitation drops a typed password, and back again asks for one", async () => {
+    mockApi({ [LIST]: page([]) });
+    renderPage();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "New user" }));
+    const dialog = screen.getByRole("dialog", { name: "New user" });
+    await user.type(within(dialog).getByLabelText("Initial password"), PASSWORD);
+    const toggle = within(dialog).getByRole("button", { name: "Email an invitation instead" });
+    await user.click(toggle);
+    expect(within(dialog).queryByLabelText("Initial password")).not.toBeInTheDocument();
+    expect(toggle).toHaveTextContent("Set a password instead");
+    expect(toggle).toHaveFocus();
+    await user.click(toggle);
+    expect(within(dialog).getByLabelText("Initial password")).toHaveValue("");
   });
 
   it("shows a duplicate email on the email field", async () => {
@@ -193,20 +324,13 @@ describe("UsersPage: creating a user", () => {
       }),
     });
     renderPage();
-    const dialog = await fillCreateForm("rahul@example.test");
+    const { dialog } = await fillCreateForm({ email: "rahul@example.test" });
     await waitFor(() =>
       expect(within(dialog).getByLabelText("Email")).toHaveAccessibleDescription(
         expect.stringContaining("already exists"),
       ),
     );
     expect(screen.getByRole("dialog", { name: "New user" })).toBeInTheDocument();
-  });
-
-  it("never asks the admin for the user's password", async () => {
-    mockApi({ [LIST]: page([]) });
-    renderPage();
-    await userEvent.setup().click(await screen.findByRole("button", { name: "New user" }));
-    expect(within(screen.getByRole("dialog")).queryByLabelText(/password/i)).not.toBeInTheDocument();
   });
 
   it("closes with Escape and returns focus to the button", async () => {
@@ -219,6 +343,178 @@ describe("UsersPage: creating a user", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(button).toHaveFocus();
+  });
+});
+
+describe("UsersPage: user details", () => {
+  const DETAIL = `GET /api/v1/admin/users/${rahul.id}`;
+  const SET_PASSWORD = `POST /api/v1/admin/users/${rahul.id}/set-password`;
+  const NEW_PASSWORD = "copper-meadow-skylark";
+
+  async function openDetails(name = "Rahul Sharma") {
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name }));
+    return { user, drawer: screen.getByRole("dialog", { name }) };
+  }
+
+  it("opens from the name with the user's details, and never a password", async () => {
+    mockApi({ [LIST]: page([rahul]), [DETAIL]: { status: 200, body: rahul } });
+    renderPage();
+    const { user, drawer } = await openDetails();
+    expect(drawer).toHaveTextContent("rahul@example.test");
+    expect(drawer).toHaveTextContent("RoleUser");
+    expect(drawer).toHaveTextContent("Active");
+    expect(drawer).toHaveTextContent(`Set ${formatDate(rahul.password_changed_at)}`);
+    expect(drawer).toHaveTextContent("Passwords are never shown.");
+    expect(drawer.querySelector("input")).toBeNull();
+    expect(within(drawer).getByRole("link", { name: "Open CRM" })).toHaveAttribute("href", `/admin/users/${rahul.id}/dashboard`);
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Rahul Sharma" })).toHaveFocus();
+  });
+
+  it("says when a password must be changed, or an invitation is still pending", async () => {
+    const temporary = makeAdminUser({ password_change_required: true });
+    mockApi({
+      [LIST]: page([temporary, invited]),
+      [DETAIL]: { status: 200, body: temporary },
+      [`GET /api/v1/admin/users/${invited.id}`]: { status: 200, body: invited },
+    });
+    renderPage();
+    let { user, drawer } = await openDetails();
+    expect(drawer).toHaveTextContent("Must be changed at next sign-in");
+    await user.keyboard("{Escape}");
+    ({ user, drawer } = await openDetails("Neha Verma"));
+    expect(drawer).toHaveTextContent("Invitation pending");
+    expect(drawer).toHaveTextContent("Not available until they accept their invitation.");
+    expect(within(drawer).queryByRole("button", { name: "Set new password" })).not.toBeInTheDocument();
+  });
+
+  it("sets a new password with the user's version, then shows what happens next", async () => {
+    let current = rahul;
+    const api = mockApi({
+      [LIST]: () => page([current]),
+      [DETAIL]: () => ({ status: 200, body: current }),
+      [SET_PASSWORD]: () => {
+        current = { ...rahul, password_change_required: true, version: 2 };
+        return { status: 200, body: current };
+      },
+    });
+    renderPage();
+    const { user, drawer } = await openDetails();
+    await user.click(within(drawer).getByRole("button", { name: "Set new password" }));
+    const dialog = screen.getByRole("dialog", { name: "Set a new password for Rahul Sharma" });
+    expect(within(dialog).getByLabelText("New password")).toHaveAttribute("autocomplete", "off");
+    await user.type(within(dialog).getByLabelText("New password"), NEW_PASSWORD);
+    await user.type(within(dialog).getByLabelText("Confirm password"), NEW_PASSWORD);
+    await user.click(within(dialog).getByRole("button", { name: "Set password" }));
+
+    const back = await screen.findByRole("dialog", { name: "Rahul Sharma" });
+    expect(await within(back).findByRole("status")).toHaveTextContent("Rahul Sharma must choose a new password at next sign-in.");
+    expect(back).toHaveTextContent("Must be changed at next sign-in");
+    expect(api.callsTo("POST", `/api/v1/admin/users/${rahul.id}/set-password`)[0]!.body).toEqual({
+      version: 1,
+      new_password: NEW_PASSWORD,
+    });
+    expect(document.body.innerHTML).not.toContain(NEW_PASSWORD);
+  });
+
+  it("checks that the two passwords match before sending", async () => {
+    const api = mockApi({ [LIST]: page([rahul]), [DETAIL]: { status: 200, body: rahul } });
+    renderPage();
+    const { user, drawer } = await openDetails();
+    await user.click(within(drawer).getByRole("button", { name: "Set new password" }));
+    const dialog = screen.getByRole("dialog", { name: "Set a new password for Rahul Sharma" });
+    await user.type(within(dialog).getByLabelText("New password"), NEW_PASSWORD);
+    await user.type(within(dialog).getByLabelText("Confirm password"), "something-else-entirely");
+    await user.click(within(dialog).getByRole("button", { name: "Set password" }));
+    expect(within(dialog).getByLabelText("Confirm password")).toHaveAccessibleDescription("The passwords don't match.");
+    expect(api.callsTo("POST", `/api/v1/admin/users/${rahul.id}/set-password`)).toHaveLength(0);
+  });
+
+  it.each([
+    [422, "unprocessable", "A password can't be set for this user.", "A password can't be set for this user."],
+    [409, "conflict", "The record was changed by someone else.", "Someone else changed this user meanwhile."],
+  ])("explains a refusal (%s)", async (status, code, message, shown) => {
+    mockApi({ [LIST]: page([rahul]), [DETAIL]: { status: 200, body: rahul }, [SET_PASSWORD]: apiError(status, code, message) });
+    renderPage();
+    const { user, drawer } = await openDetails();
+    await user.click(within(drawer).getByRole("button", { name: "Set new password" }));
+    const dialog = screen.getByRole("dialog", { name: "Set a new password for Rahul Sharma" });
+    await user.type(within(dialog).getByLabelText("New password"), NEW_PASSWORD);
+    await user.type(within(dialog).getByLabelText("Confirm password"), NEW_PASSWORD);
+    await user.click(within(dialog).getByRole("button", { name: "Set password" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(shown);
+  });
+
+  it.each([
+    ["yourself", self, "This is you."],
+    ["another administrator", makeAdminUser({ role: "admin", role_label: "Admin" }), "Not available for administrators."],
+    ["a deactivated user", makeAdminUser({ status: "deactivated", status_label: "Deactivated" }), "Not available for deactivated users."],
+  ])("offers no password or support tools for %s", async (_who, target, reason) => {
+    mockApi({ [LIST]: page([target]), [`GET /api/v1/admin/users/${target.id}`]: { status: 200, body: target } });
+    renderPage();
+    const { drawer } = await openDetails(target.full_name);
+    expect(drawer).toHaveTextContent(reason);
+    expect(within(drawer).queryByRole("button", { name: "Set new password" })).not.toBeInTheDocument();
+    expect(within(drawer).queryByRole("button", { name: "Access as user" })).not.toBeInTheDocument();
+  });
+
+  it("starts a support session and opens the user's CRM", async () => {
+    const SESSION = {
+      id: "0a1b2c3d-0000-4000-8000-000000000001",
+      target: { id: rahul.id, full_name: "Rahul Sharma" },
+      reason: "Fixing a lead",
+      started_at: "2026-10-05T10:00:00Z",
+      expires_at: "2026-10-05T10:30:00Z",
+    };
+    const api = mockApi({
+      [LIST]: page([rahul]),
+      [DETAIL]: { status: 200, body: rahul },
+      "POST /api/v1/admin/support-sessions": { status: 201, body: SESSION },
+      "GET /api/v1/auth/me": apiError(503, "service_unavailable", "Down."),
+    });
+    const client = createTestQueryClient();
+    client.setQueryData(VIEWER_QUERY_KEY, adminViewer);
+    renderWithProviders(<UsersPage />, { viewer: adminViewer, client });
+    const { user, drawer } = await openDetails();
+    await user.click(within(drawer).getByRole("button", { name: "Access as user" }));
+    const dialog = screen.getByRole("dialog", { name: "Access Rahul Sharma's CRM?" });
+    await user.type(within(dialog).getByLabelText(/Reason/), "Fixing a lead");
+    await user.click(within(dialog).getByRole("button", { name: "Start support session" }));
+    await waitFor(() => expect(nav.push).toHaveBeenCalledWith(`/admin/users/${rahul.id}/dashboard`));
+    expect(api.callsTo("POST", "/api/v1/admin/support-sessions")[0]!.body).toEqual({ user: rahul.id, reason: "Fixing a lead" });
+    expect(client.getQueryData<Viewer>(VIEWER_QUERY_KEY)?.supportSession).toEqual({
+      id: SESSION.id,
+      target: { id: rahul.id, fullName: "Rahul Sharma" },
+      reason: "Fixing a lead",
+      startedAt: SESSION.started_at,
+      expiresAt: SESSION.expires_at,
+    });
+  });
+
+  it("explains why a support session couldn't start", async () => {
+    mockApi({
+      [LIST]: page([rahul]),
+      [DETAIL]: { status: 200, body: rahul },
+      "POST /api/v1/admin/support-sessions": apiError(409, "conflict", "You are already in a support session."),
+    });
+    renderPage();
+    const { user, drawer } = await openDetails();
+    await user.click(within(drawer).getByRole("button", { name: "Access as user" }));
+    const dialog = screen.getByRole("dialog", { name: "Access Rahul Sharma's CRM?" });
+    await user.click(within(dialog).getByRole("button", { name: "Start support session" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("You are already in a support session.");
+    expect(nav.push).not.toHaveBeenCalled();
+  });
+});
+
+describe("UsersPage: after a support session", () => {
+  it("says the session ended when it brought the administrator back here", async () => {
+    mockApi({ [LIST]: page([rahul]) });
+    setFlash("Support session ended", "/admin/users");
+    renderPage();
+    expect(await screen.findByRole("status")).toHaveTextContent("Support session ended");
   });
 });
 

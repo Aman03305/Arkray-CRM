@@ -64,8 +64,10 @@ export function LoginForm() {
     if (Object.keys(problems).length === 0) login.mutate({ email: email.trim(), password });
   };
 
-  const errors = { ...serverFields, ...missing };
-  const showBanner = login.isError && Object.keys(serverFields).length === 0;
+  // An administrator-set password that was never replaced in time: the server says what to do.
+  const temporaryExpired = isApiError(login.error, 400, "temporary_password_expired");
+  const errors = temporaryExpired ? { ...missing } : { ...serverFields, ...missing };
+  const showBanner = login.isError && (temporaryExpired || Object.keys(serverFields).length === 0);
   const banner = describeError(login.error);
   const otherSession = existingSession.isSuccess && reason ? existingSession.data : null;
 

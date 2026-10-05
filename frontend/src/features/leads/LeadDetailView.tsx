@@ -225,7 +225,7 @@ export function LeadDetailView({ workspace, leadId }: { workspace: Workspace; le
                 </Button>
                 <Link
                   href={leadHref(workspace, lead.id, "edit")}
-                  className="inline-flex h-9 items-center gap-2 rounded-md bg-brand-600 px-3.5 text-sm font-medium text-white hover:bg-brand-700"
+                  className="inline-flex h-9 items-center gap-2 rounded-full bg-brand-600 px-3.5 text-sm font-medium text-white hover:bg-brand-700"
                 >
                   <Pencil aria-hidden="true" className="size-4" />
                   Edit

@@ -16,6 +16,7 @@ import { randomUuid } from "@/lib/random";
 import type { Workspace } from "@/lib/workspace";
 
 import { activitiesApi, activityKeys } from "./api";
+import type { Schedule } from "./calendar";
 import {
   changedFields,
   createRequest,
@@ -38,6 +39,8 @@ export type FormMode =
       /** Fixed when opened from a lead's or an opportunity's page. */
       lead?: { id: string; label: string };
       opportunity?: { id: string; label: string };
+      /** The day or time chosen on the calendar (a prefilled form closes without asking). */
+      schedule?: Schedule;
     }
   | { kind: "edit"; activity: Activity };
 
@@ -48,7 +51,8 @@ const KNOWN_FIELDS = new Set(["lead", "opportunity", "title", "description", "pr
  * activity belongs to the lead's owner; nobody picks an owner. A create retried with exactly
  * the same request reuses its idempotency key (a timeout can't create two); an edit carries
  * the version it started from, and a conflict (409) keeps the typing on screen and offers to
- * apply it to the latest version.
+ * apply it to the latest version. With `onKindChange` (a new entry from the calendar) the
+ * form can switch between a meeting and a task, keeping what was typed.
  */
 export function ActivityFormDialog({
   workspace,
@@ -56,18 +60,22 @@ export function ActivityFormDialog({
   mode,
   onClose,
   onSaved,
+  onKindChange,
 }: {
   workspace: Workspace;
   kind: FormKind;
   mode: FormMode;
   onClose: () => void;
   onSaved: (activity: Activity) => void;
+  onKindChange?: (kind: FormKind) => void;
 }) {
   const queryClient = useQueryClient();
   const sync = useActivityWriteSync(workspace);
   const form = useRef<HTMLFormElement>(null);
   const editing = mode.kind === "edit" ? mode.activity : null;
-  const [base, setBase] = useState<Draft>(() => (editing ? draftFromActivity(editing) : EMPTY_DRAFT));
+  const [base, setBase] = useState<Draft>(() =>
+    editing ? draftFromActivity(editing) : { ...EMPTY_DRAFT, ...(mode.kind === "create" ? mode.schedule : undefined) },
+  );
   const [version, setVersion] = useState(editing?.version ?? 0);
   const [draft, setDraft] = useState<Draft>(base);
   const [lead, setLead] = useState(mode.kind === "create" ? (mode.lead?.id ?? "") : "");
@@ -186,6 +194,15 @@ export function ActivityFormDialog({
     focusLater('button[type="submit"]');
   };
 
+  const switchKind = (next: FormKind) => {
+    if (next === kind || save.isPending) return;
+    // The other type's fields have their own problems (and the server's answer was about
+    // the other request).
+    setClientErrors({});
+    save.reset();
+    onKindChange?.(next);
+  };
+
   const noun = kind === "task" ? "task" : "meeting";
   // An edit's 409 has its own banner (above); a create's 409 (a retried request whose task
   // has since left this workspace) is explained by the server's message.
@@ -248,6 +265,22 @@ export function ActivityFormDialog({
             Your changes were applied to the latest version. These fields were also changed by someone else; your values are kept:{" "}
             {reviewFields.join(", ")}.
           </Alert>
+        ) : null}
+
+        {onKindChange && !editing ? (
+          <div role="group" aria-label="What to schedule" className="inline-flex rounded-md border border-slate-300 bg-white p-0.5 text-sm">
+            {(["meeting", "task"] as const).map((option) => (
+              <button
+                key={option}
+                type="button"
+                aria-pressed={kind === option}
+                onClick={() => switchKind(option)}
+                className={`rounded px-3 py-1 ${kind === option ? "bg-slate-900 font-medium text-white" : "text-slate-600 hover:bg-slate-50"}`}
+              >
+                {option === "meeting" ? "Meeting" : "Task"}
+              </button>
+            ))}
+          </div>
         ) : null}
 
         {editing ? (

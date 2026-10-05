@@ -183,3 +183,15 @@ def require_identity(first_name: str, last_name: str, organization_name: str) ->
     """A lead needs someone to be about: a person's name, an organisation, or both."""
     if not (first_name or last_name or organization_name):
         raise InvalidInputError(details={"first_name": [NAME_REQUIRED]})
+
+
+# The same contact rules for modules that store contact details of their own (an
+# opportunity's customer contact, docs/pipeline.md#opportunities).
+def clean_email_address(value: Any) -> str:
+    """A valid email address (or "" for none), as a lead's email is checked."""
+    return _email(value)
+
+
+def clean_phone_number(value: Any) -> str:
+    """A valid phone number (or "" for none), as a lead's phone numbers are checked."""
+    return _phone(value)

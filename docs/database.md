@@ -161,6 +161,8 @@ Not drawn: `audit_event`, `core_outbox_event`, `core_idempotency_record` and `id
 | `deactivated_at` | timestamptz NULL | CHECK: set exactly when deactivated |
 | `password` | varchar(128) | Argon2id hash; CHECK an active user's password is usable (no `!` prefix) |
 | `session_epoch` | int | part of the session auth hash; incremented to end every session (deactivation, email change, reset) |
+| `password_change_required` | bool | product enhancement phase: set when an administrator chose the password (create with a password, *Set new password*); every API call but sign-out, `/auth/me` and the password change answers 403 until the user changes it |
+| `password_changed_at` | timestamptz NULL | when the password was last set (by the user or an administrator): what administrators see, never anything about the password |
 | `version` | int | optimistic concurrency for admin edits (409 on a stale value) |
 | `last_login`, `created_at`, `updated_at` | timestamptz | |
 
@@ -168,6 +170,18 @@ Indexes: `(created_at DESC, id DESC)` for the admin list order and cursor; GIN t
 on `UPPER(first_name)`, `UPPER(last_name)` and `UPPER(email)` for the admin search
 (`icontains` compiles to `UPPER(col::text) LIKE …`; verified with `EXPLAIN`). The
 `pg_trgm` extension is created by `identity.0002`.
+
+### `identity_support_session` (product enhancement phase)
+
+`id` uuid, `admin_id` FK PROTECT, `target_id` FK PROTECT, `reason` (≤ 200, plain text),
+`session_digest` (SHA-256 of the administrator's browser-session key: CHECK 64 hex),
+`started_at`, `expires_at` (CHECK after the start), `ended_at`, `end_reason` (`exited`,
+`expired`, `signed_out`, `not_allowed`, `session_changed`; CHECK set together with
+`ended_at`). CHECK not oneself. Indexes: `identity_support_one_live_per_admin` UNIQUE
+`(admin_id) WHERE ended_at IS NULL` (at most one live session per administrator, the
+database's guarantee), `identity_support_live_idx (expires_at) WHERE ended_at IS NULL` (the
+hourly sweep), `identity_support_target_idx (target_id, started_at DESC)`
+([admin-user-workspace.md](admin-user-workspace.md#support-sessions)).
 
 ### `identity_account_token` (Phase 1)
 
@@ -210,7 +224,10 @@ bounded by attacker sources × limits.
 
 `id bigint`, `occurred_at`, `actor_type (user|system)`, `actor_id uuid NULL`, `action`,
 `target_type`, `target_id`, `subject_user_id uuid NULL` (whose workspace was involved),
-`request_id`, `ip_address inet`, `metadata jsonb` (sanitised; secrets redacted; ≤ 4 KB).
+`request_id`, `ip_address inet`, `metadata jsonb` (sanitised; secrets redacted; ≤ 4 KB),
+`support_session_id uuid NULL` (product enhancement phase: the support session a change was
+made in; its partial index `audit_support_idx (support_session_id, occurred_at) WHERE
+support_session_id IS NOT NULL` was built CONCURRENTLY by `audit.0004`).
 
 - CHECKs: valid actor type; a user actor must have an id.
 - Indexes: `(occurred_at DESC)`, `(actor_id, occurred_at DESC)`,
@@ -347,16 +364,23 @@ duplicate query shape.
 
 Configuration rows seeded by `pipeline.0003` ([pipeline.md](pipeline.md#stages)).
 
-- Pipeline: `id` uuid, `key` UNIQUE (CHECK `^[a-z][a-z0-9_]{0,31}$`), `name` UNIQUE (CHECK
-  non-empty), `is_default` (partial UNIQUE: at most one; CHECK the default is active),
-  `is_active`, timestamps. Seeded: Sales Pipeline (`sales`, default).
+- Pipeline: `id` uuid, `key` UNIQUE (CHECK `^[a-z][a-z0-9_]{0,31}$`), `name` (CHECK
+  non-empty), `is_default` (partial UNIQUE: at most one; CHECK the default is active and
+  shared), `is_active` (false: archived), timestamps. Seeded: Sales Pipeline (`sales`,
+  default). Product enhancement phase (`pipeline.0006`): `owner_id` FK NULL (NULL: shared),
+  `created_by_id` FK NULL, `version` (CHECK ≥ 1); names unique among the active pipelines of
+  one owner (`pipeline_pipeline_owner_name_unique (owner_id, lower(name))`) or among the
+  shared ones (`pipeline_pipeline_shared_name_unique (lower(name)) WHERE owner_id IS NULL`),
+  both partial on `is_active`; `pipeline_pipeline_owner_idx (owner_id, name) WHERE owner_id
+  IS NOT NULL` lists an owner's pipelines.
 - Stage: `id` uuid, `pipeline_id` FK PROTECT, `key` (UNIQUE per pipeline, same format
   CHECK), `name` (CHECK non-empty; UNIQUE per pipeline among **active** stages,
   case-insensitively: `lower(name)` partial unique index), `position` smallint (UNIQUE per
   pipeline, **DEFERRABLE INITIALLY DEFERRED** so a reorder can swap positions in one
   transaction), `probability NUMERIC(5,2)` (CHECK 0-100), `category` CHECK `IN
   ('open','won','lost')`, `is_active`, timestamps.
-  - CHECKs: won ⇒ probability 100; lost ⇒ probability 0.
+  - CHECKs: won ⇒ probability 100; lost ⇒ probability 0; `is_negotiation` (product
+    enhancement phase) ⇒ open.
   - UNIQUE `(id, pipeline_id, category)`: the target of the opportunities' composite key,
     which also stops a stage's category or pipeline from changing while it is in use.
   - Seeded: New (10 %), Qualified (25 %), Proposal (50 %), Negotiation (75 %), Won (100 %,
@@ -383,6 +407,11 @@ Configuration rows seeded by `pipeline.0003` ([pipeline.md](pipeline.md#stages))
 | `open_owner_id` uuid **GENERATED** | `CASE WHEN status='open' THEN owner_id END` |
 | `expected_close_sort` date **GENERATED** | `COALESCE(expected_close_date, '9999-12-31')`, NOT NULL sort key |
 | `closed_sort` timestamptz **GENERATED** | `COALESCE(closed_at, '1900-01-01')`, NOT NULL sort key |
+| `opportunity_date` date | product enhancement phase; CHECK 2000-01-01 … 2099-12-31; backfilled from `created_at` in `CRM_TIME_ZONE` |
+| `account_name`, `customer_name` varchar(200) | CHECK non-empty; backfilled from the lead |
+| `contact_phone`, `contact_email`, `address` (≤ 1,000), `instrument_name` (≤ 200), `work_load` (≤ 100) | optional |
+| `custom_fields` jsonb | CHECK `jsonb_typeof = 'object'`; values keyed by field id, validated against the pipeline's definitions ([pipeline.md](pipeline.md#custom-fields)) |
+| `negotiated_price` NUMERIC(14,2) NULL, `negotiated_at` NULL | the latest negotiated price (a copy of the history's newest row); CHECK set together, price ≥ 0 |
 
 Composite foreign keys (`pipeline.0002`, [ADR-0018](adr/0018-pipeline-integrity-by-composite-keys.md)):
 
@@ -407,6 +436,7 @@ Default FK indexes are disabled (`db_index=False`): nothing queries those column
 | `pipeline_opp_lead_idx (lead_id, created_at DESC, id DESC)` | a lead's opportunities (lead page); the reassignment subscriber's lock query; the conversion guard; the ownership FK's lookup when a lead's owner changes | 0.01-0.05 ms | 21 MB |
 | `pipeline_opp_owner_created_idx (owner_id, created_at DESC, id DESC)` | one owner's default list (newest/oldest), archived view, per-stage aggregates (bitmap), other per-owner sorts (bitmap + sort) | 0.1-9 ms | 30 MB |
 | `pipeline_opp_created_idx (created_at DESC, id DESC)` | organisation-wide default list and archived view; global search's recent pass organisation-wide (Phase 7) | 0.14-0.2 ms | 12 MB |
+| `pipeline_opp_owner_pipe_idx (owner_id, pipeline_id)` (product enhancement phase, `pipeline.0006`) | which pipelines hold one owner's deals (`selectors.visible`, index-only), one owner's deals in one personal pipeline (board counts) | 1.8 ms (11.6 ms without: 10,346 heap blocks for an owner of 20,000) / 1.9 ms (10.4 ms) | 2.2 MB |
 | `pipeline_opp_search_trgm GIN (upper(title) gin_trgm_ops) WHERE archived_at IS NULL` (Phase 7, `pipeline.0005`) | global search's older pass: title substrings ([search.md](search.md#database-and-indexes)); trigrams only, so no list or board query can choose it | 4-8 ms per search at 300,000 (100-150 ms of sequential scan without it) | 17 MB |
 
 The board's partial indexes cover one status each, so the board's per-stage query and a
@@ -434,6 +464,25 @@ the opportunity entered the stage, `lost_reason`, `actor_id` FK, `occurred_at`.
 - Written in the transaction that moves the stage, while holding the opportunity's lock.
 - Index `pipeline_history_opp_idx (opportunity_id, occurred_at DESC, id DESC)`: the
   history page (keyset, newest first).
+
+### `pipeline_negotiation_price` (product enhancement phase, append-only)
+
+`id bigint`, `opportunity_id` FK PROTECT, `price NUMERIC(14,2)` (CHECK ≥ 0), `currency`
+(CHECK `^[A-Z]{3}$`, INR), `stage_id` FK and `stage_name` (a copy, CHECK non-empty),
+`source` (`stage_entry`, `revision`, `creation`), `opportunity_version` (the version the
+price was recorded at), `actor_id` FK, `subject_user_id` NULL (the owner when the actor is
+someone else), `support_session_id` NULL, `occurred_at`. Append-only: `AppendOnlyModel` plus
+the `pipeline_negotiation_price_append_only` trigger. Index `pipeline_negotiation_opp_idx
+(opportunity_id, occurred_at DESC, id DESC)`: the history, newest first (0.02 ms).
+
+### `pipeline_custom_field` (product enhancement phase)
+
+`id` uuid, `pipeline_id` FK, `name` (≤ 60, CHECK non-empty), `field_type` (CHECK one of
+text, long_text, number, currency, date, boolean, single_select, multi_select), `required`,
+`options` jsonb (CHECK an array; choices `{id, label}`), `position`, `is_active`,
+`created_by_id`, timestamps. Indexes: `pipeline_field_pipeline_idx (pipeline_id, position)`,
+`pipeline_field_active_name_unique (pipeline_id, lower(name)) WHERE is_active`. Values live
+in `pipeline_opportunity.custom_fields`: no DDL per field, ever.
 
 ### `activities_activity` (built, Phase 4)
 
@@ -524,6 +573,25 @@ read every activity (0.3-2 s) ([search.md](search.md#performance); `bench_search
 Known slower shape (administrators only; risk R44): the organisation-wide summary (25 ms at
 403k, 31 ms at 2M; one aggregate per page load).
 `tests/performance/test_activity_query_plans.py` pins which index serves each shape.
+
+### `activities_attachment` (product enhancement phase)
+
+Metadata of a note's files; the bytes live in object storage ([activities.md](activities.md#attachments)).
+`id` uuid, `note_id` FK PROTECT, `original_name` (display text, ≤ 200), `extension` (CHECK
+`^[a-z0-9]{1,8}$`), `content_type`, `size` (CHECK 1 … 100 MB), `sha256` (CHECK 64 hex),
+`storage_key` UNIQUE (generated), `state` (`uploading`, `stored`, `failed`), `scan_status`
+(`not_scanned`, `pending`, `clean`, `rejected`), `uploaded_by_id`, `created_at`,
+`stored_at` (CHECK not while uploading), `deleted_at`/`deleted_by_id`, `purged_at` (CHECK
+only once gone: deleted, failed or rejected). `activities_activity` gained `edited_at` and
+`edited_by_id` (who last edited a note's text). Indexes:
+
+- `activities_attachment_note_idx (note_id, created_at) WHERE deleted_at IS NULL`: a note's
+  files, and the deal's notes list (one query for any number of notes, 0.27 ms);
+- `activities_attachment_open_idx (created_at) WHERE state = 'uploading' OR scan_status =
+  'pending' OR (purged_at IS NULL AND (deleted_at IS NOT NULL OR state = 'failed' OR
+  scan_status = 'rejected'))`: the hourly housekeeping's three queries each imply one arm
+  (0.01 ms each at 300,000 files; the first version lacked the blocked and pending arms and
+  the purge query read the whole table: 628 ms, enhancement review).
 
 ### `activities_timeline_entry` (built, Phase 4, append-only)
 
@@ -654,6 +722,40 @@ owner, 0.6 ms for a typical one, 88 ms organisation-wide
 Phase 6's per-user statistics table will run the same statements with `GROUP BY owner_id`
 for one page of users (`owner_id = ANY(:page_user_ids)`), so it costs a constant number of
 queries per page regardless of how many users or records exist.
+
+## Product enhancement phase: access patterns
+
+`tests/performance/bench_enhancement.py` on a copy of the RAG benchmark database migrated to
+this phase's schema and grown with `--seed`: 501 users, 1,000,000 leads, 300,000
+opportunities (89,772 of them in 1,500 personal pipelines with custom stage probabilities),
+72,764 negotiated prices, 300,021 attachment rows, 2,026,713 audit events (6,000 security
+events), 2,005,148 activities. Each request goes through the whole stack and every
+statement it runs is EXPLAIN ANALYZEd (best of three; wall clock includes the test client).
+
+| Request | Who | Queries | Slowest statement | Wall |
+|---|---|---|---|---|
+| pipelines list | heaviest owner (19,994 deals) | 5 | 1.8 ms | 11.5 ms |
+| board, default pipeline | heaviest owner | 10 | 11.3 ms (per-stage counts of 12,924 open deals: bitmap heap) | 59.5 ms |
+| board, a personal pipeline | heaviest owner | 10 | 1.9 ms | 42.1 ms |
+| list, one stage of a personal pipeline | heaviest owner | 4 | 0.02 ms | 8.8 ms |
+| deal page | heaviest owner | 3 | 0.06 ms | 7.1 ms |
+| negotiated prices | heaviest owner | 4 | 0.02 ms | 6.5 ms |
+| deal notes with files | the deal's owner | 5 | 0.23 ms | 21.2 ms |
+| dashboard (all pipelines) | heaviest owner | 12 | 9.3 ms | 40.2 ms |
+| pipelines list (1,501) | administrator, organisation | 6 | 1.7 ms | 125.1 ms (serialising 500 pipelines with stages and fields) |
+| board, default pipeline | administrator, organisation | 11 | 52.3 ms (sequential scan: organisation-wide counts, as before, R40) | 153.2 ms |
+| dashboard | administrator, organisation | 13 | 68.8 ms (sequential scans, as before) | 144.9 ms |
+| security events (2M audit rows) | administrator | 4 | 5.6 ms (`audit_action_idx`) | 14.4 ms |
+| user detail | administrator | 3 | 0.02 ms | 5.5 ms |
+
+No new sequential scan of a large table: the organisation-wide ones are the documented
+Phase 3/5 shapes. The `(owner_id, pipeline_id)` index was added on this evidence (the
+pipelines list's visibility subquery 11.6 → 1.8 ms, a personal board 10.4 → 1.9 ms; 2.2 MB;
+0.3 s to build at 300,000). **Migrations at this volume** (the same copy, before seeding):
+`pipeline.0006` 21 s forward (backfilling 300,000 opportunities: it holds the opportunity
+table for that time, so run it in the release window), 2.5 s back; the others under a second
+each; the full rollback to the previous release's schema and forward again 17.5 s, with a
+checksum of every opportunity's id, stage, value, owner and version unchanged.
 
 ## Migrations
 

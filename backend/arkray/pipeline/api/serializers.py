@@ -24,6 +24,7 @@ from arkray.core.access import AccessScope
 from arkray.core.api import ExactDecimalField, OpaqueIdField, StrictInputSerializer
 from arkray.leads.api.serializers import LeadSerializer, UserRefSerializer
 
+from .. import configuration
 from .. import models as m
 from ..selectors import BOARD_CARDS_DEFAULT, BOARD_CARDS_MAX, DEFAULT_ORDERING, ORDERINGS
 
@@ -52,10 +53,26 @@ def percentage(**kwargs: Any) -> serializers.DecimalField:
 # --- output ------------------------------------------------------------------------------------
 class StageSerializer(serializers.ModelSerializer[m.Stage]):
     probability = percentage()
+    type = serializers.ChoiceField(
+        source="stage_type",
+        choices=m.StageType.choices,
+        read_only=True,
+        help_text="open, negotiation, won or lost: what the stage means (never its name).",
+    )
 
     class Meta:
         model = m.Stage
-        fields = ["id", "key", "name", "position", "probability", "category", "is_active"]
+        fields = [
+            "id",
+            "key",
+            "name",
+            "position",
+            "probability",
+            "category",
+            "type",
+            "is_negotiation",
+            "is_active",
+        ]
         read_only_fields = fields
 
 
@@ -66,19 +83,57 @@ class PipelineRefSerializer(serializers.ModelSerializer[m.Pipeline]):
         read_only_fields = fields
 
 
-class PipelineSerializer(serializers.ModelSerializer[m.Pipeline]):
-    stages = StageSerializer(many=True, read_only=True)
+class FieldOptionSerializer(serializers.Serializer[Any]):
+    id = serializers.CharField()
+    # DRF pops declared fields off the class; the base Field attribute is unaffected.
+    label = serializers.CharField()  # type: ignore[assignment]
+
+
+class CustomFieldSerializer(serializers.ModelSerializer[m.CustomField]):
+    type = serializers.ChoiceField(source="field_type", choices=m.FieldType.choices, read_only=True)
+    options = FieldOptionSerializer(many=True, read_only=True)
 
     class Meta:
-        model = m.Pipeline
-        fields = ["id", "key", "name", "is_default", "is_active", "stages"]
+        model = m.CustomField
+        fields = ["id", "name", "type", "required", "options", "position"]
         read_only_fields = fields
 
 
-class PipelineListSerializer(serializers.Serializer[Any]):
-    """Every pipeline with its stages in order (retired ones flagged): the board columns
-    and the stage choices of every form come from here, never from hard-coded lists."""
+class PipelineSerializer(serializers.ModelSerializer[m.Pipeline]):
+    """A pipeline with its stages in order (retired ones flagged) and its active custom
+    fields: the board columns, stage choices and form fields come from here, never from
+    hard-coded lists. `owner` is null for a shared (organisation) pipeline; `can_manage`
+    says whether the caller may configure it in this workspace."""
 
+    stages = StageSerializer(many=True, read_only=True)
+    custom_fields = CustomFieldSerializer(source="fields", many=True, read_only=True)
+    owner = UserRefSerializer(read_only=True, allow_null=True)
+    can_manage = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.Pipeline
+        fields = [
+            "id",
+            "key",
+            "name",
+            "owner",
+            "is_default",
+            "is_active",
+            "version",
+            "can_manage",
+            "stages",
+            "custom_fields",
+        ]
+        read_only_fields = fields
+
+    def get_can_manage(self, pipeline: m.Pipeline) -> bool:
+        actor, scope = self.context.get("actor"), self.context.get("scope")
+        if actor is None or scope is None:
+            return False
+        return configuration.can_manage(actor, scope, pipeline)
+
+
+class PipelineListSerializer(serializers.Serializer[Any]):
     results = PipelineSerializer(many=True)
 
 
@@ -110,6 +165,7 @@ class _ScopedLead(serializers.Serializer[Any]):
 CARD_FIELDS = [
     "id",
     "title",
+    "account_name",
     "lead",
     "owner",
     "stage_id",
@@ -119,6 +175,7 @@ CARD_FIELDS = [
     "probability_overridden",
     "weighted_value",
     "expected_close_date",
+    "negotiated_price",
     "closed_at",
     "archived_at",
     "version",
@@ -136,6 +193,7 @@ class OpportunityCardSerializer(_ScopedLead, serializers.ModelSerializer[m.Oppor
     value = money()
     probability = percentage()
     weighted_value = money()
+    negotiated_price = money(allow_null=True)
 
     class Meta:
         model = m.Opportunity
@@ -149,9 +207,14 @@ class OpportunitySerializer(_ScopedLead, serializers.ModelSerializer[m.Opportuni
     created_by = UserRefSerializer(read_only=True)
     pipeline = PipelineRefSerializer(read_only=True)
     stage = StageSerializer(read_only=True)
-    value = money()
+    value = money(help_text="The instrument installation price (INR): the deal's value.")
     probability = percentage()
     weighted_value = money()
+    negotiated_price = money(allow_null=True, help_text="The latest negotiated price, if any.")
+    custom_fields = serializers.DictField(
+        read_only=True,
+        help_text="Custom field id -> canonical value (strings, booleans or option ids).",
+    )
 
     class Meta:
         model = m.Opportunity
@@ -159,6 +222,15 @@ class OpportunitySerializer(_ScopedLead, serializers.ModelSerializer[m.Opportuni
             *(f for f in CARD_FIELDS if f != "stage_id"),
             "pipeline",
             "stage",
+            "opportunity_date",
+            "customer_name",
+            "contact_phone",
+            "contact_email",
+            "address",
+            "instrument_name",
+            "work_load",
+            "custom_fields",
+            "negotiated_at",
             "description",
             "lost_reason",
             "created_by",
@@ -241,6 +313,32 @@ class StageHistoryPageSerializer(serializers.Serializer[Any]):
     previous = serializers.CharField(allow_null=True)
 
 
+class NegotiationPriceSerializer(serializers.ModelSerializer[m.NegotiationPrice]):
+    id = OpaqueIdField("negotiation-price")
+    price = money()
+    actor = UserRefSerializer(read_only=True)
+
+    class Meta:
+        model = m.NegotiationPrice
+        fields = [
+            "id",
+            "price",
+            "currency",
+            "stage_id",
+            "stage_name",
+            "source",
+            "actor",
+            "occurred_at",
+        ]
+        read_only_fields = fields
+
+
+class NegotiationPricePageSerializer(serializers.Serializer[Any]):
+    results = NegotiationPriceSerializer(many=True)
+    next = serializers.CharField(allow_null=True)
+    previous = serializers.CharField(allow_null=True)
+
+
 class ConversionSerializer(serializers.Serializer[Any]):
     lead = LeadSerializer()
     opportunity = OpportunitySerializer()
@@ -248,11 +346,8 @@ class ConversionSerializer(serializers.Serializer[Any]):
 
 # --- input -------------------------------------------------------------------------------------
 def _value(**kwargs: Any) -> ExactDecimalField:
-    return ExactDecimalField(
-        max_whole_digits=m.MONEY_DIGITS - m.MONEY_PLACES,
-        help_text='Amount in the organisation currency (INR), e.g. "1250000.00".',
-        **kwargs,
-    )
+    kwargs.setdefault("help_text", 'Amount in the organisation currency (INR), e.g. "1250000.00".')
+    return ExactDecimalField(max_whole_digits=m.MONEY_DIGITS - m.MONEY_PLACES, **kwargs)
 
 
 def _probability(**kwargs: Any) -> ExactDecimalField:
@@ -264,13 +359,47 @@ def _probability(**kwargs: Any) -> ExactDecimalField:
     )
 
 
-class OpportunityFieldsSerializer(StrictInputSerializer):
+def _text(max_length: int, **kwargs: Any) -> serializers.CharField:
+    return serializers.CharField(
+        max_length=max_length, allow_blank=True, required=False, trim_whitespace=False, **kwargs
+    )
+
+
+def _custom_values() -> serializers.DictField:
+    return serializers.DictField(
+        child=serializers.JSONField(allow_null=True),
+        required=False,
+        help_text="Custom field id -> value (null clears it). Numbers and amounts as strings.",
+    )
+
+
+class DealFieldsMixin(serializers.Serializer[Any]):
+    """The opportunity's customer, instrument and custom details (all optional here; the
+    account and customer names default to the lead's at creation)."""
+
+    opportunity_date = serializers.DateField(required=False)
+    account_name = _text(m.ACCOUNT_NAME_MAX_LENGTH)
+    customer_name = _text(m.CUSTOMER_NAME_MAX_LENGTH)
+    contact_phone = _text(40)
+    contact_email = _text(254)
+    address = _text(m.ADDRESS_MAX_LENGTH)
+    instrument_name = _text(m.INSTRUMENT_NAME_MAX_LENGTH)
+    work_load = _text(m.WORK_LOAD_MAX_LENGTH)
+    custom_fields = _custom_values()
+
+
+class OpportunityFieldsSerializer(DealFieldsMixin, StrictInputSerializer):
     title = serializers.CharField(max_length=m.TITLE_MAX_LENGTH)
     value = _value()
     probability = _probability(required=False)
     expected_close_date = serializers.DateField(allow_null=True, required=False)
     description = serializers.CharField(
         max_length=m.DESCRIPTION_MAX_LENGTH, allow_blank=True, required=False, trim_whitespace=False
+    )
+    negotiated_price = _value(
+        required=False,
+        allow_null=True,
+        help_text="Required when the stage is a negotiation stage; refused otherwise.",
     )
 
 
@@ -285,7 +414,7 @@ class OpportunityCreateSerializer(OpportunityFieldsSerializer):
     )
 
 
-class OpportunityUpdateSerializer(StrictInputSerializer):
+class OpportunityUpdateSerializer(DealFieldsMixin, StrictInputSerializer):
     version = serializers.IntegerField(min_value=1)
     title = serializers.CharField(max_length=m.TITLE_MAX_LENGTH, required=False)
     value = _value(required=False)
@@ -308,6 +437,83 @@ class OpportunityMoveSerializer(StrictInputSerializer):
         required=False,
         help_text="Optional, only when moving to a lost stage.",
     )
+    negotiated_price = _value(
+        required=False,
+        allow_null=True,
+        help_text="Required when moving into a negotiation stage; refused otherwise.",
+    )
+
+
+class NegotiatedPriceInputSerializer(StrictInputSerializer):
+    version = serializers.IntegerField(min_value=1)
+    price = _value(help_text='The negotiated price (INR), e.g. "1050000.00".')
+
+
+# --- input: configuration -------------------------------------------------------------------
+class StageInputSerializer(StrictInputSerializer):
+    id = serializers.UUIDField(required=False, help_text="An existing stage; omit for a new one.")
+    name = serializers.CharField(max_length=m.STAGE_NAME_MAX_LENGTH, trim_whitespace=False)
+    type = serializers.ChoiceField(choices=m.StageType.choices)
+    probability = ExactDecimalField(
+        max_whole_digits=3,
+        required=False,
+        allow_null=True,
+        help_text="0-100 for open and negotiation stages; won is 100 and lost 0.",
+    )
+
+
+class FieldOptionInputSerializer(StrictInputSerializer):
+    id = serializers.CharField(max_length=10, required=False, help_text="An existing choice.")
+    label = serializers.CharField(  # type: ignore[assignment]
+        max_length=m.FIELD_OPTION_MAX_LENGTH, trim_whitespace=False
+    )
+
+
+class FieldInputSerializer(StrictInputSerializer):
+    id = serializers.UUIDField(required=False, help_text="An existing field; omit for a new one.")
+    name = serializers.CharField(max_length=m.FIELD_NAME_MAX_LENGTH, trim_whitespace=False)
+    type = serializers.ChoiceField(choices=m.FieldType.choices)
+    required = serializers.BooleanField(required=False, default=False)  # type: ignore[assignment]
+    options = serializers.ListField(
+        child=FieldOptionInputSerializer(), required=False, max_length=m.MAX_FIELD_OPTIONS
+    )
+
+
+def _stages() -> serializers.ListField:
+    return serializers.ListField(
+        child=StageInputSerializer(), max_length=m.MAX_STAGES_PER_PIPELINE, allow_empty=False
+    )
+
+
+def _fields(**kwargs: Any) -> serializers.ListField:
+    return serializers.ListField(
+        child=FieldInputSerializer(), max_length=m.MAX_FIELDS_PER_PIPELINE, **kwargs
+    )
+
+
+class PipelineCreateSerializer(StrictInputSerializer):
+    name = serializers.CharField(max_length=m.PIPELINE_NAME_MAX_LENGTH, trim_whitespace=False)
+    stages = _stages()
+    custom_fields = _fields(required=False)
+
+
+class PipelineRenameSerializer(StrictInputSerializer):
+    version = serializers.IntegerField(min_value=1)
+    name = serializers.CharField(max_length=m.PIPELINE_NAME_MAX_LENGTH, trim_whitespace=False)
+
+
+class StagesReplaceSerializer(StrictInputSerializer):
+    version = serializers.IntegerField(min_value=1)
+    stages = _stages()
+
+
+class FieldsReplaceSerializer(StrictInputSerializer):
+    version = serializers.IntegerField(min_value=1)
+    custom_fields = _fields(allow_empty=True)
+
+
+class PipelineListQuerySerializer(StrictInputSerializer):
+    archived = serializers.BooleanField(required=False, default=False)
 
 
 class OpportunityVersionSerializer(StrictInputSerializer):

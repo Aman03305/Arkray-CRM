@@ -100,6 +100,8 @@ def ensure_pipeline_configuration() -> None:
                 "position": position,
                 "probability": probability,
                 "category": category,
+                # pipeline.0006 made the seeded Negotiation a negotiation stage.
+                "is_negotiation": stage_key == "negotiation",
             },
         )
 
@@ -132,6 +134,8 @@ class OpportunityFactory(factory.django.DjangoModelFactory[Opportunity]):
     closed_at = factory.LazyAttribute(
         lambda o: None if o.stage.category == "open" else timezone.now()
     )
+    account_name = "Account"
+    customer_name = "Customer"
 
 
 _INITIAL_STATUS = {

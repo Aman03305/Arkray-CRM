@@ -44,6 +44,18 @@ admin_urlpatterns = [
         views.AdminUserResendInvitationView.as_view(),
         name="admin-user-resend-invitation",
     ),
+    path(
+        "users/<uuid:user_id>/set-password",
+        views.AdminUserSetPasswordView.as_view(),
+        name="admin-user-set-password",
+    ),
+    path("security-events", views.SecurityEventListView.as_view(), name="admin-security-events"),
+    path("support-sessions", views.SupportSessionStartView.as_view(), name="support-sessions"),
+    path(
+        "support-sessions/current",
+        views.SupportSessionCurrentView.as_view(),
+        name="support-session-current",
+    ),
 ]
 
 workspace_urlpatterns = [

@@ -1,4 +1,4 @@
-import type { Activity, ActivityListItem, ActivitySummary, TimelineEntry } from "@/lib/api/types";
+import type { Activity, ActivityListItem, ActivitySummary, Attachment, Note, TimelineEntry } from "@/lib/api/types";
 
 import { LEAD_ID, RAHUL_ID } from "./fixtures";
 import { OPPORTUNITY_ID } from "./pipeline-fixtures";
@@ -37,6 +37,9 @@ export function makeActivity(overrides: Partial<Activity> = {}): Activity {
     meeting_url: "",
     completed_by: null,
     cancelled_by: null,
+    edited_at: null,
+    edited_by: null,
+    attachments: [],
   };
   return { ...base, ...overrides };
 }
@@ -75,11 +78,14 @@ export function makeNote(overrides: Partial<Activity> = {}): Activity {
 }
 
 export function asListItem(activity: Activity, overrides: Partial<ActivityListItem> = {}): ActivityListItem {
-  const { description, location, meeting_url, completed_by, cancelled_by, ...shared } = activity;
+  const { description, location, meeting_url, completed_by, cancelled_by, edited_at, edited_by, attachments, ...shared } = activity;
   void location;
   void meeting_url;
   void completed_by;
   void cancelled_by;
+  void edited_at;
+  void edited_by;
+  void attachments;
   return {
     ...shared,
     preview: description.slice(0, 240),
@@ -132,4 +138,38 @@ export function noteEntry(text: string, overrides: Partial<TimelineEntry> = {}):
     },
     ...overrides,
   });
+}
+
+// --- a deal's notes and their files ---------------------------------------------------------
+export const ATTACHMENT_ID = "a77ac000-0000-4000-8000-0000000000f1";
+
+export function makeAttachment(overrides: Partial<Attachment> = {}): Attachment {
+  const base: Attachment = {
+    id: ATTACHMENT_ID,
+    name: "Quotation.pdf",
+    extension: "pdf",
+    content_type: "application/pdf",
+    size: 1_258_291,
+    scan_status: "clean",
+    downloadable: true,
+    previewable: false,
+    uploaded_by: RAHUL,
+    created_at: "2026-10-01T05:00:00Z",
+  };
+  return { ...base, ...overrides };
+}
+
+export function makeDealNote(overrides: Partial<Note> = {}): Note {
+  const base: Note = {
+    id: NOTE_ID,
+    description: "Prefers morning calls.",
+    created_by: RAHUL,
+    created_at: "2026-10-01T04:30:00Z",
+    edited_at: null,
+    edited_by: null,
+    version: 1,
+    attachments: [],
+    can_edit: true,
+  };
+  return { ...base, ...overrides };
 }

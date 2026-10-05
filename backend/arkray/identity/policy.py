@@ -26,6 +26,9 @@ class Capability(StrEnum):
     CONFIG_MANAGE = "config.manage"  # pipelines, stages, lead statuses and sources
     AUDIT_VIEW = "audit.view"
     AI_QUERY = "ai.query"  # use Ask Arkray (within the caller's own scope)
+    # Start a time-limited, audited support session in one user's CRM (never with their
+    # password; docs/admin-user-workspace.md#support-sessions).
+    SUPPORT_ACCESS = "support.access"
 
 
 ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = {
@@ -40,6 +43,7 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = {
             Capability.CONFIG_MANAGE,
             Capability.AUDIT_VIEW,
             Capability.AI_QUERY,
+            Capability.SUPPORT_ACCESS,
         }
     ),
     Role.SALES_USER: frozenset({Capability.CRM_ACCESS_OWN, Capability.AI_QUERY}),

@@ -11,24 +11,26 @@ import { EditOpportunityView, OpportunityView, PipelineView } from "@/features/w
 import type { Board } from "@/lib/api/types";
 import { parseAmountInput } from "@/lib/money";
 import { LEAD_OPTIONS, salesViewer } from "@/test/fixtures";
-import { makeBoard, makeCard, makeOpportunity, OPPORTUNITY_ID, OTHER_OPPORTUNITY_ID, PIPELINES, STAGES } from "@/test/pipeline-fixtures";
+import { makeBoard, makeCard, makeOpportunity, OPPORTUNITY_ID, OTHER_OPPORTUNITY_ID, PIPELINE_ROUTES, STAGES } from "@/test/pipeline-fixtures";
 import { apiError, mockApi, renderWithProviders, type RecordedCall } from "@/test/render";
 
 import { forgetBoardState } from "./hooks";
 
-const nav = vi.hoisted(() => ({ pathname: "/pipeline", push: vi.fn() }));
+const nav = vi.hoisted(() => ({ pathname: "/pipeline", push: vi.fn(), replace: vi.fn() }));
 vi.mock("next/navigation", () => ({
   usePathname: () => nav.pathname,
-  useRouter: () => ({ push: nav.push, replace: vi.fn(), back: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => ({ push: nav.push, replace: nav.replace, back: vi.fn(), prefetch: vi.fn() }),
 }));
 
 const CONFIG = {
-  "GET /api/v1/config/pipelines": { status: 200, body: PIPELINES },
+  ...PIPELINE_ROUTES,
   "GET /api/v1/config/lead-options": { status: 200, body: LEAD_OPTIONS },
 };
 const ME_BOARD = "/api/v1/workspaces/me/pipeline-board";
 const ME = `/api/v1/workspaces/me/opportunities/${OPPORTUNITY_ID}`;
 const moveUrl = (id: string) => `/api/v1/workspaces/me/opportunities/${id}/move`;
+// Moves go to Qualified/New: entering Negotiation asks for the price (pipeline-board.test.tsx).
+const stageOf = (call: RecordedCall) => Object.values(STAGES).find((s) => s.id === (call.body as { stage: string }).stage)!;
 
 function dataTransfer() {
   const data = new Map<string, string>();
@@ -66,6 +68,7 @@ function narrow() {
 beforeEach(() => {
   nav.pathname = "/pipeline";
   nav.push.mockReset();
+  nav.replace.mockReset();
   forgetBoardState();
 });
 
@@ -85,8 +88,8 @@ describe("F1 (P1): filters changed while a move is in flight", () => {
     });
     renderWithProviders(<PipelineView />, { viewer: salesViewer });
     const card = (await screen.findByRole("link", { name: "Hospital Analyzer Project" })).closest("article")!;
-    dragTo(card, columnOf("Negotiation"));
-    await waitFor(() => expect(within(columnOf("Negotiation")).getByText("Hospital Analyzer Project")).toBeInTheDocument());
+    dragTo(card, columnOf("Qualified"));
+    await waitFor(() => expect(within(columnOf("Qualified")).getByText("Hospital Analyzer Project")).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText("Expected close to"), { target: { value: "2026-10-31" } });
     expect(await screen.findByText("October deal")).toBeInTheDocument();
     offline = true;
@@ -98,7 +101,7 @@ describe("F1 (P1): filters changed while a move is in flight", () => {
     // And the unfiltered board shows the card back in Proposal, as the server has it.
     fireEvent.change(screen.getByLabelText("Expected close to"), { target: { value: "" } });
     await waitFor(() => expect(within(columnOf("Proposal")).getByText("Hospital Analyzer Project")).toBeInTheDocument());
-    expect(within(columnOf("Negotiation")).queryByText("Hospital Analyzer Project")).not.toBeInTheDocument();
+    expect(within(columnOf("Qualified")).queryByText("Hospital Analyzer Project")).not.toBeInTheDocument();
   });
 });
 
@@ -110,18 +113,17 @@ describe("F2: the next move after a successful one", () => {
       [`GET ${ME_BOARD}`]: () => (++boardCalls === 1 ? { status: 200, body: makeBoard() } : apiError(503, "unavailable", "Try later.")),
       [`POST ${moveUrl(makeCard().id)}`]: (call: RecordedCall) => {
         const version = (call.body as { version: number }).version;
-        const stage = (call.body as { stage: string }).stage === STAGES.negotiation.id ? STAGES.negotiation : STAGES.qualified;
-        return { status: 200, body: makeOpportunity({ stage, version: version + 1 }) };
+        return { status: 200, body: makeOpportunity({ stage: stageOf(call), version: version + 1 }) };
       },
     });
     renderWithProviders(<PipelineView />, { viewer: salesViewer });
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Move Hospital Analyzer Project" }));
-    await user.click(screen.getByRole("menuitem", { name: "Move to Negotiation" }));
-    await screen.findByText('"Hospital Analyzer Project" moved to Negotiation.');
-    await user.click(screen.getByRole("button", { name: "Move Hospital Analyzer Project" }));
     await user.click(screen.getByRole("menuitem", { name: "Move to Qualified" }));
-    expect(await screen.findByText('"Hospital Analyzer Project" moved to Qualified.')).toBeInTheDocument();
+    await screen.findByText('"Hospital Analyzer Project" moved to Qualified.');
+    await user.click(screen.getByRole("button", { name: "Move Hospital Analyzer Project" }));
+    await user.click(screen.getByRole("menuitem", { name: "Move to New" }));
+    expect(await screen.findByText('"Hospital Analyzer Project" moved to New.')).toBeInTheDocument();
     expect(api.callsTo("POST", moveUrl(makeCard().id)).map((c) => (c.body as { version: number }).version)).toEqual([2, 3]);
   });
 });
@@ -199,12 +201,12 @@ describe("F5: a second move while one is saving", () => {
     renderWithProviders(<PipelineView />, { viewer: salesViewer });
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Move Hospital Analyzer Project" }));
-    await user.click(screen.getByRole("menuitem", { name: "Move to Negotiation" }));
-    await user.click(screen.getByRole("button", { name: "Move Second deal" }));
     await user.click(screen.getByRole("menuitem", { name: "Move to Qualified" }));
+    await user.click(screen.getByRole("button", { name: "Move Second deal" }));
+    await user.click(screen.getByRole("menuitem", { name: "Move to New" }));
     expect(await screen.findByText("The previous move is still being saved. Try again in a moment.")).toBeInTheDocument();
     expect(api.callsTo("POST", moveUrl(OTHER_OPPORTUNITY_ID))).toHaveLength(0);
-    await act(async () => response.resolve({ status: 200, body: makeOpportunity({ stage: STAGES.negotiation, version: 3 }) }));
+    await act(async () => response.resolve({ status: 200, body: makeOpportunity({ stage: STAGES.qualified, version: 3 }) }));
   });
 });
 
@@ -238,7 +240,7 @@ describe("F6 (P1) and F7: editing conflicts", () => {
     nav.pathname = `/pipeline/${OPPORTUNITY_ID}/edit`;
   });
 
-  it("F6: 'Apply my changes' keeps someone else's manual probability", async () => {
+  it("F6: 'Keep my changes' keeps someone else's manual probability", async () => {
     let version = 2;
     const api = mockApi({
       ...CONFIG,
@@ -254,13 +256,13 @@ describe("F6 (P1) and F7: editing conflicts", () => {
     });
     renderWithProviders(<EditOpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
     const user = userEvent.setup();
-    const title = await screen.findByLabelText("Title");
+    const title = await screen.findByLabelText("Opportunity name");
     await user.clear(title);
     await user.type(title, "Hospital Analyzer Project (phase 2)");
     version = 3;
     await user.click(screen.getByRole("button", { name: "Save changes" }));
-    await user.click(await screen.findByRole("button", { name: "Apply my changes to the latest version" }));
-    expect(screen.getByRole("checkbox", { name: /Set the probability manually/ })).toBeChecked();
+    await user.click(await screen.findByRole("button", { name: "Keep my changes" }));
+    expect(screen.getByRole("checkbox", { name: /Own probability/ })).toBeChecked();
     expect(screen.getByLabelText("Probability (%)")).toHaveValue("60");
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(api.callsTo("PATCH", ME)).toHaveLength(2));
@@ -279,12 +281,13 @@ describe("F6 (P1) and F7: editing conflicts", () => {
     });
     renderWithProviders(<EditOpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
     const user = userEvent.setup();
-    const description = await screen.findByLabelText(/^Description/);
+    const drawer = await screen.findByRole("dialog", { name: "Edit opportunity" });
+    const description = within(drawer).getByLabelText(/^Description/);
     await user.clear(description);
     await user.type(description, "Long notes the user typed");
     version = 3;
     await user.click(screen.getByRole("button", { name: "Save changes" }));
-    expect(await screen.findByText("Someone archived this opportunity while you were editing")).toBeInTheDocument();
+    expect(await screen.findByText("This opportunity was archived meanwhile")).toBeInTheDocument();
     expect(screen.getByDisplayValue("Long notes the user typed")).toBeInTheDocument();
   });
 });
@@ -295,9 +298,9 @@ describe("F8: focus after closing actions on the opportunity page", () => {
   });
 
   it.each([
-    ["Mark as won", "Mark as won", { status: "won", stage: STAGES.won, probability: "100.00", version: 3 }, "Marked as won."],
-    ["Archive", "Archive opportunity", { archived_at: "2026-09-30T05:00:00Z", version: 3 }, "Opportunity archived."],
-  ] as const)("%s: focus lands on the page heading, not the document body", async (open, confirm, after, notice) => {
+    ["Won", "Mark as won", { status: "won", stage: STAGES.won, probability: "100.00", version: 3 }, "Marked as won."],
+    ["Delete (archive)", "Delete", { archived_at: "2026-09-30T05:00:00Z", version: 3 }, "Opportunity deleted (archived). You can restore it."],
+  ] as const)("%s: focus lands on the page, not the document body", async (open, confirm, after, notice) => {
     let done = false;
     mockApi({
       ...CONFIG,
@@ -319,12 +322,22 @@ describe("F8: focus after closing actions on the opportunity page", () => {
       { viewer: salesViewer },
     );
     const user = userEvent.setup();
-    const button = await screen.findByRole("button", { name: open });
-    button.focus();
-    await user.keyboard("{Enter}");
+    if (open === "Won") {
+      const button = await screen.findByRole("button", { name: open });
+      button.focus();
+      await user.keyboard("{Enter}");
+    } else {
+      const menu = await screen.findByRole("button", { name: "More actions for Hospital Analyzer Project" });
+      menu.focus();
+      await user.keyboard("{Enter}");
+      await user.click(screen.getByRole("menuitem", { name: open }));
+    }
     await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: confirm }));
     expect(await screen.findByText(notice)).toBeInTheDocument();
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { level: 1 })));
+    // Won: the button is gone, so the heading; archive: the menu that opened it is still there.
+    const expected = () =>
+      open === "Won" ? screen.getByRole("heading", { level: 1 }) : screen.getByRole("button", { name: "More actions for Hospital Analyzer Project" });
+    await waitFor(() => expect(document.activeElement).toBe(expected()));
   });
 });
 
@@ -371,7 +384,7 @@ describe("walkthrough: the board after a change made on the opportunity's own pa
       [`PATCH ${ME}`]: { status: 200, body: makeOpportunity({ version: 3, value: "1500000.00" }) },
       [`POST ${moveUrl(makeCard().id)}`]: (call: RecordedCall) =>
         (call.body as { version: number }).version === 3
-          ? { status: 200, body: makeOpportunity({ stage: STAGES.negotiation, version: 4 }) }
+          ? { status: 200, body: makeOpportunity({ stage: STAGES.qualified, version: 4 }) }
           : apiError(409, "conflict", "Changed."),
     });
     const view = renderWithProviders(<PipelineView />, { viewer: salesViewer });
@@ -380,21 +393,21 @@ describe("walkthrough: the board after a change made on the opportunity's own pa
     nav.pathname = `/pipeline/${OPPORTUNITY_ID}/edit`;
     view.rerender(<EditOpportunityView opportunityId={OPPORTUNITY_ID} />);
     const user = userEvent.setup();
-    const value = await screen.findByLabelText("Value (₹)");
+    const value = await screen.findByLabelText("Installation price (₹)");
     await user.clear(value);
     await user.type(value, "15,00,000");
     slow = deferred();
     await user.click(screen.getByRole("button", { name: "Save changes" }));
-    await waitFor(() => expect(nav.push).toHaveBeenCalled());
+    await waitFor(() => expect(nav.replace).toHaveBeenCalled());
     nav.pathname = "/pipeline";
     view.rerender(<PipelineView />);
     const card = (await screen.findByRole("link", { name: "Hospital Analyzer Project" })).closest("article")!;
-    dragTo(card, columnOf("Negotiation"));
-    expect(await screen.findByText('"Hospital Analyzer Project" moved to Negotiation.')).toBeInTheDocument();
+    dragTo(card, columnOf("Qualified"));
+    expect(await screen.findByText('"Hospital Analyzer Project" moved to Qualified.')).toBeInTheDocument();
     expect((api.callsTo("POST", moveUrl(makeCard().id))[0]!.body as { version: number }).version).toBe(3);
     const pending = slow as ReturnType<typeof deferred<{ status: number; body: unknown }>> | null;
     await act(async () =>
-      pending?.resolve({ status: 200, body: makeBoard([makeCard({ stage_id: STAGES.negotiation.id, version: 4 })]) }),
+      pending?.resolve({ status: 200, body: makeBoard([makeCard({ stage_id: STAGES.qualified.id, version: 4 })]) }),
     );
   });
 
@@ -424,9 +437,10 @@ describe("walkthrough: the board after a change made on the opportunity's own pa
     });
     renderWithProviders(<OpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
     const user = userEvent.setup();
+    await user.click(await screen.findByRole("tab", { name: "History" }));
     const history = await screen.findByRole("region", { name: "Stage history" });
     await within(history).findByText("Created in");
-    await user.click(screen.getByRole("button", { name: "Mark as won" }));
+    await user.click(screen.getByRole("button", { name: "Won" }));
     await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Mark as won" }));
     await screen.findByText("Marked as won.");
     expect(within(history).getByText("Created in")).toBeInTheDocument(); // still there, not a skeleton

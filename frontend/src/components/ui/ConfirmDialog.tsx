@@ -12,6 +12,8 @@ interface ConfirmDialogProps {
   /** The consequences; announced with the title (it is the dialog's description). */
   children: ReactNode;
   confirmLabel: string;
+  /** Default "Cancel". */
+  cancelLabel?: string;
   tone?: "primary" | "danger";
   busy?: boolean;
   error?: { message: string; requestId: string | null } | null;
@@ -29,6 +31,7 @@ export function ConfirmDialog({
   title,
   children,
   confirmLabel,
+  cancelLabel = "Cancel",
   tone = "primary",
   busy = false,
   error,
@@ -45,7 +48,7 @@ export function ConfirmDialog({
       ) : null}
       <DialogActions>
         <Button variant="secondary" onClick={onCancel} disabled={busy} data-autofocus={danger || undefined}>
-          Cancel
+          {cancelLabel}
         </Button>
         <Button variant={tone} onClick={onConfirm} loading={busy} data-autofocus={danger ? undefined : true}>
           {confirmLabel}

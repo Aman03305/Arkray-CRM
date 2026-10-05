@@ -23,6 +23,7 @@ TABLE_WIDE = [
     "activities.0005_review_integrity",
     "activities.0006_review_performance",
     "activities.0007_current_work_indexes",
+    "pipeline.0006_ownership_negotiation_fields",  # product enhancement phase
 ]
 CONCURRENT = [
     "leads.0005_owner_index_covers_archive",  # Phase 5
@@ -30,6 +31,7 @@ CONCURRENT = [
     "activities.0008_search_indexes",  # Phase 7
     "core.0005_outbox_dead_index",  # Phase 10
     "ai.0003_question_finished_index",  # Phase 10 review
+    "audit.0004_support_session_index",  # product enhancement phase
 ]
 
 LIFT = "SET statement_timeout = 0; SET lock_timeout = 0;"

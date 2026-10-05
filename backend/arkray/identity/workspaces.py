@@ -27,8 +27,8 @@ from django.utils import timezone
 
 from arkray.audit import services as audit
 from arkray.core.access import AccessScope, ScopeKind
-from arkray.core.context import update_context
-from arkray.core.errors import NotFoundError, PermissionDeniedError
+from arkray.core.context import current_support_target_id, update_context
+from arkray.core.errors import NotFoundError, PermissionDeniedError, SupportSessionActive
 
 from .models import User, WorkspaceAccessWindow
 from .policy import Capability, has_capability
@@ -56,9 +56,20 @@ class _Actor(Protocol):
     def is_active(self) -> bool: ...
 
 
+SUPPORT_ELSEWHERE = (
+    "You're in a support session for another user's CRM. Exit it to open other workspaces."
+)
+
+
 def resolve_workspace(actor: _Actor, workspace: str) -> AccessScope:
     if not actor.is_authenticated or not actor.is_active:
         raise PermissionDeniedError()
+    # In a support session (identity.support) the only workspace is the target user's.
+    support_target = current_support_target_id()
+    if support_target is not None and not (
+        _CANONICAL_UUID.fullmatch(workspace) and UUID(workspace) == support_target
+    ):
+        raise SupportSessionActive(SUPPORT_ELSEWHERE)
 
     if workspace == WORKSPACE_SELF:
         if not has_capability(actor, Capability.CRM_ACCESS_OWN):

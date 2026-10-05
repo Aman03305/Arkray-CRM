@@ -11,4 +11,4 @@ class ActivitiesConfig(AppConfig):
         # reassigned lead; the timeline records lead and opportunity history). Registered
         # after the pipeline's own subscribers (INSTALLED_APPS order), which keeps the lock
         # order lead -> opportunities -> activities inside a reassignment.
-        from . import subscribers  # noqa: F401
+        from . import handlers, subscribers, tasks  # noqa: F401

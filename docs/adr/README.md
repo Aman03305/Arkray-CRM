@@ -31,6 +31,7 @@ and update the old one's status line.
 | [0023](0023-ask-arkray-implementation.md) | Ask Arkray as built: local embeddings, answers on their own queue, a deterministic fast path |
 | [0024](0024-phase-9-security-hardening.md) | Security hardening: sealed and bound page links, prefixed cookies, a nonce CSP, audit outside the cache |
 | [0025](0025-production-deployment.md) | Production deployment: restricted database role enforced at start, the edge proxy's contract, erasure on request |
+| [0026](0026-user-pipelines-support-sessions-attachments.md) | User-defined pipelines, negotiated prices, support sessions without impersonation, admin-set passwords, note attachments |
 
 Template:
 

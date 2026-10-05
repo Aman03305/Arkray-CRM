@@ -17,10 +17,17 @@ can never wait for each other in a cycle:
     2. opportunities     FOR NO KEY UPDATE OF the opportunity row only (never the joined
                          stage: shared configuration rows are only key-share-checked);
                          several at once only in ascending id order
-    3. user rows         FOR SHARE (identity.selectors.lock_assignable_user); leaf locks:
+    3. configuration     the pipeline row FOR SHARE (writers of custom values: creating, or
+                         editing them) or FOR KEY SHARE (moves, restores), then the target
+                         stage FOR KEY SHARE, each re-read under its lock. Configuration
+                         changes (configuration.py) lock the pipeline and stage rows
+                         exclusively and never lock a lead or an opportunity, so they can't
+                         be part of a cycle; a stage being archived can't receive a move
+                         that read it as active (docs/pipeline.md#configuration)
+    4. user rows         FOR SHARE (identity.selectors.lock_assignable_user); leaf locks:
                          whoever holds one never waits for a lead or opportunity lock
                          held by a transaction that wants the user row exclusively
-    4. inserts           stage history, audit, idempotency records
+    5. inserts           stage history, negotiated prices, audit, idempotency records
 
 Holding the lead's lock means its owner can't change until we commit: a reassignment
 waits (and then moves what we created), or went first (and we no longer find the lead in
@@ -41,13 +48,15 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from django.db import IntegrityError, transaction
+from django.conf import settings
+from django.db import IntegrityError, connection, transaction
 from django.db.models import F
 from django.utils import timezone
 
 from arkray.audit import services as audit
 from arkray.core import idempotency
 from arkray.core.access import AccessScope
+from arkray.core.context import current_support_session_id
 from arkray.core.domain_events import publish
 from arkray.core.errors import (
     BusinessRuleViolation,
@@ -63,7 +72,16 @@ from arkray.leads import services as lead_services
 from arkray.leads.models import Lead, StatusCategory
 
 from . import events, selectors, validation
-from .models import Opportunity, Pipeline, Stage, StageCategory, StageHistory
+from .models import (
+    NegotiationPrice,
+    NegotiationSource,
+    Opportunity,
+    Pipeline,
+    Stage,
+    StageCategory,
+    StageHistory,
+    business_today,
+)
 
 AUDIT_CREATED = "opportunity.created"
 AUDIT_UPDATED = "opportunity.updated"
@@ -74,6 +92,7 @@ AUDIT_REOPENED = "opportunity.reopened"
 AUDIT_OWNER_CHANGED = "opportunity.owner_changed"
 AUDIT_ARCHIVED = "opportunity.archived"
 AUDIT_RESTORED = "opportunity.restored"
+AUDIT_NEGOTIATED_PRICE = "opportunity.negotiated_price_recorded"
 AUDIT_LEAD_CONVERTED = "lead.converted"
 
 IDEMPOTENT_CREATE = "pipeline.create_opportunity"
@@ -112,6 +131,18 @@ NEEDS_OPPORTUNITY = (
 )
 INVALID_STAGE = "Choose a stage of this opportunity's pipeline."
 INVALID_PIPELINE = "Choose an active pipeline."
+PIPELINE_ARCHIVED = "This pipeline is archived. Restore the pipeline to make changes here."
+STAGE_REMOVED_RESTORE = (
+    "Its stage was removed from the pipeline, so it can't be restored. Its history is kept."
+)
+PRICE_REQUIRED = "Enter the negotiated price."
+PRICE_ONLY_FOR_NEGOTIATION = "Only a move into a negotiation stage takes a negotiated price."
+SAME_STAGE_PRICE = (
+    "The opportunity is already in this stage. Record a new negotiated price instead."
+)
+NOT_IN_NEGOTIATION = (
+    "Negotiated prices are recorded while the opportunity is in a negotiation stage."
+)
 ALREADY_CREATED_ELSEWHERE = (
     "This was already created by an earlier request and has since left this workspace."
 )
@@ -195,29 +226,111 @@ def _require_assignable(owner_id: UUID) -> None:
         raise BusinessRuleViolation(OWNER_NOT_ASSIGNABLE)
 
 
-def _pipeline(pipeline_id: UUID | None) -> Pipeline:
-    queryset = Pipeline.objects.filter(is_active=True)
-    pipeline = (
-        queryset.filter(pk=pipeline_id).first()
-        if pipeline_id is not None
-        else queryset.filter(is_default=True).first()
-    )
-    if pipeline is None:
+# Shared locks on configuration rows (lock order step 3), each in the statement that reads
+# the row: PostgreSQL re-checks the WHERE clause once it has the lock (READ COMMITTED), so a
+# pipeline archived or a stage retired by a configuration change that committed meanwhile is
+# not found, and nothing can change them (archive, custom fields) before we commit.
+_SHARE_USABLE_PIPELINE = (
+    "SELECT * FROM pipeline_pipeline WHERE id = %s AND is_active"
+    " AND (owner_id IS NULL OR owner_id = %s) FOR SHARE"
+)
+_SHARE_PIPELINE = "SELECT 1 FROM pipeline_pipeline WHERE id = %s FOR SHARE"
+_KEY_SHARE_ACTIVE_PIPELINE = (
+    "SELECT 1 FROM pipeline_pipeline WHERE id = %s AND is_active FOR KEY SHARE"
+)
+_KEY_SHARE_ACTIVE_STAGE = (
+    "SELECT * FROM pipeline_stage WHERE id = %s AND pipeline_id = %s AND is_active FOR KEY SHARE"
+)
+
+
+def _hold(statement: str, *params: Any) -> bool:
+    """Run a locking read; whether it found the row."""
+    with connection.cursor() as cursor:
+        cursor.execute(statement, list(params))
+        return cursor.fetchone() is not None
+
+
+def _pipeline(pipeline_id: UUID | None, owner_id: UUID) -> Pipeline:
+    """An active pipeline an opportunity of `owner_id` may be created in: a shared one, or
+    the owner's own (the default when None). FOR SHARE: its custom fields can't change and it
+    can't be archived until we commit. Unknown, archived and other users' pipelines are the
+    same validation error."""
+    if pipeline_id is None:
+        pipeline_id = selectors.default_pipeline_id()
+        if pipeline_id is None:
+            raise InvalidInputError(details={"pipeline": [INVALID_PIPELINE]})
+    found = list(Pipeline.objects.raw(_SHARE_USABLE_PIPELINE, [pipeline_id, owner_id]))
+    if not found:
         raise InvalidInputError(details={"pipeline": [INVALID_PIPELINE]})
-    return pipeline
+    return found[0]
+
+
+def _locked_stage(stage_id: UUID, pipeline_id: UUID) -> Stage | None:
+    """An active stage of the pipeline, FOR KEY SHARE: a stage being retired or retyped
+    (configuration.py, FOR UPDATE) can't receive anything meanwhile."""
+    found = list(Stage.objects.raw(_KEY_SHARE_ACTIVE_STAGE, [stage_id, pipeline_id]))
+    return found[0] if found else None
 
 
 def _stage(pipeline: Pipeline, stage_id: UUID | None) -> Stage:
     """An active stage of `pipeline`: the given one, or the first open stage."""
-    stages = Stage.objects.filter(pipeline=pipeline, is_active=True)
-    stage = (
-        stages.filter(pk=stage_id).first()
-        if stage_id is not None
-        else stages.filter(category=StageCategory.OPEN).order_by("position").first()
-    )
+    if stage_id is None:
+        stage_id = (
+            Stage.objects.filter(pipeline=pipeline, is_active=True, category=StageCategory.OPEN)
+            .order_by("position")
+            .values_list("pk", flat=True)
+            .first()
+        )
+        if stage_id is None:
+            raise InvalidInputError(details={"stage": [INVALID_STAGE]})
+    stage = _locked_stage(stage_id, pipeline.pk)
     if stage is None:
         raise InvalidInputError(details={"stage": [INVALID_STAGE]})
     return stage
+
+
+def _price_for(stage: Stage, price: Decimal | None) -> Decimal | None:
+    """Entering a negotiation stage requires the negotiated price; no other stage takes one."""
+    if stage.is_negotiation and price is None:
+        raise InvalidInputError(details={"negotiated_price": [PRICE_REQUIRED]})
+    if not stage.is_negotiation and price is not None:
+        raise InvalidInputError(details={"negotiated_price": [PRICE_ONLY_FOR_NEGOTIATION]})
+    return price
+
+
+def _clean_price(price: Any) -> Decimal | None:
+    if price is None:
+        return None
+    try:
+        return validation.clean_price(price)
+    except ValueError as exc:
+        raise InvalidInputError(details={"negotiated_price": [str(exc)]}) from None
+
+
+def _record_price(
+    opportunity: Opportunity,
+    actor_id: UUID,
+    *,
+    price: Decimal,
+    stage: Stage,
+    source: NegotiationSource,
+    at: datetime,
+) -> None:
+    """Append one negotiated price (never overwriting an earlier one) and keep the
+    opportunity's copy of the latest. The opportunity row is locked by the caller."""
+    NegotiationPrice.objects.create(
+        opportunity=opportunity,
+        price=price,
+        currency=settings.CRM_CURRENCY,
+        stage=stage,
+        stage_name=stage.name,
+        source=source,
+        opportunity_version=opportunity.version,
+        actor_id=actor_id,
+        subject_user_id=opportunity.owner_id if opportunity.owner_id != actor_id else None,
+        support_session_id=current_support_session_id(),
+        occurred_at=at,
+    )
 
 
 def _probability_for(stage: Stage, requested: Decimal | None) -> tuple[Decimal, bool]:
@@ -293,18 +406,28 @@ def _insert(
     cleaned: Mapping[str, Any],
     pipeline_id: UUID | None,
     stage_id: UUID | None,
+    negotiated_price: Decimal | None,
     via_conversion: bool,
 ) -> Opportunity:
     """Create an opportunity for an already-locked lead (inside the caller's transaction)."""
     if lead.archived_at is not None:
         raise BusinessRuleViolation(LEAD_ARCHIVED)
-    _require_assignable(lead.owner_id)
-    pipeline = _pipeline(pipeline_id)
+    pipeline = _pipeline(pipeline_id, lead.owner_id)
     stage = _stage(pipeline, stage_id)
+    _require_assignable(lead.owner_id)
     probability, overridden = _probability_for(stage, cleaned.get("probability"))
     lost_reason = cleaned.get("lost_reason", "")
     if lost_reason and stage.category != StageCategory.LOST:
         raise InvalidInputError(details={"lost_reason": [LOST_REASON_ONLY_WHEN_LOST]})
+    price = _price_for(stage, negotiated_price)
+    custom, _ = validation.clean_custom_values(
+        selectors.active_fields(pipeline.pk),
+        cleaned.get("custom_fields", {}),
+        current={},
+        creating=True,
+    )
+    # The customer defaults to the lead (an editable snapshot from now on).
+    account_default, customer_default = lead_selectors.customer_names(lead.pk)
     now = timezone.now()
     opportunity = Opportunity.objects.create(
         title=cleaned["title"],
@@ -320,10 +443,30 @@ def _insert(
         description=cleaned.get("description", ""),
         lost_reason=lost_reason,
         closed_at=now if stage.is_closed else None,
+        opportunity_date=cleaned.get("opportunity_date") or business_today(),
+        account_name=cleaned.get("account_name") or account_default,
+        customer_name=cleaned.get("customer_name") or customer_default,
+        contact_phone=cleaned.get("contact_phone", ""),
+        contact_email=cleaned.get("contact_email", ""),
+        address=cleaned.get("address", ""),
+        instrument_name=cleaned.get("instrument_name", ""),
+        work_load=cleaned.get("work_load", ""),
+        custom_fields=custom,
+        negotiated_price=price,
+        negotiated_at=now if price is not None else None,
         created_by_id=actor.pk,
         created_at=now,
     )
     _history(opportunity, actor.pk, from_stage=None, to_stage=stage, at=now)
+    if price is not None:
+        _record_price(
+            opportunity,
+            actor.pk,
+            price=price,
+            stage=stage,
+            source=NegotiationSource.CREATION,
+            at=now,
+        )
     _audit(
         AUDIT_CREATED,
         actor.pk,
@@ -370,12 +513,15 @@ def create_opportunity(
     fields: Mapping[str, Any],
     pipeline_id: UUID | None = None,
     stage_id: UUID | None = None,
+    negotiated_price: Any = None,
     idempotency_key: UUID | None = None,
 ) -> CreateResult:
     """Create an opportunity for a lead in `scope`. Its owner is the lead's owner; the
-    pipeline defaults to the default pipeline and the stage to its first open stage."""
+    pipeline defaults to the organisation's default pipeline and the stage to its first open
+    stage. Created in a negotiation stage, it needs the negotiated price."""
     authorize_write(actor, scope)
     cleaned = _creation_fields(fields)
+    price = _clean_price(negotiated_price)
     digest = idempotency.request_digest(
         scope.kind.value,
         str(scope.subject_user_id),
@@ -383,6 +529,7 @@ def create_opportunity(
         cleaned,
         str(pipeline_id),
         str(stage_id),
+        str(price),
     )
     if idempotency_key is not None:
         earlier = idempotency.replayed_resource(
@@ -400,6 +547,7 @@ def create_opportunity(
                 cleaned=cleaned,
                 pipeline_id=pipeline_id,
                 stage_id=stage_id,
+                negotiated_price=price,
                 via_conversion=False,
             )
             if idempotency_key is not None:
@@ -428,6 +576,7 @@ def convert_lead(
     fields: Mapping[str, Any],
     pipeline_id: UUID | None = None,
     stage_id: UUID | None = None,
+    negotiated_price: Any = None,
     idempotency_key: UUID | None = None,
 ) -> ConversionResult:
     """Convert a lead: create its opportunity and move the lead to the Converted status, in
@@ -436,6 +585,7 @@ def convert_lead(
     the first conversion."""
     authorize_write(actor, scope)
     cleaned = _creation_fields(fields)
+    price = _clean_price(negotiated_price)
     digest = idempotency.request_digest(
         scope.kind.value,
         str(scope.subject_user_id),
@@ -444,6 +594,7 @@ def convert_lead(
         cleaned,
         str(pipeline_id),
         str(stage_id),
+        str(price),
     )
     if idempotency_key is not None:
         earlier = idempotency.replayed_resource(
@@ -479,6 +630,7 @@ def convert_lead(
                 cleaned=cleaned,
                 pipeline_id=pipeline_id,
                 stage_id=stage_id,
+                negotiated_price=price,
                 via_conversion=True,
             )
             # The leads module's own operation: status audit and LeadStatusChanged included.
@@ -549,15 +701,27 @@ def update_opportunity(
     version: int,
     changes: Mapping[str, Any],
 ) -> Opportunity:
-    """Change title, value, probability, expected close date, description or (while lost)
-    lost reason. `probability: None` returns to the stage's default. Only fields whose
-    value actually changes are written and audited (by name: no values, no text)."""
+    """Change the deal's fields (validation.EDITABLE_FIELDS): title, value, probability,
+    dates, customer and instrument details, description, custom values or (while lost) the
+    lost reason. `probability: None` returns to the stage's default; custom values merge
+    (null clears one). Only fields whose value actually changes are written and audited (by
+    name, and custom fields by id: no values, no text)."""
     authorize_write(actor, scope)
     cleaned = validation.clean_fields(changes)
+    custom_changed: list[str] = []
     with transaction.atomic():
         opportunity, _ = _lock(scope, opportunity_id)
         _require_version(opportunity, version)
         _require_not_archived(opportunity)
+        if "custom_fields" in cleaned:
+            # FOR SHARE on the pipeline: its field definitions can't change meanwhile.
+            _hold(_SHARE_PIPELINE, opportunity.pipeline_id)
+            cleaned["custom_fields"], custom_changed = validation.clean_custom_values(
+                selectors.active_fields(opportunity.pipeline_id),
+                cleaned["custom_fields"],
+                current=opportunity.custom_fields,
+                creating=False,
+            )
         stage = opportunity.stage
         if "probability" in cleaned:
             probability, overridden = _probability_for(stage, cleaned.pop("probability"))
@@ -580,6 +744,7 @@ def update_opportunity(
             workspace=scope.kind.value,
             subject=opportunity.owner_id,
             fields=reported,
+            **({"custom_fields": custom_changed} if custom_changed else {}),
         )
         publish(
             events.OpportunityUpdated(
@@ -603,9 +768,15 @@ def move_opportunity(
     version: int,
     stage_id: UUID,
     lost_reason: str = "",
+    negotiated_price: Any = None,
 ) -> Opportunity:
     """THE stage transition: every stage change (board drag and drop, the "Move to stage"
     menu, won, lost, reopen) goes through here.
+
+    - into a negotiation stage: the negotiated price is required (every time: leaving
+      negotiation and coming back asks again) and appended to the price history; no other
+      target takes one. No path can skip it: the API, the board and the detail page all
+      call this.
 
     - open -> open: the probability becomes the new stage's default (an override belongs to
       the stage it was made in);
@@ -622,23 +793,27 @@ def move_opportunity(
         reason = validation.CLEANERS["lost_reason"](lost_reason)
     except ValueError as exc:
         raise InvalidInputError(details={"lost_reason": [str(exc)]}) from None
+    price = _clean_price(negotiated_price)
     with transaction.atomic():
         opportunity, lead = _lock(scope, opportunity_id)
         if opportunity.stage_id == stage_id:
-            # A retry of a move that already happened: nothing to do. A lost reason sent
-            # with it would be silently dropped, so it is refused instead (review).
+            # A retry of a move that already happened: nothing to do. A lost reason or a
+            # price sent with it would be silently dropped, so it is refused instead.
             if reason:
                 raise InvalidInputError(details={"lost_reason": [SAME_STAGE_LOST_REASON]})
+            if price is not None:
+                raise InvalidInputError(details={"negotiated_price": [SAME_STAGE_PRICE]})
             return selectors.opportunity_by_id(opportunity.pk)
         _require_version(opportunity, version)
         _require_not_archived(opportunity)
-        target = Stage.objects.filter(
-            pk=stage_id, pipeline_id=opportunity.pipeline_id, is_active=True
-        ).first()
+        if not _hold(_KEY_SHARE_ACTIVE_PIPELINE, opportunity.pipeline_id):
+            raise BusinessRuleViolation(PIPELINE_ARCHIVED)
+        target = _locked_stage(stage_id, opportunity.pipeline_id)
         if target is None:
             raise InvalidInputError(details={"stage": [INVALID_STAGE]})
         if reason and target.category != StageCategory.LOST:
             raise InvalidInputError(details={"lost_reason": [LOST_REASON_ONLY_WHEN_LOST]})
+        _price_for(target, price)
         source = opportunity.stage
         was_open = opportunity.is_open
         if not was_open and target.is_closed:
@@ -665,6 +840,9 @@ def move_opportunity(
         opportunity.probability_overridden = False
         opportunity.closed_at = now if target.is_closed else None
         opportunity.lost_reason = reason if target.category == StageCategory.LOST else ""
+        if price is not None:
+            opportunity.negotiated_price = price
+            opportunity.negotiated_at = now
         opportunity.version += 1
         opportunity.updated_at = now
         opportunity.save(
@@ -676,11 +854,22 @@ def move_opportunity(
                 "probability_overridden",
                 "closed_at",
                 "lost_reason",
+                "negotiated_price",
+                "negotiated_at",
                 "version",
                 "updated_at",
             ]
         )
         _history(opportunity, actor.pk, from_stage=source, to_stage=target, at=now)
+        if price is not None:
+            _record_price(
+                opportunity,
+                actor.pk,
+                price=price,
+                stage=target,
+                source=NegotiationSource.STAGE_ENTRY,
+                at=now,
+            )
         if not was_open:
             action = AUDIT_REOPENED
         elif target.category == StageCategory.WON:
@@ -700,6 +889,7 @@ def move_opportunity(
                 "to": target.key,
                 "from_status": source.category,
                 "to_status": target.category,
+                **({"negotiated_price_recorded": True} if price is not None else {}),
             },
         )
         publish(
@@ -725,6 +915,81 @@ def move_opportunity(
                 at=now,
                 workspace=scope.kind.value,
             )
+    return selectors.opportunity_by_id(opportunity.pk)
+
+
+def record_negotiated_price(
+    *,
+    actor: User,
+    scope: AccessScope,
+    opportunity_id: UUID,
+    version: int,
+    price: Any,
+) -> Opportunity:
+    """Record a new negotiated price while the opportunity is in a negotiation stage (the
+    negotiation goes on: ₹12,00,000 -> ₹11,00,000 -> ₹10,50,000). Appends to the history,
+    never overwrites it. The same price as the latest changes nothing (a retry)."""
+    authorize_write(actor, scope)
+    amount = _clean_price(price)
+    if amount is None:
+        raise InvalidInputError(details={"price": [PRICE_REQUIRED]})
+    with transaction.atomic():
+        opportunity, _ = _lock(scope, opportunity_id)
+        stage = opportunity.stage
+        latest = (
+            NegotiationPrice.objects.filter(opportunity_id=opportunity.pk)
+            .order_by("-occurred_at", "-id")
+            .values_list("price", "stage_id")
+            .first()
+        )
+        if (
+            latest == (amount, stage.pk)
+            and stage.is_negotiation
+            and opportunity.is_open
+            and opportunity.archived_at is None
+        ):
+            # A retry of the price just recorded in this stage. (A stage retyped to
+            # negotiation while the deal sat in it has no price of its own yet: recorded.)
+            return selectors.opportunity_by_id(opportunity.pk)
+        _require_version(opportunity, version)
+        _require_not_archived(opportunity)
+        if not stage.is_negotiation or not opportunity.is_open:
+            raise BusinessRuleViolation(NOT_IN_NEGOTIATION)
+        now = timezone.now()
+        opportunity.negotiated_price = amount
+        opportunity.negotiated_at = now
+        opportunity.version += 1
+        opportunity.updated_at = now
+        opportunity.save(
+            update_fields=["negotiated_price", "negotiated_at", "version", "updated_at"]
+        )
+        _record_price(
+            opportunity,
+            actor.pk,
+            price=amount,
+            stage=stage,
+            source=NegotiationSource.REVISION,
+            at=now,
+        )
+        _audit(
+            AUDIT_NEGOTIATED_PRICE,
+            actor.pk,
+            opportunity,
+            workspace=scope.kind.value,
+            subject=opportunity.owner_id,
+            stage=stage.key,
+            source=NegotiationSource.REVISION.value,
+        )
+        publish(
+            events.OpportunityUpdated(
+                opportunity_id=opportunity.pk,
+                lead_id=opportunity.lead_id,
+                owner_id=opportunity.owner_id,
+                actor_id=actor.pk,
+                occurred_at=now,
+                fields=("negotiated_price",),
+            )
+        )
     return selectors.opportunity_by_id(opportunity.pk)
 
 
@@ -811,8 +1076,15 @@ def restore_opportunity(
             raise BusinessRuleViolation(LEAD_ARCHIVED_RESTORE)
         if opportunity.is_open:
             # Restored open pipeline is current work again: like creating or reopening it,
-            # never for a deactivated owner (Phase 6 review).
+            # never for a deactivated owner (Phase 6 review), never in an archived pipeline.
+            if not _hold(_KEY_SHARE_ACTIVE_PIPELINE, opportunity.pipeline_id):
+                raise BusinessRuleViolation(PIPELINE_ARCHIVED)
             _require_assignable(opportunity.owner_id)
+        # A stage removed while only archived deals held it is retired: restoring one would
+        # make it current in a stage no longer on the board (enhancement review). KEY SHARE
+        # (after the pipeline's, as moves) keeps it from being removed until this commits.
+        if not _hold(_KEY_SHARE_ACTIVE_STAGE, opportunity.stage_id, opportunity.pipeline_id):
+            raise BusinessRuleViolation(STAGE_REMOVED_RESTORE)
         opportunity.archived_at = None
         opportunity.version += 1
         opportunity.save(update_fields=["archived_at", "version", "updated_at"])

@@ -15,12 +15,13 @@ from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from arkray.core.api import StrictInputSerializer
+from arkray.core.api import OpaqueIdField, StrictInputSerializer
 from arkray.core.text import SEARCH_MAX_LENGTH, SEARCH_MIN_LENGTH
 
 from ..emails import validate_ascii_email
-from ..models import NAME_MAX_LENGTH, Role, User, UserStatus
+from ..models import NAME_MAX_LENGTH, Role, SupportSession, User, UserStatus
 from ..policy import capabilities_for
+from ..support import REASON_MAX_LENGTH
 
 EMAIL_MAX_LENGTH = 254
 # Generous parse limit; the password policy itself caps new passwords at 128 characters.
@@ -48,13 +49,31 @@ class ViewerFeaturesSerializer(serializers.Serializer[Any]):
     ask = serializers.BooleanField(help_text="Ask Arkray is turned on for this CRM.")
 
 
+class PersonSerializer(serializers.Serializer[Any]):
+    id = serializers.UUIDField()
+    full_name = serializers.CharField()
+
+
+class SupportSessionSerializer(serializers.ModelSerializer[SupportSession]):
+    """A live support session: whose CRM, since when, until when (never extended)."""
+
+    target = PersonSerializer(read_only=True)
+
+    class Meta:
+        model = SupportSession
+        fields = ["id", "target", "reason", "started_at", "expires_at"]
+        read_only_fields = fields
+
+
 class ViewerSerializer(serializers.ModelSerializer[User]):
-    """The signed-in user (GET /auth/me and the sign-in response)."""
+    """The signed-in user (GET /auth/me and the sign-in response). Always the person signed
+    in, also during a support session (which is described separately)."""
 
     full_name = serializers.CharField(read_only=True)
     role_label = serializers.CharField(source="get_role_display", read_only=True)
     capabilities = serializers.SerializerMethodField()
     features = serializers.SerializerMethodField()
+    support_session = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -68,8 +87,15 @@ class ViewerSerializer(serializers.ModelSerializer[User]):
             "role_label",
             "capabilities",
             "features",
+            "password_change_required",
+            "support_session",
         ]
         read_only_fields = fields
+
+    @extend_schema_field(SupportSessionSerializer(allow_null=True))
+    def get_support_session(self, user: User) -> dict[str, Any] | None:
+        session = self.context.get("support_session")
+        return None if session is None else dict(SupportSessionSerializer(session).data)
 
     @extend_schema_field(serializers.ListField(child=serializers.CharField()))
     def get_capabilities(self, user: User) -> list[str]:
@@ -111,6 +137,8 @@ class AdminUserSerializer(serializers.ModelSerializer[User]):
             "activated_at",
             "deactivated_at",
             "invitation",
+            "password_change_required",
+            "password_changed_at",
             "version",
         ]
         read_only_fields = fields
@@ -232,6 +260,50 @@ class UserCreateSerializer(StrictInputSerializer):
     )
     email = _email_field()
     role = serializers.ChoiceField(choices=Role.choices)
+    password = serializers.CharField(
+        max_length=PASSWORD_INPUT_MAX_LENGTH,
+        trim_whitespace=False,
+        required=False,
+        style={"input_type": "password"},
+        help_text="An initial password (the user must change it when they first sign in). "
+        "Omit it to email an invitation instead. Stored only as a hash; never returned.",
+    )
+
+
+class SetPasswordSerializer(StrictInputSerializer):
+    version = serializers.IntegerField(min_value=1)
+    new_password = _password_field()
+
+
+class SupportSessionStartSerializer(StrictInputSerializer):
+    user = serializers.UUIDField(help_text="The user whose CRM to open.")
+    reason = serializers.CharField(
+        max_length=REASON_MAX_LENGTH, required=False, allow_blank=True, default=""
+    )
+
+
+class SecurityEventQuerySerializer(StrictInputSerializer):
+    cursor = serializers.CharField(max_length=1000, required=False)
+    page_size = serializers.IntegerField(min_value=1, max_value=50, required=False, default=20)
+
+
+class SecurityEventSerializer(serializers.Serializer[Any]):
+    """One account or security event (identity.selectors.SECURITY_ACTIONS): who did what to
+    which account, and when. Never a password, a hash, a token or a link."""
+
+    id = OpaqueIdField("security-event")
+    action = serializers.CharField()
+    occurred_at = serializers.DateTimeField()
+    actor = PersonSerializer(allow_null=True, help_text="Null when the system acted.")
+    user = PersonSerializer(allow_null=True, help_text="The account concerned.")
+    details = serializers.DictField(child=serializers.CharField(), help_text="Allowlisted.")
+    in_support_session = serializers.BooleanField()
+
+
+class SecurityEventPageSerializer(serializers.Serializer[Any]):
+    results = SecurityEventSerializer(many=True)
+    next = serializers.CharField(allow_null=True)
+    previous = serializers.CharField(allow_null=True)
 
 
 class UserUpdateSerializer(StrictInputSerializer):

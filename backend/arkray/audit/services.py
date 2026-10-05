@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from arkray.core.context import get_context
+from arkray.core.context import current_support_session_id, get_context
 from arkray.core.text import without_refused
 
 from .models import ActorType, AuditEvent
@@ -77,6 +77,9 @@ class Entry:
     target_id: str | UUID = ""
     subject_user_id: UUID | None = None
     metadata: dict[str, Any] | None = None
+    # The support session the event belongs to, when the caller knows it better than the
+    # request context (starting and ending one); otherwise the context's.
+    support_session_id: UUID | None = None
 
 
 def _event(entry: Entry) -> AuditEvent:
@@ -91,6 +94,7 @@ def _event(entry: Entry) -> AuditEvent:
         request_id=context.correlation_id[:64] if context else "",
         ip_address=context.client_ip if context else None,
         metadata=sanitize_metadata(entry.metadata),
+        support_session_id=entry.support_session_id or current_support_session_id(),
     )
 
 
@@ -108,9 +112,14 @@ def record(
     target_id: str | UUID = "",
     subject_user_id: UUID | None = None,
     metadata: dict[str, Any] | None = None,
+    support_session_id: UUID | None = None,
 ) -> AuditEvent:
     """Append an audit event. `actor_id=None` means the system performed the action."""
-    event = _event(Entry(action, actor_id, target_type, target_id, subject_user_id, metadata))
+    event = _event(
+        Entry(
+            action, actor_id, target_type, target_id, subject_user_id, metadata, support_session_id
+        )
+    )
     event.save()
     return event
 

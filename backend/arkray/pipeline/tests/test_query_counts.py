@@ -145,9 +145,10 @@ def test_detail(user_a_client, user_a, stages):
 def test_history(user_a_client, user_a, stages):
     opportunity = OpportunityFactory(lead=LeadFactory(owner=user_a))
     for version, key in enumerate(["qualified", "proposal", "negotiation", "won"], start=1):
+        price = {"negotiated_price": "1000"} if key == "negotiation" else {}
         user_a_client.post(
             opportunity_url(opportunity.pk, action="move"),
-            {"stage": str(stages[key].pk), "version": version},
+            {"stage": str(stages[key].pk), "version": version, **price},
             format="json",
         )
     queries, body = count(user_a_client, opportunity_url(opportunity.pk, action="history"))
@@ -156,7 +157,8 @@ def test_history(user_a_client, user_a, stages):
 
 
 def test_pipeline_configuration(user_a_client, stages):
-    assert count(user_a_client, "/api/v1/config/pipelines")[0] == 4  # + pipelines, stages
+    # + pipelines, stages, custom fields (product enhancement phase)
+    assert count(user_a_client, "/api/v1/config/pipelines")[0] == 5
 
 
 @pytest.mark.parametrize("n_open", [1, 10])
@@ -176,5 +178,7 @@ def test_moving_an_opportunity_costs_the_same_whatever_else_exists(
     assert response.status_code == 200
     # session, user, savepoint, lead id, lead lock, opportunity lock, target stage, update,
     # history insert, audit insert, release savepoint, reload; since Phase 4 also the
-    # timeline's stage-name snapshot and its entry (arkray.activities.subscribers)
-    assert len(queries) == 14
+    # timeline's stage-name snapshot and its entry (arkray.activities.subscribers); since the
+    # product enhancement phase the pipeline's KEY SHARE (active check), the target stage
+    # being read under its own KEY SHARE (no extra query)
+    assert len(queries) == 15

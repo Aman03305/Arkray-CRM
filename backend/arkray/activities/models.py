@@ -167,6 +167,13 @@ class Activity(UUIDPrimaryKeyModel, TimeStampedModel):
         User, on_delete=models.PROTECT, null=True, blank=True, related_name="+", db_index=False
     )
 
+    # The last edit of the activity's own fields and who made it: a note edited by an
+    # administrator shows that, so their words are never presented as the author's own.
+    edited_at = models.DateTimeField(null=True, blank=True)
+    edited_by = models.ForeignKey(
+        User, on_delete=models.PROTECT, null=True, blank=True, related_name="+", db_index=False
+    )
+
     # Activities are never deleted; archiving hides them from lists, timelines and counts.
     archived_at = models.DateTimeField(null=True, blank=True)
     version = models.PositiveIntegerField(default=1)
@@ -569,3 +576,132 @@ class TimelineEntry(AppendOnlyModel):
 
     def __str__(self) -> str:
         return f"TimelineEntry({self.pk}, {self.kind})"
+
+
+# --- attachments (docs/activities.md#attachments) ------------------------------------------------
+# A hard ceiling the database enforces whatever the configured limit (ATTACHMENT_MAX_BYTES).
+ATTACHMENT_SIZE_CEILING = 100 * 1024 * 1024
+ATTACHMENT_NAME_MAX_LENGTH = 200
+
+
+class AttachmentState(models.TextChoices):
+    # The row is written first (so every object that might exist in storage is known), the
+    # object second, then the row is marked stored. A row left uploading by a crash is
+    # cleaned up by the hourly housekeeping (object deleted, row failed).
+    UPLOADING = "uploading", "Uploading"
+    STORED = "stored", "Stored"
+    FAILED = "failed", "Failed"
+
+
+class ScanStatus(models.TextChoices):
+    """Malware scanning (activities.storage): with no scanner configured, files are
+    `not_scanned`; with one, `pending` until it answers `clean` or `rejected` (the object is
+    deleted). Only clean files, or not-scanned ones while no scanner is configured, can be
+    downloaded."""
+
+    NOT_SCANNED = "not_scanned", "Not scanned"
+    PENDING = "pending", "Being checked"
+    CLEAN = "clean", "Clean"
+    REJECTED = "rejected", "Blocked"
+
+
+class Attachment(UUIDPrimaryKeyModel):
+    """A file attached to a note. Its bytes live in private object storage
+    (STORAGES["attachments"]) under a generated key, never in PostgreSQL and never under the
+    uploaded name; this row holds the metadata. Visible exactly when its note is: every
+    download re-checks the note through the caller's scope."""
+
+    note = models.ForeignKey(
+        Activity, on_delete=models.PROTECT, related_name="attachments", db_index=False
+    )
+    # The name as uploaded, cleaned (no path, no control or bidi characters): shown and used
+    # as the download's file name, never as a storage path.
+    original_name = models.CharField(max_length=ATTACHMENT_NAME_MAX_LENGTH)
+    extension = models.CharField(max_length=8)
+    content_type = models.CharField(max_length=100)
+    size = models.BigIntegerField()
+    sha256 = models.CharField(max_length=64)
+    storage_key = models.CharField(max_length=200, unique=True)
+    state = models.CharField(
+        max_length=16, choices=AttachmentState.choices, default=AttachmentState.UPLOADING
+    )
+    scan_status = models.CharField(
+        max_length=16, choices=ScanStatus.choices, default=ScanStatus.NOT_SCANNED
+    )
+    uploaded_by = models.ForeignKey(
+        User, on_delete=models.PROTECT, related_name="+", db_index=False
+    )
+    created_at = models.DateTimeField(default=timezone.now)
+    stored_at = models.DateTimeField(null=True, blank=True)
+    # Deleting hides the file at once; the object is removed from storage afterwards
+    # (purged_at), by a job and, failing that, the hourly housekeeping. Idempotent.
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(
+        User, on_delete=models.PROTECT, null=True, blank=True, related_name="+", db_index=False
+    )
+    purged_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "activities_attachment"
+        indexes = [
+            # A note's files (and the per-note limit).
+            models.Index(
+                F("note"),
+                F("created_at"),
+                name="activities_attachment_note_idx",
+                condition=Q(deleted_at__isnull=True),
+            ),
+            # Housekeeping, hourly: uploads that never finished, files waiting for a scan, and
+            # objects still to remove (deleted, failed or blocked). Each of its queries implies
+            # one arm, so none scans the table (enhancement review: 628 ms at 300,000 files
+            # while the blocked arm was missing; docs/database.md).
+            models.Index(
+                F("created_at"),
+                name="activities_attachment_open_idx",
+                condition=Q(state=AttachmentState.UPLOADING)
+                | Q(scan_status="pending")
+                | (
+                    Q(purged_at__isnull=True)
+                    & (Q(deleted_at__isnull=False) | Q(state="failed") | Q(scan_status="rejected"))
+                ),
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(state__in=AttachmentState.values), name="activities_attachment_state"
+            ),
+            models.CheckConstraint(
+                condition=Q(scan_status__in=ScanStatus.values),
+                name="activities_attachment_scan_status",
+            ),
+            models.CheckConstraint(
+                condition=Q(size__gt=0, size__lte=ATTACHMENT_SIZE_CEILING),
+                name="activities_attachment_size",
+            ),
+            models.CheckConstraint(
+                condition=Q(sha256__regex=r"^[0-9a-f]{64}$"), name="activities_attachment_sha256"
+            ),
+            models.CheckConstraint(
+                condition=~Q(original_name="") & Q(extension__regex=r"^[a-z0-9]{1,8}$"),
+                name="activities_attachment_name",
+            ),
+            models.CheckConstraint(
+                condition=Q(stored_at__isnull=True) | ~Q(state=AttachmentState.UPLOADING),
+                name="activities_attachment_stored_at",
+            ),
+            models.CheckConstraint(
+                condition=Q(deleted_at__isnull=True, deleted_by__isnull=True)
+                | Q(deleted_at__isnull=False),
+                name="activities_attachment_deleted",
+            ),
+            models.CheckConstraint(
+                condition=Q(purged_at__isnull=True)
+                | Q(deleted_at__isnull=False)
+                | Q(state=AttachmentState.FAILED)
+                | Q(scan_status=ScanStatus.REJECTED),
+                name="activities_attachment_purged_only_when_gone",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"Attachment({self.pk})"  # never the file name: this string can reach logs

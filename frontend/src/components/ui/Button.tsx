@@ -55,7 +55,7 @@ export function Button({
       aria-disabled={loading || undefined}
       aria-busy={loading || undefined}
       onClick={handleClick}
-      className={`inline-flex items-center justify-center rounded-md font-medium transition-colors disabled:cursor-not-allowed aria-disabled:cursor-wait ${VARIANTS[variant]} ${SIZES[size]} ${className}`}
+      className={`inline-flex items-center justify-center rounded-full font-medium transition-colors disabled:cursor-not-allowed aria-disabled:cursor-wait ${VARIANTS[variant]} ${SIZES[size]} ${className}`}
       {...rest}
     >
       {loading ? <Spinner /> : icon}

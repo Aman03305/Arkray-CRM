@@ -4,13 +4,21 @@ import type {
   AdminUserPage,
   EmailChangeRequest,
   Role,
+  SecurityEventPage,
+  SetPasswordRequest,
+  SupportSessionDto,
+  SupportSessionStartRequest,
   UserCreateRequest,
   UserStatus,
   UserUpdateRequest,
 } from "@/lib/api/types";
+import type { SupportSession } from "@/lib/viewer";
 
 const USERS = "/api/v1/admin/users";
 export const USERS_QUERY_KEY = ["admin-users"] as const;
+/** One user, freshly loaded (under USERS_QUERY_KEY, so list refreshes include it). */
+export const userDetailKey = (id: string) => [...USERS_QUERY_KEY, "detail", id] as const;
+export const SECURITY_EVENTS_QUERY_KEY = ["security-events"] as const;
 export const SEARCH_MIN_LENGTH = 2;
 
 export interface UserFilters {
@@ -55,6 +63,40 @@ export const usersApi = {
   deactivate: (id: string) => apiFetch<AdminUser>(user(id, "deactivate"), { method: "POST" }),
   activate: (id: string) => apiFetch<AdminUser>(user(id, "activate"), { method: "POST" }),
   resendInvitation: (id: string) => apiFetch<AdminUser>(user(id, "resend-invitation"), { method: "POST" }),
+  get: (id: string) => apiFetch<AdminUser>(user(id)),
+  /** The user must replace it at their next sign-in; their sessions end. Never returned. */
+  setPassword: (id: string, body: SetPasswordRequest) =>
+    apiFetch<AdminUser>(user(id, "set-password"), { method: "POST", body }),
+};
+
+const SUPPORT_SESSIONS = "/api/v1/admin/support-sessions";
+
+export const supportApi = {
+  start: (body: SupportSessionStartRequest) =>
+    apiFetch<SupportSessionDto>(SUPPORT_SESSIONS, { method: "POST", body }),
+  /** Idempotent: ending a session that is already over is fine. */
+  exit: () => apiFetch<void>(`${SUPPORT_SESSIONS}/current`, { method: "DELETE" }),
+};
+
+/** The API's support session in the shape the viewer carries it (lib/viewer). */
+export function toSupportSession(dto: SupportSessionDto): SupportSession {
+  return {
+    id: dto.id,
+    target: { id: dto.target.id.toLowerCase(), fullName: dto.target.full_name },
+    reason: dto.reason,
+    startedAt: dto.started_at,
+    expiresAt: dto.expires_at,
+  };
+}
+
+export const SECURITY_EVENTS_PAGE_SIZE = 8;
+
+export const securityApi = {
+  events: (cursor: string | null, pageSize = SECURITY_EVENTS_PAGE_SIZE) => {
+    const params = new URLSearchParams({ page_size: String(pageSize) });
+    if (cursor) params.set("cursor", cursor);
+    return apiFetch<SecurityEventPage>(`/api/v1/admin/security-events?${params.toString()}`);
+  },
 };
 
 export const ROLE_OPTIONS: readonly { value: Role; label: string; description: string }[] = [

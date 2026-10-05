@@ -78,6 +78,9 @@ class TestCreate:
             "description",
             "location",
             "meeting_url",
+            "edited_at",
+            "edited_by",
+            "attachments",
             "completed_by",
             "cancelled_by",
         }

@@ -137,25 +137,27 @@ function linksLeavingWorkspace(person: Person): string[] {
 }
 
 // --- the entry point -------------------------------------------------------------------------
-describe("Admin Users: a user's name opens their CRM", () => {
-  it("the name links to the user's Dashboard with a name that says so; editing stays an explicit action", async () => {
+describe("Admin Users: a user's CRM opens from an explicit link", () => {
+  it("Open CRM leads to the user's Dashboard; the name opens their details; editing stays in the menu", async () => {
     const onAction = vi.fn();
-    renderWithProviders(<UsersTable users={[makeAdminUser()]} loading={false} viewerId="a1" onAction={onAction} />, { viewer: adminViewer });
-    const link = screen.getByRole("link", { name: "Rahul Sharma, open CRM workspace" });
+    const onOpen = vi.fn();
+    renderWithProviders(<UsersTable users={[makeAdminUser()]} loading={false} viewerId="a1" onAction={onAction} onOpen={onOpen} />, { viewer: adminViewer });
+    const link = screen.getByRole("link", { name: "Open CRM for Rahul Sharma" });
     expect(link).toHaveAttribute("href", `${base(RAHUL)}/dashboard`);
-    expect(link).toHaveTextContent(/^Rahul Sharma$/);
-    // Edit lives in the row's action menu, never on the name.
     const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Rahul Sharma" }));
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: RAHUL.id }));
+    // Edit lives in the row's action menu, never on the name.
     await user.click(screen.getByRole("button", { name: "Actions for Rahul Sharma" }));
     await user.click(screen.getByRole("menuitem", { name: "Edit details" }));
     expect(onAction).toHaveBeenCalledWith("edit", expect.objectContaining({ id: RAHUL.id }));
   });
 
-  it("a manager who may not open workspaces sees the name as text, not a dead link", () => {
+  it("a manager who may not open workspaces gets no Open CRM link (it would be a dead link)", () => {
     const manager = makeViewer({ id: "m1", capabilities: ["crm.access_own", "users.manage"] });
-    renderWithProviders(<UsersTable users={[makeAdminUser()]} loading={false} viewerId="m1" onAction={vi.fn()} />, { viewer: manager });
-    expect(screen.queryByRole("link", { name: /Rahul Sharma/ })).not.toBeInTheDocument();
-    expect(screen.getByText("Rahul Sharma")).toBeInTheDocument();
+    renderWithProviders(<UsersTable users={[makeAdminUser()]} loading={false} viewerId="m1" onAction={vi.fn()} onOpen={vi.fn()} />, { viewer: manager });
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Rahul Sharma" })).toBeInTheDocument();
   });
 });
 
@@ -232,19 +234,23 @@ describe("create and edit flows return to Rahul's workspace", () => {
     const world = workspaceWorld();
     const view = openAt(`${base(RAHUL)}/pipeline/new`, RAHUL.id, <NewOpportunityView leadId={RAHUL.leadId} />);
     const user = userEvent.setup();
-    expect(await screen.findByRole("combobox", { name: "Lead" })).toHaveValue(RAHUL.leadId);
-    await user.type(screen.getByLabelText("Title"), "Lab upgrade");
-    await user.type(screen.getByLabelText("Value (₹)"), "111111");
-    await user.click(screen.getByRole("button", { name: "Create opportunity" }));
-    await waitFor(() => expect(nav.push).toHaveBeenCalledWith(`${base(RAHUL)}/pipeline/${RAHUL.opportunityId}`));
+    const create = await screen.findByRole("dialog", { name: "New opportunity" });
+    expect(await within(create).findByRole("combobox", { name: "Lead" })).toHaveValue(RAHUL.leadId);
+    await waitFor(() => expect(within(create).getByLabelText("Account name")).not.toHaveValue(""));
+    await user.type(within(create).getByLabelText("Opportunity name"), "Lab upgrade");
+    await user.type(within(create).getByLabelText("Installation price (₹)"), "111111");
+    await user.click(within(create).getByRole("button", { name: "Create opportunity" }));
+    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`${base(RAHUL)}/pipeline/${RAHUL.opportunityId}`));
     expect(world.calls.find((c) => c.method === "POST")!.path).toBe(`/api/v1/workspaces/${RAHUL.id}/opportunities`);
 
     view.go(`${base(RAHUL)}/pipeline/${RAHUL.opportunityId}/edit`, RAHUL.id, <EditOpportunityView opportunityId={RAHUL.opportunityId} />);
-    const title = await screen.findByLabelText("Title");
+    const edit = await screen.findByRole("dialog", { name: "Edit opportunity" });
+    const title = within(edit).getByLabelText("Opportunity name");
     await user.clear(title);
     await user.type(title, "Lab upgrade, phase 2");
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
-    await waitFor(() => expect(nav.push).toHaveBeenLastCalledWith(`${base(RAHUL)}/pipeline/${RAHUL.opportunityId}`));
+    await user.click(within(edit).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(nav.replace).toHaveBeenLastCalledWith(`${base(RAHUL)}/pipeline/${RAHUL.opportunityId}`));
+    expect(world.calls.find((c) => c.method === "PATCH")!.path).toBe(`/api/v1/workspaces/${RAHUL.id}/opportunities/${RAHUL.opportunityId}`);
     expect(world.foreignCalls(RAHUL.id)).toEqual([]);
     expect(world.leaks).toEqual([]);
   });

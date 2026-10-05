@@ -187,6 +187,8 @@ is a failed deploy, not a weakened service.
 | `SESSION_COOKIE_AGE_S`, `SESSION_IDLE_TIMEOUT_S` | no | 12 h absolute, 2 h idle |
 | `ACCOUNT_INVITATION_TTL_S`, `PASSWORD_RESET_TTL_S` | no | 72 h, 1 h |
 | `WORKSPACE_ACCESS_AUDIT_WINDOW_S` | no | 15 min: one `workspace.accessed` audit row per administrator and workspace per window |
+| `SUPPORT_SESSION_TTL_S` | no | 30 min: how long an administrator's support session lasts (never extended; [admin-user-workspace.md](admin-user-workspace.md#support-sessions)) |
+| `TEMPORARY_PASSWORD_TTL_S` | no | 72 h: how long an administrator-chosen password (a new user's initial one, or a reset) signs in before the user must have changed it ([authorization.md](authorization.md#admin-set-passwords)) |
 
 The business time zone (Asia/Kolkata: "today", due dates, every displayed time) and the
 currency (INR) are fixed, not configuration: the web app formats in them, so a different
@@ -215,6 +217,24 @@ value on the server alone made the API and the screens disagree (whole-software 
 | `EMAIL_URL` | **yes** | `smtp+tls://user:pass@smtp.example.com:587`; startup fails if unset or a console, file, in-memory or dummy backend (they would put one-time account links in logs or on disk, or drop them) |
 | `DEFAULT_FROM_EMAIL` | **yes** | the sender, on a domain with SPF, DKIM and DMARC ([Email](#email)) |
 | `EMAIL_TIMEOUT_S` | no | 10 |
+
+### Attachments
+
+Files on notes ([activities.md](activities.md#attachments)). The bytes are **never** in
+PostgreSQL: a database backup is not a backup of the files ([below](#attachments-storage)).
+
+| Variable | Required | Default and notes |
+|---|---|---|
+| `ATTACHMENT_STORAGE` | **yes** in production | `filesystem` (a private directory, development) or `s3` (private S3-compatible object storage) |
+| `ATTACHMENT_ROOT` | with `filesystem` | `backend/var/attachments`; a private volume never served by a web server |
+| `ATTACHMENT_S3_BUCKET` | with `s3` | a **private** bucket (block all public access); objects are written `private`, server-side encrypted, never overwritten |
+| `ATTACHMENT_S3_ENDPOINT_URL`, `ATTACHMENT_S3_REGION` | no | for S3-compatible stores (MinIO, R2, ...) |
+| `ATTACHMENT_S3_ACCESS_KEY_ID`, `ATTACHMENT_S3_SECRET_ACCESS_KEY` | no | prefer an instance/workload role; keys, if used, may only read, write and delete in the bucket's prefix |
+| `ATTACHMENT_S3_PREFIX` | no | `attachments` |
+| `ATTACHMENT_MAX_BYTES` | no | 10 MB per file; the proxy's body limit on the upload route must be a little above it ([below](#reverse-proxy)) |
+| `ATTACHMENT_MAX_PER_NOTE` | no | 10 |
+| `ATTACHMENT_ALLOWED_EXTENSIONS` | no | `pdf,png,jpg,jpeg,webp,docx,xlsx,csv,txt`; only from the catalog the server can recognise by content (adds: `gif`, `pptx`); anything else fails startup |
+| `ATTACHMENT_SCANNER` | **recommended** | empty (no scanning: files are "not scanned" and downloadable) or `clamd://host:3310` (a ClamAV daemon: files stay "being checked" until clean; infected ones are blocked and deleted) |
 
 **Rate limits** (per user, or per client address for anonymous and sign-in requests)
 
@@ -401,3 +421,32 @@ The kill switch is `AI_ENABLED=false` (it also stops queued questions).
   `arkray/` (without tests), `config/`, `manage.py`, `gunicorn.conf.py` and the lockfile,
   never tests, caches, local environments or stray files. Build from a clean checkout.
 - Responses carry `Server: arkray` (gunicorn's product and version are not disclosed).
+
+## Attachments storage
+
+Note attachments (product enhancement phase, [activities.md](activities.md#attachments)):
+
+- **Where**: `ATTACHMENT_STORAGE=s3` and a **private** bucket (block public access; the
+  objects are written private, server-side encrypted, never overwritten) for production;
+  `filesystem` with `ATTACHMENT_ROOT` on a private volume mounted into **the web and worker
+  containers** (the image creates `/var/lib/arkray/attachments` owned by the runtime user;
+  `docker-compose.yml` mounts the `attachments` volume there) for a single host. Never under a
+  path a web server serves: downloads always go through the API, which re-checks access.
+- **Proxy**: the upload route (`/api/v1/workspaces/*/activities/*/attachments`) needs a body
+  limit a little above `ATTACHMENT_MAX_BYTES` (the reference nginx allows 11 MB there and 1 MB
+  everywhere else, and buffers uploads so a slow client never holds a web worker).
+- **Malware scanning** (files stored before a scanner was configured are queued for scanning
+  by the hourly housekeeping, 500 at a time; until clean they don't download): run a ClamAV
+  daemon (`clamav/clamav`, kept updated by freshclam)
+  reachable from the workers and set `ATTACHMENT_SCANNER=clamd://clamav:3310`; files then stay
+  "being checked" until clean, infected ones are blocked and deleted. Watch
+  `arkray_outbox_events{queue="default"}` and the dead-event alert: a scanner outage keeps
+  files pending and retries.
+- **Backup**: the database backup holds the files' metadata only. Back up the bucket with
+  versioning and cross-region replication (or the volume with snapshots) on the database's
+  schedule and retention; restore both from compatible points in time. Erasure (`erase_lead`)
+  deletes objects; versioned buckets keep earlier versions until their lifecycle expires them
+  (as backups keep erased rows, R79).
+- **Housekeeping**: `activities.housekeeping` (hourly) removes the objects of deleted, failed
+  or blocked files and gives up on uploads abandoned for an hour. Idempotent.
+

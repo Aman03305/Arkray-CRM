@@ -22,13 +22,16 @@ from decimal import Decimal
 
 from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db import models
-from django.db.models import Case, F, Q, Value, When
+from django.db.models import Case, F, Func, Q, Value, When
 from django.db.models.functions import Coalesce, Lower, Upper
+from django.db.models.lookups import Exact
 from django.utils import timezone
 
+from arkray.core.business_time import business_date
 from arkray.core.models import AppendOnlyModel, TimeStampedModel, UUIDPrimaryKeyModel
 from arkray.identity.models import User
-from arkray.leads.models import Lead
+from arkray.leads.models import EMAIL_MAX_LENGTH, Lead
+from arkray.leads.phones import PHONE_MAX_LENGTH
 
 KEY_PATTERN = r"^[a-z][a-z0-9_]{0,31}$"
 PIPELINE_NAME_MAX_LENGTH = 100
@@ -36,6 +39,25 @@ STAGE_NAME_MAX_LENGTH = 50
 TITLE_MAX_LENGTH = 200
 DESCRIPTION_MAX_LENGTH = 5000
 LOST_REASON_MAX_LENGTH = 500
+# Customer and instrument details (docs/pipeline.md#opportunities). Plain attributes of the
+# opportunity: Arkray CRM has no Account, Contact or Product entity.
+ACCOUNT_NAME_MAX_LENGTH = 200
+CUSTOMER_NAME_MAX_LENGTH = 200
+ADDRESS_MAX_LENGTH = 1000
+INSTRUMENT_NAME_MAX_LENGTH = 200
+# Free text such as "300 tests/day": the product has no workload unit semantics, so none is
+# invented (a number with a wrong unit would be worse than the salesperson's own words).
+WORK_LOAD_MAX_LENGTH = 100
+# Configuration bounds (per owner / per pipeline), so nobody can grow the configuration
+# without limit (docs/pipeline.md#configuration).
+MAX_PIPELINES_PER_OWNER = 25
+MAX_STAGES_PER_PIPELINE = 20
+MAX_FIELDS_PER_PIPELINE = 30
+MAX_FIELD_OPTIONS = 50
+FIELD_NAME_MAX_LENGTH = 60
+FIELD_OPTION_MAX_LENGTH = 100
+# The serialised custom values of one opportunity (bytes of JSON).
+CUSTOM_VALUES_MAX_BYTES = 32 * 1024
 
 # Money: NUMERIC(14, 2), i.e. up to 999,999,999,999.99 (just under ₹1 lakh crore) in the
 # organisation currency (settings.CRM_CURRENCY). Never a float anywhere.
@@ -67,16 +89,41 @@ CLOSED = (StageCategory.WON, StageCategory.LOST)
 
 
 class Pipeline(UUIDPrimaryKeyModel, TimeStampedModel):
-    """A sales process: an ordered set of stages. v1 ships one ("Sales Pipeline"), but
-    nothing assumes there is only one."""
+    """A sales process: an ordered set of stages.
+
+    An *organisation* pipeline (`owner` NULL) is shared: everyone can use it and
+    administrators (config.manage) configure it; the seeded "Sales Pipeline" is one, and the
+    default. A *personal* pipeline belongs to one user: they (and administrators managing
+    their workspace) configure it, and it holds their opportunities (docs/pipeline.md).
+    Archived pipelines (`is_active` false) are kept: opportunities and history reference
+    them."""
 
     key = models.CharField(max_length=32, unique=True)  # immutable identifier
-    name = models.CharField(max_length=PIPELINE_NAME_MAX_LENGTH, unique=True)
+    name = models.CharField(max_length=PIPELINE_NAME_MAX_LENGTH)
+    owner = models.ForeignKey(
+        User, on_delete=models.PROTECT, null=True, blank=True, related_name="+", db_index=False
+    )
+    # Provenance (e.g. the administrator who made it for a user); NULL for seeded pipelines.
+    created_by = models.ForeignKey(
+        User, on_delete=models.PROTECT, null=True, blank=True, related_name="+", db_index=False
+    )
     is_default = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
+    # Every configuration change (name, stages, custom fields, archive) bumps it: two people
+    # editing the same pipeline can't overwrite each other (409).
+    version = models.PositiveIntegerField(default=1)
 
     class Meta:
         db_table = "pipeline_pipeline"
+        indexes = [
+            # One user's pipelines (their pipeline list; the per-owner limit).
+            models.Index(
+                F("owner"),
+                F("name"),
+                name="pipeline_pipeline_owner_idx",
+                condition=Q(owner__isnull=False),
+            ),
+        ]
         constraints = [
             models.CheckConstraint(
                 condition=Q(key__regex=KEY_PATTERN), name="pipeline_pipeline_key_format"
@@ -86,15 +133,39 @@ class Pipeline(UUIDPrimaryKeyModel, TimeStampedModel):
                 condition=Q(is_default=False) | Q(is_active=True),
                 name="pipeline_pipeline_default_is_active",
             ),
+            models.CheckConstraint(
+                condition=Q(is_default=False) | Q(owner__isnull=True),
+                name="pipeline_pipeline_default_is_shared",
+            ),
+            models.CheckConstraint(
+                condition=Q(version__gte=1), name="pipeline_pipeline_version_positive"
+            ),
             models.UniqueConstraint(
                 fields=["is_default"],
                 condition=Q(is_default=True),
                 name="pipeline_pipeline_one_default",
             ),
+            # Names are unique among the active pipelines of one owner (or among the
+            # organisation's), case-insensitively; different users may reuse a name.
+            models.UniqueConstraint(
+                Lower("name"),
+                condition=Q(owner__isnull=True, is_active=True),
+                name="pipeline_pipeline_shared_name_unique",
+            ),
+            models.UniqueConstraint(
+                F("owner"),
+                Lower("name"),
+                condition=Q(owner__isnull=False, is_active=True),
+                name="pipeline_pipeline_owner_name_unique",
+            ),
         ]
 
     def __str__(self) -> str:
         return self.name
+
+    @property
+    def is_shared(self) -> bool:
+        return self.owner_id is None
 
 
 class Stage(UUIDPrimaryKeyModel, TimeStampedModel):
@@ -114,6 +185,10 @@ class Stage(UUIDPrimaryKeyModel, TimeStampedModel):
         max_digits=PROBABILITY_DIGITS, decimal_places=PROBABILITY_PLACES
     )
     category = models.CharField(max_length=8, choices=StageCategory.choices)
+    # A negotiation stage (an open stage): entering it requires the negotiated price, which
+    # is recorded in NegotiationPrice (docs/pipeline.md#negotiation). Domain data, not the
+    # name: "Negotiation" renamed to "Commercial discussion" keeps the behaviour.
+    is_negotiation = models.BooleanField(default=False)
     # Retired stages stay (opportunities and history may reference them) but nothing can
     # move into them.
     is_active = models.BooleanField(default=True)
@@ -128,6 +203,10 @@ class Stage(UUIDPrimaryKeyModel, TimeStampedModel):
             models.CheckConstraint(
                 condition=Q(category__in=StageCategory.values),
                 name="pipeline_stage_category_valid",
+            ),
+            models.CheckConstraint(
+                condition=Q(is_negotiation=False) | Q(category=StageCategory.OPEN),
+                name="pipeline_stage_negotiation_is_open",
             ),
             models.CheckConstraint(
                 condition=Q(probability__gte=IMPOSSIBLE, probability__lte=CERTAIN),
@@ -165,6 +244,25 @@ class Stage(UUIDPrimaryKeyModel, TimeStampedModel):
     @property
     def is_closed(self) -> bool:
         return self.category in CLOSED
+
+    @property
+    def stage_type(self) -> str:
+        """What the stage means, as one value: open, negotiation, won or lost."""
+        return StageType.NEGOTIATION if self.is_negotiation else str(self.category)
+
+
+class StageType(models.TextChoices):
+    """The configurable meaning of a stage (the stage manager's "Type"): a category plus the
+    negotiation flag."""
+
+    OPEN = "open", "Open"
+    NEGOTIATION = "negotiation", "Negotiation"
+    WON = "won", "Won"
+    LOST = "lost", "Lost"
+
+
+def business_today() -> date:
+    return business_date(timezone.now())
 
 
 # NULL unless the opportunity is open: the foreign key onto the lead's (id, owner) then
@@ -207,6 +305,33 @@ class Opportunity(UUIDPrimaryKeyModel, TimeStampedModel):
     # Why a lost opportunity was lost (optional, free text; only while lost).
     lost_reason = models.CharField(max_length=LOST_REASON_MAX_LENGTH, blank=True, default="")
     closed_at = models.DateTimeField(null=True, blank=True)
+
+    # --- the deal (docs/pipeline.md#opportunities) --------------------------------------------
+    # The business date of the opportunity (when it arose), as opposed to the expected
+    # closing date; defaults to today in the business time zone.
+    opportunity_date = models.DateField(default=business_today)
+    # The customer: copied from the lead when not given (an opportunity-specific snapshot the
+    # salesperson may change: the lab buying may differ from the lead's organisation).
+    account_name = models.CharField(max_length=ACCOUNT_NAME_MAX_LENGTH)
+    customer_name = models.CharField(max_length=CUSTOMER_NAME_MAX_LENGTH)
+    contact_phone = models.CharField(max_length=PHONE_MAX_LENGTH, blank=True, default="")
+    contact_email = models.CharField(max_length=EMAIL_MAX_LENGTH, blank=True, default="")
+    address = models.TextField(max_length=ADDRESS_MAX_LENGTH, blank=True, default="")
+    instrument_name = models.CharField(
+        max_length=INSTRUMENT_NAME_MAX_LENGTH, blank=True, default=""
+    )
+    work_load = models.CharField(max_length=WORK_LOAD_MAX_LENGTH, blank=True, default="")
+    # Values of the pipeline's custom fields, {field id: canonical value}; validated against
+    # the definitions by validation.clean_custom_values (never arbitrary keys or HTML).
+    custom_fields = models.JSONField(default=dict, blank=True)
+    # The latest negotiated price (INR) and when it was recorded: a copy of the newest
+    # NegotiationPrice row (the history is authoritative). Kept after the deal leaves
+    # negotiation; entering a negotiation stage again asks for a new one.
+    negotiated_price = models.DecimalField(
+        max_digits=MONEY_DIGITS, decimal_places=MONEY_PLACES, null=True, blank=True
+    )
+    negotiated_at = models.DateTimeField(null=True, blank=True)
+
     # Provenance, never changes (e.g. the administrator who created it for a salesperson).
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="+", db_index=False)
     # Opportunities are never deleted; archiving hides them from boards, lists and totals.
@@ -275,6 +400,10 @@ class Opportunity(UUIDPrimaryKeyModel, TimeStampedModel):
                 F("id").desc(),
                 name="pipeline_opp_owner_created_idx",
             ),
+            # Which pipelines hold one owner's deals (`selectors.visible`, index-only) and one
+            # owner's deals in one pipeline (a personal pipeline's board): product enhancement
+            # phase, 11.6 -> 1.8 ms and 10.4 -> 1.9 ms for an owner of 20,000 (docs/database.md).
+            models.Index(F("owner"), F("pipeline"), name="pipeline_opp_owner_pipe_idx"),
             models.Index(F("created_at").desc(), F("id").desc(), name="pipeline_opp_created_idx"),
             # Global search (Phase 7): a title substring, in any workspace. Without it an
             # organisation-wide search read every opportunity (100-150 ms at 300,000) and one
@@ -328,6 +457,30 @@ class Opportunity(UUIDPrimaryKeyModel, TimeStampedModel):
             ),
             models.CheckConstraint(
                 condition=Q(version__gte=1), name="pipeline_opp_version_positive"
+            ),
+            models.CheckConstraint(
+                condition=Q(opportunity_date__range=(EARLIEST_CLOSE_DATE, LATEST_CLOSE_DATE)),
+                name="pipeline_opp_date_range",
+            ),
+            models.CheckConstraint(
+                condition=~Q(account_name=""), name="pipeline_opp_account_present"
+            ),
+            models.CheckConstraint(
+                condition=~Q(customer_name=""), name="pipeline_opp_customer_present"
+            ),
+            models.CheckConstraint(
+                condition=Q(negotiated_price__isnull=True, negotiated_at__isnull=True)
+                | Q(negotiated_price__gte=Decimal("0"), negotiated_at__isnull=False),
+                name="pipeline_opp_negotiated_complete",
+            ),
+            models.CheckConstraint(
+                condition=Exact(
+                    Func(
+                        F("custom_fields"), function="jsonb_typeof", output_field=models.TextField()
+                    ),
+                    "object",
+                ),
+                name="pipeline_opp_custom_fields_object",
             ),
             # Trivially unique (id is the key); it exists so an activity can reference an
             # opportunity *together with its lead*: an activity's lead is always its
@@ -401,3 +554,136 @@ class StageHistory(AppendOnlyModel):
 
     def __str__(self) -> str:
         return f"StageHistory({self.pk})"
+
+
+class NegotiationSource(models.TextChoices):
+    """How a negotiated price was recorded."""
+
+    STAGE_ENTRY = "stage_entry", "Entered a negotiation stage"
+    REVISION = "revision", "Revised during negotiation"
+    CREATION = "creation", "Created in a negotiation stage"
+
+
+class NegotiationPrice(AppendOnlyModel):
+    """One negotiated price of an opportunity (docs/pipeline.md#negotiation). Insert-only
+    (ORM guard + PostgreSQL trigger): a new price never overwrites an earlier one, so the
+    history ₹12,00,000 -> ₹11,00,000 -> ₹10,50,000 stays auditable. Written in the
+    transaction that changes the opportunity, under its lock."""
+
+    id = models.BigAutoField(primary_key=True)
+    opportunity = models.ForeignKey(
+        Opportunity, on_delete=models.PROTECT, related_name="+", db_index=False
+    )
+    price = models.DecimalField(max_digits=MONEY_DIGITS, decimal_places=MONEY_PLACES)
+    currency = models.CharField(max_length=3)
+    # The negotiation stage the deal was in (and its name then: stages may be renamed).
+    stage = models.ForeignKey(Stage, on_delete=models.PROTECT, related_name="+", db_index=False)
+    stage_name = models.CharField(max_length=STAGE_NAME_MAX_LENGTH)
+    source = models.CharField(max_length=16, choices=NegotiationSource.choices)
+    # The opportunity's version after the change that recorded this price.
+    opportunity_version = models.PositiveIntegerField()
+    # Who recorded it, and whose workspace it concerned when that was someone else (an
+    # administrator working in a user's workspace): never recorded as the user's own act.
+    actor = models.ForeignKey(User, on_delete=models.PROTECT, related_name="+", db_index=False)
+    subject_user = models.ForeignKey(
+        User, on_delete=models.PROTECT, null=True, blank=True, related_name="+", db_index=False
+    )
+    # The administrator's support session, when recorded in one (identity.SupportSession).
+    support_session_id = models.UUIDField(null=True, blank=True)
+    occurred_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "pipeline_negotiation_price"
+        indexes = [
+            models.Index(
+                F("opportunity"),
+                F("occurred_at").desc(),
+                F("id").desc(),
+                name="pipeline_negotiation_opp_idx",
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(price__gte=Decimal("0")), name="pipeline_negotiation_price_valid"
+            ),
+            models.CheckConstraint(
+                condition=Q(source__in=NegotiationSource.values),
+                name="pipeline_negotiation_source_valid",
+            ),
+            models.CheckConstraint(
+                condition=~Q(stage_name="") & Q(currency__regex=r"^[A-Z]{3}$"),
+                name="pipeline_negotiation_complete",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"NegotiationPrice({self.pk})"  # never the price: this string can reach logs
+
+
+class FieldType(models.TextChoices):
+    TEXT = "text", "Text"
+    LONG_TEXT = "long_text", "Long text"
+    NUMBER = "number", "Number"
+    CURRENCY = "currency", "Currency (INR)"
+    DATE = "date", "Date"
+    BOOLEAN = "boolean", "Yes / no"
+    SINGLE_SELECT = "single_select", "Single choice"
+    MULTI_SELECT = "multi_select", "Multiple choice"
+
+
+SELECT_TYPES = (FieldType.SINGLE_SELECT, FieldType.MULTI_SELECT)
+
+
+class CustomField(UUIDPrimaryKeyModel, TimeStampedModel):
+    """An additional opportunity field, defined per pipeline (docs/pipeline.md#custom-fields):
+    it is configured by whoever may configure the pipeline, and applies to the pipeline's
+    opportunities. Values live in Opportunity.custom_fields (JSON), so defining a field never
+    changes the database schema. The type never changes after creation (remove the field and
+    add another); removed fields are archived and their values kept, hidden."""
+
+    pipeline = models.ForeignKey(
+        Pipeline, on_delete=models.PROTECT, related_name="fields", db_index=False
+    )
+    name = models.CharField(max_length=FIELD_NAME_MAX_LENGTH)
+    field_type = models.CharField(max_length=16, choices=FieldType.choices)
+    required = models.BooleanField(default=False)
+    # Select fields only: [{"id": "<10 hex>", "label": "..."}]. Values store option ids, so
+    # renaming an option never rewrites opportunities.
+    options = models.JSONField(default=list, blank=True)
+    position = models.PositiveSmallIntegerField()
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        User, on_delete=models.PROTECT, null=True, blank=True, related_name="+", db_index=False
+    )
+
+    class Meta:
+        db_table = "pipeline_custom_field"
+        indexes = [
+            models.Index(F("pipeline"), F("position"), name="pipeline_field_pipeline_idx"),
+        ]
+        constraints = [
+            models.CheckConstraint(condition=~Q(name=""), name="pipeline_field_name_present"),
+            models.CheckConstraint(
+                condition=Q(field_type__in=FieldType.values), name="pipeline_field_type_valid"
+            ),
+            models.CheckConstraint(
+                condition=Exact(
+                    Func(F("options"), function="jsonb_typeof", output_field=models.TextField()),
+                    "array",
+                ),
+                name="pipeline_field_options_array",
+            ),
+            models.UniqueConstraint(
+                F("pipeline"),
+                Lower("name"),
+                condition=Q(is_active=True),
+                name="pipeline_field_active_name_unique",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return self.name
+
+    @property
+    def is_select(self) -> bool:
+        return self.field_type in SELECT_TYPES

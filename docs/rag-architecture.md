@@ -130,20 +130,22 @@ sequenceDiagram
 ## Tools
 
 All read-only, scope-bound, strict schemas (`strict: true`, `additionalProperties: false`,
-enums; 11 tools and 14 optional parameters, inside the API's limits of 20 and 24), and every
+enums; 12 tools and 16 optional parameters organisation-wide, inside the API's limits of 20
+and 24), and every
 argument validated again server-side (types, enums, `limit` 1–20, references).
 
 | Tool | Answers | Source |
 |---|---|---|
-| `get_pipeline_summary()` | pipeline value, weighted pipeline, open count; count/value/weighted per stage | `pipeline.selectors.pipeline_totals`, `stage_breakdown` (`pipeline.metrics`) |
-| `list_opportunities(status?, stage?, closing?, sort?, limit?)` | "Which deals are in negotiation?", "closing this month" | `pipeline.selectors.opportunity_list` |
+| `get_pipeline_summary(pipeline?)` | pipeline value, weighted pipeline, open count; count/value/weighted per stage with each stage's type; every visible pipeline, or one by name (a name several visible pipelines share is refused, naming whose they are) | `pipeline.selectors.pipeline_totals`, `stage_breakdown` (`pipeline.metrics`) |
+| `list_opportunities(status?, stage?, stage_type?, pipeline?, closing?, sort?, limit?)` | "Which deals are in negotiation?" (by stage *type*, whatever the stage is called), "closing this month"; rows carry the account and the latest negotiated price | `pipeline.selectors.opportunity_list` |
+| `get_negotiation_history(ref)` | an opportunity's negotiated prices, newest first, from the append-only history (authoritative, never computed); who recorded each ("you", else by name) | `pipeline.selectors.negotiation_history` |
 | `get_lead_summary()` | total leads, new today, leads per status | `leads.selectors.lead_summary`, `status_breakdown` |
 | `list_leads(status?, created?, sort?, limit?)` | "new leads this week", "longest without contact" | `leads.selectors.lead_list` |
 | `get_activity_summary()` | open / overdue / due-today tasks, today's and upcoming meetings | `activities.selectors.activity_summary` |
 | `list_tasks(filter, limit?)` | overdue, due today, open, upcoming | `activities.selectors.activity_list` |
 | `list_meetings(range, limit?)` | today, tomorrow, this week, next 7 days, past 7 days, upcoming (scheduled, from now, within 7 days) | `activities.selectors.activity_list` |
 | `find_records(query)` | names and words → record references | `search.selectors.global_search` |
-| `get_record(ref)` | a lead / opportunity / task / meeting / note, with recent activities and stage history | the modules' `*_detail` selectors |
+| `get_record(ref)` | a lead / opportunity / task / meeting / note, with recent activities and stage history (an opportunity also with its date, instrument, work load and negotiated prices) | the modules' `*_detail` selectors |
 | `search_notes(query, about?)` | what was discussed, concerns, context (semantic) | `ai.retrieval` |
 | `team_breakdown(metric, limit?)` *(organisation only)* | pipeline, leads, overdue tasks per salesperson | `open_pipeline_by_owner`, `lead_counts_by_owner`, `task_counts_by_owner` |
 

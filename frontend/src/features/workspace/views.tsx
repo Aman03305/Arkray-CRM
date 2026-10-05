@@ -12,7 +12,6 @@ import { LeadDetailView } from "@/features/leads/LeadDetailView";
 import { LeadFormView } from "@/features/leads/LeadFormView";
 import { LeadsListView } from "@/features/leads/LeadsListView";
 import { OpportunityDetailView } from "@/features/pipeline/OpportunityDetailView";
-import { OpportunityFormView } from "@/features/pipeline/OpportunityFormView";
 import { PipelineBoardView } from "@/features/pipeline/PipelineBoardView";
 import { AdminHome } from "@/features/users/AdminHome";
 import { useWorkspace } from "@/lib/use-workspace";
@@ -112,25 +111,23 @@ export function OpportunityView({ opportunityId }: { opportunityId: string }) {
   );
 }
 
+/** New opportunity: the board, with the new-opportunity panel open over it. */
 export function NewOpportunityView({ leadId }: { leadId?: string }) {
   return (
     <InWorkspace>
       {(workspace, segment) => (
-        <OpportunityFormView key={`${segment}/${leadId ?? ""}`} workspace={workspace} mode={{ kind: "create", leadId }} />
+        <PipelineBoardView key={`${segment}/new/${leadId ?? ""}`} workspace={workspace} create={{ leadId }} />
       )}
     </InWorkspace>
   );
 }
 
+/** Edit an opportunity: its page, with the edit panel open over it. */
 export function EditOpportunityView({ opportunityId }: { opportunityId: string }) {
   return (
     <InWorkspace>
       {(workspace, segment) => (
-        <OpportunityFormView
-          key={`${segment}/${opportunityId}`}
-          workspace={workspace}
-          mode={{ kind: "edit", opportunityId }}
-        />
+        <OpportunityDetailView key={`${segment}/${opportunityId}/edit`} workspace={workspace} opportunityId={opportunityId} editOnOpen />
       )}
     </InWorkspace>
   );

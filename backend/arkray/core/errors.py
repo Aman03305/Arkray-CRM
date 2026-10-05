@@ -56,6 +56,22 @@ class PermissionDeniedError(DomainError):
     default_message = "You do not have permission to perform this action."
 
 
+class PasswordChangeRequired(PermissionDeniedError):
+    """The user signed in with a password an administrator chose: until they choose their
+    own, only signing out and changing the password are allowed."""
+
+    code = "password_change_required"
+    default_message = "Choose a new password to continue."
+
+
+class SupportSessionActive(PermissionDeniedError):
+    """An administrator in a support session can work only in that user's CRM: identity
+    and security operations need their normal administrator context."""
+
+    code = "support_session_active"
+    default_message = "Exit the support session to do this."
+
+
 class ConflictError(DomainError):
     """Optimistic-concurrency or uniqueness conflict; the client should reload and retry."""
 

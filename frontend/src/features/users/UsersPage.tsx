@@ -11,6 +11,7 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { workspaceKeys } from "@/features/workspace/api";
 import { describeError, isApiError } from "@/lib/api/errors";
 import type { AdminUser } from "@/lib/api/types";
+import { useFlash } from "@/lib/flash";
 import { VIEWER_QUERY_KEY } from "@/lib/query-client";
 import { useViewer } from "@/lib/viewer-context";
 
@@ -19,13 +20,18 @@ import {
   NO_FILTERS,
   ROLE_OPTIONS,
   SEARCH_MIN_LENGTH,
+  SECURITY_EVENTS_QUERY_KEY,
   STATUS_OPTIONS,
   type UserFilters,
+  userDetailKey,
   USERS_QUERY_KEY,
   usersApi,
 } from "./api";
+import { AccessAsUserDialog } from "./AccessAsUserDialog";
 import { ChangeEmailDialog } from "./ChangeEmailDialog";
 import { LifecycleDialog } from "./LifecycleDialog";
+import { SetPasswordDialog } from "./SetPasswordDialog";
+import { UserDetailsDrawer } from "./UserDetailsDrawer";
 import { UserFormDialog } from "./UserFormDialog";
 import { type UserAction, UsersTable } from "./UsersTable";
 
@@ -34,6 +40,7 @@ type OpenDialog =
   | { kind: "edit"; user: AdminUser }
   | { kind: "change-email"; user: AdminUser }
   | { kind: "deactivate" | "activate" | "resend"; user: AdminUser }
+  | { kind: "set-password" | "support"; user: AdminUser }
   | null;
 
 function useDebounced<T>(value: T, delayMs: number): T {
@@ -54,7 +61,12 @@ export function UsersPage() {
   const [filters, setFilters] = useState<UserFilters>(NO_FILTERS);
   const [cursor, setCursor] = useState<string | null>(null);
   const [dialog, setDialog] = useState<OpenDialog>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  // The user whose details panel is open. A dialog opened from it takes its place (no
+  // stacked modals); closing the dialog brings the panel back.
+  const [details, setDetails] = useState<AdminUser | null>(null);
+  const [detailsNotice, setDetailsNotice] = useState<string | null>(null);
+  // Also carries a notice from elsewhere, e.g. "Support session ended" (lib/flash).
+  const [notice, setNotice] = useFlash();
   const searchId = useId();
   const statusId = useId();
   const roleId = useId();
@@ -73,19 +85,38 @@ export function UsersPage() {
   };
   const filtered = Boolean(effective.q || filters.status || filters.role);
 
-  const onSaved = (user: AdminUser, message: string) => {
-    setDialog(null);
-    setNotice(message);
+  const refresh = (user: AdminUser) => {
+    queryClient.setQueryData(userDetailKey(user.id), user);
     void queryClient.invalidateQueries({ queryKey: USERS_QUERY_KEY });
+    void queryClient.invalidateQueries({ queryKey: SECURITY_EVENTS_QUERY_KEY });
     // Their workspace banner shows their name and status (deactivated, reactivated, renamed).
     void queryClient.invalidateQueries({ queryKey: workspaceKeys.subject(user.id) });
     // Edited yourself: the sidebar and Settings show your details too.
     if (user.id === viewer?.id) void queryClient.invalidateQueries({ queryKey: VIEWER_QUERY_KEY });
   };
 
+  const onSaved = (user: AdminUser, message: string) => {
+    setDialog(null);
+    setNotice(message);
+    refresh(user);
+  };
+
+  const onPasswordSet = (user: AdminUser, message: string) => {
+    setDialog(null); // back to the details panel, which shows the outcome
+    setDetailsNotice(message);
+    refresh(user);
+  };
+
   const onAction = (action: UserAction, user: AdminUser) => {
     setNotice(null);
+    setDetails(null);
     setDialog(action === "edit" ? { kind: "edit", user } : { kind: action, user });
+  };
+
+  const openDetails = (user: AdminUser) => {
+    setNotice(null);
+    setDetailsNotice(null);
+    setDetails(user);
   };
 
   const rows = users.data?.results;
@@ -95,7 +126,6 @@ export function UsersPage() {
     <>
       <PageHeader
         title="Users"
-        subtitle="Create and manage CRM users. Click a name to open their CRM."
         actions={
           <Button icon={<Plus aria-hidden="true" className="size-4" />} onClick={() => setDialog({ kind: "create" })}>
             New user
@@ -183,7 +213,7 @@ export function UsersPage() {
         <EmptyState
           icon={UsersRound}
           title={filtered ? "No users match your filters" : "No users yet"}
-          description={filtered ? "Try a different search or clear the filters." : "Create the first user to invite them to Arkray CRM."}
+          description={filtered ? "Try a different search or clear the filters." : undefined}
           action={
             filtered ? (
               <Button variant="secondary" onClick={() => updateFilters(NO_FILTERS)}>
@@ -194,7 +224,7 @@ export function UsersPage() {
         />
       ) : (
         <>
-          <UsersTable users={rows} loading={users.isPending} viewerId={viewer?.id} onAction={onAction} />
+          <UsersTable users={rows} loading={users.isPending} viewerId={viewer?.id} onAction={onAction} onOpen={openDetails} />
           <nav aria-label="Pagination" className="mt-4 flex items-center justify-end gap-2">
             <Button
               variant="secondary"
@@ -236,6 +266,28 @@ export function UsersPage() {
       ) : null}
       {dialog && (dialog.kind === "deactivate" || dialog.kind === "activate" || dialog.kind === "resend") ? (
         <LifecycleDialog action={dialog.kind} user={dialog.user} onClose={() => setDialog(null)} onDone={onSaved} />
+      ) : null}
+      {dialog?.kind === "set-password" ? (
+        <SetPasswordDialog user={dialog.user} onClose={() => setDialog(null)} onDone={onPasswordSet} />
+      ) : null}
+      {dialog?.kind === "support" ? <AccessAsUserDialog user={dialog.user} onClose={() => setDialog(null)} /> : null}
+      {details && dialog === null ? (
+        <UserDetailsDrawer
+          user={details}
+          notice={detailsNotice}
+          onClose={() => {
+            setDetails(null);
+            setDetailsNotice(null);
+          }}
+          onSetPassword={(user) => {
+            setDetailsNotice(null);
+            setDialog({ kind: "set-password", user });
+          }}
+          onAccess={(user) => {
+            setDetailsNotice(null);
+            setDialog({ kind: "support", user });
+          }}
+        />
       ) : null}
     </>
   );

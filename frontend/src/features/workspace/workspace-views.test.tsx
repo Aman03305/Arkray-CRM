@@ -1,10 +1,10 @@
 import { screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { adminViewer, makeAdminUser, RAHUL_ID, salesViewer } from "@/test/fixtures";
+import { adminViewer, RAHUL_ID, salesViewer } from "@/test/fixtures";
 import { asListItem, makeActivity, page, SUMMARY } from "@/test/activity-fixtures";
 import { makeDashboard } from "@/test/dashboard-fixtures";
-import { makeBoard, PIPELINES } from "@/test/pipeline-fixtures";
+import { makeBoard, PIPELINE_ROUTES } from "@/test/pipeline-fixtures";
 import { mockApi, renderWithProviders } from "@/test/render";
 
 import { ActivitiesView, DashboardView, PipelineView } from "./views";
@@ -20,27 +20,23 @@ beforeEach(() => {
 });
 
 describe("Dashboard", () => {
-  it("is the Admin Home for administrators: the organisation's figures and the newest users", async () => {
-    const api = mockApi({
-      "GET /api/v1/admin/users": { status: 200, body: { results: [makeAdminUser()], next: null, previous: null } },
-      "GET /api/v1/workspaces/all/dashboard": { status: 200, body: makeDashboard() },
-    });
+  it("is the Admin Home for administrators: the organisation's figures only", async () => {
+    const api = mockApi({ "GET /api/v1/workspaces/all/dashboard": { status: 200, body: makeDashboard() } });
     renderWithProviders(<DashboardView />, { viewer: adminViewer });
     expect(screen.getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
     expect(screen.getByText("Organization overview")).toBeInTheDocument();
     expect(await screen.findByText("₹15,00,000")).toBeInTheDocument();
-    expect(await screen.findByRole("link", { name: "Rahul Sharma, open CRM workspace" })).toHaveAttribute(
-      "href",
-      `/admin/users/${RAHUL_ID}/dashboard`,
-    );
-    expect(screen.getByRole("link", { name: "Manage users" })).toHaveAttribute("href", "/admin/users");
-    expect(api.calls.every((c) => !c.path.includes("/workspaces/me"))).toBe(true);
+    // CRM figures from the organisation only (plus the security log panel, not CRM data).
+    expect(api.calls.map((c) => c.path).filter((p) => p !== "/api/v1/admin/security-events")).toEqual([
+      "/api/v1/workspaces/all/dashboard",
+    ]);
+    expect(screen.getByRole("region", { name: "Security activity" })).toBeInTheDocument();
   });
 
   it("is a salesperson's own dashboard (no organisation or admin data is requested)", async () => {
     const api = mockApi({ "GET /api/v1/workspaces/me/dashboard": { status: 200, body: makeDashboard() } });
     renderWithProviders(<DashboardView />, { viewer: salesViewer });
-    expect(await screen.findByText("Your records")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
     expect(await screen.findByText("₹15,00,000")).toBeInTheDocument();
     expect(api.calls.map((c) => c.path)).toEqual(["/api/v1/workspaces/me/dashboard"]);
   });
@@ -49,10 +45,9 @@ describe("Dashboard", () => {
     navigation.pathname = `/admin/users/${RAHUL_ID}/dashboard`;
     const api = mockApi({ [`GET /api/v1/workspaces/${RAHUL_ID}/dashboard`]: { status: 200, body: makeDashboard() } });
     renderWithProviders(<DashboardView />, { viewer: adminViewer });
-    expect(await screen.findByText("Selected user's records")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
     expect(await screen.findByText("₹15,00,000")).toBeInTheDocument();
     expect(api.calls.every((c) => !c.path.includes("/workspaces/all") && !c.path.includes("/workspaces/me"))).toBe(true);
-    expect(screen.queryByText("Recently added users")).not.toBeInTheDocument();
   });
 });
 
@@ -64,7 +59,7 @@ describe("modules in another user's workspace", () => {
       [`GET /api/v1/workspaces/${RAHUL_ID}/activity-summary`]: { status: 200, body: SUMMARY },
     });
     renderWithProviders(<ActivitiesView />, { viewer: adminViewer });
-    expect(screen.getByText("Selected user's records")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Activities" })).toBeInTheDocument();
     expect((await screen.findAllByText("Send the revised quotation")).length).toBeGreaterThan(0);
     expect(api.calls.every((c) => !c.path.includes("/workspaces/all") && !c.path.includes("/workspaces/me"))).toBe(true);
   });
@@ -72,12 +67,12 @@ describe("modules in another user's workspace", () => {
   it("the Pipeline (Phase 3) loads that user's board, scoped to their workspace", async () => {
     navigation.pathname = `/admin/users/${RAHUL_ID}/pipeline`;
     const api = mockApi({
-      "GET /api/v1/config/pipelines": { status: 200, body: PIPELINES },
+      ...PIPELINE_ROUTES,
       [`GET /api/v1/workspaces/${RAHUL_ID}/pipeline-board`]: { status: 200, body: makeBoard() },
     });
     renderWithProviders(<PipelineView />, { viewer: adminViewer });
     expect(await screen.findByText("Hospital Analyzer Project")).toBeInTheDocument();
-    expect(screen.getByText(/Selected user's records/)).toBeInTheDocument();
+    expect(api.callsTo("GET", `/api/v1/workspaces/${RAHUL_ID}/pipeline-board`)).toHaveLength(1);
     expect(api.calls.every((c) => !c.path.includes("/workspaces/all") && !c.path.includes("/workspaces/me"))).toBe(true);
   });
 });

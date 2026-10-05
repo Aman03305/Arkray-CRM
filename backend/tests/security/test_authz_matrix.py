@@ -35,6 +35,8 @@ def concrete(route: str, target: User) -> str:
         .replace("<uuid:activity_id>", MISSING_RECORD)
         .replace("<uuid:question_id>", MISSING_RECORD)
         .replace("<uuid:conversation_id>", MISSING_RECORD)
+        .replace("<uuid:pipeline_id>", MISSING_RECORD)
+        .replace("<uuid:attachment_id>", MISSING_RECORD)
     )
 
 

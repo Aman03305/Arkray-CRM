@@ -10,8 +10,11 @@ Authorization, applied here for every caller (API, future imports, Ask Arkray to
   another user's or the organisation's: crm.manage_any), else 403;
 - nobody chooses an activity's owner: current work belongs to the lead's (active) owner,
   so an admin's task in Rahul's workspace is Rahul's, with the admin as `created_by`;
-- a note's text is its author's words: only the author may edit it (anyone who may write
-  in the workspace may archive it).
+- a note's text is its author's words: the author may edit it, and so may an administrator
+  working in someone's workspace (crm.manage_any); the note then records who edited it and
+  when (`edited_by`, `edited_at`), so nobody's words are presented as someone else's.
+  Anyone who may write in the workspace may archive it. Files on a note follow the same
+  rule (attachments.py).
 
 Lock order (docs/activities.md#lock-order), the same in every operation:
 
@@ -84,6 +87,7 @@ LINK_REQUIRED = "Choose the lead or opportunity this is about."
 INVALID_TYPE = "Choose task, meeting or note."
 OPPORTUNITY_OF_ANOTHER_LEAD = "This opportunity belongs to a different lead."
 LEAD_ARCHIVED = "This lead is archived. Restore it before adding activities."
+NOTE_LEAD_ARCHIVED = "This lead is archived. Restore it before changing its notes."
 OPPORTUNITY_ARCHIVED = "This opportunity is archived. Restore it before adding activities."
 LEAD_ELSEWHERE = (
     "This opportunity's lead now belongs to someone else, so activities can't be added "
@@ -98,7 +102,7 @@ LEAD_ELSEWHERE_DELEGATED = (
 OWNER_NOT_ASSIGNABLE = (
     "This lead's owner is deactivated. Reassign the lead to an active user first."
 )
-AUTHOR_ONLY = "Only the note's author can edit it."
+AUTHOR_ONLY = "Only the note's author (or an administrator) can edit it."
 NO_LIFECYCLE = "Notes can't be completed, cancelled or reopened."
 NOT_STARTED = (
     "This meeting hasn't started yet. Change its time to when it took place, then complete it."
@@ -183,6 +187,18 @@ def _lock(scope: AccessScope, activity_id: UUID) -> tuple[Activity, Lead]:
     if activity is None:  # moved out of the scope (its lead was reassigned) meanwhile
         raise NotFoundError()
     return activity, lead
+
+
+def lock_note(scope: AccessScope, note_id: UUID, *, adding: bool = False) -> Activity:
+    """A note, locked (its lead first: the lock order), for operations on its files
+    (attachments.py). NotFoundError outside the scope or if it isn't a note. `adding`: refused
+    while the lead is archived (erasure archives it: nothing personal may be added after)."""
+    note, lead = _lock(scope, note_id)
+    if note.type != ActivityType.NOTE:
+        raise NotFoundError()
+    if adding and lead.archived_at is not None:
+        raise BusinessRuleViolation(NOTE_LEAD_ARCHIVED)
+    return note
 
 
 def _lock_link(
@@ -364,11 +380,20 @@ def update_activity(
     authorize_write(actor, scope)
     cleaned = validation.clean_fields(changes)
     with transaction.atomic():
-        activity, _ = _lock(scope, activity_id)
+        activity, lead = _lock(scope, activity_id)
         spec = SPECS[activity.type]
-        if activity.type == ActivityType.NOTE and activity.created_by_id != actor.pk:
-            # Rewriting someone else's words while their name stays on them would falsify
-            # the record: the author edits, others may archive.
+        if activity.type == ActivityType.NOTE and lead.archived_at is not None:
+            # An archived lead's notes stay as they were (erasure archives the lead: text
+            # written after it could never be erased; enhancement review).
+            raise BusinessRuleViolation(NOTE_LEAD_ARCHIVED)
+        if (
+            activity.type == ActivityType.NOTE
+            and activity.created_by_id != actor.pk
+            and not scope.is_delegated
+        ):
+            # Rewriting someone else's words would falsify the record: the author edits,
+            # and an administrator managing the workspace (whose edit is then shown as
+            # theirs: edited_by); others may archive.
             raise PermissionDeniedError(AUTHOR_ONLY)
         _require_version(activity, version)
         _require_not_archived(activity)
@@ -390,7 +415,9 @@ def update_activity(
         now = timezone.now()
         activity.version += 1
         activity.updated_at = now
-        activity.save(update_fields=[*changed, "version", "updated_at"])
+        activity.edited_at = now
+        activity.edited_by_id = actor.pk
+        activity.save(update_fields=[*changed, "edited_at", "edited_by", "version", "updated_at"])
         if {"starts_at", "ends_at"} & set(changed):
             timeline.for_activity(
                 TimelineKind.MEETING_RESCHEDULED,

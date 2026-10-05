@@ -13,10 +13,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any, TypeVar
+from urllib.parse import quote
 from uuid import UUID
 
+from django.http import StreamingHttpResponse
 from django.utils import timezone
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status as http
 from rest_framework.permissions import SAFE_METHODS
 from rest_framework.request import Request
@@ -31,7 +34,7 @@ from arkray.identity.permissions import IsActiveUser
 from arkray.identity.workspaces import authorize_write, resolve_workspace, workspace_segment
 from arkray.leads.api.views import IDEMPOTENCY_PARAMETER, NOT_FOUND, OWNER_FILTER_ORG_ONLY
 
-from .. import selectors, services
+from .. import attachments, selectors, services, storage
 from ..models import Activity, TimelineEntry
 from ..selectors import ActivityFilters
 from . import serializers as s
@@ -305,3 +308,163 @@ class OpportunityTimelineView(ApiView):
                 purpose=f"opportunities.timeline:{opportunity_id}",
             )
         )
+
+
+# --- notes on a deal (the deal page's Notes) ------------------------------------------------------
+class OpportunityNotesView(ApiView):
+    """An opportunity's notes, newest first: whole text, author, edits, files and whether
+    the caller may change each one. Adding a note is POST /activities {type: "note",
+    opportunity}; editing it PATCH /activities/{id}."""
+
+    permission_classes = [IsActiveUser]
+    query_param_methods = frozenset({"GET"})
+
+    @extend_schema(
+        operation_id="opportunities_notes",
+        parameters=[s.NoteQuerySerializer],
+        responses={200: s.NotePageSerializer, 404: NOT_FOUND},
+    )
+    def get(self, request: Request, workspace: str, opportunity_id: UUID) -> Response:
+        actor, scope = _scope(request, workspace)
+        params = validated(s.NoteQuerySerializer, request.query_params)
+        paginator = KeysetPaginator(
+            selectors.NOTE_ORDERING,
+            page_size=params["page_size"],
+            binding=CursorBinding.of(
+                f"opportunities.notes:{opportunity_id}",
+                params,
+                actor_id=scope.actor_id,
+                scope=scope,
+            ),
+        )
+        page = paginator.paginate(
+            selectors.opportunity_notes(scope, opportunity_id), params.get("cursor")
+        )
+        try:
+            authorize_write(actor, scope)
+            writable = True
+        except PermissionDeniedError:
+            writable = False
+        context = {
+            "scope": scope,
+            "actor": actor,
+            "writable": writable,
+            "attachments": attachments.for_notes([note.pk for note in page.items]),
+        }
+        return Response(
+            {
+                "results": s.NoteSerializer(page.items, many=True, context=context).data,
+                **page_links(request, page),
+            }
+        )
+
+
+# --- attachments ----------------------------------------------------------------------------------
+FILENAME_HEADER = "X-Filename"
+
+
+class NoteAttachmentsView(ApiView):
+    """Attach a file to a note. The body is the file itself (Content-Type:
+    application/octet-stream) and the X-Filename header its name, percent-encoded. At most
+    ATTACHMENT_MAX_BYTES; allowed types only, recognised by their content."""
+
+    permission_classes = [IsActiveUser]
+
+    @extend_schema(
+        operation_id="activities_attachments_upload",
+        request={"application/octet-stream": OpenApiTypes.BINARY},
+        parameters=[
+            OpenApiParameter(
+                FILENAME_HEADER,
+                OpenApiTypes.STR,
+                OpenApiParameter.HEADER,
+                required=True,
+                description="The file's name, percent-encoded (UTF-8).",
+            )
+        ],
+        responses={201: s.AttachmentSerializer, 404: NOT_FOUND},
+    )
+    def post(self, request: Request, workspace: str, activity_id: UUID) -> Response:
+        actor, scope = _scope(request, workspace)
+        filename = request.headers.get(FILENAME_HEADER, "")
+        try:
+            declared = int(request.headers.get("Content-Length", ""))
+        except ValueError:
+            declared = None
+        # The raw stream: never request.data (no parser runs, nothing is buffered whole).
+        attachment = attachments.upload(
+            actor=actor,
+            scope=scope,
+            note_id=activity_id,
+            filename=filename,
+            stream=request._request,
+            declared_length=declared,
+        )
+        return Response(s.AttachmentSerializer(attachment).data, status=http.HTTP_201_CREATED)
+
+
+class AttachmentView(ApiView):
+    permission_classes = [IsActiveUser]
+
+    @extend_schema(operation_id="attachments_delete", request=None, responses={204: None})
+    def delete(self, request: Request, workspace: str, attachment_id: UUID) -> Response:
+        actor, scope = _scope(request, workspace)
+        attachments.delete(actor=actor, scope=scope, attachment_id=attachment_id)
+        return Response(status=http.HTTP_204_NO_CONTENT)
+
+
+# What a file response may do in a browser: nothing. No scripts, no plugins, no framing, its
+# own sandboxed origin even if opened directly; never sniffed into another type.
+FILE_CSP = "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox"
+
+
+def _file_response(download: attachments.Download, *, inline: bool) -> StreamingHttpResponse:
+    attachment = download.attachment
+    response = StreamingHttpResponse(
+        storage.iter_file(download.file), content_type=attachment.content_type
+    )
+    disposition = "inline" if inline else "attachment"
+    fallback = storage.ascii_fallback(attachment.original_name)
+    response["Content-Disposition"] = (
+        f'{disposition}; filename="{fallback}"; '
+        f"filename*=UTF-8''{quote(attachment.original_name, safe='')}"
+    )
+    response["Content-Length"] = str(attachment.size)
+    response["X-Content-Type-Options"] = "nosniff"
+    response["Content-Security-Policy"] = FILE_CSP
+    response["Cross-Origin-Resource-Policy"] = "same-origin"
+    response["Cache-Control"] = "private, no-store"
+    return response
+
+
+class AttachmentDownloadView(ApiView):
+    """The file, as a download, if its note is visible in this workspace now (re-checked on
+    every request) and the virus scan allows it."""
+
+    permission_classes = [IsActiveUser]
+
+    @extend_schema(
+        operation_id="attachments_download",
+        responses={(200, "application/octet-stream"): OpenApiTypes.BINARY, 404: NOT_FOUND},
+    )
+    def get(self, request: Request, workspace: str, attachment_id: UUID) -> StreamingHttpResponse:
+        _, scope = _scope(request, workspace)
+        download = attachments.open_for_download(scope=scope, attachment_id=attachment_id)
+        return _file_response(download, inline=False)
+
+
+class AttachmentPreviewView(ApiView):
+    """An image file, shown inline (PNG, JPEG, WebP, GIF only; validated at upload)."""
+
+    permission_classes = [IsActiveUser]
+
+    @extend_schema(
+        operation_id="attachments_preview",
+        responses={(200, "image/*"): OpenApiTypes.BINARY, 404: NOT_FOUND},
+    )
+    def get(self, request: Request, workspace: str, attachment_id: UUID) -> StreamingHttpResponse:
+        _, scope = _scope(request, workspace)
+        download = attachments.open_for_download(
+            scope=scope, attachment_id=attachment_id, preview=True
+        )
+        return _file_response(download, inline=True)

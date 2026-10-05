@@ -27,7 +27,7 @@ from arkray.core.keyset import (
 )
 from arkray.core.middleware import client_ip
 
-from .. import authentication, selectors, services, throttling
+from .. import authentication, selectors, services, support, throttling
 from ..models import Role, User, UserStatus
 from ..permissions import IsActiveUser, requires
 from ..policy import Capability
@@ -98,16 +98,20 @@ class LogoutView(ApiView):
 
 class MeView(ApiView):
     permission_classes = [IsActiveUser]
+    allowed_before_password_change = True
 
     @extend_schema(responses={200: s.ViewerSerializer})
     def get(self, request: Request) -> Response:
-        return Response(s.ViewerSerializer(_actor(request)).data)
+        context = {"support_session": getattr(request, "support_session", None)}
+        return Response(s.ViewerSerializer(_actor(request), context=context).data)
 
 
 class PasswordChangeView(ApiView):
     permission_classes = [IsActiveUser]
     throttle_classes = AUTH_THROTTLES
     throttle_scope = "auth"
+    allowed_before_password_change = True
+    refused_in_support_session = True
 
     @extend_schema(request=s.PasswordChangeSerializer, responses={204: None})
     def post(self, request: Request) -> Response:
@@ -181,6 +185,7 @@ ADMIN_USER_PAGE_SIZE = 25
 
 class AdminUserListView(ApiView):
     permission_classes = [requires(Capability.USERS_MANAGE)]
+    refused_in_support_session = True
     query_param_methods = frozenset({"GET"})
 
     @extend_schema(
@@ -220,6 +225,7 @@ class AdminUserListView(ApiView):
 
 class AdminUserDetailView(ApiView):
     permission_classes = [requires(Capability.USERS_MANAGE)]
+    refused_in_support_session = True
 
     @extend_schema(responses={200: s.AdminUserSerializer})
     def get(self, request: Request, user_id: UUID) -> Response:
@@ -237,6 +243,7 @@ class AdminUserDetailView(ApiView):
 
 class AdminUserEmailView(ApiView):
     permission_classes = [requires(Capability.USERS_MANAGE)]
+    refused_in_support_session = True
 
     @extend_schema(request=s.EmailChangeSerializer, responses={200: s.AdminUserSerializer})
     def post(self, request: Request, user_id: UUID) -> Response:
@@ -270,6 +277,7 @@ class AdminUserEmailView(ApiView):
 
 class AdminUserDeactivateView(ApiView):
     permission_classes = [requires(Capability.USERS_MANAGE)]
+    refused_in_support_session = True
 
     @extend_schema(request=None, responses={200: s.AdminUserSerializer})
     def post(self, request: Request, user_id: UUID) -> Response:
@@ -279,6 +287,7 @@ class AdminUserDeactivateView(ApiView):
 
 class AdminUserActivateView(ApiView):
     permission_classes = [requires(Capability.USERS_MANAGE)]
+    refused_in_support_session = True
 
     @extend_schema(request=None, responses={200: s.AdminUserSerializer})
     def post(self, request: Request, user_id: UUID) -> Response:
@@ -288,11 +297,135 @@ class AdminUserActivateView(ApiView):
 
 class AdminUserResendInvitationView(ApiView):
     permission_classes = [requires(Capability.USERS_MANAGE)]
+    refused_in_support_session = True
 
     @extend_schema(request=None, responses={200: s.AdminUserSerializer})
     def post(self, request: Request, user_id: UUID) -> Response:
         user = services.resend_invitation(actor_id=_actor(request).pk, user_id=user_id)
         return Response(s.AdminUserSerializer(user).data)
+
+
+class AdminUserSetPasswordView(ApiView):
+    """Set a new temporary password for an active (non-administrator) user: their sessions
+    end and they must choose their own password at their next sign-in. The password is never
+    stored in plaintext, logged, audited or returned."""
+
+    permission_classes = [requires(Capability.USERS_MANAGE)]
+    refused_in_support_session = True
+    throttle_classes = AUTH_THROTTLES
+    throttle_scope = "auth"
+
+    @extend_schema(request=s.SetPasswordSerializer, responses={200: s.AdminUserSerializer})
+    def post(self, request: Request, user_id: UUID) -> Response:
+        data = _validated(s.SetPasswordSerializer, request.data)
+        user = services.set_user_password(
+            actor_id=_actor(request).pk,
+            user_id=user_id,
+            version=data["version"],
+            new_password=data["new_password"],
+        )
+        return Response(s.AdminUserSerializer(user).data)
+
+
+SECURITY_EVENT_ORDERING = KeysetOrdering(
+    "-occurred_at", (SortKey("occurred_at", descending=True), SortKey("id", descending=True))
+)
+
+
+class SecurityEventListView(ApiView):
+    """Account and security events administrators are told about: password changes and
+    resets (that they happened, never the password), users created, deactivated or given a
+    new role, support sessions started and ended."""
+
+    permission_classes = [requires(Capability.AUDIT_VIEW)]
+    refused_in_support_session = True
+    query_param_methods = frozenset({"GET"})
+
+    @extend_schema(
+        operation_id="admin_security_events",
+        parameters=[s.SecurityEventQuerySerializer],
+        responses={200: s.SecurityEventPageSerializer},
+    )
+    def get(self, request: Request) -> Response:
+        params = _validated(s.SecurityEventQuerySerializer, request.query_params)
+        page = KeysetPaginator(
+            SECURITY_EVENT_ORDERING,
+            page_size=params["page_size"],
+            binding=CursorBinding.of("admin.security_events", params, actor_id=_actor(request).pk),
+        ).paginate(selectors.security_events(), params.get("cursor"))
+        target_ids = set()
+        for event in page.items:
+            if event.target_type == "user":
+                try:
+                    target_ids.add(UUID(event.target_id))
+                except ValueError:
+                    continue
+        people = selectors.people_by_id({e.actor_id for e in page.items if e.actor_id} | target_ids)
+
+        def person(user_id: UUID | None) -> dict[str, Any] | None:
+            user = people.get(user_id) if user_id is not None else None
+            return None if user is None else {"id": user.pk, "full_name": user.full_name}
+
+        results = []
+        for event in page.items:
+            allowed = selectors.SECURITY_ACTIONS.get(event.action, ())
+            details = {
+                key: str(value)
+                for key, value in (event.metadata or {}).items()
+                if key in allowed and value not in (None, "")
+            }
+            try:
+                target = UUID(event.target_id) if event.target_type == "user" else None
+            except ValueError:
+                target = None
+            results.append(
+                {
+                    "id": event.pk,
+                    "action": event.action,
+                    "occurred_at": event.occurred_at,
+                    "actor": person(event.actor_id),
+                    "user": person(target),
+                    "details": details,
+                    "in_support_session": event.support_session_id is not None,
+                }
+            )
+        return Response(
+            {
+                "results": s.SecurityEventSerializer(results, many=True).data,
+                **page_links(request, page),
+            }
+        )
+
+
+class SupportSessionStartView(ApiView):
+    """Start a support session in one user's CRM (docs/admin-user-workspace.md#support-sessions):
+    time-limited and audited; the administrator never learns or uses the user's password."""
+
+    permission_classes = [requires(Capability.SUPPORT_ACCESS)]
+    refused_in_support_session = True
+
+    @extend_schema(
+        operation_id="support_sessions_start",
+        request=s.SupportSessionStartSerializer,
+        responses={201: s.SupportSessionSerializer},
+    )
+    def post(self, request: Request) -> Response:
+        data = _validated(s.SupportSessionStartSerializer, request.data)
+        session = support.start(
+            request._request, _actor(request), data["user"], data.get("reason", "")
+        )
+        return Response(s.SupportSessionSerializer(session).data, status=status.HTTP_201_CREATED)
+
+
+class SupportSessionCurrentView(ApiView):
+    """Exit this browser session's support session (idempotent)."""
+
+    permission_classes = [requires(Capability.SUPPORT_ACCESS)]
+
+    @extend_schema(operation_id="support_sessions_exit", request=None, responses={204: None})
+    def delete(self, request: Request) -> Response:
+        support.exit_session(request._request)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # --- assignees (crm.assign_any) ----------------------------------------------------------------

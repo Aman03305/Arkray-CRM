@@ -20,7 +20,7 @@ from typing import Any
 from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
 from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db import models
-from django.db.models import Q, TextField
+from django.db.models import F, Q, TextField
 from django.db.models.functions import Cast, Lower, Upper
 from django.utils import timezone
 from django.utils.crypto import salted_hmac
@@ -133,6 +133,12 @@ class User(UUIDPrimaryKeyModel, TimeStampedModel, AbstractBaseUser):
     session_epoch = models.PositiveIntegerField(default=1)
     # Optimistic concurrency for admin edits (PATCH requires the current version).
     version = models.PositiveIntegerField(default=1)
+    # Set when an administrator chose the password (an initial or a reset one): until the
+    # user picks their own, they can only sign out or change it (docs/authorization.md).
+    password_change_required = models.BooleanField(default=False)
+    # When the password was last set (by the user or an administrator): shown to
+    # administrators instead of anything about the password itself. NULL: never set here.
+    password_changed_at = models.DateTimeField(null=True, blank=True)
 
     USERNAME_FIELD = "email"
     EMAIL_FIELD = "email"
@@ -397,3 +403,78 @@ class WorkspaceAccessWindow(models.Model):
 
     def __str__(self) -> str:
         return f"WorkspaceAccessWindow({self.workspace}, {self.window_start:%Y-%m-%d %H:%M})"
+
+
+class SupportEnd(models.TextChoices):
+    """Why a support session ended."""
+
+    EXITED = "exited", "Exited"
+    EXPIRED = "expired", "Expired"
+    SIGNED_OUT = "signed_out", "Signed out"
+    # The user was deactivated, became an administrator, or the administrator lost the
+    # capability: the session can't continue (checked on every request).
+    NOT_ALLOWED = "not_allowed", "No longer allowed"
+    # The administrator's browser session changed (a new sign-in elsewhere replaced it, or
+    # the session it was bound to ended).
+    SESSION_CHANGED = "session_changed", "Browser session changed"
+
+
+class SupportSession(UUIDPrimaryKeyModel):
+    """An administrator's time-limited, audited support access to one user's CRM
+    (docs/admin-user-workspace.md#support-sessions). Not impersonation: the administrator
+    stays signed in as themselves (their own credentials, their own session), never learns
+    or uses the user's password, and every change they make is recorded with them as the
+    actor and the user as the subject (plus this session's id).
+
+    Bound to the administrator's browser session (`session_digest`, a SHA-256 of its key)
+    and short-lived (`expires_at`); at most one live session per administrator."""
+
+    admin = models.ForeignKey(User, on_delete=models.PROTECT, related_name="+", db_index=False)
+    target = models.ForeignKey(User, on_delete=models.PROTECT, related_name="+", db_index=False)
+    reason = models.CharField(max_length=200, blank=True, default="")
+    session_digest = models.CharField(max_length=64)
+    started_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()
+    ended_at = models.DateTimeField(null=True, blank=True)
+    end_reason = models.CharField(max_length=16, choices=SupportEnd.choices, blank=True, default="")
+
+    class Meta:
+        db_table = "identity_support_session"
+        indexes = [
+            # Sessions to close when they expire (the hourly sweep) and a user's history.
+            models.Index(
+                fields=["expires_at"],
+                condition=Q(ended_at__isnull=True),
+                name="identity_support_live_idx",
+            ),
+            models.Index(fields=["target", "-started_at"], name="identity_support_target_idx"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=~Q(admin=F("target")), name="identity_support_not_self"
+            ),
+            models.CheckConstraint(
+                condition=Q(expires_at__gt=F("started_at")),
+                name="identity_support_expires_after_start",
+            ),
+            models.CheckConstraint(
+                condition=Q(ended_at__isnull=True, end_reason="")
+                | (Q(ended_at__isnull=False) & Q(end_reason__in=SupportEnd.values)),
+                name="identity_support_end_complete",
+            ),
+            models.CheckConstraint(
+                condition=Q(session_digest__regex=r"^[0-9a-f]{64}$"),
+                name="identity_support_digest_format",
+            ),
+            models.UniqueConstraint(
+                fields=["admin"],
+                condition=Q(ended_at__isnull=True),
+                name="identity_support_one_live_per_admin",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"SupportSession({self.pk})"
+
+    def is_live(self, now: datetime) -> bool:
+        return self.ended_at is None and now < self.expires_at

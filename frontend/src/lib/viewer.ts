@@ -6,7 +6,7 @@
  * every permission is enforced again by the API. Hiding a button is not security.
  * `roleLabel` is for display only (the profile page), never for decisions.
  */
-import type { ViewerDto } from "./api/types";
+import type { SupportSessionDto, ViewerDto } from "./api/types";
 
 export const CAPABILITIES = [
   "crm.access_own",
@@ -18,6 +18,7 @@ export const CAPABILITIES = [
   "config.manage",
   "audit.view",
   "ai.query",
+  "support.access",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -32,6 +33,29 @@ export interface Viewer {
   capabilities: readonly Capability[];
   /** Deployment-wide features (configuration, not permissions): Ask Arkray turned on. */
   features: { ask: boolean };
+  /** An administrator chose the password: only changing it (or signing out) works now. */
+  passwordChangeRequired: boolean;
+  /** An administrator's live support session in one user's CRM (never the user's login). */
+  supportSession: SupportSession | null;
+}
+
+export interface SupportSession {
+  id: string;
+  target: { id: string; fullName: string };
+  reason: string;
+  startedAt: string;
+  expiresAt: string;
+}
+
+function toSupportSession(dto: SupportSessionDto | null | undefined): SupportSession | null {
+  if (!dto) return null;
+  return {
+    id: dto.id,
+    target: { id: dto.target.id.toLowerCase(), fullName: dto.target.full_name },
+    reason: dto.reason,
+    startedAt: dto.started_at,
+    expiresAt: dto.expires_at,
+  };
 }
 
 function isCapability(value: string): value is Capability {
@@ -49,6 +73,8 @@ export function toViewer(dto: ViewerDto): Viewer {
     capabilities: dto.capabilities.filter(isCapability), // unknown strings grant nothing
     // A response without the field (an older backend) offers no optional features.
     features: { ask: (dto.features as ViewerDto["features"] | undefined)?.ask === true },
+    passwordChangeRequired: dto.password_change_required === true,
+    supportSession: toSupportSession(dto.support_session),
   };
 }
 

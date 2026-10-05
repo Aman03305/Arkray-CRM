@@ -176,6 +176,11 @@ sequenceDiagram
 ## Frontend
 
 - Next.js 16 App Router, TypeScript strict, Tailwind CSS v4 design tokens.
+- The look follows Zoho Bigin (colours in `src/app/globals.css`): a dark header (search,
+  a "+" quick-create menu, the account menu), a rail of modules on desktop (a drawer on
+  phones and tablets), and on Pipeline pages a pipelines panel listing the pipelines and the
+  selected one's stages. Board columns carry a line coloured by stage outcome (open, won,
+  lost). Greens that carry white text are darkened to meet WCAG AA.
 - Authenticated pages are client-rendered against the same-origin API; the session cookie
   is HTTP-only and never visible to JavaScript ([ADR-0003](adr/0003-session-authentication.md)).
 - **The URL is the source of truth for the workspace** ([ADR-0010](adr/0010-frontend-workspace-routing.md)):

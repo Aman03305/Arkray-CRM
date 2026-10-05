@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PipelineView } from "@/features/workspace/views";
 import type { Board } from "@/lib/api/types";
 import { adminViewer, PRIYA_ID, RAHUL_ID, salesViewer } from "@/test/fixtures";
-import { column, makeBoard, makeCard, makeOpportunity, OTHER_OPPORTUNITY_ID, PIPELINES, STAGES } from "@/test/pipeline-fixtures";
+import { column, makeBoard, makeCard, makeOpportunity, OTHER_OPPORTUNITY_ID, PIPELINE_ROUTES, STAGES } from "@/test/pipeline-fixtures";
 import { apiError, mockApi, renderWithProviders, type RecordedCall } from "@/test/render";
 
 import { forgetBoardState } from "./hooks";
@@ -16,7 +16,7 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: nav.push, replace: vi.fn(), back: vi.fn(), prefetch: vi.fn() }),
 }));
 
-const CONFIG = { "GET /api/v1/config/pipelines": { status: 200, body: PIPELINES } };
+const CONFIG = PIPELINE_ROUTES;
 const ME_BOARD = "/api/v1/workspaces/me/pipeline-board";
 const moveUrl = (id: string, workspace = "me") => `/api/v1/workspaces/${workspace}/opportunities/${id}/move`;
 
@@ -82,7 +82,7 @@ describe("the board", () => {
       "href",
       `/pipeline/${makeCard().id}`,
     );
-    expect(within(proposal).getByText("Asha Mehta")).toBeInTheDocument();
+    expect(within(proposal).getByText("Apollo Diagnostics")).toBeInTheDocument(); // the account
     expect(within(proposal).getAllByText("₹12,50,000").length).toBeGreaterThan(0);
     expect(within(proposal).getByText("50%")).toBeInTheDocument();
     expect(within(proposal).getByText("15 Dec 2026")).toBeInTheDocument();
@@ -90,10 +90,10 @@ describe("the board", () => {
     const totals = screen.getByRole("region", { name: "Pipeline totals" });
     expect(within(totals).getByText("₹12,50,000")).toBeInTheDocument();
     expect(within(totals).getByText("₹6,25,000")).toBeInTheDocument();
-    expect(within(totals).getByText(/won, lost and archived ones don.t count/)).toBeInTheDocument();
+    expect(within(totals).getByText("(Open opportunities' value)")).toBeInTheDocument(); // what the figure is, for screen readers
     // Won/Lost are written out, never colour alone.
     expect(within(columnOf("Won")).getByRole("heading", { name: "Won" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "New opportunity" })).toHaveAttribute("href", "/pipeline/new");
+    expect(screen.getByRole("button", { name: "New opportunity" })).toBeInTheDocument(); // opens a side panel
     expect(api.callsTo("GET", ME_BOARD)[0]!.query.get("cards_per_stage")).toBe("20");
   });
 
@@ -106,7 +106,7 @@ describe("the board", () => {
   it("shows restricted leads without their name", async () => {
     mockApi({
       ...CONFIG,
-      [`GET ${ME_BOARD}`]: { status: 200, body: makeBoard([makeCard({ lead: { id: null, restricted: true } })]) },
+      [`GET ${ME_BOARD}`]: { status: 200, body: makeBoard([makeCard({ account_name: "", lead: { id: null, restricted: true } })]) },
     });
     renderWithProviders(<PipelineView />, { viewer: salesViewer });
     expect(await screen.findByText("Lead in another workspace")).toBeInTheDocument();
@@ -180,29 +180,29 @@ describe("moving opportunities", () => {
     });
     renderWithProviders(<PipelineView />, { viewer: salesViewer });
     const card = (await screen.findByRole("link", { name: "Hospital Analyzer Project" })).closest("article")!;
-    await dragTo(card, columnOf("Negotiation"));
-    // Optimistic: already in Negotiation while the server works.
-    await waitFor(() => expect(within(columnOf("Negotiation")).getByText("Hospital Analyzer Project")).toBeInTheDocument());
+    await dragTo(card, columnOf("Qualified"));
+    // Optimistic: already in Qualified while the server works.
+    await waitFor(() => expect(within(columnOf("Qualified")).getByText("Hospital Analyzer Project")).toBeInTheDocument());
     expect(within(columnOf("Proposal")).queryByText("Hospital Analyzer Project")).not.toBeInTheDocument();
-    expect(api.callsTo("POST", moveUrl(makeCard().id))[0]!.body).toEqual({ stage: STAGES.negotiation.id, version: 2 });
-    board = makeBoard([makeCard({ stage_id: STAGES.negotiation.id, probability: "75.00", version: 3 })]);
-    await act(async () => response.resolve({ status: 200, body: makeOpportunity({ stage: STAGES.negotiation, version: 3 }) }));
-    expect(await screen.findByText('"Hospital Analyzer Project" moved to Negotiation.')).toBeInTheDocument();
-    expect(within(columnOf("Negotiation")).getByText("75%")).toBeInTheDocument();
+    expect(api.callsTo("POST", moveUrl(makeCard().id))[0]!.body).toEqual({ stage: STAGES.qualified.id, version: 2 });
+    board = makeBoard([makeCard({ stage_id: STAGES.qualified.id, probability: "25.00", version: 3 })]);
+    await act(async () => response.resolve({ status: 200, body: makeOpportunity({ stage: STAGES.qualified, version: 3 }) }));
+    expect(await screen.findByText('"Hospital Analyzer Project" moved to Qualified.')).toBeInTheDocument();
+    expect(within(columnOf("Qualified")).getByText("25%")).toBeInTheDocument();
   });
 
   it.each([
     ["a conflict", apiError(409, "conflict", "Changed."), /was changed by someone else/],
     ["a vanished record", apiError(404, "not_found", "Not found."), /no longer in this workspace/],
-    ["a server error", apiError(500, "server_error", "Boom."), /Couldn't move .* to Negotiation/],
+    ["a server error", apiError(500, "server_error", "Boom."), /Couldn't move .* to Qualified/],
   ])("after %s the card goes back to where the server has it", async (_label, reply, message) => {
     const api = mockApi({ ...CONFIG, [`GET ${ME_BOARD}`]: { status: 200, body: makeBoard() }, [`POST ${moveUrl(makeCard().id)}`]: reply });
     renderWithProviders(<PipelineView />, { viewer: salesViewer });
     const card = (await screen.findByRole("link", { name: "Hospital Analyzer Project" })).closest("article")!;
-    await dragTo(card, columnOf("Negotiation"));
+    await dragTo(card, columnOf("Qualified"));
     expect(await screen.findByText(message)).toBeInTheDocument();
     expect(within(columnOf("Proposal")).getByText("Hospital Analyzer Project")).toBeInTheDocument();
-    expect(within(columnOf("Negotiation")).queryByText("Hospital Analyzer Project")).not.toBeInTheDocument();
+    expect(within(columnOf("Qualified")).queryByText("Hospital Analyzer Project")).not.toBeInTheDocument();
     await waitFor(() => expect(api.callsTo("GET", ME_BOARD).length).toBeGreaterThan(1)); // reloaded
   });
 
@@ -215,7 +215,7 @@ describe("moving opportunities", () => {
       if ((init?.method ?? "GET") === "POST") throw new TypeError("Failed to fetch");
       return original(input, init);
     }));
-    await dragTo(card, columnOf("Negotiation"));
+    await dragTo(card, columnOf("Qualified"));
     expect(await screen.findByText(/Could not reach the server.*It is back where it was/)).toBeInTheDocument();
     expect(within(columnOf("Proposal")).getByText("Hospital Analyzer Project")).toBeInTheDocument();
   });
@@ -304,9 +304,14 @@ describe("moving opportunities", () => {
     ]);
     await user.click(screen.getByRole("menuitem", { name: "Reopen in Negotiation" }));
     const dialog = screen.getByRole("alertdialog", { name: "Reopen in Negotiation?" });
-    expect(within(dialog).getByText(/open again at 75%/)).toBeInTheDocument();
+    // Reopening into a negotiation stage asks for the negotiated price too.
+    await user.click(within(dialog).getByRole("button", { name: "Reopen" }));
+    expect(within(dialog).getByText("Enter the negotiated price.")).toBeInTheDocument();
+    expect(api.callsTo("POST", moveUrl(won.id))).toHaveLength(0);
+    await user.type(within(dialog).getByLabelText("Negotiated price (₹)"), "9,50,000");
     await user.click(within(dialog).getByRole("button", { name: "Reopen" }));
     await screen.findByText('"Hospital Analyzer Project" was reopened in Negotiation.');
+    expect(api.callsTo("POST", moveUrl(won.id))[0]!.body).toEqual({ stage: STAGES.negotiation.id, version: 2, negotiated_price: "950000" });
   });
 
   it("a failure inside the confirmation keeps the dialog open with the reason", async () => {
@@ -459,6 +464,79 @@ describe("filters", () => {
     await user.click(await screen.findByRole("button", { name: "Clear filters" }));
     expect(await screen.findByRole("link", { name: "Hospital Analyzer Project" })).toBeInTheDocument();
   });
+
+  it("phones open the filters from a button that counts the active ones", async () => {
+    mockApi({ ...CONFIG, [`GET ${ME_BOARD}`]: { status: 200, body: makeBoard() } });
+    renderWithProviders(<PipelineView />, { viewer: salesViewer });
+    await screen.findByRole("link", { name: "Hospital Analyzer Project" });
+    const toggle = screen.getByRole("button", { name: "Filters" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveAttribute("aria-controls", screen.getByRole("group", { name: "Filter the pipeline" }).id);
+    const user = userEvent.setup();
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.change(screen.getByLabelText("Expected close from"), { target: { value: "2026-10-01" } });
+    expect(screen.getByRole("button", { name: "Filters (1)" })).toBeInTheDocument();
+  });
 });
 
 
+
+
+describe("negotiation", () => {
+  it("dropping a card on a negotiation stage asks for the price first and moves nothing until then", async () => {
+    const api = mockApi({
+      ...CONFIG,
+      [`GET ${ME_BOARD}`]: { status: 200, body: makeBoard() },
+      [`POST ${moveUrl(makeCard().id)}`]: {
+        status: 200,
+        body: makeOpportunity({ stage: STAGES.negotiation, version: 3, negotiated_price: "1050000.50", negotiated_at: "2026-10-04T10:00:00Z" }),
+      },
+    });
+    renderWithProviders(<PipelineView />, { viewer: salesViewer });
+    const user = userEvent.setup();
+    const card = (await screen.findByRole("link", { name: "Hospital Analyzer Project" })).closest("article")!;
+    await dragTo(card, columnOf("Negotiation"));
+    const dialog = await screen.findByRole("alertdialog", { name: "Move to Negotiation?" });
+    // Not moved yet: still in Proposal, nothing sent.
+    expect(within(columnOf("Proposal")).getByText("Hospital Analyzer Project")).toBeInTheDocument();
+    expect(api.callsTo("POST", moveUrl(makeCard().id))).toHaveLength(0);
+    const price = within(dialog).getByLabelText("Negotiated price (₹)");
+    expect(price).toHaveFocus();
+    await user.type(price, "10,50,000.50");
+    await user.click(within(dialog).getByRole("button", { name: "Move" }));
+    await screen.findByText('"Hospital Analyzer Project" moved to Negotiation.');
+    // An exact decimal string, never a float.
+    expect(api.callsTo("POST", moveUrl(makeCard().id))[0]!.body).toEqual({
+      stage: STAGES.negotiation.id,
+      version: 2,
+      negotiated_price: "1050000.50",
+    });
+  });
+
+  it("cancelling leaves the card where it was", async () => {
+    const api = mockApi({ ...CONFIG, [`GET ${ME_BOARD}`]: { status: 200, body: makeBoard() } });
+    renderWithProviders(<PipelineView />, { viewer: salesViewer });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Move Hospital Analyzer Project" }));
+    await user.click(screen.getByRole("menuitem", { name: "Move to Negotiation" }));
+    const dialog = screen.getByRole("alertdialog", { name: "Move to Negotiation?" });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(within(columnOf("Proposal")).getByText("Hospital Analyzer Project")).toBeInTheDocument();
+    expect(api.callsTo("POST", moveUrl(makeCard().id))).toHaveLength(0);
+  });
+
+  it("an invalid price is explained and never sent", async () => {
+    const api = mockApi({ ...CONFIG, [`GET ${ME_BOARD}`]: { status: 200, body: makeBoard() } });
+    renderWithProviders(<PipelineView />, { viewer: salesViewer });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Move Hospital Analyzer Project" }));
+    await user.click(screen.getByRole("menuitem", { name: "Move to Negotiation" }));
+    const dialog = screen.getByRole("alertdialog", { name: "Move to Negotiation?" });
+    await user.type(within(dialog).getByLabelText("Negotiated price (₹)"), "1e6");
+    await user.click(within(dialog).getByRole("button", { name: "Move" }));
+    expect(within(dialog).getByLabelText("Negotiated price (₹)")).toHaveAttribute("aria-invalid", "true");
+    expect(api.callsTo("POST", moveUrl(makeCard().id))).toHaveLength(0);
+  });
+});

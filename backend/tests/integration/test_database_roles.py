@@ -83,7 +83,12 @@ def test_the_granted_role_can_work_but_not_rewrite_history(app_role):
 def test_the_grants_follow_the_append_only_trigger_not_a_list():
     with connection.cursor() as cursor:
         found = privileges.append_only_tables(cursor)
-    assert found == ["activities_timeline_entry", "audit_event", "pipeline_stage_history"]
+    assert found == [
+        "activities_timeline_entry",
+        "audit_event",
+        "pipeline_negotiation_price",
+        "pipeline_stage_history",
+    ]
 
 
 def test_privileged_roles_are_named_for_what_they_could_do(app_role):

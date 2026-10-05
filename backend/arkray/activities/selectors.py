@@ -221,16 +221,38 @@ def activity_list(
 
 def _with_relations(queryset: QuerySet[Activity]) -> QuerySet[Activity]:
     return queryset.select_related(
-        "lead", "opportunity", "owner", "created_by", "completed_by", "cancelled_by"
+        "lead", "opportunity", "owner", "created_by", "completed_by", "cancelled_by", "edited_by"
     ).only(
         *_LIST_FIELDS,
         "description",
         "location",
         "meeting_url",
+        "edited_at",
         "lead__archived_at",
         "opportunity__archived_at",
         *(f"completed_by__{f}" for f in _PERSON),
         *(f"cancelled_by__{f}" for f in _PERSON),
+        *(f"edited_by__{f}" for f in _PERSON),
+    )
+
+
+NOTE_ORDERING = KeysetOrdering(
+    "-created_at", (SortKey("created_at", descending=True), SortKey("id", descending=True))
+)
+
+
+def opportunity_notes(scope: AccessScope, opportunity_id: UUID) -> QuerySet[Activity]:
+    """An opportunity's notes (not archived), newest first, whole text: the deal page's Notes.
+    NotFoundError unless `scope` may see the opportunity; each note must itself be visible in
+    the scope (notes follow their lead, like the timeline's). Paginated by the caller; served
+    by activities_opportunity_idx."""
+    pipeline_selectors.opportunity_ref(scope, opportunity_id)
+    return _with_relations(
+        scope.apply(
+            Activity.objects.filter(
+                opportunity_id=opportunity_id, type=ActivityType.NOTE, archived_at__isnull=True
+            )
+        )
     )
 
 

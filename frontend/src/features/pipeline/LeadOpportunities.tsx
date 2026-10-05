@@ -23,7 +23,7 @@ import { Amount, OutcomeBadge } from "./PipelineBits";
  */
 export function LeadOpportunities({ workspace, leadId, canCreate }: { workspace: Workspace; leadId: string; canCreate: boolean }) {
   const [cursor, setCursor] = useState<string | null>(null);
-  const pipelines = usePipelines();
+  const pipelines = usePipelines(workspace);
   const list = useQuery({
     queryKey: pipelineKeys.forLead(workspace, leadId, cursor),
     queryFn: () => pipelineApi.forLead(workspace, leadId, cursor),

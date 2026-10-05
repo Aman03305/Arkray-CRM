@@ -14,6 +14,7 @@ import secrets
 from dataclasses import dataclass
 from functools import lru_cache
 
+from django.conf import settings
 from django.contrib.auth import HASH_SESSION_KEY, update_session_auth_hash
 from django.contrib.auth.hashers import check_password, make_password
 from django.db import transaction
@@ -30,7 +31,7 @@ from arkray.core.errors import (
 )
 from arkray.core.middleware import client_ip
 
-from . import throttling
+from . import support, throttling
 from .models import AccountToken, TokenPurpose, TokenStatus, User, normalize_email
 from .passwords import check_new_password
 from .services import SESSION_ENDED
@@ -39,6 +40,7 @@ from .sessions import end_session, start_session
 logger = logging.getLogger(__name__)
 
 AUDIT_LOGIN = "auth.login"
+AUDIT_LOGIN_TEMPORARY = "auth.login_with_temporary_password"
 AUDIT_LOGOUT = "auth.logout"
 AUDIT_PASSWORD_CHANGED = "auth.password_changed"  # noqa: S105 — an event name
 CURRENT_PASSWORD_WRONG = "Your current password is incorrect."  # noqa: S105 — a message
@@ -48,6 +50,22 @@ class InvalidCredentialsError(DomainError):
     code = "invalid_credentials"
     http_status = 400
     default_message = "Invalid email or password."
+
+
+class TemporaryPasswordExpiredError(DomainError):
+    """The right temporary password (chosen by an administrator), too late: only someone
+    who knows it sees this."""
+
+    code = "temporary_password_expired"
+    http_status = 400
+    default_message = "This temporary password has expired. Ask an administrator to set a new one."
+
+
+def temporary_password_expired(user: User) -> bool:
+    if not user.password_change_required or user.password_changed_at is None:
+        return False
+    age = timezone.now() - user.password_changed_at
+    return bool(age.total_seconds() > settings.TEMPORARY_PASSWORD_TTL_S)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +120,9 @@ def sign_in(request: HttpRequest, email: str, password: str) -> SignIn:
         throttle.failed()
         logger.info("login_failed", extra={"login": throttle.identifier[:12]})
         raise InvalidCredentialsError()
+    if temporary_password_expired(user):
+        logger.info("login_temporary_password_expired", extra={"login": throttle.identifier[:12]})
+        raise TemporaryPasswordExpiredError()
 
     throttle.succeeded()
     with transaction.atomic():
@@ -113,6 +134,17 @@ def sign_in(request: HttpRequest, email: str, password: str) -> SignIn:
             target_id=user.pk,
             metadata={"trusted_device": bool(throttle.device_id)},
         )
+        if user.password_change_required:
+            # Shown in administrators' security events (unlike every sign-in): whoever
+            # signs in with a password an administrator chose, before the user's own
+            # change, is visible there (R92; enhancement security review).
+            audit.record(
+                AUDIT_LOGIN_TEMPORARY,
+                actor_id=user.pk,
+                target_type="user",
+                target_id=user.pk,
+                subject_user_id=user.pk,
+            )
     return SignIn(
         user=user,
         identifier=throttle.identifier,
@@ -124,6 +156,7 @@ def sign_in(request: HttpRequest, email: str, password: str) -> SignIn:
 def sign_out(request: HttpRequest) -> None:
     user = request.user
     if isinstance(user, User):
+        support.end_on_sign_out(request)
         audit.record(AUDIT_LOGOUT, actor_id=user.pk, target_type="user", target_id=user.pk)
     end_session(request)
 
@@ -178,11 +211,26 @@ def change_password(request: HttpRequest, current_password: str, new_password: s
             raise PermissionDeniedError(SESSION_ENDED)
         check_new_password(new_password, user, field="new_password")
         user.set_password(new_password)
-        user.save(update_fields=["password", "updated_at"])
+        # Their own choice now: a temporary (administrator-set) password is replaced.
+        user.password_change_required = False
+        user.password_changed_at = timezone.now()
+        user.save(
+            update_fields=[
+                "password",
+                "password_change_required",
+                "password_changed_at",
+                "updated_at",
+            ]
+        )
         AccountToken.objects.filter(
             user=user, purpose=TokenPurpose.PASSWORD_RESET, status=TokenStatus.PENDING
         ).update(status=TokenStatus.REVOKED, revoked_at=timezone.now())
+        # The safe event administrators see (who and when; never the password, its hash or
+        # any token): docs/authorization.md#password-change-notification.
         audit.record(
-            AUDIT_PASSWORD_CHANGED, actor_id=user.pk, target_type="user", target_id=user.pk
+            AUDIT_PASSWORD_CHANGED,
+            actor_id=user.pk,
+            target_type="user",
+            target_id=user.pk,
         )
         update_session_auth_hash(request, user)

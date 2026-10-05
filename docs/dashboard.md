@@ -30,9 +30,13 @@ owner's new lead (owner-based visibility, like every other read). Records a prev
 keeps after a reassignment (closed opportunities, completed meetings) count for whoever
 holds them, as everywhere else ([R41](risk-register.md), [R45](risk-register.md)).
 
-The pipeline figures cover **all** pipelines (Phase 3's summary without a pipeline filter);
-the board shows one pipeline at a time, so if a second pipeline is ever configured the
-board's totals are that pipeline's share (tested). v1 has one pipeline.
+The pipeline figures cover **all** pipelines the workspace may see (Phase 3's summary
+without a pipeline filter): the shared ones, the owner's own and any pipeline holding one of
+its deals ([pipeline.md](pipeline.md#configuration)); the dashboard says "all pipelines".
+The board shows one pipeline at a time, so its totals are that pipeline's share (tested).
+The weighted pipeline uses each deal's probability, which is its stage's (whatever the
+pipeline's stages are called and however their probabilities were set) unless set by hand,
+and the **installation price** (`value`): a negotiated price never changes the totals (R96).
 
 ### Supporting lists (at most 5 rows each)
 
@@ -59,7 +63,7 @@ The dashboard follows the existing workspace rules exactly; nothing is dashboard
 | URL | Viewer | API workspace | Shows |
 |---|---|---|---|
 | `/dashboard` | sales user | `me` | their own records |
-| `/dashboard` (and `/admin`, which redirects there) | administrator | `all` | **Admin Home**: the organisation's figures and lists, plus "Recently added users" (with `users.manage`) |
+| `/dashboard` (and `/admin`, which redirects there) | administrator | `all` | **Admin Home**: the organisation's figures and lists |
 | `/admin/users/{id}/dashboard` | administrator | `{id}` | that user's records only, under the "Viewing CRM for: Rahul Sharma" banner |
 
 - A sales user asking for `all` or another user's id gets the same 404 as for a user that

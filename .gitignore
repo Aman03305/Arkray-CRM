@@ -30,6 +30,9 @@ backend/schema.yaml
 # Downloaded embedding model files (manage.py ai_fetch_model)
 backend/.models/
 
+# Local attachment storage (ATTACHMENT_ROOT): never committed, never served
+backend/var/
+
 # Editors / OS
 .idea/
 .vscode/*

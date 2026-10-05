@@ -9,11 +9,15 @@ import { currentLocation, hardNavigate } from "@/lib/browser";
 import { ViewerProvider } from "@/lib/viewer-context";
 
 import { useViewerQuery } from "./api";
+import { ForcedPasswordChange } from "./ForcedPasswordChange";
 
 /**
  * Loads the signed-in user for every authenticated page. Without a session the global 401
  * handler (lib/query-client) reloads onto /login; until then the shell shows skeletons,
  * never guessed data. This is UX only: the API refuses unauthenticated requests anyway.
+ *
+ * Someone whose password was set by an administrator must choose their own before anything
+ * else: until then the password form replaces the app.
  */
 export function SessionGate({ children }: { children: ReactNode }) {
   const viewer = useViewerQuery();
@@ -49,5 +53,6 @@ export function SessionGate({ children }: { children: ReactNode }) {
     );
   }
 
+  if (viewer.data?.passwordChangeRequired) return <ForcedPasswordChange viewer={viewer.data} />;
   return <ViewerProvider viewer={viewer.data ?? null}>{children}</ViewerProvider>;
 }

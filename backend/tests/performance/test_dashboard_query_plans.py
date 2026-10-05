@@ -65,6 +65,8 @@ def dataset(django_db_setup, django_db_blocker):
                     status="open",
                     value=Decimal("1000.00"),
                     probability=stage.probability,
+                    account_name="Account",
+                    customer_name="Customer",
                 )
                 for n, lead in enumerate(leads)
                 if n % 2
@@ -177,5 +179,10 @@ def test_one_owners_pipeline_totals_read_only_that_owners_opportunities(dataset)
     assert "pipeline_opportunity" in totals
     assert "SUM" in totals
     used = scans(plan(totals))
-    assert used & {"pipeline_opp_owner_open_idx", "pipeline_opp_owner_created_idx"}, used
+    owner_leading = {
+        "pipeline_opp_owner_open_idx",
+        "pipeline_opp_owner_created_idx",
+        "pipeline_opp_owner_pipe_idx",  # product enhancement phase
+    }
+    assert used & owner_leading, used
     assert "Seq Scan on pipeline_opportunity" not in used, used

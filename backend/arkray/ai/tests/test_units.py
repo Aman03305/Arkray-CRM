@@ -108,6 +108,10 @@ class TestRouter:
             ("Number of active opportunities", "open_deal_count"),
             ("Which deals are closing this month?", "deals_closing_this_month"),
             ("Opportunities expected to close this month", "deals_closing_this_month"),
+            # Negotiation is a stage *type* (product enhancement phase): routed by type,
+            # whatever the stage is called.
+            ("Which deals are in negotiation?", "deals_in_negotiation"),
+            ("How many opportunities are in negotiation", "deals_in_negotiation"),
         ],
     )
     def test_structured_questions_are_routed(self, question, intent):
@@ -116,7 +120,6 @@ class TestRouter:
     @pytest.mark.parametrize(
         ("question", "stage"),
         [
-            ("Which deals are in negotiation?", "Negotiation"),
             ("Show opportunities in Proposal Sent", "Proposal Sent"),
             ("deals in the won stage", "Won"),
         ],

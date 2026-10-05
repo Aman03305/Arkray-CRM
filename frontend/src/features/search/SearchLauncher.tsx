@@ -75,13 +75,13 @@ function WorkspaceSearch({ workspace }: { workspace: Workspace | null }) {
         disabled={workspace === null}
         aria-haspopup="dialog"
         aria-keyshortcuts="Control+K Meta+K"
-        className="flex h-9 min-w-0 max-w-md flex-1 items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 text-left text-sm text-slate-500 hover:border-slate-300 hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-60"
+        className="flex h-8 min-w-0 max-w-md flex-1 items-center gap-2 rounded-full border border-white/10 bg-shell-raised px-3.5 text-left text-sm text-shell-muted transition-colors hover:border-white/25 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-white disabled:cursor-not-allowed disabled:opacity-60"
       >
-        <Search aria-hidden="true" className="size-4 shrink-0 text-slate-400" />
+        <Search aria-hidden="true" className="size-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate">
           Search<span className="hidden sm:inline"> leads, deals, activities</span>
         </span>
-        <kbd aria-hidden="true" className="hidden shrink-0 rounded border border-slate-200 bg-white px-1.5 font-sans text-xs text-slate-500 sm:inline">
+        <kbd aria-hidden="true" className="hidden shrink-0 rounded border border-white/15 bg-white/5 px-1.5 font-sans text-xs text-shell-muted sm:inline">
           {apple ? "⌘K" : "Ctrl K"}
         </kbd>
       </button>

@@ -528,3 +528,13 @@ def knowledge_source_ids(*, after: UUID | None, limit: int) -> list[UUID]:
     if after is not None:
         queryset = queryset.filter(pk__gt=after)
     return list(queryset.order_by("pk").values_list("pk", flat=True)[:limit])
+
+
+def customer_names(lead_id: UUID) -> tuple[str, str]:
+    """The account and customer names an opportunity of this lead starts with (its
+    organisation, or its name for a person; its display name), for a module that has already
+    found the lead in its caller's scope."""
+    organization, display = (
+        Lead.objects.filter(pk=lead_id).values_list("organization_name", "display_name").get()
+    )
+    return (organization or display)[:200], display[:200]

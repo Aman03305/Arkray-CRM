@@ -1,39 +1,58 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, ArrowLeft, ArrowRight, Pencil } from "lucide-react";
+import { ArrowLeft, ArrowRight, Pencil } from "lucide-react";
 import Link from "next/link";
-import { type ReactNode, useState } from "react";
+import { useRouter } from "next/navigation";
+import { type FormEvent, type KeyboardEvent, type ReactNode, useId, useRef, useState } from "react";
 
+import { ActionMenu } from "@/components/ui/ActionMenu";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { Dialog, DialogActions } from "@/components/ui/Dialog";
+import { TextField } from "@/components/ui/Field";
 import { NotFoundView } from "@/components/ui/NotFoundView";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { CurrentWork } from "@/features/activities/CurrentWork";
-import { NoteComposer, Timeline } from "@/features/activities/Timeline";
+import { DealNotes } from "@/features/activities/DealNotes";
+import { Timeline } from "@/features/activities/Timeline";
 import { cursorOf } from "@/features/leads/api";
 import { PersonName } from "@/features/leads/LeadBits";
-import { describeError, isApiError } from "@/lib/api/errors";
-import type { Stage, StageHistoryEntry } from "@/lib/api/types";
-import { useFlash } from "@/lib/flash";
-import { businessToday, formatDateTime, formatRelative } from "@/lib/format";
-import { formatPercent } from "@/lib/money";
+import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
+import type { Opportunity, Stage, StageHistoryEntry } from "@/lib/api/types";
+import { setFlash, useFlash } from "@/lib/flash";
+import { businessToday, formatDateOnly, formatDateTime, formatRelative } from "@/lib/format";
+import { formatPercent, parseAmountInput } from "@/lib/money";
 import { useViewer } from "@/lib/viewer-context";
 import { leadHref, opportunityHref, sectionBack, type Workspace, workspaceHref } from "@/lib/workspace";
 
 import { pipelineApi, pipelineKeys } from "./api";
-import { pipelinePermissions, useOpportunityWriteSync, usePipelines } from "./hooks";
+import { formatCustomValue } from "./CustomFields";
+import { isNegotiation, pipelinePermissions, useOpportunityWriteSync, usePipeline } from "./hooks";
+import { OpportunityDrawer } from "./OpportunityDrawer";
 import { Amount, CloseDate, LeadName, OutcomeBadge, StageName } from "./PipelineBits";
 import { TransitionDialog } from "./TransitionDialog";
 import { moveErrorMessage, useMoveOpportunity } from "./useMoveOpportunity";
 
 type Pending = { target: Stage | null } | null;
+type Tab = "overview" | "notes" | "history";
+const TABS: { id: Tab; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "notes", label: "Notes" },
+  { id: "history", label: "History" },
+];
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({ title, children, actions }: { title: string; children: ReactNode; actions?: ReactNode }) {
+  const id = useId();
   return (
-    <section aria-label={title} className="rounded-lg border border-slate-200 bg-white p-5">
-      <h2 className="mb-3 text-sm font-semibold text-slate-900">{title}</h2>
+    <section aria-labelledby={id} className="rounded-lg border border-slate-200 bg-white p-4 sm:p-5">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h2 id={id} className="text-sm font-semibold text-slate-900">
+          {title}
+        </h2>
+        {actions}
+      </div>
       {children}
     </section>
   );
@@ -41,11 +60,11 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 
 function Fields({ items }: { items: [string, ReactNode][] }) {
   return (
-    <dl className="grid gap-x-4 gap-y-3 text-sm sm:grid-cols-[11rem_1fr]">
+    <dl className="grid gap-x-4 gap-y-2.5 text-sm sm:grid-cols-[10rem_1fr]">
       {items.map(([label, value]) => (
         <div key={label} className="contents">
           <dt className="text-slate-500">{label}</dt>
-          <dd className="min-w-0 break-words text-slate-900">{value ?? <span className="text-slate-500">—</span>}</dd>
+          <dd className="min-w-0 break-words text-slate-900">{value || value === 0 ? value : <span className="text-slate-400">—</span>}</dd>
         </div>
       ))}
     </dl>
@@ -53,27 +72,40 @@ function Fields({ items }: { items: [string, ReactNode][] }) {
 }
 
 function When({ iso }: { iso: string | null }) {
-  if (!iso) return <span className="text-slate-500">—</span>;
+  if (!iso) return <span className="text-slate-400">—</span>;
   return (
-    <time dateTime={iso}>
-      {formatDateTime(iso)} <span className="text-slate-500">({formatRelative(iso)})</span>
+    <time dateTime={iso} title={formatDateTime(iso)}>
+      {formatRelative(iso)}
     </time>
   );
 }
 
-export function OpportunityDetailView({ workspace, opportunityId }: { workspace: Workspace; opportunityId: string }) {
+export function OpportunityDetailView({
+  workspace,
+  opportunityId,
+  editOnOpen = false,
+}: {
+  workspace: Workspace;
+  opportunityId: string;
+  /** The /edit route: open the edit panel over the deal. */
+  editOnOpen?: boolean;
+}) {
   const viewer = useViewer();
+  const router = useRouter();
   const queryClient = useQueryClient();
   const permissions = pipelinePermissions(viewer, workspace);
-  const pipelines = usePipelines();
   const [notice, setNotice] = useFlash();
   const [pending, setPending] = useState<Pending>(null);
   const [moveError, setMoveError] = useState<{ message: string; requestId: string | null } | null>(null);
   const [lifecycleDialog, setLifecycleDialog] = useState<"archive" | "restore" | null>(null);
+  const [editing, setEditing] = useState(editOnOpen);
+  const [priceDialog, setPriceDialog] = useState(false);
+  const [tab, setTab] = useState<Tab>("overview");
   const detail = useQuery({
     queryKey: pipelineKeys.detail(workspace, opportunityId),
     queryFn: () => pipelineApi.get(workspace, opportunityId),
   });
+  const pipeline = usePipeline(workspace, detail.data?.pipeline.id);
   const move = useMoveOpportunity(workspace);
   const sync = useOpportunityWriteSync(workspace);
   const lifecycle = useMutation({
@@ -88,7 +120,7 @@ export function OpportunityDetailView({ workspace, opportunityId }: { workspace:
   });
 
   const back = (
-    <Link href={workspaceHref(workspace, "pipeline")} className="mb-4 inline-flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900">
+    <Link href={workspaceHref(workspace, "pipeline")} className="mb-3 inline-flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900">
       <ArrowLeft aria-hidden="true" className="size-4" />
       Pipeline
     </Link>
@@ -134,14 +166,17 @@ export function OpportunityDetailView({ workspace, opportunityId }: { workspace:
   // New work on an opportunity belongs to its lead's owner: only while the lead is here.
   const canAddWork = canChange && !opportunity.lead.restricted;
   const open = opportunity.status === "open";
-  const stages = pipelines.data?.results.find((p) => p.id === opportunity.pipeline.id)?.stages ?? [opportunity.stage];
+  const stages = pipeline.data?.stages ?? [opportunity.stage];
   const won = stages.find((s) => s.category === "won" && s.is_active);
   const lost = stages.find((s) => s.category === "lost" && s.is_active);
+  const inNegotiation = open && isNegotiation(opportunity.stage);
+  const fields = pipeline.data?.custom_fields ?? [];
+  const stored = (opportunity.custom_fields ?? {}) as Record<string, unknown>;
 
-  const confirmMove = (target: Stage, lostReason: string) => {
+  const confirmMove = (target: Stage, lostReason: string, negotiatedPrice?: string) => {
     setMoveError(null);
     move.mutate(
-      { id: opportunity.id, title: opportunity.title, version: opportunity.version, target, lostReason },
+      { id: opportunity.id, title: opportunity.title, version: opportunity.version, target, lostReason, negotiatedPrice },
       {
         onSuccess: (updated) => {
           setPending(null);
@@ -162,150 +197,229 @@ export function OpportunityDetailView({ workspace, opportunityId }: { workspace:
       },
     );
   };
+  const openMove = (target: Stage | null) => {
+    setMoveError(null);
+    setPending({ target });
+  };
+
+  const menu = permissions.canWrite
+    ? [
+        ...(archived
+          ? [{ key: "restore", label: "Restore", onSelect: () => (lifecycle.reset(), setLifecycleDialog("restore")) }]
+          : [{ key: "archive", label: "Delete (archive)", tone: "danger" as const, onSelect: () => (lifecycle.reset(), setLifecycleDialog("archive")) }]),
+      ]
+    : [];
 
   return (
     <>
       {back}
-      <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
+      <header className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h1 className="break-words text-xl font-semibold tracking-tight text-slate-900">{opportunity.title}</h1>
-          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-slate-600">
+          <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-sm text-slate-600">
             <span className="sr-only">Status:</span>
             <OutcomeBadge status={opportunity.status} />
             <span>
-              Stage: <strong className="font-medium text-slate-900"><StageName stage={opportunity.stage} /></strong>
+              <span className="sr-only">Stage: </span>
+              <strong className="font-medium text-slate-900">
+                <StageName stage={opportunity.stage} />
+              </strong>
             </span>
+            <span className="min-w-0 truncate">{opportunity.account_name}</span>
             <span>
-              Owner: <strong className="font-medium text-slate-900"><PersonName person={opportunity.owner} /></strong>
+              <span className="sr-only">Owner: </span>
+              <PersonName person={opportunity.owner} />
             </span>
-          </div>
+          </p>
         </div>
         {permissions.canWrite ? (
           <div className="flex flex-wrap items-center gap-2">
             {canChange && open && won ? (
-              <Button variant="secondary" onClick={() => { setMoveError(null); setPending({ target: won }); }}>
-                Mark as won
+              <Button variant="secondary" size="sm" onClick={() => openMove(won)}>
+                Won
               </Button>
             ) : null}
             {canChange && open && lost ? (
-              <Button variant="secondary" onClick={() => { setMoveError(null); setPending({ target: lost }); }}>
-                Mark as lost
+              <Button variant="secondary" size="sm" onClick={() => openMove(lost)}>
+                Lost
               </Button>
             ) : null}
             {canChange ? (
-              <Button variant="secondary" icon={<ArrowRight aria-hidden="true" className="size-4" />} onClick={() => { setMoveError(null); setPending({ target: null }); }}>
-                {open ? "Move to stage" : "Reopen"}
+              <Button variant="secondary" size="sm" icon={<ArrowRight aria-hidden="true" className="size-4" />} onClick={() => openMove(null)}>
+                {open ? "Move" : "Reopen"}
               </Button>
             ) : null}
-            {archived ? (
-              <Button variant="secondary" onClick={() => { lifecycle.reset(); setLifecycleDialog("restore"); }}>
-                Restore
+            {canChange ? (
+              <Button size="sm" icon={<Pencil aria-hidden="true" className="size-4" />} onClick={() => setEditing(true)}>
+                Edit
               </Button>
-            ) : (
-              <>
-                <Button variant="ghost" icon={<Archive aria-hidden="true" className="size-4" />} onClick={() => { lifecycle.reset(); setLifecycleDialog("archive"); }}>
-                  Archive
-                </Button>
-                <Link
-                  href={opportunityHref(workspace, opportunity.id, "edit")}
-                  className="inline-flex h-9 items-center gap-2 rounded-md bg-brand-600 px-3.5 text-sm font-medium text-white hover:bg-brand-700"
-                >
-                  <Pencil aria-hidden="true" className="size-4" />
-                  Edit
-                </Link>
-              </>
-            )}
+            ) : null}
+            {menu.length ? <ActionMenu label={`More actions for ${opportunity.title}`} actions={menu} /> : null}
           </div>
         ) : null}
       </header>
 
-      <div aria-live="polite" className="mb-4 empty:hidden">
+      <div aria-live="polite" className="mb-3 empty:hidden">
         {notice ? <Alert tone="success">{notice}</Alert> : null}
       </div>
       {archived ? (
-        <div className="mb-4">
-          <Alert tone="info" title="This opportunity is archived">
-            Archived {formatDateTime(opportunity.archived_at)}. It is hidden from the pipeline and its totals
-            {permissions.canWrite ? "; restore it to make changes" : ""}.
+        <div className="mb-3">
+          <Alert tone="info" title="Archived">
+            {formatDateTime(opportunity.archived_at)}. Hidden from the pipeline and its totals.
           </Alert>
         </div>
       ) : null}
 
-      <div className="grid gap-4 lg:grid-cols-3">
-        <div className="space-y-4 lg:col-span-2">
-          <Section title="Summary">
-            <Fields
-              items={[
-                ["Value", <Amount key="v" value={opportunity.value} className="font-semibold" />],
-                [
-                  "Probability",
-                  <span key="p">
-                    {formatPercent(opportunity.probability)}{" "}
-                    <span className="text-slate-500">
-                      {opportunity.probability_overridden ? "(set manually)" : open ? "(stage default)" : `(${opportunity.status})`}
-                    </span>
-                  </span>,
-                ],
-                ["Weighted value", <Amount key="w" value={opportunity.weighted_value} />],
-                ["Expected close", <CloseDate key="c" date={opportunity.expected_close_date} open={open} today={businessToday()} />],
-                ["Pipeline", opportunity.pipeline.name],
-                ["Closed", opportunity.closed_at ? <When key="cl" iso={opportunity.closed_at} /> : null],
-                ...(opportunity.status === "lost" ? ([["Lost reason", opportunity.lost_reason || null]] as [string, ReactNode][]) : []),
-              ]}
-            />
-          </Section>
-          <Section title="Description">
-            {opportunity.description ? (
-              <p className="whitespace-pre-line break-words text-sm text-slate-900">{opportunity.description}</p>
-            ) : (
-              <p className="text-sm text-slate-500">No description</p>
-            )}
-          </Section>
-          <Timeline
-            workspace={workspace}
-            subject={{ kind: "opportunity", id: opportunity.id }}
-            composer={canAddWork ? <NoteComposer workspace={workspace} link={{ opportunity: opportunity.id }} /> : null}
-          />
-          <StageHistory workspace={workspace} opportunityId={opportunity.id} version={opportunity.version} />
-        </div>
-        <div className="space-y-4">
-          <Section title="Lead">
-            {opportunity.lead.restricted || !opportunity.lead.id ? (
-              <p className="text-sm text-slate-500">
-                <LeadName lead={opportunity.lead} />. The lead has been reassigned since this opportunity was closed; its
-                details are visible in its current owner&apos;s workspace.
-              </p>
-            ) : (
-              <p className="text-sm">
-                <Link href={leadHref(workspace, opportunity.lead.id)} className="font-medium text-brand-700 hover:underline">
-                  {opportunity.lead.display_name}
-                </Link>
-                {opportunity.lead.organization_name && opportunity.lead.organization_name !== opportunity.lead.display_name ? (
-                  <span className="block text-slate-500">{opportunity.lead.organization_name}</span>
-                ) : null}
-              </p>
-            )}
-          </Section>
-          {opportunity.lead.restricted ? null : (
-            <CurrentWork
-              workspace={workspace}
-              target={{ opportunity: opportunity.id }}
-              label={opportunity.title}
-              canWrite={canAddWork}
-            />
-          )}
-          <Section title="Record details">
-            <Fields
-              items={[
-                ["Created by", <PersonName key="cb" person={opportunity.created_by} />],
-                ["Created", <When key="ca" iso={opportunity.created_at} />],
-                ["Last updated", <When key="ua" iso={opportunity.updated_at} />],
-              ]}
-            />
-          </Section>
-        </div>
+      <Tabs tab={tab} onChange={setTab} />
+
+      <div role="tabpanel" id={`deal-panel-${tab}`} aria-labelledby={`deal-tab-${tab}`} tabIndex={0} className="mt-4 focus:outline-none">
+        {tab === "overview" ? (
+          <div className="grid gap-4 lg:grid-cols-3">
+            <div className="space-y-4 lg:col-span-2">
+              <Section
+                title="Deal"
+                actions={
+                  inNegotiation && canChange ? (
+                    <Button variant="secondary" size="sm" onClick={() => setPriceDialog(true)}>
+                      Update price
+                    </Button>
+                  ) : null
+                }
+              >
+                <Fields
+                  items={[
+                    ["Installation price", <Amount key="v" value={opportunity.value} className="font-semibold" />],
+                    ...(opportunity.negotiated_price
+                      ? ([
+                          [
+                            "Negotiated price",
+                            <span key="n">
+                              <Amount value={opportunity.negotiated_price} className="font-semibold" />{" "}
+                              <span className="text-xs text-slate-500">
+                                <When iso={opportunity.negotiated_at} />
+                              </span>
+                            </span>,
+                          ],
+                        ] as [string, ReactNode][])
+                      : []),
+                    [
+                      "Probability",
+                      <span key="p">
+                        {formatPercent(opportunity.probability)}
+                        {opportunity.probability_overridden ? <span className="text-slate-500"> (own)</span> : null}
+                      </span>,
+                    ],
+                    ["Weighted value", <Amount key="w" value={opportunity.weighted_value} />],
+                    ["Opportunity date", formatDateOnly(opportunity.opportunity_date)],
+                    ["Expected closing", <CloseDate key="c" date={opportunity.expected_close_date} open={open} today={businessToday()} />],
+                    ["Pipeline", opportunity.pipeline.name],
+                    ...(opportunity.closed_at ? ([["Closed", <When key="cl" iso={opportunity.closed_at} />]] as [string, ReactNode][]) : []),
+                    ...(opportunity.status === "lost" ? ([["Lost reason", opportunity.lost_reason || null]] as [string, ReactNode][]) : []),
+                  ]}
+                />
+              </Section>
+              <Section title="Customer">
+                <Fields
+                  items={[
+                    ["Account", opportunity.account_name],
+                    ["Customer", opportunity.customer_name],
+                    [
+                      "Phone",
+                      opportunity.contact_phone ? (
+                        <a key="t" href={`tel:${opportunity.contact_phone.replace(/[^\d+]/g, "")}`} className="text-brand-700 hover:underline">
+                          {opportunity.contact_phone}
+                        </a>
+                      ) : null,
+                    ],
+                    [
+                      "Email",
+                      opportunity.contact_email ? (
+                        <a key="e" href={`mailto:${opportunity.contact_email}`} className="break-all text-brand-700 hover:underline">
+                          {opportunity.contact_email}
+                        </a>
+                      ) : null,
+                    ],
+                    ["Address", opportunity.address ? <span key="a" className="whitespace-pre-line">{opportunity.address}</span> : null],
+                  ]}
+                />
+              </Section>
+              <Section title="Instrument">
+                <Fields
+                  items={[
+                    ["Instrument", opportunity.instrument_name || null],
+                    ["Work load", opportunity.work_load || null],
+                  ]}
+                />
+              </Section>
+              {fields.length ? (
+                <Section title="More details">
+                  <Fields items={fields.map((field) => [field.name, formatCustomValue(field, stored[field.id])] as [string, ReactNode])} />
+                </Section>
+              ) : null}
+              {opportunity.description ? (
+                <Section title="Description">
+                  <p className="whitespace-pre-line break-words text-sm text-slate-900">{opportunity.description}</p>
+                </Section>
+              ) : null}
+            </div>
+            <div className="space-y-4">
+              <Section title="Lead">
+                {opportunity.lead.restricted || !opportunity.lead.id ? (
+                  <p className="text-sm">
+                    <LeadName lead={opportunity.lead} />
+                  </p>
+                ) : (
+                  <p className="text-sm">
+                    <Link href={leadHref(workspace, opportunity.lead.id)} className="font-medium text-brand-700 hover:underline">
+                      {opportunity.lead.display_name}
+                    </Link>
+                  </p>
+                )}
+              </Section>
+              {opportunity.lead.restricted ? null : (
+                <CurrentWork workspace={workspace} target={{ opportunity: opportunity.id }} label={opportunity.title} canWrite={canAddWork} />
+              )}
+              <Section title="Record">
+                <Fields
+                  items={[
+                    ["Created by", <PersonName key="cb" person={opportunity.created_by} />],
+                    ["Created", <When key="ca" iso={opportunity.created_at} />],
+                    ["Updated", <When key="ua" iso={opportunity.updated_at} />],
+                  ]}
+                />
+              </Section>
+            </div>
+          </div>
+        ) : tab === "notes" ? (
+          <DealNotes workspace={workspace} opportunityId={opportunity.id} canAdd={canAddWork} />
+        ) : (
+          <div className="space-y-4">
+            <NegotiationHistory workspace={workspace} opportunityId={opportunity.id} version={opportunity.version} />
+            <StageHistory workspace={workspace} opportunityId={opportunity.id} version={opportunity.version} />
+            <Timeline workspace={workspace} subject={{ kind: "opportunity", id: opportunity.id }} composer={null} />
+          </div>
+        )}
       </div>
 
+      {editing && canChange ? (
+        <OpportunityDrawer
+          workspace={workspace}
+          opportunity={opportunity}
+          onClose={() => {
+            setEditing(false);
+            if (editOnOpen) router.replace(opportunityHref(workspace, opportunity.id));
+          }}
+          onSaved={() => {
+            setEditing(false);
+            if (editOnOpen) {
+              // The /edit route is another page: the notice travels with the navigation.
+              const href = opportunityHref(workspace, opportunity.id);
+              setFlash("Changes saved.", href);
+              router.replace(href);
+            } else setNotice("Changes saved.");
+          }}
+        />
+      ) : null}
       {pending ? (
         <TransitionDialog
           subject={{ title: opportunity.title, stageId: opportunity.stage.id, status: opportunity.status }}
@@ -320,16 +434,28 @@ export function OpportunityDetailView({ workspace, opportunityId }: { workspace:
           }}
         />
       ) : null}
+      {priceDialog ? (
+        <PriceDialog
+          workspace={workspace}
+          opportunity={opportunity}
+          onClose={() => setPriceDialog(false)}
+          onSaved={(updated) => {
+            sync(updated);
+            setPriceDialog(false);
+            setNotice("Negotiated price recorded.");
+          }}
+        />
+      ) : null}
       <ConfirmDialog
         open={lifecycleDialog !== null}
-        title={lifecycleDialog === "archive" ? `Archive ${opportunity.title}?` : `Restore ${opportunity.title}?`}
-        confirmLabel={lifecycleDialog === "archive" ? "Archive opportunity" : "Restore opportunity"}
+        title={lifecycleDialog === "archive" ? "Delete this opportunity?" : "Restore this opportunity?"}
+        confirmLabel={lifecycleDialog === "archive" ? "Delete" : "Restore"}
         tone={lifecycleDialog === "archive" ? "danger" : "primary"}
         busy={lifecycle.isPending}
         error={
           lifecycle.isError
             ? isApiError(lifecycle.error, 409)
-              ? { message: "Someone else changed this opportunity a moment ago. The latest details are shown now; please try again.", requestId: null }
+              ? { message: "It changed a moment ago. The latest details are shown now; try again.", requestId: null }
               : describeError(lifecycle.error)
             : null
         }
@@ -338,17 +464,162 @@ export function OpportunityDetailView({ workspace, opportunityId }: { workspace:
           lifecycle.mutate(kind, {
             onSuccess: () => {
               setLifecycleDialog(null);
-              setNotice(kind === "archive" ? "Opportunity archived." : "Opportunity restored.");
+              setNotice(kind === "archive" ? "Opportunity deleted (archived). You can restore it." : "Opportunity restored.");
             },
           });
         }}
         onCancel={() => setLifecycleDialog(null)}
       >
         {lifecycleDialog === "archive"
-          ? "It will be hidden from the pipeline and no longer count in its totals. Nothing is deleted, its history is kept, and it can be restored at any time. (Closing it as won or lost is different: that stays on the pipeline.)"
-          : "It will appear in the pipeline again and count in its totals if it is open."}
+          ? "It's archived: removed from the pipeline and its totals. Its history is kept and it can be restored."
+          : "It returns to the pipeline (and its totals, if open)."}
       </ConfirmDialog>
     </>
+  );
+}
+
+/** The deal page's tabs (arrow keys, Home and End move between them). */
+function Tabs({ tab, onChange }: { tab: Tab; onChange: (tab: Tab) => void }) {
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const index = TABS.findIndex((t) => t.id === tab);
+  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    const last = TABS.length - 1;
+    const next =
+      event.key === "ArrowRight" ? (index === last ? 0 : index + 1) : event.key === "ArrowLeft" ? (index === 0 ? last : index - 1) : event.key === "Home" ? 0 : event.key === "End" ? last : null;
+    if (next === null) return;
+    event.preventDefault();
+    onChange(TABS[next]!.id);
+    refs.current[next]?.focus();
+  };
+  return (
+    <div role="tablist" aria-label="Opportunity" className="flex gap-1 border-b border-slate-200">
+      {TABS.map((t, i) => {
+        const active = t.id === tab;
+        return (
+          <button
+            key={t.id}
+            ref={(el) => {
+              refs.current[i] = el;
+            }}
+            type="button"
+            role="tab"
+            id={`deal-tab-${t.id}`}
+            aria-selected={active}
+            aria-controls={active ? `deal-panel-${t.id}` : undefined}
+            tabIndex={active ? 0 : -1}
+            onClick={() => onChange(t.id)}
+            onKeyDown={onKeyDown}
+            className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium ${
+              active ? "border-brand-600 text-brand-700" : "border-transparent text-slate-600 hover:text-slate-900"
+            }`}
+          >
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Record a new negotiated price while in a negotiation stage (appended to the history). */
+function PriceDialog({
+  workspace,
+  opportunity,
+  onClose,
+  onSaved,
+}: {
+  workspace: Workspace;
+  opportunity: Opportunity;
+  onClose: () => void;
+  onSaved: (opportunity: Opportunity) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [price, setPrice] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const save = useMutation({
+    mutationFn: (value: string) => pipelineApi.recordNegotiatedPrice(workspace, opportunity.id, opportunity.version, value),
+    onSuccess: onSaved,
+    // Someone changed the deal meanwhile: load it, so a retry sends its new version.
+    onError: (failure) => {
+      if (isApiError(failure, 409)) void queryClient.invalidateQueries({ queryKey: pipelineKeys.detail(workspace, opportunity.id) });
+    },
+  });
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const parsed = parseAmountInput(price);
+    if (!parsed.ok) {
+      setError(price.trim() ? parsed.error : "Enter the negotiated price.");
+      return;
+    }
+    setError(null);
+    save.mutate(parsed.value);
+  };
+  const server = fieldErrors(save.error);
+  const problem = save.isError && !server.price ? describeError(save.error) : null;
+  return (
+    <Dialog open title="Update negotiated price" description={<p>{opportunity.title}</p>} onClose={onClose} busy={save.isPending} size="sm">
+      <form onSubmit={submit} noValidate className="space-y-4">
+        {problem ? (
+          <Alert tone="error" requestId={problem.requestId}>
+            {isApiError(save.error, 409) ? "It changed a moment ago. The latest version is loaded now: check and save again." : problem.message}
+          </Alert>
+        ) : null}
+        <TextField
+          label="Negotiated price (₹)"
+          name="price"
+          inputMode="decimal"
+          autoComplete="off"
+          value={price}
+          onChange={(e) => {
+            setPrice(e.target.value);
+            setError(null);
+          }}
+          errors={error ? [error] : server.price}
+          data-autofocus
+        />
+        <DialogActions>
+          <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
+            Cancel
+          </Button>
+          <Button type="submit" loading={save.isPending}>
+            Save price
+          </Button>
+        </DialogActions>
+      </form>
+    </Dialog>
+  );
+}
+
+/** Every negotiated price, newest first (append-only: nothing is overwritten). */
+function NegotiationHistory({ workspace, opportunityId, version }: { workspace: Workspace; opportunityId: string; version: number }) {
+  const history = useQuery({
+    queryKey: [...pipelineKeys.negotiation(workspace, opportunityId), version],
+    queryFn: () => pipelineApi.negotiatedPrices(workspace, opportunityId),
+    placeholderData: (previous) => previous,
+  });
+  const rows = history.data?.results;
+  if (rows && rows.length === 0) return null;
+  return (
+    <Section title="Negotiated prices">
+      {history.isError ? (
+        <p className="text-sm text-red-700">The prices couldn&apos;t be loaded. {describeError(history.error).message}</p>
+      ) : !rows ? (
+        <Skeleton className="h-12 w-full" />
+      ) : (
+        <ol className="space-y-2">
+          {rows.map((row) => (
+            <li key={row.id} className="flex flex-wrap items-baseline justify-between gap-x-4 border-l-2 border-amber-300 pl-3 text-sm">
+              <span className="font-semibold text-slate-900">
+                <Amount value={row.price} />
+              </span>
+              <span className="text-xs text-slate-500">
+                {row.stage_name} · <PersonName person={row.actor} /> · <time dateTime={row.occurred_at}>{formatDateTime(row.occurred_at)}</time>
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </Section>
   );
 }
 

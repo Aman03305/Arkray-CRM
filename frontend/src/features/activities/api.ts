@@ -4,16 +4,20 @@
  * that workspace segment, so one user's activities, counts or timeline can never be served
  * from the cache under another user's workspace.
  */
-import { apiFetch } from "@/lib/api/client";
+import { cursorOf } from "@/features/leads/api";
+import { apiFetch, apiUpload } from "@/lib/api/client";
 import type {
   Activity,
   ActivityCreateRequest,
+  ActivityListItem,
   ActivityOrdering,
   ActivityPage,
   ActivityStatus,
   ActivitySummary,
   ActivityType,
   ActivityUpdateRequest,
+  Attachment,
+  NotePage,
   TimelinePage,
 } from "@/lib/api/types";
 import { type Workspace, workspaceApiPath, workspaceApiSegment } from "@/lib/workspace";
@@ -21,6 +25,10 @@ import { type Workspace, workspaceApiPath, workspaceApiSegment } from "@/lib/wor
 export const PAGE_SIZE = 25;
 export const TIMELINE_PAGE_SIZE = 20;
 export const CURRENT_WORK_PAGE_SIZE = 10;
+export const DEAL_NOTES_PAGE_SIZE = 20;
+/** The calendar reads a range in pages of 100 (the API's largest), at most this many per type. */
+export const CALENDAR_PAGE_SIZE = 100;
+export const CALENDAR_MAX_PAGES = 5;
 
 export type ActivityTab = "all" | ActivityType;
 
@@ -159,6 +167,50 @@ function currentWorkPath(workspace: Workspace, target: CurrentWorkTarget): strin
   return `${workspaceApiPath(workspace, "activities")}?${params.toString()}`;
 }
 
+/**
+ * The calendar's range: inclusive business dates of the days on screen, and, organisation-wide
+ * only, one owner ("My calendar"; empty for everyone).
+ */
+export interface CalendarRange {
+  from: string;
+  to: string;
+  owner: string;
+}
+
+export interface CalendarData {
+  /** Tasks (by due time) and meetings (by start) in the range, cancelled and archived left out. */
+  items: ActivityListItem[];
+  /** A type had more than CALENDAR_MAX_PAGES pages in the range: only its first ones are here. */
+  truncated: boolean;
+}
+
+/**
+ * One type's entries in the range: the list API with the filters the list itself sends
+ * (same scope, same authorisation, the per-type schedule indexes), soonest first, following
+ * `next` with exactly the same parameters (cursors are bound to them).
+ */
+async function calendarEntries(workspace: Workspace, type: "task" | "meeting", range: CalendarRange) {
+  const filters: ActivityFilters = {
+    ...NO_FILTERS,
+    tab: type,
+    status: "not_cancelled",
+    ordering: "scheduled",
+    dateFrom: range.from,
+    dateTo: range.to,
+    owner: range.owner,
+  };
+  const items: ActivityListItem[] = [];
+  let cursor: string | null = null;
+  for (let read = 0; read < CALENDAR_MAX_PAGES; read += 1) {
+    const params = listParams(workspace, filters, cursor, CALENDAR_PAGE_SIZE);
+    const page: ActivityPage = await apiFetch<ActivityPage>(`${workspaceApiPath(workspace, "activities")}?${params.toString()}`);
+    items.push(...page.results);
+    cursor = cursorOf(page.next);
+    if (!cursor) return { items, truncated: false };
+  }
+  return { items, truncated: true };
+}
+
 export type TimelineSubject = { kind: "lead" | "opportunity"; id: string };
 
 function timelinePath(workspace: Workspace, subject: TimelineSubject, cursor: string | null): string {
@@ -176,10 +228,15 @@ export const activityKeys = {
     ["activities", "list", workspaceApiSegment(workspace), filters, cursor] as const,
   detail: (workspace: Workspace, id: string) => ["activities", "detail", workspaceApiSegment(workspace), id] as const,
   summary: (workspace: Workspace) => ["activities", "summary", workspaceApiSegment(workspace)] as const,
+  /** Under "activities", so any activity write marks every cached range stale. */
+  calendar: (workspace: Workspace, range: CalendarRange) => ["activities", "calendar", workspaceApiSegment(workspace), range] as const,
   /** Every lead's and opportunity's current work cached for this workspace. */
   currentWork: (workspace: Workspace) => ["activities", "current", workspaceApiSegment(workspace)] as const,
   current: (workspace: Workspace, target: CurrentWorkTarget) =>
     ["activities", "current", workspaceApiSegment(workspace), target.lead ?? "", target.opportunity ?? ""] as const,
+  /** A deal's Notes (whole texts and files); under "activities", so any activity write marks it stale. */
+  dealNotes: (workspace: Workspace, opportunityId: string) =>
+    ["activities", "deal-notes", workspaceApiSegment(workspace), opportunityId] as const,
 };
 
 export const timelineKeys = {
@@ -192,6 +249,9 @@ export const timelineKeys = {
 const activity = (workspace: Workspace, id: string, action = "") =>
   workspaceApiPath(workspace, `activities/${encodeURIComponent(id)}${action ? `/${action}` : ""}`);
 
+const attachmentPath = (workspace: Workspace, id: string, action = "") =>
+  workspaceApiPath(workspace, `attachments/${encodeURIComponent(id)}${action ? `/${action}` : ""}`);
+
 export type LifecycleAction = "complete" | "cancel" | "reopen" | "archive" | "restore";
 
 export const activitiesApi = {
@@ -200,6 +260,11 @@ export const activitiesApi = {
   current: (workspace: Workspace, target: CurrentWorkTarget) => apiFetch<ActivityPage>(currentWorkPath(workspace, target)),
   get: (workspace: Workspace, id: string) => apiFetch<Activity>(activity(workspace, id)),
   summary: (workspace: Workspace) => apiFetch<ActivitySummary>(workspaceApiPath(workspace, "activity-summary")),
+  /** The tasks and meetings of the days the calendar shows (both types read in parallel). */
+  calendar: async (workspace: Workspace, range: CalendarRange): Promise<CalendarData> => {
+    const [tasks, meetings] = await Promise.all([calendarEntries(workspace, "task", range), calendarEntries(workspace, "meeting", range)]);
+    return { items: [...tasks.items, ...meetings.items], truncated: tasks.truncated || meetings.truncated };
+  },
   create: (workspace: Workspace, body: ActivityCreateRequest, idempotencyKey: string) =>
     apiFetch<Activity>(workspaceApiPath(workspace, "activities"), {
       method: "POST",
@@ -213,4 +278,23 @@ export const activitiesApi = {
     apiFetch<Activity>(activity(workspace, id, action), { method: "POST", body: { version } }),
   timeline: (workspace: Workspace, subject: TimelineSubject, cursor: string | null) =>
     apiFetch<TimelinePage>(timelinePath(workspace, subject, cursor)),
+  /** An opportunity's notes, newest first, with their files and whether each may be changed. */
+  dealNotes: (workspace: Workspace, opportunityId: string, cursor: string | null) => {
+    const params = new URLSearchParams({ page_size: String(DEAL_NOTES_PAGE_SIZE) });
+    if (cursor) params.set("cursor", cursor);
+    return apiFetch<NotePage>(
+      `${workspaceApiPath(workspace, `opportunities/${encodeURIComponent(opportunityId)}/notes`)}?${params.toString()}`,
+    );
+  },
+  /** One file, as the raw body; its name travels in X-Filename. */
+  upload: (workspace: Workspace, noteId: string, file: File) =>
+    apiUpload<Attachment>(activity(workspace, noteId, "attachments"), file, file.name),
+  removeFile: (workspace: Workspace, attachmentId: string) =>
+    apiFetch<void>(attachmentPath(workspace, attachmentId), { method: "DELETE" }),
+};
+
+/** Plain same-origin GETs with the session cookie: an <a download> and an <img> load them. */
+export const fileUrls = {
+  download: (workspace: Workspace, attachmentId: string) => attachmentPath(workspace, attachmentId, "download"),
+  preview: (workspace: Workspace, attachmentId: string) => attachmentPath(workspace, attachmentId, "preview"),
 };

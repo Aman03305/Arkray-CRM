@@ -25,3 +25,12 @@ CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"
 EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
 LOG_LEVEL = "WARNING"
 LOGGING["root"]["level"] = "WARNING"  # noqa: F405
+
+# Attachments go to a throwaway directory per test process (never the developer's files).
+import tempfile  # noqa: E402
+
+ATTACHMENT_ROOT = tempfile.mkdtemp(prefix="arkray-attachments-")
+STORAGES["attachments"] = {  # noqa: F405
+    "BACKEND": "django.core.files.storage.FileSystemStorage",
+    "OPTIONS": {"location": ATTACHMENT_ROOT, "base_url": None},
+}

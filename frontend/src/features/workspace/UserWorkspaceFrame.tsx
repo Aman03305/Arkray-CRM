@@ -27,6 +27,9 @@ import { useWorkspaceSubject } from "./api";
  * reconcile shows "not found", never another workspace's records under this user's name.
  * A non-canonical spelling of the id (upper case, percent-encoded) is replaced by the
  * canonical URL first, so every workspace has exactly one address.
+ *
+ * In a support session for this user the shell's support banner already says whose CRM this
+ * is and who is signed in, so this frame adds no banner of its own (never two).
  */
 export function UserWorkspaceFrame({ userId, children }: { userId: string; children: ReactNode }) {
   const pathname = usePathname();
@@ -81,6 +84,7 @@ export function UserWorkspaceFrame({ userId, children }: { userId: string; child
       </>
     );
   }
+  if (viewer?.supportSession?.target.id === userId) return <>{children}</>;
   const manager = hasCapability(viewer, "users.manage");
   return (
     <>

@@ -85,19 +85,19 @@ describe("the six figures", () => {
     mockApi({ [`GET ${ME}`]: { status: 200, body: makeDashboard() } });
     renderWithProviders(<DashboardView />, { viewer: salesViewer });
 
-    expect(await screen.findByRole("link", { name: /^Total leads\s+1,234\s+Not archived$/ })).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: /^Total leads\s+1,234$/ })).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 1, name: "Dashboard" })).toBeInTheDocument();
-    expect(screen.getByText("Your records")).toBeInTheDocument();
     for (const name of [
-      /^New leads today\s+7\s+Created since midnight$/,
-      /^Pipeline value\s+₹15,00,000\s+2 open opportunities$/,
-      /^Weighted pipeline\s+₹9,00,000\s+Value × probability, open only$/,
+      /^New leads today\s+7$/,
+      // Over every pipeline the workspace may see, and it says so.
+      /^Pipeline value\s+₹15,00,000\s+2 open opportunities · all pipelines$/,
+      /^Weighted pipeline\s+₹9,00,000\s+All pipelines$/,
       /^Meetings\s+3\s+today\s+6 upcoming$/,
       /^Tasks\s+9\s+open\s+2 due today · 1 overdue$/,
     ]) {
       expect(screen.getByRole("link", { name })).toBeInTheDocument();
     }
-    expect(screen.getByText(/Today is/)).toHaveTextContent("Today is 3 Oct 2026 (India time)");
+    expect(screen.getByText("3 Oct 2026")).toBeInTheDocument();
     for (const heading of ["Key figures", "New leads today", "Upcoming meetings", "Tasks requiring attention"]) {
       expect(screen.getByRole("heading", { level: 2, name: heading })).toBeInTheDocument();
     }
@@ -125,8 +125,8 @@ describe("the six figures", () => {
     mockApi({ [`GET ${ME}`]: { status: 200, body: EMPTY_DASHBOARD } });
     renderWithProviders(<DashboardView />, { viewer: salesViewer });
 
-    expect(await screen.findByRole("link", { name: /^Total leads\s+0\s/ })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /^Pipeline value\s+₹0\s+0 open opportunities$/ })).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: /^Total leads\s+0$/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /^Pipeline value\s+₹0\s+0 open opportunities · all pipelines$/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /^Weighted pipeline\s+₹0\s/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /^Meetings\s+0\s+today\s+0 upcoming$/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /^Tasks\s+0\s+open\s+0 due today · 0 overdue$/ })).toBeInTheDocument();

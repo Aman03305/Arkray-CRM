@@ -42,6 +42,10 @@ x-production-env: &production-env
   LOG_LEVEL: INFO
   # Required: the metrics endpoint (and the alerts on it) exists only with a token.
   METRICS_TOKEN: ${METRICS_TOKEN:?set METRICS_TOKEN (at least 32 characters)}
+  # This rehearsal keeps attachments on a private volume (pinned, like every setting here);
+  # a real deployment normally points ATTACHMENT_STORAGE=s3 at a private bucket.
+  ATTACHMENT_STORAGE: filesystem
+  ATTACHMENT_ROOT: /var/lib/arkray/attachments
 
 services:
   postgres:

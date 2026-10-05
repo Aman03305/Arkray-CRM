@@ -297,11 +297,12 @@ class TestEditMoveArchiveHistory:
         opportunity = OpportunityFactory(lead=LeadFactory(owner=user_a))
         keys = ["qualified", "proposal", "negotiation", "proposal", "negotiation"]
         for version, key in enumerate(keys, start=1):
+            body = {"stage": str(stages[key].pk), "version": version}
+            if key == "negotiation":
+                body["negotiated_price"] = "1000"
             assert (
                 user_a_client.post(
-                    opportunity_url(opportunity.pk, action="move"),
-                    {"stage": str(stages[key].pk), "version": version},
-                    format="json",
+                    opportunity_url(opportunity.pk, action="move"), body, format="json"
                 ).status_code
                 == 200
             )
@@ -386,6 +387,8 @@ class TestBoard:
             "expected_close_date",
             "closed_at",
             "archived_at",
+            "account_name",
+            "negotiated_price",
             "version",
             "created_at",
             "updated_at",

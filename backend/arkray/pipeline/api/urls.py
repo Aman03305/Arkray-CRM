@@ -9,8 +9,15 @@ from django.urls import path
 from . import views
 
 OPPORTUNITY = "opportunities/<uuid:opportunity_id>"
+PIPELINE = "pipelines/<uuid:pipeline_id>"
 
 workspace_urlpatterns = [
+    path("pipelines", views.WorkspacePipelinesView.as_view(), name="workspace-pipelines"),
+    path(PIPELINE, views.WorkspacePipelineView.as_view(), name="workspace-pipeline"),
+    path(f"{PIPELINE}/stages", views.PipelineStagesView.as_view(), name="pipeline-stages"),
+    path(f"{PIPELINE}/fields", views.PipelineFieldsView.as_view(), name="pipeline-fields"),
+    path(f"{PIPELINE}/archive", views.PipelineArchiveView.as_view(), name="pipeline-archive"),
+    path(f"{PIPELINE}/restore", views.PipelineRestoreView.as_view(), name="pipeline-restore"),
     path("pipeline-board", views.BoardView.as_view(), name="pipeline-board"),
     path("pipeline-summary", views.PipelineSummaryView.as_view(), name="pipeline-summary"),
     path("opportunities", views.OpportunityListView.as_view(), name="opportunities"),
@@ -24,6 +31,11 @@ workspace_urlpatterns = [
     ),
     path(
         f"{OPPORTUNITY}/history", views.OpportunityHistoryView.as_view(), name="opportunity-history"
+    ),
+    path(
+        f"{OPPORTUNITY}/negotiated-prices",
+        views.OpportunityNegotiatedPricesView.as_view(),
+        name="opportunity-negotiated-prices",
     ),
     path("leads/<uuid:lead_id>/convert", views.LeadConvertView.as_view(), name="lead-convert"),
 ]

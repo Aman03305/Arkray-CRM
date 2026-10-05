@@ -42,6 +42,10 @@ def create(actor, scope, lead, **kwargs):
 
 
 def move(actor, scope, opportunity, stage, version=None, **kwargs):
+    # Entering a negotiation stage needs the negotiated price (tested on its own in
+    # test_negotiation.py); these tests are about other rules, so they supply one.
+    if stage.is_negotiation:
+        kwargs.setdefault("negotiated_price", Decimal("1000.00"))
     return services.move_opportunity(
         actor=actor,
         scope=scope,
@@ -356,6 +360,7 @@ class TestStageTransitions:
             "to": "negotiation",
             "from_status": "open",
             "to_status": "open",
+            "negotiated_price_recorded": True,
         }
 
     def test_moving_backwards_is_allowed(self, user_a, stages):

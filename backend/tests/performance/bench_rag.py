@@ -297,7 +297,8 @@ def structured(scopes: dict[str, AccessScope], runs: int) -> None:
     """The structured path: router, tools and answer assembly as the service runs them (no
     model, no retrieval)."""
     words = service.WorkspaceWords("You", "have", "Your", "benchmark")
-    stage_names = router.active_stage_names()
+    # The routed questions name no stage, so any scope's stage names route them alike.
+    stage_names = router.active_stage_names(next(iter(scopes.values())))
     routes: list[router.Route] = []
     for question in ROUTED:
         found = router.route(question, stage_names=lambda: stage_names)

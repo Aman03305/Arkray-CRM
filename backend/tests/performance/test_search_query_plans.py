@@ -72,6 +72,8 @@ def dataset(django_db_setup, django_db_blocker):
                 status=stage.category,
                 value=1000,
                 probability=stage.probability,
+                account_name="Account",
+                customer_name="Customer",
                 created_at=lead.created_at,
             )
             for i, lead in enumerate(leads)

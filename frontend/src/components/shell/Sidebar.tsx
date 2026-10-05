@@ -13,16 +13,20 @@ import {
   administrationNavigation,
   assistantNavigation,
   type NavItem,
+  navigationWorkspace,
   settingsNavItem,
+  showsSettings,
   workspaceNavigation,
 } from "@/lib/navigation";
-import { hasCapability, initials } from "@/lib/viewer";
+import { initials } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
-import { activeSection, isAskPath, workspaceFromPathname } from "@/lib/workspace";
+import { activeSection, isAskPath } from "@/lib/workspace";
 
-const NAV_LINK = "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors";
+import { BrandMark } from "./BrandMark";
+
+const NAV_LINK = "focus-on-shell flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors";
 // The current page is marked by more than colour: a bar at its left edge and a heavier weight.
-const NAV_LINK_ACTIVE = "bg-slate-100 font-medium text-slate-900 shadow-[inset_3px_0_0_var(--color-brand-600)]";
+const NAV_LINK_ACTIVE = "bg-brand-600 font-semibold text-white shadow-[inset_3px_0_0_#ffffff]";
 
 function NavLink({ item, active, onNavigate }: { item: NavItem; active: boolean; onNavigate?: () => void }) {
   const Icon = item.icon;
@@ -31,9 +35,9 @@ function NavLink({ item, active, onNavigate }: { item: NavItem; active: boolean;
       href={item.href}
       onClick={onNavigate}
       aria-current={active ? "page" : undefined}
-      className={`${NAV_LINK} ${active ? NAV_LINK_ACTIVE : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"}`}
+      className={`${NAV_LINK} ${active ? NAV_LINK_ACTIVE : "text-shell-muted hover:bg-white/10 hover:text-white"}`}
     >
-      <Icon aria-hidden="true" className={`size-4 ${active ? "text-brand-600" : "text-slate-500"}`} />
+      <Icon aria-hidden="true" className="size-4" />
       {item.label}
     </Link>
   );
@@ -43,15 +47,15 @@ function NavLink({ item, active, onNavigate }: { item: NavItem; active: boolean;
 function WorkspaceLabel({ id, userId }: { id: string; userId: string }) {
   const subject = useWorkspaceSubject(userId);
   return (
-    <p id={id} className="truncate px-3 pb-1 text-xs font-medium uppercase tracking-wide text-slate-500">
+    <p id={id} className="truncate px-3 pb-1 text-xs font-medium uppercase tracking-wide text-shell-muted">
       CRM for{" "}
       {subject.data ? (
-        <span className="normal-case tracking-normal text-slate-700">{subject.data.full_name}</span>
+        <span className="normal-case tracking-normal text-white">{subject.data.full_name}</span>
       ) : subject.isError ? (
         <span className="normal-case tracking-normal">the selected user</span>
       ) : (
         <>
-          <Skeleton className="h-3 w-24 align-middle" />
+          <Skeleton className="h-3 w-24 bg-white/20! align-middle" />
           <span className="sr-only">the selected user (loading)</span>
         </>
       )}
@@ -59,18 +63,11 @@ function WorkspaceLabel({ id, userId }: { id: string; userId: string }) {
   );
 }
 
+/** The full navigation with labels: the drawer on phones and tablets. */
 export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   const viewer = useViewer();
-  // A URL naming no workspace (a malformed user id) shows "not found"; the links then lead
-  // back to the viewer's own top-level pages, never into a guessed workspace. So does a
-  // selected user's workspace the viewer may not open (a link shared by an administrator):
-  // its pages are "not found" for them, and so were all five links (whole-software audit).
-  const named = workspaceFromPathname(pathname, viewer);
-  const workspace =
-    named && !(named.kind === "user" && !hasCapability(viewer, "workspace.view_any"))
-      ? named
-      : workspaceFromPathname("/", viewer)!;
+  const workspace = navigationWorkspace(pathname, viewer);
   const userId = selectedUserId(workspace);
   const labelId = useId();
   const section = activeSection(pathname);
@@ -78,15 +75,13 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const signOut = useSignOut();
 
   return (
-    <div className="flex h-full flex-col border-r border-slate-200 bg-white">
-      <div className="flex h-14 items-center gap-2 border-b border-slate-200 px-5">
-        <span aria-hidden="true" className="flex size-7 items-center justify-center rounded-md bg-brand-600 text-xs font-bold text-white">
-          A
-        </span>
+    <div className="flex h-full flex-col bg-shell text-white">
+      <div className="flex h-12 items-center gap-2 border-b border-white/10 px-5">
+        <BrandMark />
         <span className="text-sm font-semibold tracking-tight">Arkray CRM</span>
       </div>
 
-      <nav aria-label="Main" className="flex-1 space-y-6 overflow-y-auto px-3 py-4">
+      <nav aria-label="Main" className="scroll-slim flex-1 space-y-6 overflow-y-auto px-3 py-4">
         <div>
           {userId ? <WorkspaceLabel id={labelId} userId={userId} /> : null}
           <ul className="space-y-1" aria-labelledby={userId ? labelId : undefined}>
@@ -105,7 +100,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 
         {adminItems.length > 0 ? (
           <div>
-            <p className="px-3 pb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Administration</p>
+            <p className="px-3 pb-1 text-xs font-medium uppercase tracking-wide text-shell-muted">Administration</p>
             <ul className="space-y-1">
               {adminItems.map((item) => (
                 <li key={item.key}>
@@ -121,22 +116,24 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         ) : null}
       </nav>
 
-      <div className="space-y-1 border-t border-slate-200 px-3 py-3">
+      <div className="space-y-1 border-t border-white/10 px-3 py-3">
         {signOut.isError ? (
-          <p role="alert" className="px-3 text-xs text-red-600">
+          <p role="alert" className="px-3 text-xs text-red-200">
             Sign-out failed. Check your connection and try again.
           </p>
         ) : null}
-        <NavLink item={settingsNavItem} active={pathname.startsWith(settingsNavItem.href)} onNavigate={onNavigate} />
+        {showsSettings(viewer) ? (
+          <NavLink item={settingsNavItem} active={pathname.startsWith(settingsNavItem.href)} onNavigate={onNavigate} />
+        ) : null}
         <div className="flex items-center gap-3 px-3 py-2" aria-label="Current user">
           {viewer ? (
             <>
-              <span aria-hidden="true" className="flex size-8 items-center justify-center rounded-full bg-slate-200 text-xs font-semibold text-slate-700">
+              <span aria-hidden="true" className="flex size-8 items-center justify-center rounded-full bg-avatar text-xs font-semibold text-shell">
                 {initials(viewer.fullName)}
               </span>
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm font-medium text-slate-900">{viewer.fullName}</span>
-                <span className="block truncate text-xs text-slate-500">{viewer.email}</span>
+                <span className="block truncate text-sm font-medium text-white">{viewer.fullName}</span>
+                <span className="block truncate text-xs text-shell-muted">{viewer.email}</span>
               </span>
               <button
                 type="button"
@@ -144,15 +141,15 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
                 disabled={signOut.isPending || signOut.isSuccess}
                 aria-label="Sign out"
                 title={signOut.isError ? "Sign-out failed. Try again." : "Sign out"}
-                className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
+                className="focus-on-shell rounded-md p-1.5 text-shell-muted hover:bg-white/10 hover:text-white disabled:opacity-50"
               >
                 {signOut.isPending ? <Spinner /> : <LogOut aria-hidden="true" className="size-4" />}
               </button>
             </>
           ) : (
             <>
-              <Skeleton className="size-8 rounded-full" />
-              <Skeleton className="h-3 w-28" />
+              <Skeleton className="size-8 rounded-full bg-white/20!" />
+              <Skeleton className="h-3 w-28 bg-white/20!" />
               <span className="sr-only">Loading user</span>
             </>
           )}

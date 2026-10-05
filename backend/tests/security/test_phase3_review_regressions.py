@@ -64,10 +64,14 @@ def create(owner, stage_key="new"):
         lead_id=LeadFactory(owner=owner).pk,
         fields=FIELDS,
         stage_id=default_stage(stage_key).pk,
+        # the seeded Negotiation is a negotiation stage (pipeline.0006)
+        negotiated_price=Decimal("1000") if stage_key == "negotiation" else None,
     ).opportunity
 
 
 def move(actor, opportunity, stage_key, version=1, **kwargs):
+    if stage_key == "negotiation":
+        kwargs.setdefault("negotiated_price", Decimal("1000"))
     return services.move_opportunity(
         actor=actor,
         scope=OWN(actor.pk),
@@ -192,7 +196,7 @@ def test_the_boards_figures_describe_one_moment(monkeypatch):
     monkeypatch.setattr(selectors, "pipeline_totals", totals_after_a_concurrent_commit)
     board = selectors.board(
         OWN(owner.pk),
-        selectors.pipeline_for_board(None),
+        selectors.pipeline_for_board(OWN(owner.pk), None),
         OpportunityFilters(),
         binding_for=None,
     )

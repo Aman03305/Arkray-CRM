@@ -18,7 +18,7 @@ from typing import Any
 from uuid import UUID
 
 from django.db import connection, transaction
-from django.db.models import Count, Prefetch, Q, QuerySet
+from django.db.models import Count, F, Prefetch, Q, QuerySet, Subquery
 
 from arkray.core.access import AccessScope
 from arkray.core.errors import InvalidInputError, NotFoundError
@@ -33,9 +33,21 @@ from arkray.core.knowledge import KnowledgeDocument, SourceType, compose
 from arkray.core.ranking import Matches, SearchQuery, top_matches
 
 from . import metrics
-from .models import SEARCH_TEXT, Opportunity, Pipeline, Stage, StageCategory, StageHistory
+from .models import (
+    SEARCH_TEXT,
+    CustomField,
+    NegotiationPrice,
+    Opportunity,
+    Pipeline,
+    Stage,
+    StageCategory,
+    StageHistory,
+)
 
 INVALID_PIPELINE = "Choose a pipeline from the list."
+# The organisation-wide pipeline list (administrators) is bounded whatever the number of
+# users: shared pipelines first, then personal ones by owner (docs/pipeline.md).
+MAX_LISTED_PIPELINES = 500
 BOARD_CARDS_DEFAULT, BOARD_CARDS_MAX = 20, 50
 
 ORDERINGS: dict[str, KeysetOrdering] = {
@@ -94,6 +106,8 @@ _CARD_FIELDS = (
     "closed_sort",
     "pipeline_id",
     "stage_id",
+    "account_name",
+    "negotiated_price",
     "lead__id",
     "lead__first_name",
     "lead__last_name",
@@ -143,27 +157,96 @@ class Board:
 
 
 # --- configuration ---------------------------------------------------------------------------
-def pipelines() -> list[Pipeline]:
-    """Every pipeline (the default first) with its stages in position order, retired ones
-    included (opportunities and history may still reference them). Two queries."""
-    stages = Prefetch("stages", queryset=Stage.objects.order_by("position", "id"))
-    return list(Pipeline.objects.prefetch_related(stages).order_by("-is_default", "name", "id"))
-
-
-def pipeline_for_board(pipeline_id: UUID | None) -> Pipeline:
-    """The requested pipeline (the default one if None), with its stages. An unknown id is
-    a validation error: pipelines are configuration, visible to everyone."""
-    queryset = Pipeline.objects.prefetch_related(
+def _with_stages(queryset: QuerySet[Pipeline]) -> QuerySet[Pipeline]:
+    """Stages in position order (retired ones included: opportunities and history may still
+    reference them): one query for any number of pipelines."""
+    return queryset.select_related("owner").prefetch_related(
         Prefetch("stages", queryset=Stage.objects.order_by("position", "id"))
     )
-    pipeline = (
-        queryset.filter(pk=pipeline_id).first()
-        if pipeline_id is not None
-        else queryset.filter(is_default=True).first()
+
+
+def _with_configuration(queryset: QuerySet[Pipeline]) -> QuerySet[Pipeline]:
+    """Stages and the active custom fields, in order: two queries for any number."""
+    return _with_stages(queryset).prefetch_related(
+        Prefetch(
+            "fields", queryset=CustomField.objects.filter(is_active=True).order_by("position", "id")
+        ),
     )
-    if pipeline is None:
+
+
+def pipelines() -> list[Pipeline]:
+    """The organisation's shared pipelines (the default first) with their stages: what
+    every signed-in user may use (`/config/pipelines`, kept for compatibility). Personal
+    pipelines are listed per workspace (visible_pipelines)."""
+    return list(
+        _with_configuration(Pipeline.objects.filter(owner__isnull=True)).order_by(
+            "-is_default", "name", "id"
+        )
+    )
+
+
+def visible(scope: AccessScope) -> Q:
+    """The pipelines `scope` may see: the organisation's shared pipelines, the personal
+    pipelines of the workspace's owner, and any pipeline holding one of the workspace's
+    opportunities (a deal follows its lead when the lead is reassigned, and must never
+    become invisible because it sits in its previous owner's pipeline). Organisation-wide:
+    every pipeline."""
+    if scope.is_organization_wide:
+        return Q()
+    holding = scope.apply(Opportunity.objects.all()).values("pipeline_id")
+    return (
+        Q(owner__isnull=True)
+        | Q(owner_id__in=scope.owner_ids)
+        | Q(pk__in=Subquery(holding.order_by().distinct()))
+    )
+
+
+def visible_pipelines(scope: AccessScope, *, archived: bool = False) -> list[Pipeline]:
+    """The pipelines `scope` may see (active ones, or only archived ones), with their
+    configuration: shared first (the default first), then personal ones by owner. Bounded
+    (MAX_LISTED_PIPELINES)."""
+    queryset = Pipeline.objects.filter(visible(scope), is_active=not archived)
+    return list(
+        _with_configuration(queryset).order_by(
+            "-is_default",
+            F("owner_id").asc(nulls_first=True),
+            "name",
+            "id",
+        )[:MAX_LISTED_PIPELINES]
+    )
+
+
+def visible_pipeline(scope: AccessScope, pipeline_id: UUID) -> Pipeline:
+    """One pipeline `scope` may see, with its configuration (NotFoundError otherwise)."""
+    found = _with_configuration(Pipeline.objects.filter(visible(scope), pk=pipeline_id)).first()
+    if found is None:
+        raise NotFoundError()
+    return found
+
+
+def default_pipeline_id() -> UUID | None:
+    return Pipeline.objects.filter(is_default=True).values_list("pk", flat=True).first()
+
+
+def pipeline_for_board(scope: AccessScope, pipeline_id: UUID | None) -> Pipeline:
+    """The requested pipeline (the organisation's default one if None), with its stages, if
+    `scope` may see it. An unknown or invisible id is a validation error, the same for both
+    (a guessed id reveals nothing)."""
+    which = Q(is_default=True) if pipeline_id is None else Q(pk=pipeline_id)
+    found = _with_stages(Pipeline.objects.filter(visible(scope), which)).first()
+    if found is None:
         raise InvalidInputError(details={"pipeline": [INVALID_PIPELINE]})
-    return pipeline
+    return found
+
+
+def active_fields(pipeline_id: UUID) -> list[CustomField]:
+    """A pipeline's active custom fields in order (configuration: the caller has already
+    decided the pipeline may be used)."""
+    return list(
+        CustomField.objects.filter(pipeline_id=pipeline_id, is_active=True).order_by(
+            "position", "id"
+        )
+    )
 
 
 # --- opportunities -----------------------------------------------------------------------------
@@ -266,15 +349,27 @@ def _with_relations(queryset: QuerySet[Opportunity]) -> QuerySet[Opportunity]:
             *_CARD_FIELDS,
             "description",
             "lost_reason",
+            "opportunity_date",
+            "customer_name",
+            "contact_phone",
+            "contact_email",
+            "address",
+            "instrument_name",
+            "work_load",
+            "custom_fields",
+            "negotiated_at",
             "pipeline__id",
             "pipeline__key",
             "pipeline__name",
+            "pipeline__owner_id",
+            "pipeline__is_active",
             "stage__id",
             "stage__key",
             "stage__name",
             "stage__position",
             "stage__probability",
             "stage__category",
+            "stage__is_negotiation",
             "stage__is_active",
             "lead__archived_at",
             *(f"created_by__{f}" for f in _PERSON),
@@ -498,6 +593,34 @@ def _board(
             )
         )
     return Board(pipeline=pipeline, columns=columns, totals=totals)
+
+
+# --- negotiated prices -------------------------------------------------------------------------
+NEGOTIATION_ORDERING = KeysetOrdering(
+    "-occurred_at", (SortKey("occurred_at", descending=True), SortKey("id", descending=True))
+)
+
+
+def negotiation_history(scope: AccessScope, opportunity_id: UUID) -> QuerySet[NegotiationPrice]:
+    """An opportunity's negotiated prices, newest first, if `scope` may see the opportunity
+    (NotFoundError otherwise). Paginated by the caller."""
+    if not scope.apply(Opportunity.objects.filter(pk=opportunity_id)).exists():
+        raise NotFoundError()
+    return (
+        NegotiationPrice.objects.filter(opportunity_id=opportunity_id)
+        .select_related("actor")
+        .only(
+            "id",
+            "opportunity_id",
+            "price",
+            "currency",
+            "stage_id",
+            "stage_name",
+            "source",
+            "occurred_at",
+            *(f"actor__{f}" for f in _PERSON),
+        )
+    )
 
 
 # --- history -----------------------------------------------------------------------------------

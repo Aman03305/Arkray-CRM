@@ -16,6 +16,8 @@ export interface MoveRequest {
   version: number;
   target: Stage;
   lostReason?: string;
+  /** Required when the target is a negotiation stage (exact decimal string). */
+  negotiatedPrice?: string;
 }
 
 /** What went wrong, in words that say what the user sees now. */
@@ -46,7 +48,8 @@ export function moveErrorMessage(error: unknown, request: Pick<MoveRequest, "tit
 export function useMoveOpportunity(workspace: Workspace, boardKey?: QueryKey) {
   const queryClient = useQueryClient();
   return useMutation<Opportunity, unknown, MoveRequest, { key?: QueryKey; snapshot?: Board }>({
-    mutationFn: ({ id, target, version, lostReason }) => pipelineApi.move(workspace, id, target.id, version, lostReason),
+    mutationFn: ({ id, target, version, lostReason, negotiatedPrice }) =>
+      pipelineApi.move(workspace, id, target.id, version, { lostReason, negotiatedPrice }),
     onMutate: async ({ id, target }) => {
       if (!boardKey) return {};
       await queryClient.cancelQueries({ queryKey: boardKey });

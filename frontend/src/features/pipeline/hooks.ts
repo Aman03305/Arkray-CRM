@@ -1,7 +1,7 @@
 "use client";
 
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useState, useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
 import { activityKeys, timelineKeys } from "@/features/activities/api";
 import type { Board, Opportunity, OpportunityCard, OpportunityPage, PipelineDto, Stage } from "@/lib/api/types";
@@ -11,9 +11,29 @@ import type { Workspace } from "@/lib/workspace";
 import { type BoardFilters, NO_BOARD_FILTERS, pipelineApi, pipelineKeys } from "./api";
 import { moveCardInBoard } from "./transitions";
 
-/** Pipelines and their stages: configuration, cached for the session. */
-export function usePipelines() {
-  return useQuery({ queryKey: pipelineKeys.pipelines, queryFn: pipelineApi.pipelines, staleTime: 10 * 60_000 });
+/** The pipelines this workspace may use, with their stages and custom fields. */
+export function usePipelines(workspace: Workspace) {
+  return useQuery({
+    queryKey: pipelineKeys.pipelines(workspace),
+    queryFn: () => pipelineApi.pipelines(workspace),
+    staleTime: 5 * 60_000,
+  });
+}
+
+/**
+ * One pipeline of this workspace (an opportunity's): from the workspace's list when it is
+ * there, else fetched on its own (an archived pipeline, or one holding a reassigned deal).
+ */
+export function usePipeline(workspace: Workspace, id: string | undefined) {
+  const list = usePipelines(workspace);
+  const listed = id ? list.data?.results.find((p) => p.id === id) : undefined;
+  const single = useQuery({
+    queryKey: pipelineKeys.pipeline(workspace, id ?? ""),
+    queryFn: () => pipelineApi.pipeline(workspace, id!),
+    enabled: Boolean(id) && list.isSuccess && !listed,
+    staleTime: 5 * 60_000,
+  });
+  return { data: listed ?? single.data, isPending: list.isPending || (!listed && single.isPending && Boolean(id)) };
 }
 
 export function defaultPipeline(pipelines: readonly PipelineDto[] | undefined): PipelineDto | undefined {
@@ -22,6 +42,11 @@ export function defaultPipeline(pipelines: readonly PipelineDto[] | undefined): 
 
 export function activeStages(pipeline: PipelineDto | undefined): Stage[] {
   return (pipeline?.stages ?? []).filter((s) => s.is_active);
+}
+
+/** A negotiation stage: entering it asks for the negotiated price (its type, never its name). */
+export function isNegotiation(stage: Pick<Stage, "type"> | undefined | null): boolean {
+  return stage?.type === "negotiation";
 }
 
 export function firstOpenStage(pipeline: PipelineDto | undefined): Stage | undefined {
@@ -56,6 +81,8 @@ function asCard(opportunity: Opportunity, previous: OpportunityCard): Opportunit
     probability_overridden: opportunity.probability_overridden,
     weighted_value: opportunity.weighted_value,
     expected_close_date: opportunity.expected_close_date,
+    account_name: opportunity.account_name,
+    negotiated_price: opportunity.negotiated_price,
     closed_at: opportunity.closed_at,
     archived_at: opportunity.archived_at,
     version: opportunity.version,
@@ -141,22 +168,38 @@ interface BoardState {
   stage: string | null;
 }
 
+// A small store rather than component state: the shell's pipelines panel switches the
+// board's pipeline (or opens one stage's list) from outside the board.
 const remembered = new Map<string, BoardState>();
+const boardListeners = new Set<() => void>();
 const INITIAL: BoardState = { filters: NO_BOARD_FILTERS, applied: NO_BOARD_FILTERS, stage: null };
+
+function remember(workspaceKey: string, next: BoardState): void {
+  remembered.set(workspaceKey, next);
+  for (const listener of boardListeners) listener();
+}
+
+function subscribeToBoards(listener: () => void): () => void {
+  boardListeners.add(listener);
+  return () => boardListeners.delete(listener);
+}
+
+/** What this workspace's board shows (filters, stage list), as remembered. */
+function useRememberedBoard(workspaceKey: string): BoardState {
+  return useSyncExternalStore(
+    subscribeToBoards,
+    () => remembered.get(workspaceKey) ?? INITIAL,
+    () => INITIAL,
+  );
+}
 
 export function invalidRange(filters: BoardFilters): boolean {
   return Boolean(filters.closeFrom && filters.closeTo && filters.closeFrom > filters.closeTo);
 }
 
 export function useBoardState(workspaceKey: string) {
-  const [state, setState] = useState<BoardState>(() => remembered.get(workspaceKey) ?? INITIAL);
-  const update = useCallback(
-    (next: BoardState) => {
-      remembered.set(workspaceKey, next);
-      setState(next);
-    },
-    [workspaceKey],
-  );
+  const state = useRememberedBoard(workspaceKey);
+  const update = (next: BoardState) => remember(workspaceKey, next);
   const setFilters = (filters: BoardFilters) =>
     update({ ...state, filters, applied: invalidRange(filters) ? state.applied : filters });
   return {
@@ -176,12 +219,32 @@ export function useBoardState(workspaceKey: string) {
  * open opportunities) open a board that isn't narrowed by an earlier filter.
  */
 export function presetBoard(workspaceKey: string): void {
-  remembered.set(workspaceKey, INITIAL);
+  remember(workspaceKey, INITIAL);
+}
+
+/** The pipeline and stage list this workspace's board shows ("" = the default pipeline). */
+export function useBoardSelection(workspaceKey: string): { pipeline: string; stage: string | null } {
+  const state = useRememberedBoard(workspaceKey);
+  return { pipeline: state.applied.pipeline, stage: state.stage };
+}
+
+/**
+ * Show `pipeline` on this workspace's board, keeping the other filters; with `stage`, that
+ * stage's full list (as "View all" does). Used by the pipelines panel.
+ */
+export function choosePipeline(workspaceKey: string, pipeline: string, stage: string | null = null): void {
+  const state = remembered.get(workspaceKey) ?? INITIAL;
+  remember(workspaceKey, {
+    filters: { ...state.filters, pipeline },
+    applied: { ...state.applied, pipeline },
+    stage,
+  });
 }
 
 /** Tests only. */
 export function forgetBoardState(): void {
   remembered.clear();
+  for (const listener of boardListeners) listener();
 }
 
 // --- layout ----------------------------------------------------------------------------------

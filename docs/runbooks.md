@@ -194,6 +194,31 @@ reconciliation re-indexes any source whose chunks drifted.
    `API_THROTTLE_AUTH`, not the failure budgets.
 3. `workspace.accessed`: which administrator opened whose workspace, once per window.
    Unexpected access: [Security incident](#security-incident).
+4. Support sessions and administrator-set passwords: the security events feed (Admin home,
+   *Security activity*; `GET /api/v1/admin/security-events`) lists who started a session for
+   whom and why, how it ended, who set whose password, and sign-ins with a temporary
+   password. Every write during a session carries its `support_session_id` in the audit
+   trail (`audit_event.support_session_id`): list a session's actions with
+   `SELECT action, target_type, target_id, occurred_at FROM audit_event WHERE
+   support_session_id = '<id>' ORDER BY occurred_at`.
+
+## File storage
+
+*Alert: `attachment_storage_failed` / `attachment_upload_failed` repeating; housekeeping
+storage failures; `attachment_malware_blocked`; pending scans growing.*
+
+1. Uploads and downloads answer 503 `storage_unavailable` while the bucket (or volume) is
+   unreachable; nothing else in the CRM depends on it. Check the bucket's credentials,
+   policy and region (`ATTACHMENT_S3_*`), or the volume's mount and free space.
+2. Uploads that failed are marked failed (no row without an object can be downloaded);
+   objects of deleted, failed or blocked files are removed by the hourly
+   `activities.housekeeping`, idempotently, once storage is back.
+3. Scanner down (`ATTACHMENT_SCANNER`): new files stay "being checked" and don't download;
+   the scan jobs retry and then go dead (the dead-events alert). Restore clamd, then retry
+   the dead `activities.scan_attachment` events ([Dead events](#dead-events)).
+4. Malware blocked: the file was never downloadable, its object is deleted, the event is
+   `attachment.rejected` (note and uploader in the audit trail). Treat the uploader's
+   account as possibly compromised: [Security incident](#security-incident).
 
 ## Security incident
 
@@ -226,6 +251,15 @@ migrations are backward compatible, no down-migration during the release window.
    `manage.py check --deploy --database default`.
 4. Point the deployment at it; readiness `ok`; sign in; spot-check the dashboard's figures.
 5. Sessions aren't in backups: everyone signs in again.
+6. **The database backup is not a backup of the files** (product enhancement phase, R93): it
+   holds pipelines, stages, custom field definitions and values, negotiated price history and
+   attachment *metadata*, but the attachment bytes live in object storage. Restore the bucket
+   (or the attachments volume) from a point in time compatible with the database's: an
+   object without a row is invisible (housekeeping never sees it), a row without an object
+   downloads as 503 `storage_unavailable`. Then list rows whose object is missing (a
+   `HEAD` per `storage_key` of `activities_attachment` rows with `state = 'stored'` and
+   `deleted_at IS NULL`) and tell their notes' authors. Support sessions in the backup end at
+   once: their browser sessions are gone.
 
 ## Vacuum after a restore or a bulk load
 

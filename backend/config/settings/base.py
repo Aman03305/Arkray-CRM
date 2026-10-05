@@ -59,6 +59,9 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     # Idle timeout + absolute lifetime for signed-in sessions (identity.sessions).
     "arkray.identity.sessions.SessionPolicyMiddleware",
+    # An administrator's support session, if any (identity.support): after the session policy,
+    # so an expired browser session never carries one.
+    "arkray.identity.support.SupportSessionMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
@@ -242,6 +245,11 @@ TRUSTED_PROXY_COUNT = env.int("TRUSTED_PROXY_COUNT", default=0)
 TRUST_INCOMING_REQUEST_ID = env.bool("TRUST_INCOMING_REQUEST_ID", default=False)
 # Window during which repeated admin access to the same user's workspace is audited once.
 WORKSPACE_ACCESS_AUDIT_WINDOW_S = env.int("WORKSPACE_ACCESS_AUDIT_WINDOW_S", default=15 * 60)
+# Support sessions (identity.support): how long one lasts (no extension; start a new one).
+SUPPORT_SESSION_TTL_S = env.int("SUPPORT_SESSION_TTL_S", default=30 * 60)
+# How long an administrator-chosen password (a new user's initial one, or a reset) can be
+# used to sign in before it must have been changed; after that an administrator sets a new one.
+TEMPORARY_PASSWORD_TTL_S = env.int("TEMPORARY_PASSWORD_TTL_S", default=72 * 60 * 60)
 # The metrics endpoint (/health/metrics, config/metrics.py) answers only a scraper sending
 # this token as a bearer token; unset, it doesn't exist (404).
 METRICS_TOKEN = env("METRICS_TOKEN", default="")
@@ -308,6 +316,10 @@ SPECTACULAR_SETTINGS = {
         "AskFactKindEnum": "arkray.ai.api.serializers.FACT_KINDS",
         "AskBlockTypeEnum": "arkray.ai.api.serializers.BLOCK_TYPES",
         "AskAnswerModeEnum": "arkray.ai.api.serializers.ANSWER_MODES",
+        "StageTypeEnum": "arkray.pipeline.models.StageType",
+        "FieldTypeEnum": "arkray.pipeline.models.FieldType",
+        "NegotiationSourceEnum": "arkray.pipeline.models.NegotiationSource",
+        "ScanStatusEnum": "arkray.activities.models.ScanStatus",
     },
 }
 
@@ -387,6 +399,12 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": crontab(hour=21, minute=30),
         "options": {"expires": 60 * 60},
     },
+    "activities-housekeeping": {
+        "task": "activities.housekeeping",
+        # attachments: remove objects of deleted, failed or abandoned uploads (idempotent)
+        "schedule": crontab(minute=35),
+        "options": {"expires": 30 * 60},
+    },
 }
 
 # --- Transactional outbox ------------------------------------------------------------------
@@ -414,6 +432,59 @@ OUTBOX_LEASE_SECONDS = 300
 OUTBOX_DONE_RETENTION_DAYS = env.int("OUTBOX_DONE_RETENTION_DAYS", default=7)
 OUTBOX_PURGE_BATCH = 5000
 OUTBOX_PURGE_MAX_BATCHES = 100  # per run: at most 500,000 rows an hour
+
+# --- Attachments (docs/activities.md#attachments) --------------------------------------------
+# Files on notes. The bytes live in private object storage, never in PostgreSQL: a private
+# directory locally (never served by a web server), private S3-compatible storage in
+# production (ATTACHMENT_STORAGE=s3). Downloads always go through the API, which re-checks
+# authorization on every request; nothing is ever public.
+ATTACHMENT_MAX_BYTES = env.int("ATTACHMENT_MAX_BYTES", default=10 * 1024 * 1024)
+ATTACHMENT_MAX_PER_NOTE = env.int("ATTACHMENT_MAX_PER_NOTE", default=10)
+# Extensions accepted, from the catalog of types the server can recognise by their content
+# (activities.storage.CATALOG: pdf png jpg jpeg webp gif docx xlsx pptx csv txt); anything
+# else (executables, scripts, HTML, SVG, archives, ...) is refused. A system check refuses
+# an extension outside the catalog.
+ATTACHMENT_ALLOWED_EXTENSIONS = env.list(
+    "ATTACHMENT_ALLOWED_EXTENSIONS",
+    default=["pdf", "png", "jpg", "jpeg", "webp", "docx", "xlsx", "csv", "txt"],
+)
+# Malware scanning: "" (none: files are "not scanned" and downloadable) or
+# "clamd://host:3310" (a ClamAV daemon: files are "pending" until clean; only clean files can
+# be downloaded, infected ones are deleted). See docs/deployment.md#attachments.
+ATTACHMENT_SCANNER = env.str("ATTACHMENT_SCANNER", default="")
+ATTACHMENT_STORAGE = env.str("ATTACHMENT_STORAGE", default="filesystem")
+ATTACHMENT_ROOT = env.str("ATTACHMENT_ROOT", default=str(BASE_DIR / "var" / "attachments"))
+if ATTACHMENT_STORAGE == "s3":
+    _ATTACHMENT_BACKEND: dict[str, Any] = {
+        "BACKEND": "storages.backends.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": env.str("ATTACHMENT_S3_BUCKET"),
+            "endpoint_url": env.str("ATTACHMENT_S3_ENDPOINT_URL", default="") or None,
+            "region_name": env.str("ATTACHMENT_S3_REGION", default="") or None,
+            "access_key": env.str("ATTACHMENT_S3_ACCESS_KEY_ID", default="") or None,
+            "secret_key": env.str("ATTACHMENT_S3_SECRET_ACCESS_KEY", default="") or None,
+            "location": env.str("ATTACHMENT_S3_PREFIX", default="attachments"),
+            # Private objects, never overwritten, no public URLs: the API streams them.
+            "default_acl": "private",
+            "file_overwrite": False,
+            "querystring_auth": True,
+            "querystring_expire": 60,
+            "object_parameters": {"ServerSideEncryption": "AES256"},
+        },
+    }
+else:
+    _ATTACHMENT_BACKEND = {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+        "OPTIONS": {"location": ATTACHMENT_ROOT, "base_url": None},
+    }
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+    "attachments": _ATTACHMENT_BACKEND,
+}
+# Uploads are read from the request stream in chunks and never buffered whole in memory
+# above this (activities.storage.receive spools to a temporary file).
+ATTACHMENT_SPOOL_MEMORY_BYTES = 1024 * 1024
 
 # --- Ask Arkray (Phase 8, docs/rag-architecture.md) -----------------------------------------
 # Every AI setting lives here: providers, models, timeouts and every bound. Nothing else in

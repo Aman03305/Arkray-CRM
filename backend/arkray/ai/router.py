@@ -16,10 +16,12 @@ worse than a slower right one.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from arkray.core.access import AccessScope
 from arkray.pipeline import selectors as pipeline_selectors
 
 FILLER = frozenset(
@@ -91,6 +93,7 @@ class Route:
     intent: str
     calls: tuple[tuple[str, dict[str, Any]], ...]  # tool name and arguments, in order
     stage: str | None = None  # deals_in_stage: the stage name as configured
+    pipeline: str | None = None  # pipeline_named: the pipeline's name as configured
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +135,14 @@ INTENTS: tuple[_Intent, ...] = (
         _words(DEALS, "how many number count total"),
         frozenset(["open", "active"]),
         (("get_pipeline_summary", {}),),
+    ),
+    _Intent(
+        # "How many deals are in negotiation?": negotiation stages by their type (domain
+        # data), whatever they are called (docs/pipeline.md#negotiation).
+        "deals_in_negotiation",
+        _words("negotiation negotiating negotiations"),
+        frozenset([*DEALS.split(), "in", "at", "under", "stage", "stages", "open"]),
+        (("list_opportunities", {"stage_type": "negotiation", "limit": 10}),),
     ),
     _Intent(
         "deals_closing_this_month",
@@ -234,24 +245,64 @@ def _stage_route(words: list[str], stage_names: list[str]) -> Route | None:
     return None
 
 
-def route(question: str, *, stage_names: Callable[[], list[str]] | None = None) -> Route | None:
+PIPELINE_VALUE_WORDS = frozenset(["pipeline", "value", "worth", "amount", "size", "open"])
+
+
+def _pipeline_route(words: list[str], pipeline_names: list[str]) -> Route | None:
+    """ "What is the value of my Government Tender pipeline?": a pipeline's name, value words
+    and filler."""
+    if "pipeline" not in words:
+        return None
+    for name in sorted(pipeline_names, key=len, reverse=True):
+        name_words = [w for w in tokens(name) if w != "pipeline"]
+        if not name_words:
+            continue
+        for at in range(len(words) - len(name_words) + 1):
+            if words[at : at + len(name_words)] == name_words:
+                rest = words[:at] + words[at + len(name_words) :]
+                if all(word in FILLER | PIPELINE_VALUE_WORDS for word in rest):
+                    return Route(
+                        "pipeline_named",
+                        (("get_pipeline_summary", {"pipeline": name}),),
+                        pipeline=name,
+                    )
+    return None
+
+
+def route(
+    question: str,
+    *,
+    stage_names: Callable[[], list[str]] | None = None,
+    pipeline_names: Callable[[], list[str]] | None = None,
+) -> Route | None:
+    """`stage_names` and `pipeline_names` give the names the asker's workspace may see (its
+    pipelines): another user's personal pipeline never shapes the routing."""
     words = tokens(question)
     if not words or len(words) > 14:
         return None
     for intent in INTENTS:
         if _covers(words, intent):
             return Route(intent.name, intent.calls)
-    names = stage_names() if stage_names is not None else active_stage_names()
-    return _stage_route(words, names)
+    named = _pipeline_route(words, pipeline_names() if pipeline_names is not None else [])
+    if named is not None:
+        return named
+    return _stage_route(words, stage_names() if stage_names is not None else [])
 
 
-def active_stage_names() -> list[str]:
+def active_stage_names(scope: AccessScope) -> list[str]:
     return sorted(
         {
             stage.name
-            for pipeline in pipeline_selectors.pipelines()
-            if pipeline.is_active
+            for pipeline in pipeline_selectors.visible_pipelines(scope)
             for stage in pipeline.stages.all()
             if stage.is_active
         }
     )
+
+
+def pipeline_names(scope: AccessScope) -> list[str]:
+    """Names that identify one visible pipeline. A name several share (names are unique per
+    owner only) isn't routed: the tool asks which one is meant."""
+    visible = pipeline_selectors.visible_pipelines(scope)
+    counts = Counter(pipeline.name.casefold() for pipeline in visible)
+    return sorted(p.name for p in visible if counts[p.name.casefold()] == 1)

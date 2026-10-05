@@ -87,6 +87,10 @@ says which). In one transaction it:
 - deletes the Ask Arkray index chunks of those records and queues their re-indexing from
   the redacted text (an indexing job that read the old text meanwhile is overwritten);
 - records `lead.erased` (the administrator, the lead's id and counts, never a value);
+- blanks the opportunities' account, customer, contact and address fields and their custom
+  values, deletes the files of the lead's notes (names and content hashes blanked, objects
+  removed by a job; an upload in flight is removed when it finishes) and, the lead being
+  archived, refuses new files and text on its notes (product enhancement phase);
 - last, redacts the lost reasons in the stage history, if there are any.
 
 Ids, dates, statuses, stage names and amounts stay, so the pipeline's figures and history
@@ -95,7 +99,8 @@ of the person is left, and its placeholder name would match every other erased l
 conversations). The operator is found as at sign-in (`--by` normalised like an email) and
 must hold the CRM-management capability. **What it can't find:** the person named in
 other leads' notes, tasks or meetings (search for the name across the organisation and
-edit those by hand), and a conversation that names only the company of a person lead. Backups keep the old data until they expire (30 days). Implemented in
+edit those by hand), and a conversation that names only the company of a person lead. Backups keep the old data until they expire (30 days), and versioned attachment buckets
+keep earlier object versions until their lifecycle expires them (R93). Implemented in
 `arkray/privacy` and tested (`arkray/privacy/tests/test_erasure.py`: every planted value of
 the person gone from the lead, activities, opportunities, history, index, stored questions
 and answers (follow-ups and failed questions included) and the audit event; a second lead

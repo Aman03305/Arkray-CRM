@@ -115,7 +115,8 @@ class TestStageConstraints:
         OpportunityFactory(stage=stages["negotiation"])
         violates(
             "pipeline_opportunity_stage_category_fk",
-            "UPDATE pipeline_stage SET category='won', probability=100 WHERE id=%s",
+            "UPDATE pipeline_stage SET category='won', probability=100, is_negotiation=false"
+            " WHERE id=%s",
             [stages["negotiation"].pk],
         )
         other = Pipeline.objects.create(key="other", name="Other")

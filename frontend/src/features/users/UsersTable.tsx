@@ -1,10 +1,14 @@
 "use client";
 
+import Link from "next/link";
+
 import { ActionMenu, type MenuAction } from "@/components/ui/ActionMenu";
 import { Skeleton } from "@/components/ui/Skeleton";
 import type { AdminUser } from "@/lib/api/types";
 import { formatDate, formatDateTime, formatRelative } from "@/lib/format";
-import { UserWorkspaceLink } from "@/features/workspace/UserWorkspaceLink";
+import { hasCapability } from "@/lib/viewer";
+import { useViewer } from "@/lib/viewer-context";
+import { userWorkspaceHref } from "@/lib/workspace";
 
 import { UserStatus } from "./UserStatus";
 
@@ -33,9 +37,13 @@ interface UsersTableProps {
   loading: boolean;
   viewerId: string | undefined;
   onAction: (action: UserAction, user: AdminUser) => void;
+  /** A name opens the user's details (their CRM is the separate "Open CRM" link). */
+  onOpen: (user: AdminUser) => void;
 }
 
-export function UsersTable({ users, loading, viewerId, onAction }: UsersTableProps) {
+export function UsersTable({ users, loading, viewerId, onAction, onOpen }: UsersTableProps) {
+  // Only viewers who may open any user's workspace get the link (it would be "not found").
+  const opensCrm = hasCapability(useViewer(), "workspace.view_any");
   return (
     <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
       <table className="min-w-full divide-y divide-slate-200 text-sm" aria-busy={loading || undefined}>
@@ -74,7 +82,14 @@ export function UsersTable({ users, loading, viewerId, onAction }: UsersTablePro
                 return (
                   <tr key={user.id} className="hover:bg-slate-50/60">
                     <td className="whitespace-nowrap px-4 py-3">
-                      <UserWorkspaceLink user={user} />
+                      <button
+                        type="button"
+                        aria-haspopup="dialog"
+                        onClick={() => onOpen(user)}
+                        className="rounded-sm text-left font-medium text-slate-900 hover:text-brand-700 hover:underline"
+                      >
+                        {user.full_name}
+                      </button>
                       {isSelf ? <span className="ml-1.5 text-xs text-slate-500">(you)</span> : null}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-slate-600">{user.email}</td>
@@ -96,8 +111,19 @@ export function UsersTable({ users, loading, viewerId, onAction }: UsersTablePro
                         {formatDate(user.created_at)}
                       </time>
                     </td>
-                    <td className="px-4 py-3 text-right">
-                      <ActionMenu label={`Actions for ${user.full_name}`} actions={actions} />
+                    <td className="px-4 py-3">
+                      <div className="flex items-center justify-end gap-2">
+                        {opensCrm ? (
+                          <Link
+                            href={userWorkspaceHref(user.id)}
+                            aria-label={`Open CRM for ${user.full_name}`}
+                            className="whitespace-nowrap rounded-sm text-sm font-medium text-brand-700 hover:underline"
+                          >
+                            Open CRM
+                          </Link>
+                        ) : null}
+                        <ActionMenu label={`Actions for ${user.full_name}`} actions={actions} />
+                      </div>
                     </td>
                   </tr>
                 );

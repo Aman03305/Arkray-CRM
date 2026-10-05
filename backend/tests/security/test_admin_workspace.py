@@ -8,6 +8,8 @@ owner's marker (RAHUL-ONLY-*, PRIYA-ONLY-*, ₹111,111 / ₹888,888) so any leak
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import re
 import uuid
@@ -24,7 +26,8 @@ from django.urls import get_resolver
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from arkray.activities.models import Activity
+from arkray.activities import storage
+from arkray.activities.models import Activity, Attachment
 from arkray.audit.models import AuditEvent
 from arkray.identity import services as identity_services
 from arkray.identity.models import Role
@@ -32,7 +35,7 @@ from arkray.identity.policy import ROLE_CAPABILITIES
 from arkray.identity.workspaces import AUDIT_ACTION_WORKSPACE_ACCESSED
 from arkray.leads.models import Lead
 from arkray.leads.services import SUBJECT_NOT_ASSIGNABLE
-from arkray.pipeline.models import Opportunity, StageHistory
+from arkray.pipeline.models import Opportunity, Pipeline, Stage, StageHistory
 from tests.authz_matrix import AUTHZ_MATRIX
 from tests.factories import (
     AdminFactory,
@@ -56,6 +59,8 @@ RECORD_PARAMS = (
     "<uuid:activity_id>",
     "<uuid:question_id>",
     "<uuid:conversation_id>",
+    "<uuid:pipeline_id>",
+    "<uuid:attachment_id>",
 )
 WORKSPACE_ROUTES = [
     *sorted(
@@ -112,14 +117,42 @@ def world(admin, user_a, user_b):
             lead=lead, title=f"{mark}-OPPORTUNITY", value=value, stage=default_stage("proposal")
         )
         soon = timezone.now() + timedelta(days=1)
+        note = NoteFactory(lead=lead, opportunity=opportunity, description=f"{mark}-NOTE")
         out[key + "_records"] = {
             "lead": lead,
             "opportunity": opportunity,
             "task": TaskFactory(lead=lead, title=f"{mark}-TASK", due_at=soon),
             "meeting": MeetingFactory(lead=lead, title=f"{mark}-MEETING"),
-            "note": NoteFactory(lead=lead, description=f"{mark}-NOTE"),
+            "note": note,
+            "pipeline": personal_pipeline(owner, f"{mark}-PIPELINE"),
+            "attachment": stored_attachment(note, f"{mark}-FILE.txt", mark.encode()),
         }
     return out
+
+
+def personal_pipeline(owner, name):
+    pipeline = Pipeline.objects.create(key=f"p{owner.pk.hex[:12]}", name=name, owner=owner)
+    Stage.objects.create(
+        pipeline=pipeline, key="first", name="First", position=10, probability=10, category="open"
+    )
+    return pipeline
+
+
+def stored_attachment(note, name, content):
+    key = f"test/{note.pk.hex}"
+    storage.save(key, io.BytesIO(content))
+    return Attachment.objects.create(
+        note=note,
+        original_name=name,
+        extension="txt",
+        content_type="text/plain",
+        size=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+        storage_key=key,
+        state="stored",
+        uploaded_by=note.created_by,
+        stored_at=timezone.now(),
+    )
 
 
 def ws(user) -> str:
@@ -150,6 +183,14 @@ def reads(world, workspace: str, each_request=nullcontext) -> dict[str, str]:
         "/activities?type=note",
         f"/activities?lead={lead}",
         "/activity-summary",
+        # product enhancement phase
+        "/pipelines",
+        "/pipelines?archived=true",
+        f"/pipelines/{records['pipeline'].pk}",
+        f"/pipeline-board?pipeline={records['pipeline'].pk}",
+        f"/opportunities/{opportunity}/notes",
+        f"/opportunities/{opportunity}/negotiated-prices",
+        f"/attachments/{records['attachment'].pk}/download",
     ] + [f"/activities/{records[k].pk}" for k in ("task", "meeting", "note")]
     client = signed_in(world["admin"])
     out = {}
@@ -157,7 +198,7 @@ def reads(world, workspace: str, each_request=nullcontext) -> dict[str, str]:
         with each_request():
             response = client.get(f"{API}/{workspace}{path}")
         assert response.status_code == 200, (path, response.content)
-        out[path] = response.content.decode()
+        out[path] = response.getvalue().decode()
     return out
 
 
@@ -291,6 +332,10 @@ def substitute(route: str, workspace: str, records: dict[str, Any]) -> str:
     path = route.replace("<str:workspace>", workspace)
     path = path.replace("<uuid:lead_id>", str(records["lead"].pk))
     path = path.replace("<uuid:opportunity_id>", str(records["opportunity"].pk))
+    path = path.replace("<uuid:pipeline_id>", str(records["pipeline"].pk))
+    path = path.replace("<uuid:attachment_id>", str(records["attachment"].pk))
+    if "/attachments" in route and "<uuid:activity_id>" in route:
+        return "/" + path.replace("<uuid:activity_id>", str(records["note"].pk))
     return "/" + path.replace("<uuid:activity_id>", str(records["task"].pk))
 
 
@@ -303,6 +348,8 @@ def test_priyas_records_through_rahuls_workspace_are_not_found(world, route, met
         "leads": list(Lead.objects.values_list("id", "version").order_by("id")),
         "opportunities": list(Opportunity.objects.values_list("id", "version").order_by("id")),
         "activities": list(Activity.objects.values_list("id", "version").order_by("id")),
+        "pipelines": list(Pipeline.objects.values_list("id", "version").order_by("id")),
+        "attachments": list(Attachment.objects.values_list("id", "deleted_at").order_by("id")),
         "audit": AuditEvent.objects.exclude(action=AUDIT_ACTION_WORKSPACE_ACCESSED).count(),
     }
     rahul = ws(world["rahul"])
@@ -321,6 +368,8 @@ def test_priyas_records_through_rahuls_workspace_are_not_found(world, route, met
         "leads": list(Lead.objects.values_list("id", "version").order_by("id")),
         "opportunities": list(Opportunity.objects.values_list("id", "version").order_by("id")),
         "activities": list(Activity.objects.values_list("id", "version").order_by("id")),
+        "pipelines": list(Pipeline.objects.values_list("id", "version").order_by("id")),
+        "attachments": list(Attachment.objects.values_list("id", "deleted_at").order_by("id")),
         "audit": AuditEvent.objects.exclude(action=AUDIT_ACTION_WORKSPACE_ACCESSED).count(),
     }
 
@@ -390,7 +439,11 @@ def test_every_change_in_rahuls_workspace_is_anitas_and_none_is_rahuls(world):
     assert opportunity["created_by"]["id"] == str(anita.pk)
     moved = client.post(
         f"{base}/opportunities/{opportunity['id']}/move",
-        {"stage": str(default_stage("negotiation").pk), "version": opportunity["version"]},
+        {
+            "stage": str(default_stage("negotiation").pk),
+            "version": opportunity["version"],
+            "negotiated_price": "100000",
+        },
         format="json",
     )
     assert moved.status_code == 200, moved.content

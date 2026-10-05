@@ -85,6 +85,32 @@ describe("a 401 on a signed-in page", () => {
   });
 });
 
+describe("a 403 about the viewer's own state", () => {
+  beforeEach(() => {
+    browser.hardNavigate.mockReset();
+    setPathname("/leads");
+  });
+  afterEach(() => setPathname("/"));
+
+  it.each(["password_change_required", "support_session_active"])("(%s) fetches the viewer again", async (code) => {
+    const client = createQueryClient();
+    client.setQueryData(VIEWER_QUERY_KEY, { id: "u1" });
+    const failing = client.getMutationCache().build(client, { mutationFn: () => Promise.reject(new ApiError(403, code, "x")) });
+    await failing.execute(undefined).catch(() => undefined);
+    expect(client.getQueryState(VIEWER_QUERY_KEY)?.isInvalidated).toBe(true);
+    expect(browser.hardNavigate).not.toHaveBeenCalled();
+  });
+
+  it("leaves the viewer alone for other refusals", async () => {
+    const client = createQueryClient();
+    client.setQueryData(VIEWER_QUERY_KEY, { id: "u1" });
+    await client
+      .fetchQuery({ queryKey: ["x"], queryFn: () => Promise.reject(new ApiError(403, "permission_denied", "x")), retry: false })
+      .catch(() => undefined);
+    expect(client.getQueryState(VIEWER_QUERY_KEY)?.isInvalidated).toBe(false);
+  });
+});
+
 it("knows the public authentication pages", () => {
   expect(["/login", "/forgot-password", "/reset-password/abc", "/activate/abc"].every(isPublicPath)).toBe(true);
   expect(["/dashboard", "/admin/users", "/loginx"].some(isPublicPath)).toBe(false);

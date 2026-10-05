@@ -11,6 +11,7 @@ const ADMIN_CAPABILITIES: Capability[] = [
   "crm.assign_any",
   "crm.manage_any",
   "crm.view_all",
+  "support.access",
   "users.manage",
   "workspace.view_any",
 ];
@@ -27,6 +28,8 @@ export function makeViewer(overrides: Partial<Viewer> = {}): Viewer {
     roleLabel: "User",
     capabilities: ["crm.access_own", "ai.query"],
     features: { ask: false },
+    passwordChangeRequired: false,
+    supportSession: null,
     ...overrides,
   };
 }
@@ -58,6 +61,8 @@ export function makeAdminUser(overrides: Partial<AdminUser> = {}): AdminUser {
     activated_at: "2026-09-01T05:00:00Z",
     deactivated_at: null,
     invitation: null,
+    password_change_required: false,
+    password_changed_at: "2026-09-01T05:00:00Z",
     version: 1,
   };
   return { ...base, ...overrides };

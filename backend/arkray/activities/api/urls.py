@@ -26,4 +26,21 @@ workspace_urlpatterns = [
         views.OpportunityTimelineView.as_view(),
         name="opportunity-timeline",
     ),
+    path(
+        "opportunities/<uuid:opportunity_id>/notes",
+        views.OpportunityNotesView.as_view(),
+        name="opportunity-notes",
+    ),
+    path(f"{ACTIVITY}/attachments", views.NoteAttachmentsView.as_view(), name="note-attachments"),
+    path("attachments/<uuid:attachment_id>", views.AttachmentView.as_view(), name="attachment"),
+    path(
+        "attachments/<uuid:attachment_id>/download",
+        views.AttachmentDownloadView.as_view(),
+        name="attachment-download",
+    ),
+    path(
+        "attachments/<uuid:attachment_id>/preview",
+        views.AttachmentPreviewView.as_view(),
+        name="attachment-preview",
+    ),
 ]

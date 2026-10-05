@@ -134,6 +134,7 @@ export function workspaceWorld(people: Person[] = [RAHUL, PRIYA]) {
     let m: RegExpExecArray | null;
     if (rest === "") return ok({ kind: "user", subject: { id: p.id, full_name: p.name, status: p.status } });
     if (rest === "/dashboard") return ok(dashboardOf(p));
+    if (rest === "/pipelines") return ok(PIPELINES); // this workspace's pipelines
     if (rest === "/leads" && method === "GET") return ok(page([makeLeadListItem({ ...leadOf(p) })]));
     if (rest === "/leads" && method === "POST") return ok(leadOf(p, { id: `${p.leadId.slice(0, -1)}9`, created_by: ACTOR }), 201);
     if (rest === "/leads/duplicates") return ok({ results: [] });

@@ -22,7 +22,6 @@ import { businessToday, formatDateOnly, formatTime } from "@/lib/format";
 import { formatInr } from "@/lib/money";
 import {
   activityHref,
-  describeWorkspace,
   leadHref,
   type Workspace,
   workspaceApiSegment,
@@ -136,7 +135,7 @@ function Figure({
             </>
           ) : null}
         </div>
-        <div className="mt-1 text-sm text-slate-500">{detail}</div>
+        {detail ? <div className="mt-1 text-sm text-slate-500">{detail}</div> : null}
       </TargetLink>
     </li>
   );
@@ -148,29 +147,29 @@ function Figures({ dashboard, go, updating }: { dashboard: Dashboard; go: Target
   return (
     <section aria-labelledby={heading} aria-busy={updating || undefined}>
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <h2 id={heading} className="text-sm font-semibold text-slate-900">
+        <h2 id={heading} className="sr-only">
           Key figures
         </h2>
         <p className="text-xs text-slate-500">
           {updating ? <span className="mr-2 font-medium text-slate-700">Updating…</span> : null}
-          Today is <time dateTime={dashboard.business_date}>{formatDateOnly(dashboard.business_date)}</time> (India time)
+          <time dateTime={dashboard.business_date}>{formatDateOnly(dashboard.business_date)}</time>
         </p>
       </div>
       <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        <Figure label="Total leads" icon={Contact} value={count(leads.total)} detail="Not archived" to={go.leads} />
-        <Figure label="New leads today" icon={UserPlus} value={count(leads.new_today)} detail="Created since midnight" to={go.newLeads} />
+        <Figure label="Total leads" icon={Contact} value={count(leads.total)} detail="" to={go.leads} />
+        <Figure label="New leads today" icon={UserPlus} value={count(leads.new_today)} detail="" to={go.newLeads} />
         <Figure
           label="Pipeline value"
           icon={IndianRupee}
           value={formatInr(pipeline.pipeline_value)}
-          detail={counted(pipeline.open_count, "open opportunity", "open opportunities")}
+          detail={`${counted(pipeline.open_count, "open opportunity", "open opportunities")} · all pipelines`}
           to={go.pipeline}
         />
         <Figure
           label="Weighted pipeline"
           icon={Scale}
           value={formatInr(pipeline.weighted_pipeline)}
-          detail="Value × probability, open only"
+          detail="All pipelines"
           to={go.pipeline}
         />
         <Figure
@@ -359,7 +358,6 @@ function TasksNeedingAttention({ dashboard, workspace, go }: { dashboard: Dashbo
         <p className={NONE}>No open tasks.</p>
       ) : (
         <>
-          <p className="pt-3 text-xs text-slate-500">Open tasks, overdue first, then by due date.</p>
           <ActivityRows rows={dashboard.next_tasks} workspace={workspace} kind="task" />
         </>
       )}
@@ -429,7 +427,7 @@ function useNewBusinessDay(businessDate: string | undefined, refresh: () => void
  * figures rather than leaving old ones up. A workspace the caller may not open is the
  * standard not-found page alone.
  */
-export function DashboardContent({ workspace, header, after }: { workspace: Workspace; header: ReactNode; after?: ReactNode }) {
+export function DashboardContent({ workspace, header }: { workspace: Workspace; header: ReactNode }) {
   const dashboard = useDashboard(workspace);
   useNewBusinessDay(dashboard.data?.business_date, () => void dashboard.refetch());
 
@@ -482,12 +480,11 @@ export function DashboardContent({ workspace, header, after }: { workspace: Work
         {status}
       </p>
       {body}
-      {after}
     </>
   );
 }
 
 /** A person's dashboard: their own, or one user's opened by an administrator. */
 export function WorkspaceDashboard({ workspace }: { workspace: Workspace }) {
-  return <DashboardContent workspace={workspace} header={<PageHeader title="Dashboard" subtitle={describeWorkspace(workspace)} />} />;
+  return <DashboardContent workspace={workspace} header={<PageHeader title="Dashboard" />} />;
 }

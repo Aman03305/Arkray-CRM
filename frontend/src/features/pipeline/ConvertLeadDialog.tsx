@@ -16,7 +16,9 @@ import { randomUuid } from "@/lib/random";
 import type { Workspace } from "@/lib/workspace";
 
 import { pipelineApi } from "./api";
-import { activeStages, defaultPipeline, firstOpenStage, syncAfterOpportunityWrite, usePipelines } from "./hooks";
+import { CustomFieldInputs } from "./CustomFields";
+import { type CustomValue, customRequest, validateCustom } from "./draft";
+import { activeStages, defaultPipeline, firstOpenStage, isNegotiation, syncAfterOpportunityWrite, usePipelines } from "./hooks";
 
 /**
  * Convert a lead: create its opportunity and mark the lead Converted, in one server
@@ -36,17 +38,23 @@ export function ConvertLeadDialog({
   onConverted: (result: Conversion) => void;
 }) {
   const queryClient = useQueryClient();
-  const pipelines = usePipelines();
+  const pipelines = usePipelines(workspace);
   const pipeline = defaultPipeline(pipelines.data?.results);
   const [title, setTitle] = useState(() => lead.organization_name || lead.display_name);
   const [value, setValue] = useState("");
   const [stageId, setStageId] = useState("");
   const [closeDate, setCloseDate] = useState("");
+  const [negotiatedPrice, setNegotiatedPrice] = useState("");
+  const [custom, setCustom] = useState<Record<string, CustomValue>>({});
   const [clientErrors, setClientErrors] = useState<Record<string, string[]>>({});
   const form = useRef<HTMLFormElement>(null);
   const idempotency = useRef<{ body: string; key: string } | null>(null);
   const stages = activeStages(pipeline).filter((s) => s.category !== "lost");
   const stage = stages.find((s) => s.id === stageId) ?? firstOpenStage(pipeline);
+  // What the server requires of a new deal (enhancement review): the price when it starts in
+  // a negotiation stage (whatever the stage is called), and the pipeline's required fields.
+  const asksPrice = isNegotiation(stage);
+  const requiredFields = (pipeline?.custom_fields ?? []).filter((f) => f.required);
 
   const convert = useMutation({
     mutationFn: (body: LeadConvertRequest) => {
@@ -74,6 +82,9 @@ export function ConvertLeadDialog({
     if (!title.trim()) problems.title = ["Enter a title."];
     const amount = parseAmountInput(value);
     if (!amount.ok) problems.value = [amount.error];
+    const price = parseAmountInput(negotiatedPrice);
+    if (asksPrice && !price.ok) problems.negotiated_price = [negotiatedPrice.trim() ? price.error : "Enter the negotiated price."];
+    Object.assign(problems, validateCustom(requiredFields, custom, true));
     setClientErrors(problems);
     if (!amount.ok || Object.keys(problems).length) return;
     const body: { -readonly [K in keyof LeadConvertRequest]: LeadConvertRequest[K] } = {
@@ -83,13 +94,17 @@ export function ConvertLeadDialog({
     };
     if (stageId) body.stage = stageId;
     if (closeDate) body.expected_close_date = closeDate;
+    if (asksPrice && price.ok) body.negotiated_price = price.value;
+    if (requiredFields.length) body.custom_fields = customRequest(requiredFields, custom);
     convert.mutate(body, { onSuccess: onConverted });
   };
 
   const problem = convert.isError
     ? isApiError(convert.error, 409)
       ? { message: "This lead was changed a moment ago. The latest details are shown now; please check and try again.", requestId: null }
-      : Object.keys(server).some((f) => ["title", "value", "stage", "expected_close_date"].includes(f))
+      : Object.keys(server).some(
+            (f) => ["title", "value", "stage", "expected_close_date", "negotiated_price"].includes(f) || f.startsWith("custom_fields."),
+          )
         ? null
         : describeError(convert.error)
     : null;
@@ -132,6 +147,20 @@ export function ConvertLeadDialog({
           options={stages.map((s) => ({ value: s.id, label: `${s.name} (${formatPercent(s.probability)})` }))}
           errors={errors.stage}
         />
+        {asksPrice ? (
+          <TextField
+            label="Negotiated price (₹)"
+            name="negotiated_price"
+            inputMode="decimal"
+            value={negotiatedPrice}
+            onChange={(e) => setNegotiatedPrice(e.target.value)}
+            errors={errors.negotiated_price}
+            autoComplete="off"
+          />
+        ) : null}
+        {requiredFields.length ? (
+          <CustomFieldInputs fields={requiredFields} values={custom} onChange={(id, v) => setCustom((c) => ({ ...c, [id]: v }))} errors={errors} />
+        ) : null}
         <TextField
           label="Expected close date"
           name="expected_close_date"

@@ -4,6 +4,64 @@
  */
 
 export interface paths {
+    readonly "/api/v1/admin/security-events": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * @description Account and security events administrators are told about: password changes and
+         *     resets (that they happened, never the password), users created, deactivated or given a
+         *     new role, support sessions started and ended.
+         */
+        readonly get: operations["admin_security_events"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/support-sessions": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Start a support session in one user's CRM (docs/admin-user-workspace.md#support-sessions):
+         *     time-limited and audited; the administrator never learns or uses the user's password.
+         */
+        readonly post: operations["support_sessions_start"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/support-sessions/current": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        readonly post?: never;
+        /** @description Exit this browser session's support session (idempotent). */
+        readonly delete: operations["support_sessions_exit"];
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/admin/users": {
         readonly parameters: {
             readonly query?: never;
@@ -94,6 +152,27 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         readonly post: operations["admin_users_resend_invitation_create"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/users/{user_id}/set-password": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Set a new temporary password for an active (non-administrator) user: their sessions
+         *     end and they must choose their own password at their next sign-in. The password is never
+         *     stored in plaintext, logged, audited or returned.
+         */
+        readonly post: operations["admin_users_set_password_create"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -288,7 +367,10 @@ export interface paths {
             readonly path?: never;
             readonly cookie?: never;
         };
-        /** @description Pipelines and their stages (configuration, the same for everyone). */
+        /**
+         * @description The organisation's shared pipelines and their stages (the same for everyone). A
+         *     workspace's pipelines, personal ones included, are at /workspaces/{ws}/pipelines.
+         */
         readonly get: operations["pipelines_list"];
         readonly put?: never;
         readonly post?: never;
@@ -361,6 +443,27 @@ export interface paths {
         readonly put?: never;
         /** Hide an activity from lists, timelines and counts. */
         readonly post: operations["activities_archive"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/activities/{activity_id}/attachments": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Attach a file to a note. The body is the file itself (Content-Type:
+         *     application/octet-stream) and the X-Filename header its name, percent-encoded. At most
+         *     ATTACHMENT_MAX_BYTES; allowed types only, recognised by their content.
+         */
+        readonly post: operations["activities_attachments_upload"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -517,6 +620,59 @@ export interface paths {
         };
         /** @description One of the caller's questions in this workspace (poll until answered or failed). */
         readonly get: operations["ask_question"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/attachments/{attachment_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete: operations["attachments_delete"];
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/attachments/{attachment_id}/download": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * @description The file, as a download, if its note is visible in this workspace now (re-checked on
+         *     every request) and the virus scan allows it.
+         */
+        readonly get: operations["attachments_download"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/attachments/{attachment_id}/preview": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** @description An image file, shown inline (PNG, JPEG, WebP, GIF only; validated at upload). */
+        readonly get: operations["attachments_preview"];
         readonly put?: never;
         readonly post?: never;
         readonly delete?: never;
@@ -791,6 +947,51 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/negotiated-prices": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * @description The negotiated price history (newest first, append-only), and recording a new price
+         *     while the opportunity is in a negotiation stage.
+         */
+        readonly get: operations["opportunities_negotiated_prices"];
+        readonly put?: never;
+        /**
+         * @description The negotiated price history (newest first, append-only), and recording a new price
+         *     while the opportunity is in a negotiation stage.
+         */
+        readonly post: operations["opportunities_record_negotiated_price"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/notes": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * @description An opportunity's notes, newest first: whole text, author, edits, files and whether
+         *     the caller may change each one. Adding a note is POST /activities {type: "note",
+         *     opportunity}; editing it PATCH /activities/{id}.
+         */
+        readonly get: operations["opportunities_notes"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/restore": {
         readonly parameters: {
             readonly query?: never;
@@ -865,6 +1066,117 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/workspaces/{workspace}/pipelines": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * @description The pipelines this workspace may use (shared ones, the owner's own, and any holding
+         *     one of its deals), and creating a pipeline: one's own; a user's (administrators, in that
+         *     user's workspace); or a shared one (administrators, organisation-wide).
+         */
+        readonly get: operations["workspace_pipelines_list"];
+        readonly put?: never;
+        /**
+         * @description The pipelines this workspace may use (shared ones, the owner's own, and any holding
+         *     one of its deals), and creating a pipeline: one's own; a user's (administrators, in that
+         *     user's workspace); or a shared one (administrators, organisation-wide).
+         */
+        readonly post: operations["workspace_pipelines_create"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/pipelines/{pipeline_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get: operations["workspace_pipelines_retrieve"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch: operations["workspace_pipelines_rename"];
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/pipelines/{pipeline_id}/archive": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        readonly post: operations["workspace_pipelines_archive"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/pipelines/{pipeline_id}/fields": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        /** @description Replace the pipeline's custom opportunity fields. */
+        readonly put: operations["workspace_pipelines_fields"];
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/pipelines/{pipeline_id}/restore": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        readonly post: operations["workspace_pipelines_restore"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/pipelines/{pipeline_id}/stages": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        /**
+         * @description Replace the pipeline's stage list (add, rename, retype, re-probability, reorder and
+         *     remove in one versioned change).
+         */
+        readonly put: operations["workspace_pipelines_stages"];
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/workspaces/{workspace}/search": {
         readonly parameters: {
             readonly query?: never;
@@ -924,6 +1236,11 @@ export interface components {
             readonly meeting_url: string;
             readonly completed_by: components["schemas"]["UserRef"] | null;
             readonly cancelled_by: components["schemas"]["UserRef"] | null;
+            /** Format: date-time */
+            readonly edited_at: string | null;
+            readonly edited_by: components["schemas"]["UserRef"] | null;
+            /** @description A note's files (others: none). */
+            readonly attachments: readonly components["schemas"]["Attachment"][];
         };
         /** @description Every type-specific field (each type accepts only its own: validation.py). */
         readonly ActivityCreateRequest: {
@@ -1082,6 +1399,9 @@ export interface components {
             /** Format: date-time */
             readonly deactivated_at: string | null;
             readonly invitation: components["schemas"]["InvitationState"] | null;
+            readonly password_change_required: boolean;
+            /** Format: date-time */
+            readonly password_changed_at: string | null;
             readonly version: number;
         };
         /** @description One keyset-paginated page of users (follow `next` / `previous` as given). */
@@ -1206,6 +1526,24 @@ export interface components {
             readonly next: string | null;
             readonly previous: string | null;
         };
+        /**
+         * @description A file's metadata (never its storage key or bytes). `downloadable` follows the virus
+         *     scan policy; `previewable` images may be shown inline (the preview route).
+         */
+        readonly Attachment: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly name: string;
+            readonly extension: string;
+            readonly content_type: string;
+            readonly size: number;
+            readonly scan_status: components["schemas"]["ScanStatusEnum"];
+            readonly downloadable: boolean;
+            readonly previewable: boolean;
+            readonly uploaded_by: components["schemas"]["UserRef"];
+            /** Format: date-time */
+            readonly created_at: string;
+        };
         readonly Board: {
             readonly pipeline: components["schemas"]["PipelineRef"];
             readonly currency: string;
@@ -1254,6 +1592,15 @@ export interface components {
         readonly Conversion: {
             readonly lead: components["schemas"]["Lead"];
             readonly opportunity: components["schemas"]["Opportunity"];
+        };
+        readonly CustomField: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly name: string;
+            readonly type: components["schemas"]["FieldTypeEnum"];
+            readonly required: boolean;
+            readonly options: readonly components["schemas"]["FieldOption"][];
+            readonly position: number;
         };
         /** @description The workspace's figures and its short lists, all read at the same moment. */
         readonly Dashboard: {
@@ -1310,6 +1657,43 @@ export interface components {
             readonly email: string;
             readonly version: number;
             readonly current_password?: string;
+        };
+        readonly FieldInputRequest: {
+            /**
+             * Format: uuid
+             * @description An existing field; omit for a new one.
+             */
+            readonly id?: string;
+            readonly name: string;
+            readonly type: components["schemas"]["FieldTypeEnum"];
+            /** @default false */
+            readonly required: boolean;
+            readonly options?: readonly components["schemas"]["FieldOptionInputRequest"][];
+        };
+        readonly FieldOption: {
+            readonly id: string;
+            readonly label: string;
+        };
+        readonly FieldOptionInputRequest: {
+            /** @description An existing choice. */
+            readonly id?: string;
+            readonly label: string;
+        };
+        /**
+         * @description * `text` - Text
+         *     * `long_text` - Long text
+         *     * `number` - Number
+         *     * `currency` - Currency (INR)
+         *     * `date` - Date
+         *     * `boolean` - Yes / no
+         *     * `single_select` - Single choice
+         *     * `multi_select` - Multiple choice
+         * @enum {string}
+         */
+        readonly FieldTypeEnum: "text" | "long_text" | "number" | "currency" | "date" | "boolean" | "single_select" | "multi_select";
+        readonly FieldsReplaceRequest: {
+            readonly version: number;
+            readonly custom_fields: readonly components["schemas"]["FieldInputRequest"][];
         };
         readonly InvitationAcceptRequest: {
             readonly token: string;
@@ -1369,7 +1753,24 @@ export interface components {
             readonly owner: string;
             readonly version: number;
         };
+        /**
+         * @description The opportunity's customer, instrument and custom details (all optional here; the
+         *     account and customer names default to the lead's at creation).
+         */
         readonly LeadConvertRequest: {
+            /** Format: date */
+            readonly opportunity_date?: string;
+            readonly account_name?: string;
+            readonly customer_name?: string;
+            readonly contact_phone?: string;
+            readonly contact_email?: string;
+            readonly address?: string;
+            readonly instrument_name?: string;
+            readonly work_load?: string;
+            /** @description Custom field id -> value (null clears it). Numbers and amounts as strings. */
+            readonly custom_fields?: {
+                readonly [key: string]: unknown;
+            };
             readonly title: string;
             /** @description Amount in the organisation currency (INR), e.g. "1250000.00". */
             readonly value: string | number;
@@ -1378,6 +1779,8 @@ export interface components {
             /** Format: date */
             readonly expected_close_date?: string | null;
             readonly description?: string;
+            /** @description Required when the stage is a negotiation stage; refused otherwise. */
+            readonly negotiated_price?: (string | number) | null;
             /** @description The lead's current version. */
             readonly version: number;
             /** Format: uuid */
@@ -1512,16 +1915,75 @@ export interface components {
          * @enum {string}
          */
         readonly MatchedOnEnum: "email" | "phone";
+        readonly NegotiatedPriceInputRequest: {
+            readonly version: number;
+            /** @description The negotiated price (INR), e.g. "1050000.00". */
+            readonly price: string | number;
+        };
+        readonly NegotiationPrice: {
+            /** @example 3f9a1c0b7d2e4a6c8e10 */
+            readonly id: string;
+            /** Format: decimal */
+            readonly price: string;
+            readonly currency: string;
+            /** Format: uuid */
+            readonly stage_id: string;
+            readonly stage_name: string;
+            readonly source: components["schemas"]["NegotiationSourceEnum"];
+            readonly actor: components["schemas"]["UserRef"];
+            /** Format: date-time */
+            readonly occurred_at: string;
+        };
+        readonly NegotiationPricePage: {
+            readonly results: readonly components["schemas"]["NegotiationPrice"][];
+            readonly next: string | null;
+            readonly previous: string | null;
+        };
+        /**
+         * @description * `stage_entry` - Entered a negotiation stage
+         *     * `revision` - Revised during negotiation
+         *     * `creation` - Created in a negotiation stage
+         * @enum {string}
+         */
+        readonly NegotiationSourceEnum: "stage_entry" | "revision" | "creation";
+        /**
+         * @description A note on the deal page: the whole text, its author, when it was written and last
+         *     edited (and by whom), its files, and whether the caller may change it.
+         */
+        readonly Note: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly description: string;
+            /** @description The author. */
+            readonly created_by: components["schemas"]["UserRef"];
+            /** Format: date-time */
+            readonly created_at: string;
+            /** Format: date-time */
+            readonly edited_at: string | null;
+            readonly edited_by: components["schemas"]["UserRef"] | null;
+            readonly version: number;
+            readonly attachments: readonly components["schemas"]["Attachment"][];
+            readonly can_edit: boolean;
+        };
+        readonly NotePage: {
+            readonly results: readonly components["schemas"]["Note"][];
+            readonly next: string | null;
+            readonly previous: string | null;
+        };
         /** @enum {unknown} */
         readonly NullEnum: null;
         readonly Opportunity: {
             /** Format: uuid */
             readonly id: string;
             readonly title: string;
+            readonly account_name: string;
             readonly lead: components["schemas"]["LeadRef"];
             readonly owner: components["schemas"]["UserRef"];
             readonly status: components["schemas"]["StageCategoryEnum"];
-            /** Format: decimal */
+            /**
+             * Format: decimal
+             * @description The instrument installation price (INR): the deal's value.
+             */
             readonly value: string;
             /** Format: decimal */
             readonly probability: string;
@@ -1530,6 +1992,11 @@ export interface components {
             readonly weighted_value: string;
             /** Format: date */
             readonly expected_close_date: string | null;
+            /**
+             * Format: decimal
+             * @description The latest negotiated price, if any.
+             */
+            readonly negotiated_price: string | null;
             /** Format: date-time */
             readonly closed_at: string | null;
             /** Format: date-time */
@@ -1541,6 +2008,20 @@ export interface components {
             readonly updated_at: string;
             readonly pipeline: components["schemas"]["PipelineRef"];
             readonly stage: components["schemas"]["Stage"];
+            /** Format: date */
+            readonly opportunity_date: string;
+            readonly customer_name: string;
+            readonly contact_phone: string;
+            readonly contact_email: string;
+            readonly address: string;
+            readonly instrument_name: string;
+            readonly work_load: string;
+            /** @description Custom field id -> canonical value (strings, booleans or option ids). */
+            readonly custom_fields: {
+                readonly [key: string]: unknown;
+            };
+            /** Format: date-time */
+            readonly negotiated_at: string | null;
             readonly description: string;
             readonly lost_reason: string;
             readonly created_by: components["schemas"]["UserRef"];
@@ -1550,6 +2031,7 @@ export interface components {
             /** Format: uuid */
             readonly id: string;
             readonly title: string;
+            readonly account_name: string;
             readonly lead: components["schemas"]["LeadRef"];
             readonly owner: components["schemas"]["UserRef"];
             /** Format: uuid */
@@ -1564,6 +2046,8 @@ export interface components {
             readonly weighted_value: string;
             /** Format: date */
             readonly expected_close_date: string | null;
+            /** Format: decimal */
+            readonly negotiated_price: string | null;
             /** Format: date-time */
             readonly closed_at: string | null;
             /** Format: date-time */
@@ -1574,7 +2058,24 @@ export interface components {
             /** Format: date-time */
             readonly updated_at: string;
         };
+        /**
+         * @description The opportunity's customer, instrument and custom details (all optional here; the
+         *     account and customer names default to the lead's at creation).
+         */
         readonly OpportunityCreateRequest: {
+            /** Format: date */
+            readonly opportunity_date?: string;
+            readonly account_name?: string;
+            readonly customer_name?: string;
+            readonly contact_phone?: string;
+            readonly contact_email?: string;
+            readonly address?: string;
+            readonly instrument_name?: string;
+            readonly work_load?: string;
+            /** @description Custom field id -> value (null clears it). Numbers and amounts as strings. */
+            readonly custom_fields?: {
+                readonly [key: string]: unknown;
+            };
             readonly title: string;
             /** @description Amount in the organisation currency (INR), e.g. "1250000.00". */
             readonly value: string | number;
@@ -1583,6 +2084,8 @@ export interface components {
             /** Format: date */
             readonly expected_close_date?: string | null;
             readonly description?: string;
+            /** @description Required when the stage is a negotiation stage; refused otherwise. */
+            readonly negotiated_price?: (string | number) | null;
             /**
              * Format: uuid
              * @description The lead (in this workspace) the opportunity is for.
@@ -1609,6 +2112,8 @@ export interface components {
             readonly version: number;
             /** @description Optional, only when moving to a lost stage. */
             readonly lost_reason?: string;
+            /** @description Required when moving into a negotiation stage; refused otherwise. */
+            readonly negotiated_price?: (string | number) | null;
         };
         /** @description One keyset-paginated page of opportunities (follow `next` / `previous` as given). */
         readonly OpportunityPage: {
@@ -1701,7 +2206,24 @@ export interface components {
             readonly description?: string;
             readonly version?: number;
         };
+        /**
+         * @description The opportunity's customer, instrument and custom details (all optional here; the
+         *     account and customer names default to the lead's at creation).
+         */
         readonly PatchedOpportunityUpdateRequest: {
+            /** Format: date */
+            readonly opportunity_date?: string;
+            readonly account_name?: string;
+            readonly customer_name?: string;
+            readonly contact_phone?: string;
+            readonly contact_email?: string;
+            readonly address?: string;
+            readonly instrument_name?: string;
+            readonly work_load?: string;
+            /** @description Custom field id -> value (null clears it). Numbers and amounts as strings. */
+            readonly custom_fields?: {
+                readonly [key: string]: unknown;
+            };
             readonly version?: number;
             readonly title?: string;
             /** @description Amount in the organisation currency (INR), e.g. "1250000.00". */
@@ -1713,25 +2235,45 @@ export interface components {
             readonly description?: string;
             readonly lost_reason?: string;
         };
+        readonly PatchedPipelineRenameRequest: {
+            readonly version?: number;
+            readonly name?: string;
+        };
         readonly PatchedUserUpdateRequest: {
             readonly first_name?: string;
             readonly last_name?: string;
             readonly role?: components["schemas"]["RoleEnum"];
             readonly version?: number;
         };
+        readonly Person: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly full_name: string;
+        };
+        /**
+         * @description A pipeline with its stages in order (retired ones flagged) and its active custom
+         *     fields: the board columns, stage choices and form fields come from here, never from
+         *     hard-coded lists. `owner` is null for a shared (organisation) pipeline; `can_manage`
+         *     says whether the caller may configure it in this workspace.
+         */
         readonly Pipeline: {
             /** Format: uuid */
             readonly id: string;
             readonly key: string;
             readonly name: string;
+            readonly owner: components["schemas"]["UserRef"] | null;
             readonly is_default: boolean;
             readonly is_active: boolean;
+            readonly version: number;
+            readonly can_manage: boolean;
             readonly stages: readonly components["schemas"]["Stage"][];
+            readonly custom_fields: readonly components["schemas"]["CustomField"][];
         };
-        /**
-         * @description Every pipeline with its stages in order (retired ones flagged): the board columns
-         *     and the stage choices of every form come from here, never from hard-coded lists.
-         */
+        readonly PipelineCreateRequest: {
+            readonly name: string;
+            readonly stages: readonly components["schemas"]["StageInputRequest"][];
+            readonly custom_fields?: readonly components["schemas"]["FieldInputRequest"][];
+        };
         readonly PipelineList: {
             readonly results: readonly components["schemas"]["Pipeline"][];
         };
@@ -1804,6 +2346,14 @@ export interface components {
          * @enum {string}
          */
         readonly RoleEnum: "admin" | "sales_user";
+        /**
+         * @description * `not_scanned` - Not scanned
+         *     * `pending` - Being checked
+         *     * `clean` - Clean
+         *     * `rejected` - Blocked
+         * @enum {string}
+         */
+        readonly ScanStatusEnum: "not_scanned" | "pending" | "clean" | "rejected";
         readonly SearchLead: {
             /** Format: uuid */
             readonly id: string;
@@ -1912,6 +2462,35 @@ export interface components {
             /** @description More tasks matched than are shown. */
             readonly has_more: boolean;
         };
+        /**
+         * @description One account or security event (identity.selectors.SECURITY_ACTIONS): who did what to
+         *     which account, and when. Never a password, a hash, a token or a link.
+         */
+        readonly SecurityEvent: {
+            /** @example 3f9a1c0b7d2e4a6c8e10 */
+            readonly id: string;
+            readonly action: string;
+            /** Format: date-time */
+            readonly occurred_at: string;
+            /** @description Null when the system acted. */
+            readonly actor: components["schemas"]["Person"] | null;
+            /** @description The account concerned. */
+            readonly user: components["schemas"]["Person"] | null;
+            /** @description Allowlisted. */
+            readonly details: {
+                readonly [key: string]: string;
+            };
+            readonly in_support_session: boolean;
+        };
+        readonly SecurityEventPage: {
+            readonly results: readonly components["schemas"]["SecurityEvent"][];
+            readonly next: string | null;
+            readonly previous: string | null;
+        };
+        readonly SetPasswordRequest: {
+            readonly version: number;
+            readonly new_password: string;
+        };
         readonly SourceRef: {
             readonly key: string;
             readonly name: string;
@@ -1925,6 +2504,16 @@ export interface components {
             /** Format: decimal */
             readonly probability: string;
             readonly category: components["schemas"]["StageCategoryEnum"];
+            /**
+             * @description open, negotiation, won or lost: what the stage means (never its name).
+             *
+             *     * `open` - Open
+             *     * `negotiation` - Negotiation
+             *     * `won` - Won
+             *     * `lost` - Lost
+             */
+            readonly type: components["schemas"]["StageTypeEnum"];
+            readonly is_negotiation: boolean;
             readonly is_active: boolean;
         };
         /**
@@ -1959,6 +2548,29 @@ export interface components {
             readonly next: string | null;
             readonly previous: string | null;
         };
+        readonly StageInputRequest: {
+            /**
+             * Format: uuid
+             * @description An existing stage; omit for a new one.
+             */
+            readonly id?: string;
+            readonly name: string;
+            readonly type: components["schemas"]["StageTypeEnum"];
+            /** @description 0-100 for open and negotiation stages; won is 100 and lost 0. */
+            readonly probability?: (string | number) | null;
+        };
+        /**
+         * @description * `open` - Open
+         *     * `negotiation` - Negotiation
+         *     * `won` - Won
+         *     * `lost` - Lost
+         * @enum {string}
+         */
+        readonly StageTypeEnum: "open" | "negotiation" | "won" | "lost";
+        readonly StagesReplaceRequest: {
+            readonly version: number;
+            readonly stages: readonly components["schemas"]["StageInputRequest"][];
+        };
         /**
          * @description * `invited` - Invited
          *     * `active` - Active
@@ -1978,6 +2590,26 @@ export interface components {
          * @enum {string}
          */
         readonly SummariesEnum: "available" | "unavailable" | "none";
+        /** @description A live support session: whose CRM, since when, until when (never extended). */
+        readonly SupportSession: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly target: components["schemas"]["Person"];
+            readonly reason: string;
+            /** Format: date-time */
+            readonly started_at: string;
+            /** Format: date-time */
+            readonly expires_at: string;
+        };
+        readonly SupportSessionStartRequest: {
+            /**
+             * Format: uuid
+             * @description The user whose CRM to open.
+             */
+            readonly user: string;
+            /** @default  */
+            readonly reason: string;
+        };
         readonly TimelineActivity: {
             /** Format: uuid */
             readonly id: string;
@@ -2048,6 +2680,8 @@ export interface components {
             /** Format: email */
             readonly email: string;
             readonly role: components["schemas"]["RoleEnum"];
+            /** @description An initial password (the user must change it when they first sign in). Omit it to email an invitation instead. Stored only as a hash; never returned. */
+            readonly password?: string;
         };
         readonly UserRef: {
             /** Format: uuid */
@@ -2055,7 +2689,10 @@ export interface components {
             readonly full_name: string;
             readonly is_active: boolean;
         };
-        /** @description The signed-in user (GET /auth/me and the sign-in response). */
+        /**
+         * @description The signed-in user (GET /auth/me and the sign-in response). Always the person signed
+         *     in, also during a support session (which is described separately).
+         */
         readonly Viewer: {
             /** Format: uuid */
             readonly id: string;
@@ -2068,6 +2705,8 @@ export interface components {
             readonly role_label: string;
             readonly capabilities: readonly string[];
             readonly features: components["schemas"]["ViewerFeatures"];
+            readonly password_change_required: boolean;
+            readonly support_session: components["schemas"]["SupportSession"] | null;
         };
         /** @description Deployment-wide features the UI should offer (configuration, not permissions). */
         readonly ViewerFeatures: {
@@ -2100,6 +2739,69 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    readonly admin_security_events: {
+        readonly parameters: {
+            readonly query?: {
+                readonly cursor?: string;
+                readonly page_size?: number;
+            };
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SecurityEventPage"];
+                };
+            };
+        };
+    };
+    readonly support_sessions_start: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["SupportSessionStartRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SupportSession"];
+                };
+            };
+        };
+    };
+    readonly support_sessions_exit: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description No response body */
+            readonly 204: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     readonly admin_users_list: {
         readonly parameters: {
             readonly query?: {
@@ -2280,6 +2982,31 @@ export interface operations {
             readonly cookie?: never;
         };
         readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AdminUser"];
+                };
+            };
+        };
+    };
+    readonly admin_users_set_password_create: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly user_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["SetPasswordRequest"];
+            };
+        };
         readonly responses: {
             readonly 200: {
                 headers: {
@@ -2768,6 +3495,42 @@ export interface operations {
             };
         };
     };
+    readonly activities_attachments_upload: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /** @description The file's name, percent-encoded (UTF-8). */
+                readonly "X-Filename": string;
+            };
+            readonly path: {
+                readonly activity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: {
+            readonly content: {
+                readonly "application/octet-stream": string;
+            };
+        };
+        readonly responses: {
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Attachment"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     readonly activities_cancel: {
         readonly parameters: {
             readonly query?: never;
@@ -3105,6 +3868,85 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["Question"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly attachments_delete: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly attachment_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description No response body */
+            readonly 204: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly attachments_download: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly attachment_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/octet-stream": string;
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly attachments_preview: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly attachment_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "image/*": string;
                 };
             };
             /** @description Not found, or outside this workspace. */
@@ -3784,6 +4626,103 @@ export interface operations {
             };
         };
     };
+    readonly opportunities_negotiated_prices: {
+        readonly parameters: {
+            readonly query?: {
+                readonly cursor?: string;
+                readonly page_size?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly opportunity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["NegotiationPricePage"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly opportunities_record_negotiated_price: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly opportunity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["NegotiatedPriceInputRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Opportunity"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly opportunities_notes: {
+        readonly parameters: {
+            readonly query?: {
+                readonly cursor?: string;
+                readonly page_size?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly opportunity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["NotePage"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     readonly opportunities_restore: {
         readonly parameters: {
             readonly query?: never;
@@ -3919,6 +4858,262 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["PipelineSummary"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly workspace_pipelines_list: {
+        readonly parameters: {
+            readonly query?: {
+                readonly archived?: boolean;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["PipelineList"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly workspace_pipelines_create: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["PipelineCreateRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Pipeline"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly workspace_pipelines_retrieve: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly pipeline_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Pipeline"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly workspace_pipelines_rename: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly pipeline_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["PatchedPipelineRenameRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Pipeline"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly workspace_pipelines_archive: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly pipeline_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["OpportunityVersionRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Pipeline"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly workspace_pipelines_fields: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly pipeline_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["FieldsReplaceRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Pipeline"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly workspace_pipelines_restore: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly pipeline_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["OpportunityVersionRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Pipeline"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly workspace_pipelines_stages: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly pipeline_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["StagesReplaceRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Pipeline"];
                 };
             };
             /** @description Not found, or outside this workspace. */

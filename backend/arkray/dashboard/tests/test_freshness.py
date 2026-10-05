@@ -59,7 +59,11 @@ def test_every_write_shows_on_the_next_load(user_a_client):
     moved = post(
         client,
         f"opportunities/{opportunity['id']}/move",
-        {"stage": str(default_stage("negotiation").pk), "version": opportunity["version"]},
+        {
+            "stage": str(default_stage("negotiation").pk),
+            "version": opportunity["version"],
+            "negotiated_price": "1000",
+        },
         expected=200,
     )
     assert figures(client)["pipeline"]["weighted_pipeline"] == "750000.00"

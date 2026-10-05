@@ -85,12 +85,16 @@ def created(owner, lead):
 
 
 def move(actor, scope, opportunity_id, stage_key, version=1):
+    stage = default_stage(stage_key)
     return services.move_opportunity(
         actor=actor,
         scope=scope,
         opportunity_id=opportunity_id,
         version=version,
-        stage_id=default_stage(stage_key).pk,
+        stage_id=stage.pk,
+        # Entering negotiation needs the price (product enhancement phase); without it the
+        # move was refused or conflicted depending on which thread ran first.
+        negotiated_price=Decimal("1000") if stage.is_negotiation else None,
     )
 
 

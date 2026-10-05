@@ -203,6 +203,26 @@ since v0.7.0 rolled back to exactly v0.7.0's schema (the `vector` extension stay
   1,281 (R59: the run's own notes pushed "price" out of the recent window); at most 13
   database connections; the indexing backlog at most 46 and drained.
 
+## What exists after the product enhancement phase
+
+- Backend: `pipeline/tests/test_configuration.py` (pipelines and stages: ownership, limits,
+  stage replacement, retire vs delete, archive and restore, review regressions),
+  `test_negotiation.py` (a price on every path into negotiation, append-only history,
+  revisions), `test_deal_fields.py` (new fields, custom fields: types, bounds, markup,
+  canonical values, merge), `identity/tests/test_admin_passwords.py` (hash only; never in
+  logs, audit, outbox, mail or any response; forced change; expiry; no administrator
+  takeover), `test_support_sessions.py`, `activities/tests/test_attachments.py` (types by
+  content, Office active content, names, limits, authorization, outages, scanning with a
+  fake clamd, the erasure-during-upload race), `ai/tests/test_pipeline_questions.py`,
+  `tests/integration/test_enhancement_races.py` (14 real-thread races, including a stage
+  reorder against a forward move; five mutation checks in the session's `mutate.py`), and
+  the authorization matrix extended to every new route.
+- Frontend: the opportunity drawer, deal page tabs, negotiation dialogs, pipeline settings,
+  deal notes with files, the user details panel, set password, support session banner,
+  forced password change, security activity, and `pipeline/enhancement-review.test.tsx`
+  (one test per confirmed review finding).
+- Performance: `tests/performance/bench_enhancement.py` ([database.md](database.md#product-enhancement-phase-access-patterns)).
+
 ## What exists after Phase 11
 
 - **Backend (4071 tests, 97 % coverage of `arkray/`)**: production

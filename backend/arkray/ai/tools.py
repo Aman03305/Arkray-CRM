@@ -44,7 +44,7 @@ from arkray.leads import selectors as lead_selectors
 from arkray.leads.models import Lead
 from arkray.leads.selectors import LeadFilters
 from arkray.pipeline import selectors as pipeline_selectors
-from arkray.pipeline.models import Opportunity, Stage
+from arkray.pipeline.models import Opportunity, Pipeline, Stage
 from arkray.pipeline.selectors import OpportunityFilters
 from arkray.search import selectors as search_selectors
 
@@ -186,12 +186,36 @@ def _lead_link(ctx: ToolContext, lead: Lead | None) -> dict[str, str] | None:
     }
 
 
-def _stage_names() -> dict[UUID, Stage]:
-    return {
-        stage.pk: stage
-        for pipeline in pipeline_selectors.pipelines()
-        for stage in pipeline.stages.all()
-    }
+def _pipelines(ctx: ToolContext) -> list[Pipeline]:
+    """The pipelines this workspace may see (docs/pipeline.md#pipelines): active ones, then
+    archived ones. Never another user's personal pipeline that holds none of its deals."""
+    return [
+        *pipeline_selectors.visible_pipelines(ctx.scope),
+        *pipeline_selectors.visible_pipelines(ctx.scope, archived=True),
+    ]
+
+
+def _stage_names(ctx: ToolContext) -> dict[UUID, Stage]:
+    return {stage.pk: stage for pipeline in _pipelines(ctx) for stage in pipeline.stages.all()}
+
+
+def _named_pipeline(ctx: ToolContext, name: str) -> Pipeline:
+    pipelines = _pipelines(ctx)
+    matched = [p for p in pipelines if p.name.casefold() == name.casefold()]
+    if not matched:
+        names = ", ".join(sorted({p.name for p in pipelines if p.is_active}))
+        raise ToolError(f"No pipeline is called {name!r}. Pipelines: {names}.")
+    if len(matched) > 1:
+        # Names are unique per owner only: never answer for an arbitrary one of them
+        # (enhancement review: a ₹0 shared pipeline answered for the user's own).
+        owners = ", ".join(
+            "shared" if p.owner is None else f"{p.owner.full_name}'s" for p in matched
+        )
+        raise ToolError(
+            f"Several pipelines are called {name!r} ({owners}). Ask in the workspace of the"
+            " one you mean, or about all pipelines."
+        )
+    return matched[0]
 
 
 def _opportunity_row(
@@ -210,6 +234,11 @@ def _opportunity_row(
         "expected_close": fmt.day(found.expected_close_date),
         "lead": _lead_link(ctx, found.lead),
     }
+    if found.account_name:
+        row["account"] = fmt.label(found.account_name)
+    if found.negotiated_price is not None:
+        # The latest recorded negotiated price (authoritative, from the price history).
+        row["negotiated_price"] = fmt.money(found.negotiated_price)
     if found.closed_at is not None:
         row["closed"] = fmt.day(found.closed_at)
     owner = _person(ctx, found.owner)
@@ -268,13 +297,17 @@ def _lead_row(ctx: ToolContext, lead: Lead) -> dict[str, Any]:
 
 # --- the tools -----------------------------------------------------------------------------------
 def get_pipeline_summary(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    _check_keys(args, set())
-    totals = pipeline_selectors.pipeline_totals(ctx.scope, OpportunityFilters())
+    _check_keys(args, {"pipeline"})
+    name = _text(args, "pipeline", required=False, max_length=100)
+    chosen = _named_pipeline(ctx, name) if name is not None else None
+    totals = pipeline_selectors.pipeline_totals(
+        ctx.scope, OpportunityFilters(pipeline_id=chosen.pk if chosen else None)
+    )
     ctx.amount("Pipeline value", totals.pipeline_value)
     ctx.amount("Weighted pipeline", totals.weighted_pipeline)
     ctx.count("Open opportunities", totals.open_count)
     pipelines = []
-    for pipeline in pipeline_selectors.pipelines():
+    for pipeline in [chosen] if chosen is not None else _pipelines(ctx):
         breakdown = pipeline_selectors.stage_breakdown(ctx.scope, pipeline)
         # A retired pipeline still holding opportunities is listed too: the totals count
         # them, so the breakdown must add up to them (whole-software audit).
@@ -287,6 +320,7 @@ def get_pipeline_summary(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
                     {
                         "stage": row.stage.name,
                         "category": row.stage.category,
+                        "type": row.stage.stage_type,
                         "opportunities": row.count,
                         "value": fmt.money(row.total_value),
                         "weighted_value": fmt.money(row.weighted_value),
@@ -296,6 +330,7 @@ def get_pipeline_summary(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
             }
         )
     return {
+        "pipeline": chosen.name if chosen else "all pipelines",
         "pipeline_value": fmt.money(totals.pipeline_value),
         "weighted_pipeline": fmt.money(totals.weighted_pipeline),
         "open_opportunities": totals.open_count,
@@ -325,13 +360,15 @@ def _month_bounds(day: date, months_ahead: int) -> tuple[date, date]:
 
 
 def list_opportunities(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    _check_keys(args, {"status", "stage", "closing", "sort", "limit"})
+    _check_keys(args, {"status", "stage", "stage_type", "pipeline", "closing", "sort", "limit"})
     status = _choice(args, "status", ("open", "won", "lost"), None)
     closing = _choice(args, "closing", _CLOSING, None)
     sort = _choice(args, "sort", tuple(_OPPORTUNITY_SORTS), "value_desc") or "value_desc"
     limit = _limit(args)
     stage_name = _text(args, "stage", required=False, max_length=50)
-    stages = _stage_names()
+    stage_type = _choice(args, "stage_type", ("open", "negotiation", "won", "lost"), None)
+    pipeline_name = _text(args, "pipeline", required=False, max_length=100)
+    stages = _stage_names(ctx)
     if closing is not None and status is None:
         status = "open"  # an expected close date only matters for open deals
     filters = OpportunityFilters(status=status)
@@ -350,6 +387,15 @@ def list_opportunities(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
             status=status, expected_close_from=first, expected_close_to=last
         )
     queryset = pipeline_selectors.opportunity_list(ctx.scope, filters)
+    if pipeline_name is not None:
+        queryset = queryset.filter(pipeline_id=_named_pipeline(ctx, pipeline_name).pk)
+    if stage_type is not None:
+        # The stage's meaning, never its name: "Negotiation" renamed "Commercial discussion"
+        # is still a negotiation stage (docs/pipeline.md#negotiation).
+        typed = [s.pk for s in stages.values() if s.stage_type == stage_type]
+        queryset = queryset.filter(stage_id__in=typed)
+        if status is None:
+            queryset = queryset.filter(status="open" if stage_type == "negotiation" else stage_type)
     if stage_name is not None:
         matched = [s for s in stages.values() if s.name.casefold() == stage_name.casefold()]
         if not matched:
@@ -551,7 +597,7 @@ def find_records(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         raise ToolError(f"Search words need 3 letters or digits in a row ({exc}).") from None
     found = search_selectors.global_search(ctx.scope, query)
-    stages = _stage_names()
+    stages = _stage_names(ctx)
     groups = (found.leads, found.opportunities, found.tasks, found.meetings, found.notes)
     return {
         "query": query.text,
@@ -624,7 +670,7 @@ def _recent_activities(ctx: ToolContext, filters: ActivityFilters) -> list[dict[
 
 def _lead_details(ctx: ToolContext, lead_id: UUID) -> dict[str, Any]:
     lead = lead_selectors.lead_detail(ctx.scope, lead_id)
-    stages = _stage_names()
+    stages = _stage_names(ctx)
     opportunities = pipeline_selectors.opportunity_list(
         ctx.scope, OpportunityFilters(lead_id=lead_id)
     ).order_by("-created_at", "-id")[:RECENT_ACTIVITY_LIMIT]
@@ -647,7 +693,7 @@ def _opportunity_details(ctx: ToolContext, opportunity_id: UUID) -> dict[str, An
         .filter(pk=opportunity_id)
         .get()
     )
-    stages = _stage_names()
+    stages = _stage_names(ctx)
     row = _opportunity_row(ctx, card, stages)
     row["archived"] = found.archived_at is not None
     row["untrusted_text"] = fmt.clip(found.description, TEXT_LIMIT) if found.description else None
@@ -658,10 +704,57 @@ def _opportunity_details(ctx: ToolContext, opportunity_id: UUID) -> dict[str, An
         {"from": h.from_stage_name or None, "to": h.to_stage_name, "on": fmt.when(h.occurred_at)}
         for h in history
     ]
+    row["opportunity_date"] = fmt.day(found.opportunity_date)
+    if found.instrument_name:
+        row["instrument"] = fmt.label(found.instrument_name)
+    if found.work_load:
+        row["work_load"] = fmt.label(found.work_load)
+    row["negotiation_history"] = _negotiation_rows(ctx, opportunity_id)
     row["recent_activities"] = _recent_activities(
         ctx, ActivityFilters(opportunity_id=opportunity_id)
     )
     return row
+
+
+NEGOTIATION_HISTORY_LIMIT = 20
+
+
+def _negotiation_rows(ctx: ToolContext, opportunity_id: UUID) -> list[dict[str, Any]]:
+    prices = pipeline_selectors.negotiation_history(ctx.scope, opportunity_id).order_by(
+        "-occurred_at", "-id"
+    )[:NEGOTIATION_HISTORY_LIMIT]
+    return [
+        {
+            "price": fmt.money(price.price),
+            "stage": fmt.label(price.stage_name),
+            "recorded": fmt.when(price.occurred_at),
+            # Whoever recorded it, by name, unless it was the person asking: an
+            # administrator's price in a user's workspace is never "you" for the user, nor
+            # the user's for the administrator (enhancement review).
+            "by": "you" if price.actor_id == ctx.scope.actor_id else price.actor.full_name,
+        }
+        for price in prices
+    ]
+
+
+def get_negotiation_history(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """The negotiated prices of one opportunity, newest first: authoritative amounts from
+    the append-only history, never computed."""
+    _check_keys(args, {"ref"})
+    _, record_id = _ref(_text(args, "ref", required=True, max_length=60) or "", ("opportunity",))
+    try:
+        found = pipeline_selectors.opportunity_detail(ctx.scope, record_id)
+        rows = _negotiation_rows(ctx, record_id)
+    except NotFoundError:
+        raise ToolError("No such opportunity in this workspace.") from None
+    if found.negotiated_price is not None:
+        ctx.amount("Latest negotiated price", found.negotiated_price)
+    return {
+        "ref": ctx.cite("opportunity", found.pk, found.title),
+        "latest": fmt.money(found.negotiated_price) if found.negotiated_price is not None else None,
+        "history": rows,
+        "shown": len(rows),
+    }
 
 
 def _activity_details(ctx: ToolContext, kind: str, activity_id: UUID) -> dict[str, Any]:
@@ -826,9 +919,10 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         "get_pipeline_summary",
         "Pipeline value, weighted pipeline and number of open opportunities in this "
-        "workspace, plus the number, value and weighted value of opportunities in each stage. "
-        "Use for any question about pipeline totals or deals by stage.",
-        _schema({}),
+        "workspace (every pipeline, or one by name), plus the number, value and weighted value "
+        "of opportunities in each stage. Use for any question about pipeline totals or deals "
+        "by stage.",
+        _schema({"pipeline": {"type": "string", "description": "A pipeline's name (optional)."}}),
         get_pipeline_summary,
     ),
     Tool(
@@ -840,6 +934,12 @@ TOOLS: tuple[Tool, ...] = (
             {
                 "status": {"type": "string", "enum": ["open", "won", "lost"]},
                 "stage": {"type": "string", "description": "A stage name, e.g. Negotiation."},
+                "stage_type": {
+                    "type": "string",
+                    "enum": ["open", "negotiation", "won", "lost"],
+                    "description": "What the stage means, whatever it is called.",
+                },
+                "pipeline": {"type": "string", "description": "A pipeline's name."},
                 "closing": {
                     "type": "string",
                     "enum": list(_CLOSING),
@@ -850,6 +950,14 @@ TOOLS: tuple[Tool, ...] = (
             }
         ),
         list_opportunities,
+    ),
+    Tool(
+        "get_negotiation_history",
+        "The negotiated prices recorded for one opportunity (its reference, opportunity:<id>), "
+        "newest first, with the stage, when and by whom. Use for 'what price did we last "
+        "negotiate' questions; find the opportunity first with find_records.",
+        _schema({"ref": {"type": "string"}}, ("ref",)),
+        get_negotiation_history,
     ),
     Tool(
         "get_lead_summary",

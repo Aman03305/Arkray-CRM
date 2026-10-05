@@ -30,6 +30,12 @@ export function describeError(error: unknown): DisplayError {
   if (error.status === 403 && error.code === "permission_denied") {
     return { message: "You don't have permission to do that.", requestId: error.requestId };
   }
+  if (error.status === 403 && error.code === "support_session_active") {
+    return { message: "Not available during a support session. Exit it first.", requestId: error.requestId };
+  }
+  if (error.status === 403 && error.code === "password_change_required") {
+    return { message: "Choose a new password to continue.", requestId: error.requestId };
+  }
   return { message: error.message || GENERIC, requestId: error.requestId };
 }
 

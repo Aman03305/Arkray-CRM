@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, ClassVar
 
 from rest_framework.permissions import BasePermission
 
+from arkray.core.errors import PasswordChangeRequired, SupportSessionActive
+
 from .policy import Capability, has_capability
 
 if TYPE_CHECKING:
@@ -18,12 +20,33 @@ if TYPE_CHECKING:
     from rest_framework.views import APIView
 
 
+def _account_gates(request: Request, view: APIView) -> None:
+    """Applied after the caller passed their permission check, on every route:
+
+    - a user who must change an administrator-chosen password reaches only the views marked
+      `allowed_before_password_change` (who am I, change password);
+    - an administrator in a support session can't use views marked
+      `refused_in_support_session` (user administration, passwords, security events):
+      identity and security work needs their normal administrator context."""
+    if getattr(request.user, "password_change_required", False) and not getattr(
+        view, "allowed_before_password_change", False
+    ):
+        raise PasswordChangeRequired()
+    if getattr(view, "refused_in_support_session", False) and (
+        getattr(request, "support_session", None) is not None
+    ):
+        raise SupportSessionActive()
+
+
 class IsActiveUser(BasePermission):
     """Any signed-in, active user, acting on their own account or a resolved workspace."""
 
     def has_permission(self, request: Request, view: APIView) -> bool:
         user = request.user
-        return bool(user and user.is_authenticated and user.is_active)
+        if not (user and user.is_authenticated and user.is_active):
+            return False
+        _account_gates(request, view)
+        return True
 
 
 class HasCapability(BasePermission):
@@ -32,7 +55,10 @@ class HasCapability(BasePermission):
     capability: ClassVar[Capability | None] = None
 
     def has_permission(self, request: Request, view: APIView) -> bool:
-        return self.capability is not None and has_capability(request.user, self.capability)
+        if self.capability is None or not has_capability(request.user, self.capability):
+            return False
+        _account_gates(request, view)
+        return True
 
 
 _CAPABILITY_PERMISSIONS: dict[Capability, type[HasCapability]] = {}

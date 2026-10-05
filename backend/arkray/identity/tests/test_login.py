@@ -48,6 +48,8 @@ class TestSuccessfulSignIn:
             "role_label",
             "capabilities",
             "features",
+            "password_change_required",
+            "support_session",
         }
         assert body["full_name"] == "Rahul Sharma"
         assert body["capabilities"] == ["ai.query", "crm.access_own"]

@@ -43,7 +43,7 @@ export function ResetPasswordForm({ token }: { token: string }) {
         <Link
           href="/forgot-password"
           prefetch={false}
-          className="mt-4 inline-flex h-9 w-full items-center justify-center rounded-md bg-brand-600 text-sm font-medium text-white hover:bg-brand-700"
+          className="mt-4 inline-flex h-9 w-full items-center justify-center rounded-full bg-brand-600 text-sm font-medium text-white hover:bg-brand-700"
         >
           Request a new link
         </Link>

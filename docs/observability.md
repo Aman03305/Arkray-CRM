@@ -68,6 +68,17 @@ Conventions:
 - Django's 4xx duplicates are suppressed (the access log has them); 5xx are logged with
   tracebacks and correlation ids. A database outage is answered 503 `service_unavailable`
   (Phase 10), so an outage and a bug are different status codes in the access log.
+- Product enhancement phase (ids, kinds and counts only; never a file name, a password, a
+  price or a custom value): `attachment_upload_failed` (`reason`: storage),
+  `attachment_storage_failed` (`operation`), `attachment_rejected` (`extension`, `reason`:
+  content), `attachment_malware_blocked` (`extension`, WARNING), `login_temporary_password_expired`;
+  the activities housekeeping reports `abandoned`, `purged`, `storage_failures`,
+  `queued_for_scanning`, `no_longer_scanned` and `pending_scans`. Audit: `pipeline.*`
+  (created, renamed, stages_changed, fields_changed, archived, restored),
+  `opportunity.negotiated_price_recorded`, `attachment.uploaded|deleted|rejected`,
+  `note.updated` (with `edited_by`), `auth.password_set_by_admin`,
+  `auth.login_with_temporary_password`, `support_session.started|ended`; every event written
+  during a support session carries its `support_session_id`.
 - Dependency breakers (Phase 10): `cache_circuit_opened` and `ai_dispatch_circuit_opened`
   (WARNING, `cooldown_s`), one line per process each time the breaker opens; the cool-down
   doubles while the outage lasts (cache 15 s to 120 s, Ask Arkray's hand-off 30 s to 120 s).
@@ -178,3 +189,6 @@ The metric-based rows are shipped as Prometheus rules in `infrastructure/alerts/
 | RAG indexing backlog | `arkray_outbox_events{queue="ai_index",status="pending"}` > 1,000 for 30 min, or its oldest due > 1 h | runbooks: re-indexing |
 | Index health (R64) | a trigram index > 1.5 × its size after the last rebuild (weekly check) | runbooks: index bloat |
 | Security | login failure spike; lockout spike; `workspace.accessed` volume anomaly (audit) | runbooks: security events |
+| Support sessions and passwords | any `support_session.started` outside support hours, or more than a handful a day; `auth.login_with_temporary_password` by an address the user never used (audit, security events feed) | runbooks: security events |
+| File storage | `attachment_storage_failed` or `attachment_upload_failed` repeating for 10 min; housekeeping `storage_failures` > 0 two runs in a row | runbooks: file storage |
+| Malware | any `attachment_malware_blocked`; `pending_scans` growing for an hour (scanner down: files don't download) | runbooks: file storage |

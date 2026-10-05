@@ -7,7 +7,10 @@
  * - mutations are never retried automatically;
  * - any 401 on a signed-in page means the session ended (idle timeout, deactivation,
  *   password change elsewhere): the app reloads onto the sign-in page, dropping all cached
- *   data, and comes back here afterwards.
+ *   data, and comes back here afterwards;
+ * - a 403 saying a new password must be chosen, or that a support session limits what can be
+ *   done, means the signed-in user's state changed: the viewer is fetched again, and the
+ *   session gate / shell follow it (the password form, or the end of the support session).
  */
 import { MutationCache, QueryCache, QueryClient } from "@tanstack/react-query";
 
@@ -22,6 +25,9 @@ const PUBLIC_PREFIXES = ["/login", "/forgot-password", "/reset-password", "/acti
 export function isPublicPath(pathname: string): boolean {
   return PUBLIC_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 }
+
+/** 403 codes that mean the viewer's own state changed (see above). */
+const VIEWER_STATE_CODES = new Set(["password_change_required", "support_session_active"]);
 
 /** A server asking to be left alone longer than this isn't retried automatically. */
 const MAX_RETRY_AFTER_S = 4;
@@ -52,7 +58,13 @@ export function createQueryClient(): QueryClient {
   });
 
   function onError(error: unknown): void {
-    if (!(error instanceof ApiError) || error.status !== 401 || redirecting) return;
+    if (!(error instanceof ApiError)) return;
+    if (error.status === 403 && VIEWER_STATE_CODES.has(error.code)) {
+      // Several requests failing together share one refetch.
+      void client.invalidateQueries({ queryKey: VIEWER_QUERY_KEY }, { cancelRefetch: false });
+      return;
+    }
+    if (error.status !== 401 || redirecting) return;
     if (isPublicPath(window.location.pathname)) return;
     redirecting = true;
     const hadSession = client.getQueryData(VIEWER_QUERY_KEY) !== undefined;

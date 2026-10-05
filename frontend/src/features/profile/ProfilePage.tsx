@@ -98,9 +98,9 @@ export function ProfilePage() {
 
   return (
     <>
-      <PageHeader title="Settings" subtitle="Your profile and sign-in security." />
+      <PageHeader title="Settings" />
       <div className="space-y-6">
-        <Section title="Profile" description="Contact an administrator to change your name or email.">
+        <Section title="Profile" description="An administrator changes your name or email.">
           <dl className="grid gap-4 sm:grid-cols-3">
             {rows.map(([label, value]) => (
               <div key={label}>
@@ -118,11 +118,11 @@ export function ProfilePage() {
           </dl>
         </Section>
 
-        <Section title="Password" description="Changing it signs you out on every other device.">
+        <Section title="Password" description="Changing it signs you out on your other devices.">
           <ChangePasswordForm />
         </Section>
 
-        <Section title="Session" description="Sessions end after 2 hours without activity, and always after 12 hours.">
+        <Section title="Session" description="Ends after 2 hours idle.">
           {signOutError ? (
             <div className="mb-3">
               <Alert tone="error" requestId={signOutError.requestId}>

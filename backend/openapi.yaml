@@ -3,6 +3,72 @@ info:
   title: Arkray CRM API
   version: 1.0.0
 paths:
+  /api/v1/admin/security-events:
+    get:
+      operationId: admin_security_events
+      description: |-
+        Account and security events administrators are told about: password changes and
+        resets (that they happened, never the password), users created, deactivated or given a
+        new role, support sessions started and ended.
+      parameters:
+      - in: query
+        name: cursor
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 1000
+      - in: query
+        name: page_size
+        schema:
+          type: integer
+          maximum: 50
+          minimum: 1
+          default: 20
+      tags:
+      - admin
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityEventPage'
+          description: ''
+  /api/v1/admin/support-sessions:
+    post:
+      operationId: support_sessions_start
+      description: |-
+        Start a support session in one user's CRM (docs/admin-user-workspace.md#support-sessions):
+        time-limited and audited; the administrator never learns or uses the user's password.
+      tags:
+      - admin
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SupportSessionStartRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupportSession'
+          description: ''
+  /api/v1/admin/support-sessions/current:
+    delete:
+      operationId: support_sessions_exit
+      description: Exit this browser session's support session (idempotent).
+      tags:
+      - admin
+      security:
+      - sessionAuth: []
+      responses:
+        '204':
+          description: No response body
   /api/v1/admin/users:
     get:
       operationId: admin_users_list
@@ -209,6 +275,37 @@ paths:
         required: true
       tags:
       - admin
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+          description: ''
+  /api/v1/admin/users/{user_id}/set-password:
+    post:
+      operationId: admin_users_set_password_create
+      description: |-
+        Set a new temporary password for an active (non-administrator) user: their sessions
+        end and they must choose their own password at their next sign-in. The password is never
+        stored in plaintext, logged, audited or returned.
+      parameters:
+      - in: path
+        name: user_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - admin
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetPasswordRequest'
+        required: true
       security:
       - sessionAuth: []
       responses:
@@ -434,7 +531,9 @@ paths:
   /api/v1/config/pipelines:
     get:
       operationId: pipelines_list
-      description: Pipelines and their stages (configuration, the same for everyone).
+      description: |-
+        The organisation's shared pipelines and their stages (the same for everyone). A
+        workspace's pipelines, personal ones included, are at /workspaces/{ws}/pipelines.
       tags:
       - config
       security:
@@ -734,6 +833,50 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Activity'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/activities/{activity_id}/attachments:
+    post:
+      operationId: activities_attachments_upload
+      description: |-
+        Attach a file to a note. The body is the file itself (Content-Type:
+        application/octet-stream) and the X-Filename header its name, percent-encoded. At most
+        ATTACHMENT_MAX_BYTES; allowed types only, recognised by their content.
+      parameters:
+      - in: header
+        name: X-Filename
+        schema:
+          type: string
+        description: The file's name, percent-encoded (UTF-8).
+        required: true
+      - in: path
+        name: activity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      security:
+      - sessionAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Attachment'
           description: ''
         '404':
           description: Not found, or outside this workspace.
@@ -1069,6 +1212,91 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Question'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/attachments/{attachment_id}:
+    delete:
+      operationId: attachments_delete
+      parameters:
+      - in: path
+        name: attachment_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/workspaces/{workspace}/attachments/{attachment_id}/download:
+    get:
+      operationId: attachments_download
+      description: |-
+        The file, as a download, if its note is visible in this workspace now (re-checked on
+        every request) and the virus scan allows it.
+      parameters:
+      - in: path
+        name: attachment_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/attachments/{attachment_id}/preview:
+    get:
+      operationId: attachments_preview
+      description: An image file, shown inline (PNG, JPEG, WebP, GIF only; validated
+        at upload).
+      parameters:
+      - in: path
+        name: attachment_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
           description: ''
         '404':
           description: Not found, or outside this workspace.
@@ -1910,6 +2138,131 @@ paths:
           description: ''
         '404':
           description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/negotiated-prices:
+    get:
+      operationId: opportunities_negotiated_prices
+      description: |-
+        The negotiated price history (newest first, append-only), and recording a new price
+        while the opportunity is in a negotiation stage.
+      parameters:
+      - in: query
+        name: cursor
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 1000
+      - in: path
+        name: opportunity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: query
+        name: page_size
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 50
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NegotiationPricePage'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+    post:
+      operationId: opportunities_record_negotiated_price
+      description: |-
+        The negotiated price history (newest first, append-only), and recording a new price
+        while the opportunity is in a negotiation stage.
+      parameters:
+      - in: path
+        name: opportunity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NegotiatedPriceInputRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Opportunity'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/notes:
+    get:
+      operationId: opportunities_notes
+      description: |-
+        An opportunity's notes, newest first: whole text, author, edits, files and whether
+        the caller may change each one. Adding a note is POST /activities {type: "note",
+        opportunity}; editing it PATCH /activities/{id}.
+      parameters:
+      - in: query
+        name: cursor
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 1000
+      - in: path
+        name: opportunity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: query
+        name: page_size
+        schema:
+          type: integer
+          maximum: 50
+          minimum: 1
+          default: 20
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotePage'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
   /api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/restore:
     post:
       operationId: opportunities_restore
@@ -2138,6 +2491,268 @@ paths:
           description: ''
         '404':
           description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/pipelines:
+    get:
+      operationId: workspace_pipelines_list
+      description: |-
+        The pipelines this workspace may use (shared ones, the owner's own, and any holding
+        one of its deals), and creating a pipeline: one's own; a user's (administrators, in that
+        user's workspace); or a shared one (administrators, organisation-wide).
+      parameters:
+      - in: query
+        name: archived
+        schema:
+          type: boolean
+          default: false
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PipelineList'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+    post:
+      operationId: workspace_pipelines_create
+      description: |-
+        The pipelines this workspace may use (shared ones, the owner's own, and any holding
+        one of its deals), and creating a pipeline: one's own; a user's (administrators, in that
+        user's workspace); or a shared one (administrators, organisation-wide).
+      parameters:
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PipelineCreateRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pipeline'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/pipelines/{pipeline_id}:
+    get:
+      operationId: workspace_pipelines_retrieve
+      parameters:
+      - in: path
+        name: pipeline_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pipeline'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+    patch:
+      operationId: workspace_pipelines_rename
+      parameters:
+      - in: path
+        name: pipeline_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedPipelineRenameRequest'
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pipeline'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/pipelines/{pipeline_id}/archive:
+    post:
+      operationId: workspace_pipelines_archive
+      parameters:
+      - in: path
+        name: pipeline_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpportunityVersionRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pipeline'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/pipelines/{pipeline_id}/fields:
+    put:
+      operationId: workspace_pipelines_fields
+      description: Replace the pipeline's custom opportunity fields.
+      parameters:
+      - in: path
+        name: pipeline_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FieldsReplaceRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pipeline'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/pipelines/{pipeline_id}/restore:
+    post:
+      operationId: workspace_pipelines_restore
+      parameters:
+      - in: path
+        name: pipeline_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpportunityVersionRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pipeline'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/pipelines/{pipeline_id}/stages:
+    put:
+      operationId: workspace_pipelines_stages
+      description: |-
+        Replace the pipeline's stage list (add, rename, retype, re-probability, reorder and
+        remove in one versioned change).
+      parameters:
+      - in: path
+        name: pipeline_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StagesReplaceRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pipeline'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
   /api/v1/workspaces/{workspace}/search:
     get:
       operationId: search
@@ -2288,8 +2903,25 @@ components:
           - $ref: '#/components/schemas/UserRef'
           readOnly: true
           nullable: true
+        edited_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        edited_by:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+          nullable: true
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Attachment'
+          readOnly: true
+          description: 'A note''s files (others: none).'
       required:
       - archived_at
+      - attachments
       - cancelled_at
       - cancelled_by
       - completable
@@ -2299,6 +2931,8 @@ components:
       - created_by
       - description
       - due_at
+      - edited_at
+      - edited_by
       - ends_at
       - id
       - is_overdue
@@ -2661,6 +3295,14 @@ components:
           - $ref: '#/components/schemas/InvitationState'
           nullable: true
           readOnly: true
+        password_change_required:
+          type: boolean
+          readOnly: true
+        password_changed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
         version:
           type: integer
           readOnly: true
@@ -2675,6 +3317,8 @@ components:
       - invitation
       - last_login
       - last_name
+      - password_change_required
+      - password_changed_at
       - role
       - role_label
       - status
@@ -2945,6 +3589,57 @@ components:
       - next
       - previous
       - results
+    Attachment:
+      type: object
+      description: |-
+        A file's metadata (never its storage key or bytes). `downloadable` follows the virus
+        scan policy; `previewable` images may be shown inline (the preview route).
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          readOnly: true
+        extension:
+          type: string
+          readOnly: true
+        content_type:
+          type: string
+          readOnly: true
+        size:
+          type: integer
+          readOnly: true
+        scan_status:
+          allOf:
+          - $ref: '#/components/schemas/ScanStatusEnum'
+          readOnly: true
+        downloadable:
+          type: boolean
+          readOnly: true
+        previewable:
+          type: boolean
+          readOnly: true
+        uploaded_by:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - content_type
+      - created_at
+      - downloadable
+      - extension
+      - id
+      - name
+      - previewable
+      - scan_status
+      - size
+      - uploaded_by
     Board:
       type: object
       properties:
@@ -3068,6 +3763,38 @@ components:
       required:
       - lead
       - opportunity
+    CustomField:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          readOnly: true
+        type:
+          allOf:
+          - $ref: '#/components/schemas/FieldTypeEnum'
+          readOnly: true
+        required:
+          type: boolean
+          readOnly: true
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldOption'
+          readOnly: true
+        position:
+          type: integer
+          readOnly: true
+      required:
+      - id
+      - name
+      - options
+      - position
+      - required
+      - type
     Dashboard:
       type: object
       description: The workspace's figures and its short lists, all read at the same
@@ -3224,6 +3951,88 @@ components:
           maxLength: 1024
       required:
       - email
+      - version
+    FieldInputRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: An existing field; omit for a new one.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 60
+        type:
+          $ref: '#/components/schemas/FieldTypeEnum'
+        required:
+          type: boolean
+          default: false
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldOptionInputRequest'
+          maxItems: 50
+      required:
+      - name
+      - type
+    FieldOption:
+      type: object
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+      required:
+      - id
+      - label
+    FieldOptionInputRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          minLength: 1
+          description: An existing choice.
+          maxLength: 10
+        label:
+          type: string
+          minLength: 1
+          maxLength: 100
+      required:
+      - label
+    FieldTypeEnum:
+      enum:
+      - text
+      - long_text
+      - number
+      - currency
+      - date
+      - boolean
+      - single_select
+      - multi_select
+      type: string
+      description: |-
+        * `text` - Text
+        * `long_text` - Long text
+        * `number` - Number
+        * `currency` - Currency (INR)
+        * `date` - Date
+        * `boolean` - Yes / no
+        * `single_select` - Single choice
+        * `multi_select` - Multiple choice
+    FieldsReplaceRequest:
+      type: object
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        custom_fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldInputRequest'
+          maxItems: 30
+      required:
+      - custom_fields
       - version
     InvitationAcceptRequest:
       type: object
@@ -3416,7 +4225,40 @@ components:
       - version
     LeadConvertRequest:
       type: object
+      description: |-
+        The opportunity's customer, instrument and custom details (all optional here; the
+        account and customer names default to the lead's at creation).
       properties:
+        opportunity_date:
+          type: string
+          format: date
+        account_name:
+          type: string
+          maxLength: 200
+        customer_name:
+          type: string
+          maxLength: 200
+        contact_phone:
+          type: string
+          maxLength: 40
+        contact_email:
+          type: string
+          maxLength: 254
+        address:
+          type: string
+          maxLength: 1000
+        instrument_name:
+          type: string
+          maxLength: 200
+        work_load:
+          type: string
+          maxLength: 100
+        custom_fields:
+          type: object
+          additionalProperties:
+            nullable: true
+          description: Custom field id -> value (null clears it). Numbers and amounts
+            as strings.
         title:
           type: string
           minLength: 1
@@ -3445,6 +4287,15 @@ components:
         description:
           type: string
           maxLength: 5000
+        negotiated_price:
+          oneOf:
+          - type: string
+            pattern: ^[0-9]+(\.[0-9]{1,2})?$
+            example: '1250000.00'
+          - type: integer
+            minimum: 0
+          nullable: true
+          description: Required when the stage is a negotiation stage; refused otherwise.
         version:
           type: integer
           minimum: 1
@@ -3825,6 +4676,162 @@ components:
       description: |-
         * `email` - email
         * `phone` - phone
+    NegotiatedPriceInputRequest:
+      type: object
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        price:
+          oneOf:
+          - type: string
+            pattern: ^[0-9]+(\.[0-9]{1,2})?$
+            example: '1250000.00'
+          - type: integer
+            minimum: 0
+          description: The negotiated price (INR), e.g. "1050000.00".
+      required:
+      - price
+      - version
+    NegotiationPrice:
+      type: object
+      properties:
+        id:
+          type: string
+          example: 3f9a1c0b7d2e4a6c8e10
+          readOnly: true
+        price:
+          type: string
+          format: decimal
+          readOnly: true
+        currency:
+          type: string
+          readOnly: true
+        stage_id:
+          type: string
+          format: uuid
+          readOnly: true
+        stage_name:
+          type: string
+          readOnly: true
+        source:
+          allOf:
+          - $ref: '#/components/schemas/NegotiationSourceEnum'
+          readOnly: true
+        actor:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+        occurred_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - actor
+      - currency
+      - id
+      - occurred_at
+      - price
+      - source
+      - stage_id
+      - stage_name
+    NegotiationPricePage:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/NegotiationPrice'
+        next:
+          type: string
+          nullable: true
+        previous:
+          type: string
+          nullable: true
+      required:
+      - next
+      - previous
+      - results
+    NegotiationSourceEnum:
+      enum:
+      - stage_entry
+      - revision
+      - creation
+      type: string
+      description: |-
+        * `stage_entry` - Entered a negotiation stage
+        * `revision` - Revised during negotiation
+        * `creation` - Created in a negotiation stage
+    Note:
+      type: object
+      description: |-
+        A note on the deal page: the whole text, its author, when it was written and last
+        edited (and by whom), its files, and whether the caller may change it.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        description:
+          type: string
+          readOnly: true
+        created_by:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+          description: The author.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        edited_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        edited_by:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+          nullable: true
+        version:
+          type: integer
+          readOnly: true
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Attachment'
+          readOnly: true
+        can_edit:
+          type: boolean
+          readOnly: true
+      required:
+      - attachments
+      - can_edit
+      - created_at
+      - created_by
+      - description
+      - edited_at
+      - edited_by
+      - id
+      - version
+    NotePage:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Note'
+        next:
+          type: string
+          nullable: true
+        previous:
+          type: string
+          nullable: true
+      required:
+      - next
+      - previous
+      - results
     NullEnum:
       enum:
       - null
@@ -3836,6 +4843,9 @@ components:
           format: uuid
           readOnly: true
         title:
+          type: string
+          readOnly: true
+        account_name:
           type: string
           readOnly: true
         lead:
@@ -3854,6 +4864,7 @@ components:
           type: string
           format: decimal
           readOnly: true
+          description: 'The instrument installation price (INR): the deal''s value.'
         probability:
           type: string
           format: decimal
@@ -3871,6 +4882,12 @@ components:
           format: date
           readOnly: true
           nullable: true
+        negotiated_price:
+          type: string
+          format: decimal
+          readOnly: true
+          nullable: true
+          description: The latest negotiated price, if any.
         closed_at:
           type: string
           format: date-time
@@ -3900,6 +4917,39 @@ components:
           allOf:
           - $ref: '#/components/schemas/Stage'
           readOnly: true
+        opportunity_date:
+          type: string
+          format: date
+          readOnly: true
+        customer_name:
+          type: string
+          readOnly: true
+        contact_phone:
+          type: string
+          readOnly: true
+        contact_email:
+          type: string
+          readOnly: true
+        address:
+          type: string
+          readOnly: true
+        instrument_name:
+          type: string
+          readOnly: true
+        work_load:
+          type: string
+          readOnly: true
+        custom_fields:
+          type: object
+          additionalProperties: {}
+          readOnly: true
+          description: Custom field id -> canonical value (strings, booleans or option
+            ids).
+        negotiated_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
         description:
           type: string
           readOnly: true
@@ -3911,15 +4961,25 @@ components:
           - $ref: '#/components/schemas/UserRef'
           readOnly: true
       required:
+      - account_name
+      - address
       - archived_at
       - closed_at
+      - contact_email
+      - contact_phone
       - created_at
       - created_by
+      - custom_fields
+      - customer_name
       - description
       - expected_close_date
       - id
+      - instrument_name
       - lead
       - lost_reason
+      - negotiated_at
+      - negotiated_price
+      - opportunity_date
       - owner
       - pipeline
       - probability
@@ -3931,6 +4991,7 @@ components:
       - value
       - version
       - weighted_value
+      - work_load
     OpportunityCard:
       type: object
       description: A board card and a list row.
@@ -3940,6 +5001,9 @@ components:
           format: uuid
           readOnly: true
         title:
+          type: string
+          readOnly: true
+        account_name:
           type: string
           readOnly: true
         lead:
@@ -3979,6 +5043,11 @@ components:
           format: date
           readOnly: true
           nullable: true
+        negotiated_price:
+          type: string
+          format: decimal
+          readOnly: true
+          nullable: true
         closed_at:
           type: string
           format: date-time
@@ -4001,12 +5070,14 @@ components:
           format: date-time
           readOnly: true
       required:
+      - account_name
       - archived_at
       - closed_at
       - created_at
       - expected_close_date
       - id
       - lead
+      - negotiated_price
       - owner
       - probability
       - probability_overridden
@@ -4019,7 +5090,40 @@ components:
       - weighted_value
     OpportunityCreateRequest:
       type: object
+      description: |-
+        The opportunity's customer, instrument and custom details (all optional here; the
+        account and customer names default to the lead's at creation).
       properties:
+        opportunity_date:
+          type: string
+          format: date
+        account_name:
+          type: string
+          maxLength: 200
+        customer_name:
+          type: string
+          maxLength: 200
+        contact_phone:
+          type: string
+          maxLength: 40
+        contact_email:
+          type: string
+          maxLength: 254
+        address:
+          type: string
+          maxLength: 1000
+        instrument_name:
+          type: string
+          maxLength: 200
+        work_load:
+          type: string
+          maxLength: 100
+        custom_fields:
+          type: object
+          additionalProperties:
+            nullable: true
+          description: Custom field id -> value (null clears it). Numbers and amounts
+            as strings.
         title:
           type: string
           minLength: 1
@@ -4048,6 +5152,15 @@ components:
         description:
           type: string
           maxLength: 5000
+        negotiated_price:
+          oneOf:
+          - type: string
+            pattern: ^[0-9]+(\.[0-9]{1,2})?$
+            example: '1250000.00'
+          - type: integer
+            minimum: 0
+          nullable: true
+          description: Required when the stage is a negotiation stage; refused otherwise.
         lead:
           type: string
           format: uuid
@@ -4081,6 +5194,15 @@ components:
           type: string
           description: Optional, only when moving to a lost stage.
           maxLength: 500
+        negotiated_price:
+          oneOf:
+          - type: string
+            pattern: ^[0-9]+(\.[0-9]{1,2})?$
+            example: '1250000.00'
+          - type: integer
+            minimum: 0
+          nullable: true
+          description: Required when moving into a negotiation stage; refused otherwise.
       required:
       - stage
       - version
@@ -4282,7 +5404,40 @@ components:
           minimum: 1
     PatchedOpportunityUpdateRequest:
       type: object
+      description: |-
+        The opportunity's customer, instrument and custom details (all optional here; the
+        account and customer names default to the lead's at creation).
       properties:
+        opportunity_date:
+          type: string
+          format: date
+        account_name:
+          type: string
+          maxLength: 200
+        customer_name:
+          type: string
+          maxLength: 200
+        contact_phone:
+          type: string
+          maxLength: 40
+        contact_email:
+          type: string
+          maxLength: 254
+        address:
+          type: string
+          maxLength: 1000
+        instrument_name:
+          type: string
+          maxLength: 200
+        work_load:
+          type: string
+          maxLength: 100
+        custom_fields:
+          type: object
+          additionalProperties:
+            nullable: true
+          description: Custom field id -> value (null clears it). Numbers and amounts
+            as strings.
         version:
           type: integer
           minimum: 1
@@ -4317,6 +5472,16 @@ components:
         lost_reason:
           type: string
           maxLength: 500
+    PatchedPipelineRenameRequest:
+      type: object
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
     PatchedUserUpdateRequest:
       type: object
       properties:
@@ -4332,8 +5497,24 @@ components:
         version:
           type: integer
           minimum: 1
+    Person:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        full_name:
+          type: string
+      required:
+      - full_name
+      - id
     Pipeline:
       type: object
+      description: |-
+        A pipeline with its stages in order (retired ones flagged) and its active custom
+        fields: the board columns, stage choices and form fields come from here, never from
+        hard-coded lists. `owner` is null for a shared (organisation) pipeline; `can_manage`
+        says whether the caller may configure it in this workspace.
       properties:
         id:
           type: string
@@ -4345,10 +5526,21 @@ components:
         name:
           type: string
           readOnly: true
+        owner:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+          nullable: true
         is_default:
           type: boolean
           readOnly: true
         is_active:
+          type: boolean
+          readOnly: true
+        version:
+          type: integer
+          readOnly: true
+        can_manage:
           type: boolean
           readOnly: true
         stages:
@@ -4356,18 +5548,44 @@ components:
           items:
             $ref: '#/components/schemas/Stage'
           readOnly: true
+        custom_fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/CustomField'
+          readOnly: true
       required:
+      - can_manage
+      - custom_fields
       - id
       - is_active
       - is_default
       - key
       - name
+      - owner
+      - stages
+      - version
+    PipelineCreateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        stages:
+          type: array
+          items:
+            $ref: '#/components/schemas/StageInputRequest'
+          maxItems: 20
+        custom_fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldInputRequest'
+          maxItems: 30
+      required:
+      - name
       - stages
     PipelineList:
       type: object
-      description: |-
-        Every pipeline with its stages in order (retired ones flagged): the board columns
-        and the stage choices of every form come from here, never from hard-coded lists.
       properties:
         results:
           type: array
@@ -4517,6 +5735,18 @@ components:
       description: |-
         * `admin` - Admin
         * `sales_user` - User
+    ScanStatusEnum:
+      enum:
+      - not_scanned
+      - pending
+      - clean
+      - rejected
+      type: string
+      description: |-
+        * `not_scanned` - Not scanned
+        * `pending` - Being checked
+        * `clean` - Clean
+        * `rejected` - Blocked
     SearchLead:
       type: object
       properties:
@@ -4827,6 +6057,76 @@ components:
       required:
       - has_more
       - results
+    SecurityEvent:
+      type: object
+      description: |-
+        One account or security event (identity.selectors.SECURITY_ACTIONS): who did what to
+        which account, and when. Never a password, a hash, a token or a link.
+      properties:
+        id:
+          type: string
+          example: 3f9a1c0b7d2e4a6c8e10
+          readOnly: true
+        action:
+          type: string
+        occurred_at:
+          type: string
+          format: date-time
+        actor:
+          allOf:
+          - $ref: '#/components/schemas/Person'
+          nullable: true
+          description: Null when the system acted.
+        user:
+          allOf:
+          - $ref: '#/components/schemas/Person'
+          nullable: true
+          description: The account concerned.
+        details:
+          type: object
+          additionalProperties:
+            type: string
+          description: Allowlisted.
+        in_support_session:
+          type: boolean
+      required:
+      - action
+      - actor
+      - details
+      - id
+      - in_support_session
+      - occurred_at
+      - user
+    SecurityEventPage:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SecurityEvent'
+        next:
+          type: string
+          nullable: true
+        previous:
+          type: string
+          nullable: true
+      required:
+      - next
+      - previous
+      - results
+    SetPasswordRequest:
+      type: object
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        new_password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+      required:
+      - new_password
+      - version
     SourceRef:
       type: object
       properties:
@@ -4864,6 +6164,20 @@ components:
           allOf:
           - $ref: '#/components/schemas/StageCategoryEnum'
           readOnly: true
+        type:
+          allOf:
+          - $ref: '#/components/schemas/StageTypeEnum'
+          readOnly: true
+          description: |-
+            open, negotiation, won or lost: what the stage means (never its name).
+
+            * `open` - Open
+            * `negotiation` - Negotiation
+            * `won` - Won
+            * `lost` - Lost
+        is_negotiation:
+          type: boolean
+          readOnly: true
         is_active:
           type: boolean
           readOnly: true
@@ -4871,10 +6185,12 @@ components:
       - category
       - id
       - is_active
+      - is_negotiation
       - key
       - name
       - position
       - probability
+      - type
     StageCategoryEnum:
       enum:
       - open
@@ -4964,6 +6280,58 @@ components:
       - next
       - previous
       - results
+    StageInputRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: An existing stage; omit for a new one.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 50
+        type:
+          $ref: '#/components/schemas/StageTypeEnum'
+        probability:
+          oneOf:
+          - type: string
+            pattern: ^[0-9]+(\.[0-9]{1,2})?$
+            example: '1250000.00'
+          - type: integer
+            minimum: 0
+          nullable: true
+          description: 0-100 for open and negotiation stages; won is 100 and lost
+            0.
+      required:
+      - name
+      - type
+    StageTypeEnum:
+      enum:
+      - open
+      - negotiation
+      - won
+      - lost
+      type: string
+      description: |-
+        * `open` - Open
+        * `negotiation` - Negotiation
+        * `won` - Won
+        * `lost` - Lost
+    StagesReplaceRequest:
+      type: object
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        stages:
+          type: array
+          items:
+            $ref: '#/components/schemas/StageInputRequest'
+          maxItems: 20
+      required:
+      - stages
+      - version
     StatusEnum:
       enum:
       - invited
@@ -5001,6 +6369,49 @@ components:
         * `available` - available
         * `unavailable` - unavailable
         * `none` - none
+    SupportSession:
+      type: object
+      description: 'A live support session: whose CRM, since when, until when (never
+        extended).'
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        target:
+          allOf:
+          - $ref: '#/components/schemas/Person'
+          readOnly: true
+        reason:
+          type: string
+          readOnly: true
+        started_at:
+          type: string
+          format: date-time
+          readOnly: true
+        expires_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - expires_at
+      - id
+      - reason
+      - started_at
+      - target
+    SupportSessionStartRequest:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+          description: The user whose CRM to open.
+        reason:
+          type: string
+          default: ''
+          maxLength: 200
+      required:
+      - user
     TimelineActivity:
       type: object
       properties:
@@ -5164,6 +6575,13 @@ components:
           maxLength: 254
         role:
           $ref: '#/components/schemas/RoleEnum'
+        password:
+          type: string
+          minLength: 1
+          description: An initial password (the user must change it when they first
+            sign in). Omit it to email an invitation instead. Stored only as a hash;
+            never returned.
+          maxLength: 1024
       required:
       - email
       - first_name
@@ -5187,7 +6605,9 @@ components:
       - is_active
     Viewer:
       type: object
-      description: The signed-in user (GET /auth/me and the sign-in response).
+      description: |-
+        The signed-in user (GET /auth/me and the sign-in response). Always the person signed
+        in, also during a support session (which is described separately).
       properties:
         id:
           type: string
@@ -5222,6 +6642,14 @@ components:
           allOf:
           - $ref: '#/components/schemas/ViewerFeatures'
           readOnly: true
+        password_change_required:
+          type: boolean
+          readOnly: true
+        support_session:
+          allOf:
+          - $ref: '#/components/schemas/SupportSession'
+          nullable: true
+          readOnly: true
       required:
       - capabilities
       - email
@@ -5230,8 +6658,10 @@ components:
       - full_name
       - id
       - last_name
+      - password_change_required
       - role
       - role_label
+      - support_session
     ViewerFeatures:
       type: object
       description: Deployment-wide features the UI should offer (configuration, not

@@ -94,12 +94,72 @@ a date and a time (pre-filled with 18:00, the end of the working day, in India t
   workspace says *written by the admin*). The note's owner is the lead's owner: a note is
   the lead's context and follows it on reassignment, so the new owner can read it, while the
   author shown never changes.
-- **Only the author edits a note's text** (403 for anyone else): letting someone rewrite
-  words that stay signed by another person would falsify the record. Anyone who may write
-  in the workspace may **archive** a note (written by mistake, on the wrong lead).
+- **The author edits a note's text, and so may an administrator working in someone's
+  workspace** (`crm.manage_any`; others get 403). The note then records **who edited it and
+  when** (`edited_by`, `edited_at`) and shows "Edited by Anita Rao", so nobody's words are
+  presented as someone else's; the audit has `note.updated` with the actor. Previous text is
+  not kept (privacy-minimal, as audit never stores text). Anyone who may write in the
+  workspace may **archive** a note (written by mistake, on the wrong lead).
+- The deal page's **Notes** tab (`GET …/opportunities/{id}/notes`): whole text, author,
+  edits, files and whether the caller may change each note; *+ Add note* with files.
 - Note text is never logged, put in audit metadata, timeline data, exception messages,
   analytics or domain events. Lists and timelines carry a 240-character preview only.
   Embeddings for Ask Arkray are Phase 8 (the domain events below are the extension point).
+
+## Attachments
+
+Files on notes ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.md);
+`attachments.py`, `storage.py`).
+
+- **Allowed types** (`ATTACHMENT_ALLOWED_EXTENSIONS`, from a catalog the server recognises
+  by content): PDF, PNG, JPEG, WebP, DOCX, XLSX, CSV, TXT by default (GIF and PPTX can be
+  enabled). A file must be what its extension says (magic bytes; OOXML packages with their
+  main part and **no active content**: no macro project, OLE object (`*.bin` parts other
+  than printer settings) or ActiveX control under any part name, no embedding other than
+  Office documents and pictures, no macro, OLE or ActiveX content type declared, no external
+  template; the zip directory plus its small XML parts are read, bounded; text is UTF-8
+  without NUL bytes). Everything else is refused: executables, scripts (`.exe .dll .bat .cmd .ps1 .sh
+  .js`), HTML, SVG, archives, macro documents, double extensions (`invoice.pdf.exe`).
+- **Names** are display text only: path components dropped, control and bidi characters
+  refused, ≤ 200 characters. Objects live under generated keys (`YYYY/MM/<uuid>`), never the
+  uploaded name.
+- **Limits**: `ATTACHMENT_MAX_BYTES` (10 MB; checked from Content-Length and again while
+  reading: 413), `ATTACHMENT_MAX_PER_NOTE` (10; counted under the note's lock: 422), empty
+  files refused. The proxy allows 11 MB on the upload route only.
+- **Upload** (`POST …/activities/{note}/attachments`, the raw file, `X-Filename`
+  percent-encoded): streamed in 64 KB chunks, hashed (SHA-256), spooled to a temporary file
+  above 1 MB; then the note is locked (lead first: the lock order) and a row written
+  (`uploading`, generated key); then the object stored (no lock held); then the row marked
+  `stored` and `attachment.uploaded` audited (extension and a size bucket, never the name).
+  Storage down: 503 `storage_unavailable`, the row `failed`; a crash in between leaves an
+  `uploading` row the hourly housekeeping resolves (object deleted if present).
+- **Who**: visible exactly when its note is; adding or deleting files changes the note, so
+  the note's author or an administrator managing the workspace (403 otherwise).
+- **Download** (`GET …/attachments/{id}/download`): the note is re-checked through the
+  caller's scope on every request (knowing the id grants nothing; another workspace: 404);
+  streamed with `Content-Disposition: attachment` (RFC 6266 `filename*`),
+  `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`,
+  `Cross-Origin-Resource-Policy: same-origin`, `Cache-Control: private, no-store`.
+  **Preview** (`…/preview`): images only (PNG, JPEG, WebP, GIF, validated at upload), inline,
+  same headers. Never HTML or SVG as active content.
+- **Virus scanning** (`ATTACHMENT_SCANNER`): none configured — files are `not_scanned` and
+  downloadable (the UI says nothing extra); `clamd://host:3310` — files are `pending` until a
+  job scans them over clamd's INSTREAM protocol: `clean` files download, `rejected` ones are
+  blocked and their object deleted (`attachment.rejected`). A scanner outage keeps files
+  pending (the job retries, then goes dead: an alert). No pretend scanner. **Changing the
+  setting**: configuring a scanner later queues earlier files for scanning (500 per hourly
+  housekeeping run; downloadable once clean); removing it releases files still waiting
+  ("not scanned").
+- **Delete** (`DELETE …/attachments/{id}`): hidden at once (`deleted_at`, `deleted_by`,
+  `attachment.deleted`), the object removed by a job and, failing that, the hourly
+  housekeeping (`activities.housekeeping`); idempotent (a missing object counts as removed).
+- **Not indexed** for search or Ask Arkray: file contents never reach a language model.
+- **Erasure** (`erase_lead`): the files of the lead's notes are deleted, names and content
+  hashes blanked, objects queued for removal. An upload still being written when the lead is
+  erased is removed when it finishes (the purge leaves uploading rows alone; the upload then
+  finds its row deleted, queues the purge and answers 404). Afterwards the lead is archived:
+  **an archived lead's notes take no new files or text** (422), so nothing personal can be
+  added beyond the erasure's reach.
 
 ## Ownership
 
@@ -380,6 +440,25 @@ figure counts (meetings today: `cancelled=false` and today's dates; upcoming mee
   again before its reload offers the right actions with the right version; a row's menu
   doesn't open while an action on it runs. A scheduled meeting shows Complete within 30 s
   of its start on a page left open (one shared clock; the server decides).
+- **Calendar** (the first of the page's tabs; the list stays the default): tasks at their
+  due time and meetings from start to end, by month, week (Monday to Sunday) or day, in
+  India time like every time on screen (a meeting running past midnight is drawn to the end
+  of its day). Cancelled and archived ones are left out; completed ones stay, struck through;
+  overdue tasks and meetings awaiting an outcome are marked in words and by icon, not colour
+  alone. Organisation-wide, *My calendar* narrows it to the viewer's own and *Everyone*
+  (the default) names each entry's owner. A month cell lists three entries, or two and
+  "+N more", which opens the day; on phones a cell shows dots and opens the day. Each day's
+  **+** (and, with a mouse, a click on an empty part of a day, or on a time in the week and
+  day views, to the half hour) opens the task/meeting dialog prefilled for then (a whole day:
+  a meeting at 9:00 for 30 minutes, a task due at 18:00) with a Meeting / Task switch that
+  keeps what was typed; a prefilled form closes without asking. An entry opens its activity.
+  It reads the list API per type (`type`, `date_from`/`date_to` = the days on screen,
+  `cancelled=false`, `ordering=scheduled`, `page_size=100`, `owner` for My calendar),
+  following `next` with the same parameters, at most 5 pages per type; beyond that it says
+  the period is cut short and suggests a narrower one. Its query key is under
+  `["activities", "calendar", <workspace>]`, so every activity write marks it stale. The
+  view and the calendar's position are remembered per workspace in memory, like the
+  filters; a summary shortcut or a dashboard figure shows the list.
 - **+ Task / + Meeting** open a dialog (lead picker limited to this workspace, optional
   opportunity of that lead, due date and time or start and end in India time, priority,
   location, https link, description/agenda). Errors sit under their fields and focus moves

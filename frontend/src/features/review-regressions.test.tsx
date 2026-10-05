@@ -10,11 +10,10 @@ import { AppShell } from "@/components/shell/AppShell";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { ActivateAccountForm } from "@/features/auth/ActivateAccountForm";
 import { LoginForm } from "@/features/auth/LoginForm";
-import { AdminHome } from "@/features/users/AdminHome";
 import { UsersPage } from "@/features/users/UsersPage";
 import { DashboardView } from "@/features/workspace/views";
 import { ApiError, apiFetch, readCookie } from "@/lib/api/client";
-import { adminViewer, makeAdminUser, makeViewer } from "@/test/fixtures";
+import { adminViewer, makeAdminUser } from "@/test/fixtures";
 import { apiError, mockApi, renderWithProviders, type RecordedCall } from "@/test/render";
 
 const nav = vi.hoisted(() => ({ search: "", pathname: "/dashboard", hardNavigate: vi.fn() }));
@@ -204,17 +203,6 @@ describe("capability-consistent views (review P3-5, P3-7)", () => {
     expect(screen.getByText("Loading")).toBeInTheDocument();
     expect(screen.queryByText("Key figures")).not.toBeInTheDocument();
     expect(api.calls).toHaveLength(0);
-  });
-
-  it("Admin Home loads users only for viewers who may manage them", async () => {
-    const api = mockApi({});
-    renderWithProviders(<AdminHome />, {
-      viewer: makeViewer({ capabilities: ["crm.access_own", "crm.view_all"] }),
-    });
-    // The organisation's figures load (Phase 5); the users list never does.
-    await waitFor(() => expect(api.callsTo("GET", "/api/v1/workspaces/all/dashboard")).toHaveLength(1));
-    expect(screen.queryByText("Recently added users")).not.toBeInTheDocument();
-    expect(api.callsTo("GET", "/api/v1/admin/users")).toHaveLength(0);
   });
 });
 

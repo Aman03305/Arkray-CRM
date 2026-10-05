@@ -1,26 +1,52 @@
 @import "tailwindcss";
 
 /*
- * Arkray CRM design tokens. Neutral slate surfaces, subtle borders, one accent colour.
+ * Arkray CRM design tokens, taken from the Zoho Bigin look: a dark petrol header and
+ * navigation rail, a teal secondary panel, green actions, and a pale blue-grey board.
  * System font stack: no build-time font downloads, native rendering on every OS.
+ *
+ * Bigin's own greens (#1eae70 on buttons, #00a878 on the selected rail item) carry white
+ * text below WCAG AA (2.9:1 and 3.1:1). They are kept for decoration (the logo mark, accent
+ * fills); every green that carries white text is brand-600 (#00875a, 4.5:1) or darker.
  */
 @theme {
   --font-sans:
     ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
     "Noto Sans", sans-serif;
 
-  --color-brand-50: #eff6ff;
-  --color-brand-100: #dbeafe;
-  --color-brand-200: #bfdbfe;
-  --color-brand-300: #93c5fd;
-  --color-brand-500: #3b82f6;
-  --color-brand-600: #2563eb;
-  --color-brand-700: #1d4ed8;
+  /* Actions, links, focus rings: Bigin green. */
+  --color-brand-50: #e9f9f2;
+  --color-brand-100: #def8f2;
+  --color-brand-200: #b8ecd6;
+  --color-brand-300: #82bca8;
+  --color-brand-400: #00a878;
+  --color-brand-500: #1eae70;
+  --color-brand-600: #00875a;
+  --color-brand-700: #00704a;
+  --color-brand-800: #075e3d;
+
+  /* Application shell. */
+  --color-shell: #0a3e52; /* header and navigation rail */
+  --color-shell-panel: #0a4a62; /* secondary panel (pipelines) */
+  --color-shell-raised: #0a4860; /* search field on the header */
+  --color-shell-active: #08686c; /* selected item in the panel */
+  --color-shell-muted: #b8cdd5; /* secondary text on the shell (5.9:1 or better) */
+  --color-avatar: #a6e0aa;
+
+  /* Pipeline board. */
+  --color-board: #eef6f8; /* behind the columns */
+  --color-column: #f8fafc;
+  --color-card-border: #e8eef0;
+  --color-stage-open: #96aed0;
+  --color-stage-won: #82bca8;
+  --color-stage-lost: #d29a9a;
 }
 
 @layer base {
   html {
     color-scheme: light;
+    /* The header is fixed: anchors and focused fields scroll into view below it. */
+    scroll-padding-top: 3.5rem;
   }
 
   body {
@@ -29,5 +55,18 @@
 
   :focus-visible {
     @apply outline-2 outline-offset-2 outline-brand-600;
+  }
+}
+
+/* Slim scrollbars inside the board's columns and the panels, as in Bigin. */
+@utility scroll-slim {
+  scrollbar-width: thin;
+  scrollbar-color: #c4ccd4 transparent;
+}
+
+/* On the dark shell the green focus ring is too faint (2.6:1): white instead. */
+@utility focus-on-shell {
+  &:focus-visible {
+    outline-color: #ffffff;
   }
 }

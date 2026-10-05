@@ -16,7 +16,10 @@ administrator runs `manage.py erase_lead`, which in one transaction:
   and archives it (a `lead.archived` timeline entry, like any archive), so figures, history
   and the audit trail keep their shape;
 - redacts the text of its activities (notes, task and meeting titles and descriptions,
-  meeting places and links) and of its opportunities (titles, descriptions, lost reasons);
+  meeting places and links) and of its opportunities (titles, descriptions, lost reasons,
+  account and customer names, contact phone and email, address, custom field values);
+- deletes the files attached to its notes (names blanked, objects removed from storage by
+  the purge job and, failing that, the hourly housekeeping);
 - deletes the Ask Arkray index chunks of those records, and queues their re-indexing from
   the redacted text (an indexing job that read the old text concurrently is overwritten);
 - records `lead.erased` in the audit trail: the operator, the lead's id and counts, never
@@ -40,7 +43,8 @@ from django.db import connection, transaction
 from django.db.models import F, Q
 from django.utils import timezone
 
-from arkray.activities.models import Activity, ActivityType
+from arkray.activities import attachments
+from arkray.activities.models import Activity, ActivityType, Attachment
 from arkray.ai import indexing
 from arkray.ai import service as ai_service
 from arkray.ai.models import Conversation, KnowledgeChunk
@@ -98,6 +102,7 @@ class Erasure:
     history_rows: int
     chunks: int
     conversations: int
+    attachments: int = 0
 
 
 def _owns_history() -> bool:
@@ -204,6 +209,9 @@ def preview(lead_id: UUID) -> Erasure:
         history_rows=_history_with_reasons(opportunity_ids),
         chunks=KnowledgeChunk.objects.filter(Q(lead_id=lead_id) | Q(source_id__in=records)).count(),
         conversations=len(_touching_conversations(records, identifying_terms(lead))),
+        attachments=Attachment.objects.filter(
+            note_id__in=activity_ids, purged_at__isnull=True
+        ).count(),
     )
 
 
@@ -255,8 +263,23 @@ def erase(lead_id: UUID, *, operator_id: UUID) -> Erasure:
         title=ERASED, description="", location="", meeting_url="", **bump
     )
     Opportunity.objects.filter(pk__in=opportunity_ids).update(
-        title=ERASED, description="", lost_reason="", **bump
+        title=ERASED,
+        description="",
+        lost_reason="",
+        account_name=ERASED,
+        customer_name=ERASED,
+        contact_phone="",
+        contact_email="",
+        address="",
+        custom_fields={},
+        **bump,
     )
+    note_ids = list(
+        Activity.objects.filter(pk__in=activity_ids, type=ActivityType.NOTE).values_list(
+            "pk", flat=True
+        )
+    )
+    files = attachments.erase_for_notes(note_ids, now)
     for field in LEAD_TEXT_FIELDS:
         setattr(lead, field, "")
     lead.first_name = ERASED
@@ -283,6 +306,7 @@ def erase(lead_id: UUID, *, operator_id: UUID) -> Erasure:
         history_rows=history_rows,
         chunks=chunks,
         conversations=conversations,
+        attachments=files,
     )
     counts = {key: value for key, value in asdict(result).items() if key != "lead_id"}
     audit.record(

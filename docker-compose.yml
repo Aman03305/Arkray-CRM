@@ -37,6 +37,10 @@ x-backend-env: &backend-env
   AI_LLM_PROVIDER: ${AI_LLM_PROVIDER:-none}
   # Only the ai worker calls the provider, so only it gets the key (worker-ai below).
   AI_LLM_KEY_HOLDER: "false"
+  # Note attachments: a private volume here (docs/deployment.md#attachments); production
+  # normally uses private S3-compatible storage instead (ATTACHMENT_STORAGE=s3).
+  ATTACHMENT_STORAGE: filesystem
+  ATTACHMENT_ROOT: /var/lib/arkray/attachments
 
 # The application containers run as they must in production (Phase 11): read-only root
 # filesystem (writes go to tmpfs /tmp only), no Linux capabilities, no privilege escalation.
@@ -112,6 +116,8 @@ services:
     <<: *hardened
     build: ./backend
     environment: *backend-env
+    volumes:
+      - attachments:/var/lib/arkray/attachments
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
     depends_on:
@@ -137,6 +143,9 @@ services:
       DB_STATEMENT_TIMEOUT_MS: "60000"
     # CRM background work only (Ask Arkray's indexing and questions have their own workers).
     command: ["celery", "-A", "config", "worker", "--queues", "outbox,default,email", "--concurrency", "2", "--loglevel", "INFO"]
+    # Attachment jobs (virus scan, removing deleted files) read and delete objects here.
+    volumes:
+      - attachments:/var/lib/arkray/attachments
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -226,3 +235,4 @@ services:
 volumes:
   pgdata:
   redisdata:
+  attachments:

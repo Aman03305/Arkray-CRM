@@ -29,7 +29,7 @@ from arkray.identity.permissions import IsActiveUser
 from arkray.identity.workspaces import authorize_write, resolve_workspace, workspace_segment
 from arkray.leads.api.views import IDEMPOTENCY_PARAMETER, NOT_FOUND, OWNER_FILTER_ORG_ONLY
 
-from .. import selectors, services
+from .. import configuration, selectors, services
 from ..selectors import OpportunityFilters
 from . import serializers as s
 
@@ -71,13 +71,166 @@ def _location(scope: AccessScope, opportunity_id: UUID) -> str:
 
 
 class PipelineConfigView(ApiView):
-    """Pipelines and their stages (configuration, the same for everyone)."""
+    """The organisation's shared pipelines and their stages (the same for everyone). A
+    workspace's pipelines, personal ones included, are at /workspaces/{ws}/pipelines."""
 
     permission_classes = [IsActiveUser]
 
     @extend_schema(operation_id="pipelines_list", responses={200: s.PipelineListSerializer})
     def get(self, request: Request) -> Response:
         return Response(s.PipelineListSerializer({"results": selectors.pipelines()}).data)
+
+
+def _pipeline(pipeline: Any, actor: User, scope: AccessScope) -> dict[str, Any]:
+    return dict(s.PipelineSerializer(pipeline, context={"actor": actor, "scope": scope}).data)
+
+
+class WorkspacePipelinesView(ApiView):
+    """The pipelines this workspace may use (shared ones, the owner's own, and any holding
+    one of its deals), and creating a pipeline: one's own; a user's (administrators, in that
+    user's workspace); or a shared one (administrators, organisation-wide)."""
+
+    permission_classes = [IsActiveUser]
+    query_param_methods = frozenset({"GET"})
+
+    @extend_schema(
+        operation_id="workspace_pipelines_list",
+        parameters=[s.PipelineListQuerySerializer],
+        responses={200: s.PipelineListSerializer, 404: NOT_FOUND},
+    )
+    def get(self, request: Request, workspace: str) -> Response:
+        actor, scope = _scope(request, workspace)
+        params = validated(s.PipelineListQuerySerializer, request.query_params)
+        found = selectors.visible_pipelines(scope, archived=params["archived"])
+        context = {"actor": actor, "scope": scope}
+        return Response(s.PipelineListSerializer({"results": found}, context=context).data)
+
+    @extend_schema(
+        operation_id="workspace_pipelines_create",
+        request=s.PipelineCreateSerializer,
+        responses={201: s.PipelineSerializer, 404: NOT_FOUND},
+    )
+    def post(self, request: Request, workspace: str) -> Response:
+        actor, scope = _scope(request, workspace)
+        data = validated(s.PipelineCreateSerializer, request.data)
+        pipeline = configuration.create_pipeline(
+            actor=actor,
+            scope=scope,
+            name=data["name"],
+            stages=data["stages"],
+            fields=data.get("custom_fields", []),
+        )
+        return Response(_pipeline(pipeline, actor, scope), status=http.HTTP_201_CREATED)
+
+
+class WorkspacePipelineView(ApiView):
+    permission_classes = [IsActiveUser]
+
+    @extend_schema(
+        operation_id="workspace_pipelines_retrieve",
+        responses={200: s.PipelineSerializer, 404: NOT_FOUND},
+    )
+    def get(self, request: Request, workspace: str, pipeline_id: UUID) -> Response:
+        actor, scope = _scope(request, workspace)
+        return Response(_pipeline(selectors.visible_pipeline(scope, pipeline_id), actor, scope))
+
+    @extend_schema(
+        operation_id="workspace_pipelines_rename",
+        request=s.PipelineRenameSerializer,
+        responses={200: s.PipelineSerializer, 404: NOT_FOUND},
+    )
+    def patch(self, request: Request, workspace: str, pipeline_id: UUID) -> Response:
+        actor, scope = _scope(request, workspace)
+        data = validated(s.PipelineRenameSerializer, request.data)
+        pipeline = configuration.rename_pipeline(
+            actor=actor,
+            scope=scope,
+            pipeline_id=pipeline_id,
+            version=data["version"],
+            name=data["name"],
+        )
+        return Response(_pipeline(pipeline, actor, scope))
+
+
+class PipelineStagesView(ApiView):
+    """Replace the pipeline's stage list (add, rename, retype, re-probability, reorder and
+    remove in one versioned change)."""
+
+    permission_classes = [IsActiveUser]
+
+    @extend_schema(
+        operation_id="workspace_pipelines_stages",
+        request=s.StagesReplaceSerializer,
+        responses={200: s.PipelineSerializer, 404: NOT_FOUND},
+    )
+    def put(self, request: Request, workspace: str, pipeline_id: UUID) -> Response:
+        actor, scope = _scope(request, workspace)
+        data = validated(s.StagesReplaceSerializer, request.data)
+        pipeline = configuration.replace_stages(
+            actor=actor,
+            scope=scope,
+            pipeline_id=pipeline_id,
+            version=data["version"],
+            stages=data["stages"],
+        )
+        return Response(_pipeline(pipeline, actor, scope))
+
+
+class PipelineFieldsView(ApiView):
+    """Replace the pipeline's custom opportunity fields."""
+
+    permission_classes = [IsActiveUser]
+
+    @extend_schema(
+        operation_id="workspace_pipelines_fields",
+        request=s.FieldsReplaceSerializer,
+        responses={200: s.PipelineSerializer, 404: NOT_FOUND},
+    )
+    def put(self, request: Request, workspace: str, pipeline_id: UUID) -> Response:
+        actor, scope = _scope(request, workspace)
+        data = validated(s.FieldsReplaceSerializer, request.data)
+        pipeline = configuration.replace_fields(
+            actor=actor,
+            scope=scope,
+            pipeline_id=pipeline_id,
+            version=data["version"],
+            fields=data["custom_fields"],
+        )
+        return Response(_pipeline(pipeline, actor, scope))
+
+
+class PipelineArchiveView(ApiView):
+    permission_classes = [IsActiveUser]
+
+    @extend_schema(
+        operation_id="workspace_pipelines_archive",
+        request=s.OpportunityVersionSerializer,
+        responses={200: s.PipelineSerializer, 404: NOT_FOUND},
+    )
+    def post(self, request: Request, workspace: str, pipeline_id: UUID) -> Response:
+        actor, scope = _scope(request, workspace)
+        data = validated(s.OpportunityVersionSerializer, request.data)
+        pipeline = configuration.archive_pipeline(
+            actor=actor, scope=scope, pipeline_id=pipeline_id, version=data["version"]
+        )
+        return Response(_pipeline(pipeline, actor, scope))
+
+
+class PipelineRestoreView(ApiView):
+    permission_classes = [IsActiveUser]
+
+    @extend_schema(
+        operation_id="workspace_pipelines_restore",
+        request=s.OpportunityVersionSerializer,
+        responses={200: s.PipelineSerializer, 404: NOT_FOUND},
+    )
+    def post(self, request: Request, workspace: str, pipeline_id: UUID) -> Response:
+        actor, scope = _scope(request, workspace)
+        data = validated(s.OpportunityVersionSerializer, request.data)
+        pipeline = configuration.restore_pipeline(
+            actor=actor, scope=scope, pipeline_id=pipeline_id, version=data["version"]
+        )
+        return Response(_pipeline(pipeline, actor, scope))
 
 
 # The opportunities list's cursors, also issued by the board for its columns' `next`.
@@ -101,7 +254,7 @@ class BoardView(ApiView):
         _, scope = _scope(request, workspace)
         params = validated(s.BoardQuerySerializer, request.query_params)
         filters = _filters(params, scope)
-        pipeline = selectors.pipeline_for_board(params.get("pipeline"))
+        pipeline = selectors.pipeline_for_board(scope, params.get("pipeline"))
 
         def continuation(stage_id: UUID, ordering: str) -> dict[str, str]:
             """The opportunities list request that continues a column."""
@@ -245,6 +398,7 @@ class OpportunityListView(ApiView):
         lead_id = data.pop("lead")
         pipeline_id = data.pop("pipeline", None)
         stage_id = data.pop("stage", None)
+        negotiated_price = data.pop("negotiated_price", None)
         result = services.create_opportunity(
             actor=actor,
             scope=scope,
@@ -252,6 +406,7 @@ class OpportunityListView(ApiView):
             fields=data,
             pipeline_id=pipeline_id,
             stage_id=stage_id,
+            negotiated_price=negotiated_price,
             idempotency_key=idempotency_key(request),
         )
         response = Response(_opportunity(result.opportunity, scope), status=http.HTTP_201_CREATED)
@@ -308,6 +463,60 @@ class OpportunityMoveView(ApiView):
             version=data["version"],
             stage_id=data["stage"],
             lost_reason=data.get("lost_reason", ""),
+            negotiated_price=data.get("negotiated_price"),
+        )
+        return Response(_opportunity(opportunity, scope))
+
+
+class OpportunityNegotiatedPricesView(ApiView):
+    """The negotiated price history (newest first, append-only), and recording a new price
+    while the opportunity is in a negotiation stage."""
+
+    permission_classes = [IsActiveUser]
+    query_param_methods = frozenset({"GET"})
+
+    @extend_schema(
+        operation_id="opportunities_negotiated_prices",
+        parameters=[s.HistoryQuerySerializer],
+        responses={200: s.NegotiationPricePageSerializer, 404: NOT_FOUND},
+    )
+    def get(self, request: Request, workspace: str, opportunity_id: UUID) -> Response:
+        _, scope = _scope(request, workspace)
+        params = validated(s.HistoryQuerySerializer, request.query_params)
+        paginator = KeysetPaginator(
+            selectors.NEGOTIATION_ORDERING,
+            page_size=params["page_size"],
+            binding=CursorBinding.of(
+                f"opportunities.negotiated-prices:{opportunity_id}",
+                params,
+                actor_id=scope.actor_id,
+                scope=scope,
+            ),
+        )
+        page = paginator.paginate(
+            selectors.negotiation_history(scope, opportunity_id), params.get("cursor")
+        )
+        return Response(
+            {
+                "results": s.NegotiationPriceSerializer(page.items, many=True).data,
+                **page_links(request, page),
+            }
+        )
+
+    @extend_schema(
+        operation_id="opportunities_record_negotiated_price",
+        request=s.NegotiatedPriceInputSerializer,
+        responses={200: s.OpportunitySerializer, 404: NOT_FOUND},
+    )
+    def post(self, request: Request, workspace: str, opportunity_id: UUID) -> Response:
+        actor, scope = _scope(request, workspace)
+        data = validated(s.NegotiatedPriceInputSerializer, request.data)
+        opportunity = services.record_negotiated_price(
+            actor=actor,
+            scope=scope,
+            opportunity_id=opportunity_id,
+            version=data["version"],
+            price=data["price"],
         )
         return Response(_opportunity(opportunity, scope))
 
@@ -399,6 +608,7 @@ class LeadConvertView(ApiView):
         version = data.pop("version")
         pipeline_id = data.pop("pipeline", None)
         stage_id = data.pop("stage", None)
+        negotiated_price = data.pop("negotiated_price", None)
         result = services.convert_lead(
             actor=actor,
             scope=scope,
@@ -407,6 +617,7 @@ class LeadConvertView(ApiView):
             fields=data,
             pipeline_id=pipeline_id,
             stage_id=stage_id,
+            negotiated_price=negotiated_price,
             idempotency_key=idempotency_key(request),
         )
         body = s.ConversionSerializer(

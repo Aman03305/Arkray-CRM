@@ -17,7 +17,6 @@ import type { LeadListItem } from "@/lib/api/types";
 import { useFlash } from "@/lib/flash";
 import { useViewer } from "@/lib/viewer-context";
 import {
-  describeWorkspace,
   leadHref,
   newLeadHref,
   type Workspace,
@@ -100,7 +99,7 @@ export function LeadsListView({ workspace }: { workspace: Workspace }) {
   const newLead = permissions.canCreate ? (
     <Link
       href={newLeadHref(workspace)}
-      className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-brand-600 px-3.5 text-sm font-medium text-white hover:bg-brand-700"
+      className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-brand-600 px-3.5 text-sm font-medium text-white hover:bg-brand-700"
     >
       <Plus aria-hidden="true" className="size-4" />
       New lead
@@ -109,7 +108,7 @@ export function LeadsListView({ workspace }: { workspace: Workspace }) {
 
   return (
     <>
-      <PageHeader title="Leads" subtitle={describeWorkspace(workspace)} actions={newLead} />
+      <PageHeader title="Leads" actions={newLead} />
 
       <LeadFiltersBar
         filters={list.filters}
@@ -171,7 +170,7 @@ export function LeadsListView({ workspace }: { workspace: Workspace }) {
             }
           />
         ) : list.filters.archived ? (
-          <EmptyState icon={Contact} title="No archived leads" description="Leads you archive are kept here and can be restored." />
+          <EmptyState icon={Contact} title="No archived leads" description="Archived leads can be restored." />
         ) : (
           <EmptyState
             icon={Contact}
@@ -186,7 +185,7 @@ export function LeadsListView({ workspace }: { workspace: Workspace }) {
                 <Link
                   href={newLeadHref(workspace)}
                   aria-label="Add a lead"
-                  className="inline-flex h-9 items-center gap-2 rounded-md bg-brand-600 px-3.5 text-sm font-medium text-white hover:bg-brand-700"
+                  className="inline-flex h-9 items-center gap-2 rounded-full bg-brand-600 px-3.5 text-sm font-medium text-white hover:bg-brand-700"
                 >
                   <Plus aria-hidden="true" className="size-4" />
                   Lead

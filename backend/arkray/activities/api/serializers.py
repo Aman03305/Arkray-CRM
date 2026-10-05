@@ -28,6 +28,7 @@ from arkray.leads.api.serializers import UserRefSerializer
 from arkray.leads.models import Lead
 from arkray.pipeline.models import Opportunity, StageCategory
 
+from .. import attachments, storage
 from .. import models as m
 from ..selectors import DEFAULT_ORDERING, ORDERINGS, PREVIEW_LENGTH
 from ..timeline import USER_KEYS
@@ -173,9 +174,45 @@ class ActivityListItemSerializer(_ActivityBase):
         return preview(getattr(activity, "text_preview", ""))[1]
 
 
+class AttachmentSerializer(serializers.ModelSerializer[m.Attachment]):
+    """A file's metadata (never its storage key or bytes). `downloadable` follows the virus
+    scan policy; `previewable` images may be shown inline (the preview route)."""
+
+    name = serializers.CharField(source="original_name", read_only=True)
+    uploaded_by = UserRefSerializer(read_only=True)
+    downloadable = serializers.SerializerMethodField()
+    previewable = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.Attachment
+        fields = [
+            "id",
+            "name",
+            "extension",
+            "content_type",
+            "size",
+            "scan_status",
+            "downloadable",
+            "previewable",
+            "uploaded_by",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_downloadable(self, attachment: m.Attachment) -> bool:
+        return attachments.downloadable(attachment)
+
+    def get_previewable(self, attachment: m.Attachment) -> bool:
+        return storage.CATALOG[attachment.extension].previewable and attachments.downloadable(
+            attachment
+        )
+
+
 class ActivitySerializer(_ActivityBase):
     completed_by = UserRefSerializer(read_only=True, allow_null=True)
     cancelled_by = UserRefSerializer(read_only=True, allow_null=True)
+    edited_by = UserRefSerializer(read_only=True, allow_null=True)
+    attachments = serializers.SerializerMethodField(help_text="A note's files (others: none).")
 
     class Meta:
         model = m.Activity
@@ -186,8 +223,62 @@ class ActivitySerializer(_ActivityBase):
             "meeting_url",
             "completed_by",
             "cancelled_by",
+            "edited_at",
+            "edited_by",
+            "attachments",
         ]
         read_only_fields = fields
+
+    @extend_schema_field(AttachmentSerializer(many=True))
+    def get_attachments(self, activity: m.Activity) -> list[dict[str, Any]]:
+        if activity.type != m.ActivityType.NOTE:
+            return []
+        files = attachments.for_notes([activity.pk])[activity.pk]
+        return list(AttachmentSerializer(files, many=True).data)
+
+
+class NoteSerializer(serializers.ModelSerializer[m.Activity]):
+    """A note on the deal page: the whole text, its author, when it was written and last
+    edited (and by whom), its files, and whether the caller may change it."""
+
+    created_by = UserRefSerializer(read_only=True, help_text="The author.")
+    edited_by = UserRefSerializer(read_only=True, allow_null=True)
+    attachments = serializers.SerializerMethodField()
+    can_edit = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.Activity
+        fields = [
+            "id",
+            "description",
+            "created_by",
+            "created_at",
+            "edited_at",
+            "edited_by",
+            "version",
+            "attachments",
+            "can_edit",
+        ]
+        read_only_fields = fields
+
+    @extend_schema_field(AttachmentSerializer(many=True))
+    def get_attachments(self, note: m.Activity) -> list[dict[str, Any]]:
+        files = self.context["attachments"].get(note.pk, [])
+        return list(AttachmentSerializer(files, many=True).data)
+
+    def get_can_edit(self, note: m.Activity) -> bool:
+        actor, scope = self.context.get("actor"), self.context["scope"]
+        return (
+            actor is not None
+            and self.context["writable"]
+            and attachments.may_change_note(actor, scope, note)
+        )
+
+
+class NotePageSerializer(serializers.Serializer[Any]):
+    results = NoteSerializer(many=True)
+    next = serializers.CharField(allow_null=True)
+    previous = serializers.CharField(allow_null=True)
 
 
 class ActivityPageSerializer(serializers.Serializer[Any]):
@@ -402,5 +493,10 @@ class ActivityListQuerySerializer(StrictInputSerializer):
 
 
 class TimelineQuerySerializer(StrictInputSerializer):
+    cursor = serializers.CharField(max_length=1000, required=False)
+    page_size = serializers.IntegerField(min_value=1, max_value=50, required=False, default=20)
+
+
+class NoteQuerySerializer(StrictInputSerializer):
     cursor = serializers.CharField(max_length=1000, required=False)
     page_size = serializers.IntegerField(min_value=1, max_value=50, required=False, default=20)

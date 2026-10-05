@@ -4,10 +4,10 @@ import { type FormEvent, useId, useState } from "react";
 
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
-import { TextAreaField } from "@/components/ui/Field";
+import { TextAreaField, TextField } from "@/components/ui/Field";
 import { Dialog, DialogActions } from "@/components/ui/Dialog";
 import type { Stage, StageCategory } from "@/lib/api/types";
-import { formatPercent } from "@/lib/money";
+import { formatPercent, parseAmountInput } from "@/lib/money";
 
 import { StageName } from "./PipelineBits";
 import { moveTargets, transitionKind } from "./transitions";
@@ -28,11 +28,13 @@ interface TransitionDialogProps {
   target: Stage | null;
   busy: boolean;
   error: { message: string; requestId: string | null } | null;
-  onConfirm: (stage: Stage, lostReason: string) => void;
+  /** `negotiatedPrice`: an exact decimal string, given when the target is a negotiation stage. */
+  onConfirm: (stage: Stage, lostReason: string, negotiatedPrice?: string) => void;
   onClose: () => void;
 }
 
 function consequence(kind: ReturnType<typeof transitionKind>, target: Stage): string {
+  if (target.type === "negotiation" && (kind === "move" || kind === "reopen")) return "";
   switch (kind) {
     case "win":
       return "It will be closed as won at 100% and leave the open pipeline totals. You can reopen it later.";
@@ -56,9 +58,14 @@ export function TransitionDialog({ subject, stages, target, busy, error, onConfi
   const choices = moveTargets(stages, subject);
   const [chosen, setChosen] = useState<string>(target?.id ?? "");
   const [reason, setReason] = useState("");
+  const [price, setPrice] = useState("");
+  const [priceError, setPriceError] = useState<string | null>(null);
   const groupId = useId();
   const stage = target ?? choices.find((s) => s.id === chosen) ?? null;
   const kind = stage ? transitionKind(subject, stage) : null;
+  // Entering a negotiation stage (its type, whatever its name) needs the negotiated price,
+  // every time, also after leaving negotiation and coming back. Cancelling changes nothing.
+  const asksPrice = stage?.type === "negotiation" && (kind === "move" || kind === "reopen");
 
   const title =
     target === null
@@ -76,6 +83,16 @@ export function TransitionDialog({ subject, stages, target, busy, error, onConfi
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (busy || !stage || kind === "same" || kind === "reopen-first") return;
+    if (asksPrice) {
+      const parsed = parseAmountInput(price);
+      if (!parsed.ok) {
+        setPriceError(price.trim() ? parsed.error : "Enter the negotiated price.");
+        return;
+      }
+      setPriceError(null);
+      onConfirm(stage, "", parsed.value);
+      return;
+    }
     onConfirm(stage, kind === "lose" ? reason.trim() : "");
   };
 
@@ -114,7 +131,22 @@ export function TransitionDialog({ subject, stages, target, busy, error, onConfi
             </div>
           </fieldset>
         ) : null}
-        {stage && kind ? <p className="text-sm text-slate-600">{consequence(kind, stage)}</p> : null}
+        {stage && kind && consequence(kind, stage) ? <p className="text-sm text-slate-600">{consequence(kind, stage)}</p> : null}
+        {asksPrice ? (
+          <TextField
+            label="Negotiated price (₹)"
+            name="negotiated_price"
+            inputMode="decimal"
+            autoComplete="off"
+            value={price}
+            onChange={(e) => {
+              setPrice(e.target.value);
+              setPriceError(null);
+            }}
+            errors={priceError ? [priceError] : undefined}
+            data-autofocus={target !== null || undefined}
+          />
+        ) : null}
         {kind === "lose" ? (
           <TextAreaField
             label="Why was it lost?"
@@ -128,7 +160,12 @@ export function TransitionDialog({ subject, stages, target, busy, error, onConfi
           />
         ) : null}
         <DialogActions>
-          <Button variant="secondary" onClick={onClose} disabled={busy} data-autofocus={(target !== null && kind !== "lose") || undefined}>
+          <Button
+            variant="secondary"
+            onClick={onClose}
+            disabled={busy}
+            data-autofocus={(target !== null && kind !== "lose" && !asksPrice) || undefined}
+          >
             Cancel
           </Button>
           <Button

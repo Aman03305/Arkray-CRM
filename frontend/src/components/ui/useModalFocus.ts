@@ -27,6 +27,11 @@ function inertOutside(element: HTMLElement): () => void {
   return () => changed.forEach((el) => (el.inert = false));
 }
 
+/** Open modals, innermost last: only the top one answers keys and focus (a confirmation
+ * opened from a drawer closes alone on Escape; enhancement review). */
+const openModals: symbol[] = [];
+const isTop = (modal: symbol) => openModals[openModals.length - 1] === modal;
+
 /**
  * Modal focus management (dialogs, the mobile navigation drawer): on open, focus moves in
  * (to `[data-autofocus]`, else the first focusable element, else the container); Tab and
@@ -55,8 +60,11 @@ export function useModalFocus(
     const first = root.querySelector<HTMLElement>("[data-autofocus]:not(:disabled)") ?? tabbable(root)[0];
     (first ?? root).focus();
     const restoreInert = inertOutside(overlay);
+    const modal = Symbol("modal");
+    openModals.push(modal);
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (!isTop(modal)) return; // a modal opened on top of this one handles it
       if (event.key === "Escape") {
         if (event.isComposing) return; // the input method cancels its own composition
         event.stopPropagation();
@@ -85,11 +93,13 @@ export function useModalFocus(
       }
     };
     const onFocusIn = (event: FocusEvent) => {
+      if (!isTop(modal)) return;
       if (event.target instanceof Node && !root.contains(event.target)) root.focus();
     };
     document.addEventListener("keydown", onKeyDown);
     document.addEventListener("focusin", onFocusIn);
     return () => {
+      openModals.splice(openModals.indexOf(modal), 1);
       document.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("focusin", onFocusIn);
       restoreInert();

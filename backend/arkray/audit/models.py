@@ -27,6 +27,10 @@ class AuditEvent(AppendOnlyModel):
     target_type = models.CharField(max_length=50, blank=True, default="")
     target_id = models.CharField(max_length=64, blank=True, default="")
     subject_user_id = models.UUIDField(null=True, blank=True)
+    # The administrator's support session (identity.SupportSession) the action was taken in,
+    # if any: the actor is still the administrator, the subject the user. A column, not
+    # metadata (whose keys mentioning a session are redacted).
+    support_session_id = models.UUIDField(null=True, blank=True)
     request_id = models.CharField(max_length=64, blank=True, default="")
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
@@ -39,6 +43,12 @@ class AuditEvent(AppendOnlyModel):
             models.Index(fields=["subject_user_id", "-occurred_at"], name="audit_subject_idx"),
             models.Index(fields=["target_type", "target_id"], name="audit_target_idx"),
             models.Index(fields=["action", "-occurred_at"], name="audit_action_idx"),
+            # What an administrator did in one support session.
+            models.Index(
+                fields=["support_session_id", "occurred_at"],
+                name="audit_support_idx",
+                condition=Q(support_session_id__isnull=False),
+            ),
         ]
         constraints = [
             models.CheckConstraint(

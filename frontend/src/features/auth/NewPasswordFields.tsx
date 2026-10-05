@@ -21,18 +21,24 @@ export function NewPasswordFields({
   onChange,
   errors,
   label = "New password",
+  autoComplete = "new-password",
 }: {
   value: NewPasswordValue;
   onChange: (value: NewPasswordValue) => void;
   errors: Record<string, readonly string[] | undefined>;
   label?: string;
+  /** "off" when the password is someone else's (an administrator setting it), so the
+   * browser doesn't offer to save it as the administrator's own. */
+  autoComplete?: "new-password" | "off";
 }) {
+  const other = autoComplete === "off" ? { "data-1p-ignore": true, "data-lpignore": "true" } : {};
   return (
     <>
       <PasswordField
         label={label}
         name="new-password"
-        autoComplete="new-password"
+        autoComplete={autoComplete}
+        {...other}
         value={value.password}
         onChange={(e) => onChange({ ...value, password: e.target.value })}
         errors={errors.password}
@@ -41,7 +47,8 @@ export function NewPasswordFields({
       <PasswordField
         label="Confirm password"
         name="confirm-password"
-        autoComplete="new-password"
+        autoComplete={autoComplete}
+        {...other}
         value={value.confirmation}
         onChange={(e) => onChange({ ...value, confirmation: e.target.value })}
         errors={errors.confirmation}

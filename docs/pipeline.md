@@ -1,10 +1,13 @@
 # Pipeline and opportunities
 
-**Built in Phase 3.** Code: [`backend/arkray/pipeline/`](../backend/arkray/pipeline/) and
+**Built in Phase 3; user-defined pipelines, editable stages, negotiation, the deal's details
+and custom fields added in the product enhancement phase.** Code:
+[`backend/arkray/pipeline/`](../backend/arkray/pipeline/) and
 [`frontend/src/features/pipeline/`](../frontend/src/features/pipeline/). Decisions:
 [ADR-0018](adr/0018-pipeline-integrity-by-composite-keys.md) (status and ownership enforced
-by composite foreign keys; lock order) and [ADR-0019](adr/0019-lead-conversion.md) (what
-"Converted" means).
+by composite foreign keys; lock order), [ADR-0019](adr/0019-lead-conversion.md) (what
+"Converted" means) and [ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.md)
+(user pipelines, negotiation, custom fields).
 
 The canonical domain term is **opportunity** everywhere: models, API, services, events,
 audit and UI. ("Deal" appears only in sample titles.)
@@ -12,9 +15,9 @@ audit and UI. ("Deal" appears only in sample titles.)
 ## Model
 
 ```
-Pipeline  1 ── * Stage          (configuration, seeded)
+User      1 ── * Pipeline (owner NULL: shared)  1 ── * Stage, * CustomField
 Lead      1 ── * Opportunity  * ── 1 Stage (and its Pipeline)
-Opportunity 1 ── * StageHistory (append-only)
+Opportunity 1 ── * StageHistory (append-only), * NegotiationPrice (append-only)
 ```
 
 A lead has zero, one or many opportunities. There is still no Company, Account, Contact
@@ -22,11 +25,127 @@ or Product: an opportunity is a potential sale **to one lead**.
 
 ### Pipelines
 
-`pipeline_pipeline`: `id`, immutable `key`, `name` (unique), `is_default` (at most one,
-partial unique index; the default must be active), `is_active`, timestamps. v1 seeds one,
-**Sales Pipeline** (`sales`). Nothing assumes there is only one: stages, opportunities,
-the board, filters and forms all take a pipeline, and a second pipeline is a data change
-(tested).
+`pipeline_pipeline`: `id`, immutable `key`, `name`, `owner` (NULL: a **shared**,
+organisation pipeline; else a user's **personal** pipeline), `created_by`, `is_default` (at
+most one, partial unique index; the default must be active and shared), `is_active` (false:
+archived), `version`, timestamps. Names are unique among the active pipelines of one owner
+(or among the shared ones), case-insensitively; two users may both have a "Tenders".
+`pipeline.0006` made the seeded **Sales Pipeline** (`sales`) a shared pipeline (still the
+default) and its Negotiation stage a negotiation stage; nothing else changed for existing
+data (opportunities, values, owners, history, activities, notes and audit untouched; each
+opportunity's account and customer names were copied from its lead and its opportunity date
+from its creation day).
+
+## Configuration
+
+**Who sees which pipelines** (`selectors.visible`): a workspace sees the shared pipelines, the
+personal pipelines of its owner, and **any pipeline holding one of its opportunities** (a deal
+follows its lead when the lead is reassigned; it must never become invisible because it sits in
+its previous owner's pipeline). Organisation-wide: every pipeline (at most 500 listed). Another
+user's personal pipeline is otherwise a 404 (and an unknown `?pipeline=` on the board a 400,
+the same as for one that doesn't exist).
+
+**Who configures them** (`configuration.py`):
+
+| Pipeline | May configure | From |
+|---|---|---|
+| shared | administrators (`config.manage`) | the organisation-wide workspace only |
+| a user's own | that user (`crm.access_own`); administrators (`crm.manage_any`, recorded as actor with the owner as subject) | the owner's workspace (or organisation-wide) |
+
+Seeing a pipeline never implies configuring it (403). A new pipeline belongs to the
+workspace it is created in: one's own; a user's (an administrator, `created_by` = the
+administrator); organisation-wide, a shared one (`config.manage`). Limits: 25 active pipelines
+per owner (and 25 shared), 20 active stages per pipeline, 30 custom fields, 50 choices per
+field. Names are plain text (no markup), bounded.
+
+**API** (all under `/api/v1/workspaces/{ws}/`): `GET/POST pipelines` (`?archived=true` for
+archived ones), `GET/PATCH pipelines/{id}` (rename, `{version, name}`), `PUT
+pipelines/{id}/stages {version, stages}`, `PUT pipelines/{id}/fields {version,
+custom_fields}`, `POST pipelines/{id}/archive|restore {version}`. Every change requires the
+version the client saw (409 otherwise) and bumps it; audit: `pipeline.created`, `.renamed`,
+`.stages_changed` (stage keys added, changed, archived, deleted), `.fields_changed` (field
+ids), `.archived`, `.restored`. `GET /api/v1/config/pipelines` (kept for compatibility) lists
+the shared pipelines only.
+
+**Editing stages** is one operation, replacing the active stage list in order: stages with
+an `id` are renamed, retyped, re-probabilised and reordered; stages without one are added;
+active stages left out are removed:
+
+- a stage holding **current (non-archived) opportunities** can't be removed (422 naming it and
+  the count: move them first);
+- a stage anything references (an archived opportunity, stage history, a negotiated price) is
+  **archived** (kept, hidden, its position moved out of the board's range; history keeps the
+  name it recorded);
+- a stage nothing ever referenced is **deleted**;
+- a stage holding any opportunity can't change between open, won and lost (422; open ↔
+  negotiation is fine); won is always 100 %, lost 0 %; at least one open stage remains.
+
+**Archiving a pipeline** hides it from selectors and forms; its opportunities and history
+stay. Refused for the default pipeline and while it holds open, non-archived opportunities.
+No opportunity can be created, moved, reopened or restored (open) in an archived pipeline.
+
+**Concurrency** (tested with real threads, mutation-checked): configuration changes lock the
+pipeline row (FOR UPDATE to edit stages or archive; FOR NO KEY UPDATE to rename, restore or
+edit fields) then the stages they remove, retype or move (FOR UPDATE), and never lock a lead
+or an opportunity. A stage edit takes the pipeline FOR UPDATE because it conflicts with the
+KEY SHARE every move takes on the pipeline before its stages: changing a stage's position
+(a unique key) locks the row FOR UPDATE, and a move holds KEY SHARE on its target stage
+while its history insert takes KEY SHARE on its source stage, so a reorder and a forward
+move deadlocked (enhancement review P0, `test_enhancement_races.py`, reproduced by reverting
+the fix). Restoring an archived deal also takes KEY SHARE on its stage and is refused (422)
+if the stage was removed meanwhile. Opportunity writes take shared
+locks on configuration *after* their own (lock order step 3): creation and custom-value edits
+FOR SHARE on the pipeline, moves and restores FOR KEY SHARE on the pipeline, and every
+creation or move FOR KEY SHARE on its target stage, each in the statement that reads the row
+(PostgreSQL re-checks it under the lock). So a stage being removed and a move into it
+serialise: the move commits first (and the removal then counts it: 422) or the removal does
+(and the move finds no such stage: 400); a pipeline archived while a deal is created in it
+likewise; custom values are never validated against definitions being changed.
+
+## Negotiation
+
+A stage of type **negotiation** (an open stage, `is_negotiation`; its name is free:
+"Commercial discussion" works the same) asks for the **negotiated price**:
+
+- **entering** one (a move, a reopen, a creation or conversion directly into it) requires
+  `negotiated_price` (INR, an exact decimal like `value`; 400 otherwise); no other target takes
+  one (400). The rule is in `services.move_opportunity` / `_insert`: drag and drop, the Move
+  menu, the deal page, the API and an administrator's workspace all go through it. A refused
+  move changes nothing (no version, history or audit);
+- **re-entering** after leaving negotiation asks again;
+- while negotiating, `POST …/opportunities/{id}/negotiated-prices {version, price}` records a
+  revision (the same price as the latest is a harmless retry; 422 outside negotiation);
+- every price is **appended** to `pipeline_negotiation_price` (append-only: ORM guard and a
+  PostgreSQL trigger): price, currency, the stage and its name then, source (`stage_entry`,
+  `revision`, `creation`), the opportunity's version, actor, subject (the owner when the
+  actor is someone else) and support session. Nothing is overwritten; `GET
+  …/negotiated-prices` lists it newest first. The opportunity keeps a copy of the latest
+  (`negotiated_price`, `negotiated_at`) for cards and Ask Arkray;
+- audit: `opportunity.negotiated_price_recorded` for revisions and
+  `negotiated_price_recorded: true` on the stage change; amounts stay in the history, never
+  in audit metadata;
+- `value` (shown as **Installation price**) stays the amount pipeline value and weighted
+  pipeline use: a negotiated price never silently rewrites it (a product decision; the deal
+  page shows both).
+
+## Custom fields
+
+Per pipeline (`pipeline_custom_field`): `name` (≤ 60, plain text, unique among the
+pipeline's active fields), `type` (text, long text, number, currency, date, yes/no, single
+choice, multiple choice; **fixed after creation**: remove the field and add another),
+`required`, `options` (choices: `[{id, label}]`, ≤ 50, plain text; values store the ids, so
+renaming a choice never rewrites deals), `position`, `is_active`. Configured with the
+pipeline (`PUT …/fields`, versioned), by whoever may configure the pipeline.
+
+Values live in `pipeline_opportunity.custom_fields` (JSONB, a CHECK keeps it an object):
+`{field id: value}` in canonical form (strings for text, numbers, money and dates; booleans;
+option ids), validated against the pipeline's active definitions on every write
+(`validation.clean_custom_values`): unknown or other pipelines' field ids are refused; text is
+bounded (500 / 5,000) and refuses markup; numbers and money are exact strings (a JSON float is
+refused); dates 1900-2199; required fields must be given at creation and can't be cleared;
+the whole object is at most 32 KB. Edits merge (only the given fields change; null clears).
+A removed field is archived: its values stay on the deals, hidden. Audit records the ids of
+changed fields, never values. Defining a field never changes the database schema.
 
 ### Stages
 
@@ -61,16 +180,24 @@ pipeline, checked at commit so a reorder can swap positions in one transaction),
 
 | Field | Rules |
 |---|---|
-| `title` | required, one line, ≤ 200 characters (same text rules as lead names) |
+| `title` | required, one line, ≤ 200 characters (same text rules as lead names); shown as "Opportunity name" |
 | `lead` | required; a lead **in the caller's workspace**; fixed for the opportunity's lifetime |
 | `owner` | never sent by clients: always the lead's owner (see [Ownership](#ownership)) |
 | `pipeline`, `stage` | the pipeline defaults to the default one, the stage to its first active open stage; stages change only through the move operation |
 | `status` | `open` / `won` / `lost` = the stage's category, database-enforced; read-only |
-| `value` | `NUMERIC(14,2)`, 0 to 999,999,999,999.99, in INR |
+| `value` | `NUMERIC(14,2)`, 0 to 999,999,999,999.99, in INR; shown as **Installation price** (the instrument installation price: the deal's amount) |
+| `opportunity_date` | required **date**, 2000-2099: when the opportunity arose (default: today, business time zone). Not the expected closing date |
+| `account_name`, `customer_name` | required, one line, ≤ 200; default to the lead's organisation (or name) and name: an editable snapshot (the lab buying may differ from the lead's organisation) |
+| `contact_phone`, `contact_email` | optional; checked exactly as a lead's phone and email (structured, never a free-form blob) |
+| `address` | optional, multi-line, ≤ 1,000 |
+| `instrument_name` | optional, ≤ 200 |
+| `work_load` | optional, ≤ 100, free text such as "300 tests/day": the product has no workload unit semantics, so none is invented |
+| `custom_fields` | the pipeline's custom field values ([Custom fields](#custom-fields)) |
+| `negotiated_price`, `negotiated_at` | read-only: the latest negotiated price ([Negotiation](#negotiation)) |
 | `probability` | `NUMERIC(5,2)`, 0-100; see [Probability](#probability) |
 | `probability_overridden` | read-only flag: set manually rather than the stage's default |
 | `weighted_value` | computed by PostgreSQL on every read (never stored, never computed in the browser) |
-| `expected_close_date` | optional **date** (no time, no zone), 2000-01-01 to 2099-12-31 |
+| `expected_close_date` | optional **date** (no time, no zone), 2000-01-01 to 2099-12-31; shown as "Expected closing date" |
 | `description` | optional, ≤ 5,000 characters |
 | `lost_reason` | optional, ≤ 500 characters, only while lost |
 | `closed_at` | set exactly while won or lost (CHECK); cleared on reopen |
@@ -271,8 +398,10 @@ locked an opportunity before its lead; a deliberate mutation of `_lock` produced
    opportunity writes, only `KEY SHARE`-checked by the foreign keys: the review found that
    a lock over the opportunity-stage join also locked the shared stage row, so two users
    moving cards in opposite directions deadlocked (P1, fixed, pinned by real-thread tests);
-3. **user rows**: `FOR SHARE` (`lock_assignable_user`), leaf locks;
-4. inserts: stage history, audit, idempotency records.
+3. **configuration**: the pipeline row FOR SHARE (creating, editing custom values) or FOR KEY
+   SHARE (moves, restores), then the target stage FOR KEY SHARE ([Configuration](#configuration));
+4. **user rows**: `FOR SHARE` (`lock_assignable_user`), leaf locks;
+5. inserts: stage history, negotiated prices, audit, idempotency records.
 
 Phase 4 extends the order with **activities** after opportunities and before user rows
 (lead → opportunities → activities → user rows → inserts); activity writes lock the lead
@@ -351,17 +480,33 @@ bumps the versions of the opportunities it moves.
   card leaves the list shown (a stage list), focus goes to the message saying where it
   went. When a dialog's opener disappears (Mark as won → Reopen), focus goes to the page
   heading.
-- Opportunity page: summary (value, probability with "set manually"/"stage default",
-  weighted value, expected close with "(overdue)" in words), lead (link, or restricted),
-  description, stage history, record details; Move to stage (radio list), Mark as won /
-  lost, Reopen, Edit, Archive/Restore.
-- Create/edit form: lead picker (searches the workspace's own leads only), title, value
-  (typed as `12,50,000`, `1,250,000` or `1250000.50`, sent as an exact string; commas that
-  don't group digits properly, such as `12,50,00`, are refused rather than guessed),
-  stage, optional manual probability, expected close date, description, lost reason when
-  lost. Idempotency key per identical body; edit conflicts (409) offer "Apply my changes
-  to the latest version" (keeping someone else's manual probability, review) or
-  "Discard"; an opportunity archived meanwhile keeps the form and the typing on screen.
+- **Board toolbar** (product enhancement phase): the pipeline picker (owners named
+  organisation-wide), *Settings* where the viewer may configure the pipeline, *+ Pipeline*,
+  the totals and *New opportunity*. **Pipeline settings** is a side panel: name, stages
+  (name, type, probability; reorder with buttons, focus kept on the moved row; remove) and
+  custom fields (type fixed once saved; choices one per line); a new pipeline and its fields
+  are one request; a partial save (rename saved, stages refused) is retried from what was
+  saved, at its version.
+- **Deal page**: a header (status, stage, account, owner; *Won*, *Lost*, *Move* or
+  *Reopen*, *Edit*, and *Delete (archive)* / *Restore* in the actions menu) and three tabs:
+  **Overview** (Deal: installation price, negotiated price with *Update price* while
+  negotiating, probability, weighted value, dates; Customer; Instrument; More details: the
+  custom fields; Description; the lead, open work and record details), **Notes** (deal
+  notes with files, [activities.md](activities.md#attachments)) and **History** (negotiated
+  prices, stage history, the timeline).
+- **New and edit opportunity**: a right-side panel over the board or the deal (full width on
+  phones), grouped Basic (name, lead, pipeline, stage, opportunity date; the negotiated price
+  when the stage is a negotiation stage), Customer (account, customer, phone, email,
+  address; prefilled from the lead), Instrument (instrument, work load, installation price),
+  Closing (expected closing date, own probability, lost reason) and Additional (custom
+  fields, description). Amounts typed as `12,50,000`, `1,250,000` or `1250000.50`, sent as
+  exact strings (misplaced commas refused). Idempotency key per identical body; an edit
+  conflict (409) offers *Keep my changes* (merged onto the latest, someone else's manual
+  probability kept) or *Discard mine*; closing the panel with unsaved typing asks first.
+  Opened from a route (a lead's *New opportunity*, the header): saving lands on the new deal,
+  cancelling returns to the lead (or the board).
+- **Convert** asks what a new deal needs: the negotiated price when its stage is a
+  negotiation stage, and the pipeline's required custom fields.
 - Filters: an inverted expected-close range is explained next to the dates and never sent;
   the board keeps the last valid range. Stage lists start from their first page whenever
   the filters change.
@@ -392,8 +537,8 @@ Query counts per request are pinned (identical at 10 and 100 opportunities,
 | detail | 3 |
 | summary | 3 |
 | history | 4 |
-| pipeline configuration | 4 |
-| move (a write) | 14 (12 before Phase 4; + the timeline's stage-name snapshot and entry), independent of how many opportunities the lead has |
+| pipeline configuration (`/config/pipelines`) | 5 (+ custom fields) |
+| move (a write) | 15 (12 before Phase 4; + the timeline's stage-name snapshot and entry; + the pipeline's KEY SHARE since the product enhancement phase, the target stage read under its own), independent of how many opportunities the lead has |
 | lead reassignment moving 1 or 25 open opportunities | 12 either way (10 before Phase 4; + the activities' lock query and the timeline entry; review: it was 9 + N) |
 
 Benchmark: 300,000 opportunities (100,000 leads, 60 owners, one with 20,100; 60 % open,

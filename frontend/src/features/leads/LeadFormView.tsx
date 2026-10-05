@@ -322,7 +322,7 @@ function LeadForm({ workspace, lead }: { workspace: Workspace; lead: Lead | null
         <ArrowLeft aria-hidden="true" className="size-4" />
         {lead ? lead.display_name : "Leads"}
       </Link>
-      <PageHeader title={lead ? "Edit lead" : "New lead"} subtitle={lead ? undefined : "Only a name or an organization is required. Add the rest when you know it."} />
+      <PageHeader title={lead ? "Edit lead" : "New lead"} subtitle={undefined} />
 
       <form ref={form} onSubmit={onSubmit} noValidate className="max-w-4xl space-y-4">
         {conflict ? (
@@ -363,7 +363,7 @@ function LeadForm({ workspace, lead }: { workspace: Workspace; lead: Lead | null
           </Alert>
         ) : null}
 
-        <FormSection title="Basic information" description="Required: a person's name, an organization, or both.">
+        <FormSection title="Basic information" description="A name, an organization, or both.">
           {text("first_name", { maxLength: 100, optional: false, hint: "Leave either name blank if the person uses one name." })}
           {text("last_name", { maxLength: 100, optional: false })}
           {text("organization_name", { maxLength: 200, optional: false })}
@@ -491,7 +491,7 @@ function LeadForm({ workspace, lead }: { workspace: Workspace; lead: Lead | null
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <Link
             href={cancelHref}
-            className="inline-flex h-9 items-center justify-center rounded-md border border-slate-300 bg-white px-3.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            className="inline-flex h-9 items-center justify-center rounded-full border border-slate-300 bg-white px-3.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
           >
             Cancel
           </Link>

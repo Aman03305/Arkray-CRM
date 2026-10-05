@@ -71,6 +71,19 @@ describe("LoginForm", () => {
     expect(nav.hardNavigate).not.toHaveBeenCalled();
   });
 
+  it("explains an expired temporary password with the server's message", async () => {
+    const message = "Your temporary password has expired. Ask your administrator for a new one.";
+    mockApi({
+      "GET /api/v1/auth/me": NOT_SIGNED_IN,
+      "POST /api/v1/auth/login": apiError(400, "temporary_password_expired", message, { password: ["Expired."] }),
+    });
+    renderWithProviders(<LoginForm />);
+    await fillAndSubmit();
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(screen.getByRole("alert")).not.toHaveTextContent("Reference");
+    expect(nav.hardNavigate).not.toHaveBeenCalled();
+  });
+
   it("explains a lockout", async () => {
     mockApi({
       "GET /api/v1/auth/me": NOT_SIGNED_IN,

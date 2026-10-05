@@ -12,7 +12,10 @@ Concurrency rules (docs/authorization.md#concurrency):
   CHECKs) remain the final arbiter.
 
 Secrets never pass through here in plaintext except `deliver_account_token`, which mints
-the one-time secret, stores its digest and emails the link, all inside the email job.
+the one-time secret, stores its digest and emails the link, all inside the email job, and an
+administrator-chosen password (a new user's initial one, or a reset), which exists only in
+the request that sets it: it is hashed at once, never logged, audited, queued or returned,
+and the user must replace it at their first sign-in (docs/authorization.md#admin-set-passwords).
 """
 
 from __future__ import annotations
@@ -69,6 +72,7 @@ AUDIT_PROFILE_UPDATED = "user.profile_updated"
 AUDIT_EMAIL_CHANGED = "user.email_changed"
 AUDIT_PASSWORD_RESET_ISSUED = "auth.password_reset_issued"  # noqa: S105
 AUDIT_PASSWORD_RESET_COMPLETED = "auth.password_reset_completed"  # noqa: S105
+AUDIT_PASSWORD_SET_BY_ADMIN = "auth.password_set_by_admin"  # noqa: S105
 AUDIT_PASSWORD_RESET_SUPPRESSED = "auth.password_reset_suppressed"  # noqa: S105
 
 EDITABLE_FIELDS = frozenset({"first_name", "last_name", "role"})
@@ -185,9 +189,19 @@ def _clean_name(value: str, field: str) -> str:
         raise InvalidInputError(details={field: [str(exc)]}) from None
 
 
-def create_user(*, actor_id: UUID, email: str, first_name: str, last_name: str, role: str) -> User:
-    """Create an invited user and queue their invitation. Nobody ever chooses (or sees)
-    another user's password; the email job delivers a one-time activation link."""
+def create_user(
+    *,
+    actor_id: UUID,
+    email: str,
+    first_name: str,
+    last_name: str,
+    role: str,
+    password: str | None = None,
+) -> User:
+    """Create a user. With `password` (the administrator enters an initial password) the
+    account is active at once and the user must choose their own password when they first
+    sign in; only the hash is stored. Without it, the user is invited: the email job
+    delivers a one-time activation link and the user sets their password themselves."""
     email = normalize_email(email)
     first_name = _clean_name(first_name, "first_name")
     last_name = _clean_name(last_name, "last_name")
@@ -195,6 +209,10 @@ def create_user(*, actor_id: UUID, email: str, first_name: str, last_name: str, 
         raise InvalidInputError(details={"role": ["Choose a valid role."]})
     if not first_name:
         raise InvalidInputError(details={"first_name": ["This field may not be blank."]})
+    if password is not None and role in roles_with(Capability.USERS_MANAGE):
+        # An administrator choosing another administrator's first password could sign in as
+        # them before they do (enhancement security review): administrators are invited.
+        raise InvalidInputError(details={"password": [ADMINISTRATOR_INVITED]})
     try:
         with transaction.atomic():
             _serialise_user_administration()
@@ -210,10 +228,22 @@ def create_user(*, actor_id: UUID, email: str, first_name: str, last_name: str, 
                 status=UserStatus.INVITED,
                 is_active=False,
             )
+            if password is not None:
+                # The policy (length, similarity to the name and email, common passwords).
+                check_new_password(password, user, field="password")
+                user.set_password(password)
+                user.status, user.is_active, user.activated_at = UserStatus.ACTIVE, True, now
+                user.password_change_required = True
+                user.password_changed_at = now
+                user.save()
+                _audit_user(
+                    AUDIT_USER_CREATED, actor.pk, user, role=role, activation="set_by_admin"
+                )
+                return selectors.admin_user_detail(user.pk)
             user.set_unusable_password()
             user.save()
             invitation = _issue_token(user, TokenPurpose.INVITATION, created_by=actor, now=now)
-            _audit_user(AUDIT_USER_CREATED, actor.pk, user, role=role)
+            _audit_user(AUDIT_USER_CREATED, actor.pk, user, role=role, activation="invitation")
             _audit_user(
                 AUDIT_INVITATION_CREATED,
                 actor.pk,
@@ -256,6 +286,11 @@ def update_user(*, actor_id: UUID, user_id: UUID, version: int, changes: Mapping
                 raise InvalidInputError(details={"role": ["Choose a valid role."]})
             if user.pk == actor.pk:
                 raise BusinessRuleViolation("You can't change your own role.")
+            if user.password_change_required and new_role in roles_with(Capability.USERS_MANAGE):
+                # The password an administrator set is still theirs to know: promoting the
+                # account now would hand them an administrator's (demote, set, promote: the
+                # enhancement security review's takeover).
+                raise BusinessRuleViolation(PROMOTION_REFUSED_UNTIL_OWN_CHOICE)
             if (
                 _manages_users(user)
                 and new_role not in roles_with(Capability.USERS_MANAGE)
@@ -352,6 +387,69 @@ def change_user_email(
         if conflict := _email_conflict(new_email, excluding=user_id):
             raise conflict from None
         raise
+    return selectors.admin_user_detail(user.pk)
+
+
+# Why an administrator can't set a password here (messages; the names avoid "password" only
+# to keep the hardcoded-secret lint quiet).
+OWN_ACCOUNT_REFUSED = "Change your own password in Settings."
+INACTIVE_ACCOUNT_REFUSED = (
+    "Only active users have a password to set. Resend the invitation instead."
+)
+ADMINISTRATOR_ACCOUNT_REFUSED = (
+    "Administrators set their own passwords: ask them to use Forgot password if they're locked out."
+)
+ADMINISTRATOR_INVITED = "Administrators choose their own password: send an invitation instead."
+PROMOTION_REFUSED_UNTIL_OWN_CHOICE = (
+    "This user must first choose their own password (at their next sign-in): then they can be"
+    " made an administrator."
+)
+
+
+def set_user_password(*, actor_id: UUID, user_id: UUID, version: int, new_password: str) -> User:
+    """An administrator sets a new (temporary) password for an active user: the user's
+    sessions end, outstanding reset links are voided, and the user must choose their own
+    password at their next sign-in. Audited as `auth.password_set_by_admin` (who, for whom,
+    when; never the password). Not for one's own account (Settings) nor another
+    administrator's (that would let one administrator sign in as another)."""
+    with transaction.atomic():
+        _serialise_user_administration()
+        actor = _acting_manager(actor_id)
+        if user_id == actor.pk:
+            raise BusinessRuleViolation(OWN_ACCOUNT_REFUSED)
+        user = _lock_user(user_id)
+        _require_version(user, version)
+        if user.status != UserStatus.ACTIVE:
+            raise BusinessRuleViolation(INACTIVE_ACCOUNT_REFUSED)
+        if _manages_users(user):
+            raise BusinessRuleViolation(ADMINISTRATOR_ACCOUNT_REFUSED)
+        check_new_password(new_password, user, field="new_password")
+        now = timezone.now()
+        user.set_password(new_password)
+        user.session_epoch += 1  # every session of the user ends
+        user.password_change_required = True
+        user.password_changed_at = now
+        user.version += 1
+        user.save(
+            update_fields=[
+                "password",
+                "session_epoch",
+                "password_change_required",
+                "password_changed_at",
+                "version",
+                "updated_at",
+            ]
+        )
+        revoked = _revoke_pending(user, now, purposes=[TokenPurpose.PASSWORD_RESET])
+        throttling.forget_account_failures(user.email)
+        audit.record(
+            AUDIT_PASSWORD_SET_BY_ADMIN,
+            actor_id=actor.pk,
+            target_type="user",
+            target_id=user.pk,
+            subject_user_id=user.pk,
+            metadata={"revoked_links": revoked},
+        )
     return selectors.admin_user_detail(user.pk)
 
 
@@ -527,6 +625,7 @@ def accept_invitation(secret: str, password: str) -> User:
         now = timezone.now()
         user.set_password(password)
         user.status, user.is_active, user.activated_at = UserStatus.ACTIVE, True, now
+        user.password_changed_at = now
         user.version += 1
         user.save(
             update_fields=[
@@ -534,6 +633,7 @@ def accept_invitation(secret: str, password: str) -> User:
                 "status",
                 "is_active",
                 "activated_at",
+                "password_changed_at",
                 "version",
                 "updated_at",
             ]
@@ -592,7 +692,18 @@ def confirm_password_reset(secret: str, new_password: str) -> None:
         now = timezone.now()
         user.set_password(new_password)
         user.session_epoch += 1
-        user.save(update_fields=["password", "session_epoch", "updated_at"])
+        # The user chose this one: an administrator-set password no longer needs changing.
+        user.password_change_required = False
+        user.password_changed_at = now
+        user.save(
+            update_fields=[
+                "password",
+                "session_epoch",
+                "password_change_required",
+                "password_changed_at",
+                "updated_at",
+            ]
+        )
         _consume(token, now)
         throttling.forget_account_failures(user.email)
         _audit_user(AUDIT_PASSWORD_RESET_COMPLETED, user.pk, user)

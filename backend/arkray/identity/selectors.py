@@ -3,12 +3,13 @@ workspaces are resolved to an AccessScope before anything here runs)."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from uuid import UUID
 
 from django.db import connection
 from django.db.models import F, FilteredRelation, Q, QuerySet
 
+from arkray.audit.models import AuditEvent
 from arkray.core.access import AccessScope
 from arkray.core.errors import NotFoundError
 from arkray.core.text import search_terms
@@ -107,3 +108,49 @@ def people(user_ids: Iterable[UUID]) -> dict[UUID, User]:
         return {}
     users = User.objects.filter(pk__in=ids).only("id", "first_name", "last_name", "is_active")
     return {user.pk: user for user in users}
+
+
+# --- security events (docs/authorization.md#password-change-notification) ---------------------
+# What administrators are told about accounts: who did what to which account, and when. An
+# allowlist of actions; never a password, a hash, a token or a link. The keys of metadata
+# shown are allowlisted per action too.
+SECURITY_ACTIONS: dict[str, tuple[str, ...]] = {
+    "auth.login_with_temporary_password": (),
+    "auth.password_changed": (),
+    "auth.password_reset_completed": (),
+    "auth.password_set_by_admin": (),
+    "user.created": ("role", "activation"),
+    "user.deactivated": (),
+    "user.reactivated": (),
+    "user.role_changed": ("from", "to"),
+    "user.email_changed": (),
+    "support_session.started": ("reason",),
+    "support_session.ended": ("end",),
+}
+
+
+def security_events() -> QuerySet[AuditEvent]:
+    """Recent account and security events, newest first (paginated by the caller)."""
+    return AuditEvent.objects.filter(action__in=list(SECURITY_ACTIONS)).only(
+        "id",
+        "occurred_at",
+        "action",
+        "actor_id",
+        "target_type",
+        "target_id",
+        "subject_user_id",
+        "metadata",
+        "support_session_id",
+    )
+
+
+def people_by_id(user_ids: Collection[UUID]) -> dict[UUID, User]:
+    """Names of the given users (one query), for lists that reference users by id."""
+    if not user_ids:
+        return {}
+    return {
+        user.pk: user
+        for user in User.objects.filter(pk__in=list(user_ids)).only(
+            "id", "first_name", "last_name", "is_active"
+        )
+    }
