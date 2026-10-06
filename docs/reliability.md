@@ -105,11 +105,12 @@ run late or twice.
 | **PostgreSQL down** | CRM unavailable (the only hard dependency) | `/health/ready` 503, so the load balancer drains; `/health/live` stays 200 (no restart loops); the API answers **503 `service_unavailable` with `Retry-After: 30`** and the request id (Phase 10: a connection-level failure anywhere in the request, including the session middleware; a statement timeout or deadlock stays a 500, a fault to fix); the metrics scrape reports `arkray_db_up 0` and keeps its broker and cache gauges. Drill: ready 503, live 200 in 3 ms, healthy again within 5-13 s of PostgreSQL returning, no application restart. One connection attempt per request: the access-log line no longer resolves the user a second time (whole-software audit: 7.7-12.8 s to the 503 before, about half after) | readiness, `arkray_db_up`, 5xx rate |
 | **PostgreSQL stalled** (paused, failing over, a network partition: connections neither answer nor close) | requests hang, then fail at the proxy | the server-side timeouts can't fire on a server that is frozen. Web workers wait in their query; gunicorn kills them at 30 s (`WORKER TIMEOUT`) and the proxy answers 502, then 504 (35 s); everything resumes the moment the database does. Bounded since the whole-software audit: readiness answers 503 within its 2 s probe deadline while a worker is free; TCP keepalives and `tcp_user_timeout` turn a partition into an error after 30-60 s. Measured (a 45 s pause, 2 requests a second): 502 at 30-32 s, 504 at 35 s, immediate recovery. An HTTP liveness probe shares the stuck workers: probe liveness at the TCP level (`tcpSocket`), or give an HTTP one more than 35 s of tolerance, or a failover restarts every pod | readiness, `arkray_db_up` 0, gunicorn `WORKER TIMEOUT`, proxy 502/504 (`upstream_status` in the access log) |
 | **PostgreSQL slow / lock contention** | slow requests | `statement_timeout` 10 s (web), `lock_timeout` 5 s, `idle_in_transaction_session_timeout` 60 s: a stuck query fails fast instead of pinning workers and connections; `jit` off (short OLTP statements: compilation only added latency, Phase 5) | latency, timeout errors |
-| **Redis cache down** | none functionally | cache ops become misses via django-redis `IGNORE_EXCEPTIONS`; **fail-fast connections**: no redis-py retries plus a per-process circuit breaker, so an outage costs one failed attempt per process per cool-down instead of seconds per request; the cool-down starts at 15 s and doubles while the outage lasts, up to 120 s, and the first successful connection resets it (Phase 10); readiness reports `degraded` (still 200). Measured: 8 s per request before the breaker, 0.2 s after. Phase 10 drill (Redis's container stopped under load): each probe stalls its request about 3.9 s in DNS, which socket timeouts don't bound; with a fixed 15 s cool-down that was 50 stalls in 45 s across 8 processes, with the back-off 24 in 90 s; 0 errors, 103 req/s against 127 healthy (8 users) | readiness `degraded`, `cache_circuit_opened`, `arkray_cache_up` |
+| **Redis cache down** | none functionally | cache ops become misses via django-redis `IGNORE_EXCEPTIONS`; **fail-fast connections**: no redis-py retries plus a per-process circuit breaker, so an outage costs one failed attempt per process per cool-down instead of seconds per request; the cool-down starts at 15 s and doubles while the outage lasts, up to 120 s, and the first successful connection resets it (Phase 10); when a cool-down runs out, one background thread per process checks whether Redis is back while requests keep failing fast, so no request waits on the check (2026-10-06); readiness reports `degraded` (still 200). Measured: 8 s per request before the breaker, 0.2 s after. Phase 10 drill (Redis's container stopped under load): each probe stalls its request about 3.9 s in DNS, which socket timeouts don't bound; with a fixed 15 s cool-down that was 50 stalls in 45 s across 8 processes, with the back-off 24 in 90 s; 0 errors, 103 req/s against 127 healthy (8 users). 2026-10-06: the dev Redis crash-looped on a corrupt AOF tail and pages felt randomly slow (requests of 3.9-4.4 s every 2 minutes per process); the probe now runs off the request | readiness `degraded`, `cache_circuit_opened`, `arkray_cache_up` |
 | **Redis cache down: side effects** | DRF request-rate throttling fails open; **login and reset throttling, Ask Arkray's bulkheads and the admin-workspace audit window are unaffected** (PostgreSQL-backed since Phases 1, 8 and 9; tested) | by design | — |
 | **Redis broker down** | background work pauses | CRM writes still succeed (outbox rows accumulate in PostgreSQL); beat and workers reconnect automatically; the backlog drains within the in-flight caps. Drill: 406 indexing events accumulated during the outage and were done 50 s after Redis returned, none dead | oldest-pending age alert, `arkray_broker_up` |
 | **Worker crash mid-task** | one event delayed | `acks_late` + `reject_on_worker_lost` redeliver; lease recovery as backstop; attempts counted. Drill (`kill -9` of the indexing worker under load): 31 events waited in flight, all done within 20 s of its restart; every one of the 1,917 notes written during the drills indexed exactly once (the chunk table's unique key), none dead. The event a killed *container* was running waits out its running lease instead (5 minutes; 4 min 51 s in the whole-software audit's drill): its broker message stays unacknowledged, and the lease recovery runs it again | dead events, logs |
 | **A queue's workers down** | that queue's work waits | its events are handed to the broker and sit in flight, taken by nobody, until the workers return (then done within seconds: 6.2 s for the index, 5 s for email in the audit's drills); the CRM is unaffected (0 errors in 712 probes) | `arkray_outbox_oldest_undelivered_seconds` (alert after 5 minutes; before the audit nothing showed it) |
+| **PostgreSQL down with background work in flight** (final audit SRE-5) | invitations, emails and index jobs are delayed, up to the 30-minute dispatch lease | a worker whose task fails before it claims its event (the database is down) acknowledges the message with no retry: the event stays in flight until its lease ends, then is dispatched again; nothing is lost or dead-lettered | `arkray_outbox_oldest_undelivered_seconds` (> 300 s alerts) |
 | **Duplicate / stale broker messages** | none | claim tokens make every non-current message a no-op (`outbox_stale_message_ignored`) | logs |
 | **Default-queue backlog** (for example a large import) | only that queue slows | relay runs on its own `outbox` queue; other queues keep draining | queue age per queue |
 | **Beat down** | nothing dispatched | same as broker down; run exactly one beat (see deployment) | oldest-pending age alert |
@@ -119,6 +120,8 @@ run late or twice.
 | **ai workers down / backlog** | Ask Arkray's non-routed questions | pending questions expire after 90 s (`timeout`); router questions are answered on the web request | `ai_question_skipped`, `arkray_ai_questions_last_hour{error="timeout"}`, `arkray_ai_questions_pending` |
 | **Broker down for a question** | that question | fails at once with `ai_unavailable`; a fail-fast breaker (30 s, doubling to 2 min while the broker stays down; Phase 10) spares later questions the connect timeout; router questions unaffected. A failed publish holds its web worker about 10 s (DNS and connect): once per process per cool-down, 16 times in the 90 s drill across 8 processes | `ai_dispatch_failed`, `ai_dispatch_circuit_opened` |
 | **SMTP down** | emails delayed | user creation and reset requests succeed; email events retry with backoff, each retry minting a fresh link secret; the admin table shows "Sending invitation…" until delivery; resend is available to admins (tested). An email waits for its next retry after SMTP returns (98-108 s after a 2.6-minute outage, exactly one each). An outage longer than about 10-20 minutes exhausts the 8 attempts: those emails go dead, and an admin resends the invitations (or `outbox_requeue --queue email`) | `outbox_event_retry_scheduled`, dead events on queue `email` |
+| **Attachment storage down or slow** (bucket unreachable, black-holed, throttling, a full volume) | file uploads and downloads only | each storage call has a 12 s deadline (botocore's own: 3 s connect, 10 s read, 2 attempts), at most 4 in flight per process, and a per-process breaker: after 3 outage-like failures in a row (timeouts, connection errors, 5xx, a full disk) calls answer 503 `storage_unavailable` + `Retry-After: 30` at once, without a network call, for 15 s doubling to 2 minutes; a background thread checks whether storage is back (`head_bucket`, or a sentinel written and read back), never a request. A failed upload leaves a `failed` row, never a stored one; readiness stays `ok`. Verified against a local fault-injecting S3 endpoint with the real client (below) | `arkray_attachment_storage_up`, `arkray_attachment_storage_errors_last_hour`, `attachment_storage_failed`, `attachment_storage_circuit_opened` |
+| **Attachment object lost** (deleted outside the application, a bucket restored to an older point) | that file | its download answers 410 `attachment_unavailable` ("This file is no longer available. Ask an administrator."), never the outage's 503; a 404 or 403 from the store never trips the breaker; the download path writes nothing: the daily reconciliation reports the file and `reconcile_attachments --repair` marks it unavailable | `arkray_attachment_objects_missing_last_hour`, `attachment_object_missing` (WARNING), `arkray_attachment_reconcile_mismatches` |
 | **Web tier down** | pages unavailable, the API unaffected | the proxy answers 504, then 502, until a web instance is back (8 s after it started in the audit's drill) | the web probe (`GET /login`, a healthcheck in both Compose files), proxy 502/504 with `upstream_status` |
 | **Recovery thundering herd** | spike after an outage | jittered backoff; in-flight caps meter the drain rate | — |
 | **Bad deploy / failed migration** | release blocked | migrations run as a separate one-off job before rollout; the app never migrates on boot; expand/contract migrations keep old and new code compatible | job failure |
@@ -136,6 +139,8 @@ Every network call and every wait is bounded:
 | Redis cache connect / socket | 1 s / 1 s, no retries, circuit breaker (15 s doubling to 120 s) |
 | Metrics scrape's Redis probes (broker, cache) | 2 s each, then reported down |
 | Redis broker socket | 5 s |
+| Attachment storage call (any backend) | 12 s deadline per call; S3 client 3 s connect, 10 s read, 2 attempts |
+| Attachment storage liveness probe (metrics) | 2 s, cached 30 s per process |
 | SMTP | 10 s |
 | Celery task soft / hard limit | 100 s / 120 s |
 | Outbox dispatch lease / running lease | 30 min / 300 s |
@@ -154,6 +159,7 @@ Every network call and every wait is bounded:
 | Web requests | never retried server-side |
 | Frontend | GET queries retried twice with backoff (TanStack Query, Phase 1); **mutations never auto-retried**. Create endpoints accept an `Idempotency-Key` where duplicates would be harmful (see [api-conventions.md](api-conventions.md#idempotency)). |
 | Redis cache | none (fail fast); breaker with back-off (15 s to 120 s) |
+| Attachment storage | botocore standard mode, 2 attempts in total, inside the 12 s deadline; then a per-process breaker (3 failures, 15 s doubling to 120 s); uploads and downloads are never retried server-side; purge and scan jobs retry through the outbox |
 
 Phase 10 audit: every retry above is bounded (attempt counts, budgets, cool-down caps),
 backs off (exponential with jitter, `Retry-After`, or breaker cool-downs), is safe to repeat
@@ -196,7 +202,10 @@ connections, idle ones hold their slots). Beyond that, put
 with psycopg 3 by default (safe with transaction pooling), and
 `DISABLE_SERVER_SIDE_CURSORS=True` must be set when PgBouncer is used. The optional
 per-process psycopg pool (`DB_POOL_ENABLED`) bounds connections per process when threaded
-servers are used.
+servers are used. With it on, count **two** per web process (the worker and the readiness
+probe's own thread: 16 for 8 workers, measured in the final audit), and `/health/ready`
+needs one spare connection beyond the workers: with the role's connection limit equal to
+the worker count it answers 503 while the API still serves.
 
 ## Backpressure and bounded work
 
@@ -206,6 +215,63 @@ servers are used.
   a user with no pause between requests is answered 429 with `Retry-After`.
 - Imports and exports run in workers in batches, never inside a web request.
 - Statement timeouts cap the cost of any single query.
+
+## Attachment storage
+
+File storage is a degraded dependency, like the cache: uploads and downloads fail cleanly
+while it is down and nothing else does (final audit SRE-4, R105). `activities.storage`
+guards every call, whatever the backend:
+
+- **Deadline:** the call runs on a small per-process pool and the request stops waiting
+  after `ATTACHMENT_STORAGE_DEADLINE_S`. botocore's timeouts bound each socket operation,
+  not the whole call (a stalled body, a slow drip of bytes, two attempts with back-off
+  could take 20 s and more); the deadline bounds the request. The abandoned call is told to
+  stop at its next chunk and ends within botocore's own timeouts. A download from S3 is
+  fetched whole (into a spool file) before the response starts, so a failure is a 503, not
+  a 200 cut off mid-file.
+- **Bulkhead:** at most `ATTACHMENT_STORAGE_MAX_IN_FLIGHT` calls per process, abandoned
+  ones included; beyond that a call answers 503 at once. With gunicorn's sync workers a
+  process serves one request at a time, so this bounds threaded servers and the abandoned
+  calls; what keeps storage trouble from taking every web worker is the deadline (no
+  request waits more than 12 s) and the breaker (after 3 failures a process stops waiting
+  at all). Worst case at the start of an outage: about 3 x 12 s of one worker per process
+  before its breaker opens. Uploads also have their own rate limit per user
+  (`API_THROTTLE_ATTACHMENTS`, 30 a minute, besides the 600 a minute for everything).
+- **Breaker:** after `ATTACHMENT_STORAGE_BREAKER_FAILURES` outage-like failures in a row
+  (timeout, connection, 5xx, a full volume, an incomplete write), calls fail at once for
+  `ATTACHMENT_STORAGE_BREAKER_COOLDOWN_S`, doubling up to 8 times that while the outage
+  lasts; when a cool-down ends, one background thread per process checks the store
+  (`head_bucket`, or a sentinel written, read back and deleted) and its success closes the
+  breaker. A missing object (404) and a refusal (403: a configuration fault, answered at
+  once) are answers, not outages: they never trip it.
+- **Integrity:** a row becomes `stored` only after `storage.save()` returned, which reads
+  the object's size back from the store (a HEAD on S3, a stat on disk); a short object is a
+  failed upload. Tested at every step: the write failing, the write done and the finish
+  failing, the process dying between the two, a deletion whose purge fails
+  (`activities/tests/test_attachment_failures.py`).
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ATTACHMENT_STORAGE_DEADLINE_S` | `12` | per call; keep it under gunicorn's 30 s with room for the rest of the request |
+| `ATTACHMENT_STORAGE_MAX_IN_FLIGHT` | `4` | per process (web and worker) |
+| `ATTACHMENT_STORAGE_BREAKER_FAILURES` | `3` | outage-like failures in a row before the breaker opens |
+| `ATTACHMENT_STORAGE_BREAKER_COOLDOWN_S` | `15` | first cool-down; doubles to 8 x while the outage lasts |
+| `ATTACHMENT_S3_CONNECT_TIMEOUT_S`, `ATTACHMENT_S3_READ_TIMEOUT_S`, `ATTACHMENT_S3_MAX_ATTEMPTS` | `3`, `10`, `2` | botocore's, per socket operation and attempt |
+| `ATTACHMENT_RECONCILE_DAILY` | `true` | the daily read-only reconciliation ([runbooks.md](runbooks.md#attachment-reconciliation)) |
+| `API_THROTTLE_ATTACHMENTS` | `30/min` | uploads per user |
+
+**Verified** (`tests/integration/test_attachment_storage_faults.py`, [testing.md](testing.md#attachment-storage-faults)):
+the real django-storages `S3Storage` and botocore client, built with the production
+options, against a local fault-injecting S3-compatible endpoint: connection refused, a
+black-holed address, a store that accepts and never answers, 403, 404, 500, 503 SlowDown, a
+write the store keeps only half of, slow answers, a download that stalls or drops
+mid-body; twelve uploads at once to a dead store (all back within the deadline, the rest
+failing in under 100 ms once the breaker is open); the CRM's other endpoints answering
+while storage hangs; recovery. The filesystem backend: an unwritable root, a full disk, a
+short write, a slow disk. **Not verified here:** a real S3 or S3-compatible bucket (its
+consistency, multipart behaviour above 8 MB, server-side encryption, IAM policy errors,
+real network latency): R99 stays open until the deployment's own bucket is tested
+([runbooks.md](runbooks.md#attachment-storage-degraded)).
 
 ## Graceful shutdown
 

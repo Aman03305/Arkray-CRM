@@ -11,6 +11,7 @@ import pytest
 from django.utils import timezone
 
 from tests.factories import LeadFactory, MeetingFactory, default_stage
+from tests.helpers import key_header
 
 from .conftest import dashboard_url
 
@@ -26,7 +27,8 @@ def figures(client):
 
 
 def post(client, path, body, expected=201):
-    response = client.post(f"{ME}/{path}", body, format="json")
+    headers = key_header() if path == "opportunities" else None  # a create requires one
+    response = client.post(f"{ME}/{path}", body, format="json", headers=headers)
     assert response.status_code == expected, response.content
     return response.json()
 
@@ -62,6 +64,7 @@ def test_every_write_shows_on_the_next_load(user_a_client):
             "stage": str(default_stage("negotiation").pk),
             "version": opportunity["version"],
             "negotiated_price": "1000",
+            "agreed_cpt": "Rs 18",
         },
         expected=200,
     )

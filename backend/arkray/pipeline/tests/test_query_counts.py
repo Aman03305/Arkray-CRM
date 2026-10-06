@@ -145,7 +145,7 @@ def test_detail(user_a_client, user_a, stages):
 def test_history(user_a_client, user_a, stages):
     opportunity = OpportunityFactory(lead=LeadFactory(owner=user_a))
     for version, key in enumerate(["qualified", "proposal", "negotiation", "won"], start=1):
-        price = {"negotiated_price": "1000"} if key == "negotiation" else {}
+        price = {"negotiated_price": "1000", "agreed_cpt": "Rs 18"} if key == "negotiation" else {}
         user_a_client.post(
             opportunity_url(opportunity.pk, action="move"),
             {"stage": str(stages[key].pk), "version": version, **price},

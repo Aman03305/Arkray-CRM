@@ -101,13 +101,15 @@ both cases ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.md))
   shows only the change-password screen. An unchanged temporary password expires after
   `TEMPORARY_PASSWORD_TTL_S` (72 h; sign-in answers `temporary_password_expired`);
 - setting a password ends the user's sessions and voids outstanding reset links; it is
-  refused for oneself (Settings), for another administrator (that would let one administrator
-  sign in as another), and for invited or deactivated users; audited as
-  `auth.password_set_by_admin` (actor, user; never the password);
+  refused for oneself (Settings), for another administrator **whatever the account's status**
+  (that would let one administrator sign in as another; see
+  [Administrator account protection](#administrator-account-protection)), and for invited or
+  deactivated users; audited as `auth.password_set_by_admin` (actor, user; never the
+  password);
 - **administrators are always invited** (a password on create is refused for a role that
   manages users), and a user whose administrator-set password is still unchanged **can't be
-  made an administrator** until they choose their own (422): otherwise demote, set,
-  promote would let one administrator sign in as another (adversarial review);
+  made an administrator** until they choose their own (422): otherwise set, promote would
+  hand one administrator another administrator's account (adversarial review);
 - a sign-in with a password an administrator set (before the user changed it) is recorded as
   `auth.login_with_temporary_password` and shown in the security events: an administrator
   using it is visible there, before the user's own change;
@@ -202,18 +204,48 @@ administrator.
 - Editable via `PATCH` (with the current `version`, or 409): first name, last name, role.
   Anything else, including `email`, `status`, `is_active`, `password`, `is_superuser` and
   `capabilities`, is rejected with 400 (unknown field). Role changes are audited with
-  before and after values, admins can't change their own role, and demotion takes effect on
-  the next request.
+  before and after values, admins can't change their own role, **nor another
+  administrator's** (422, below), and a role change takes effect on the next request.
 - **Email change** is its own action (`POST /admin/users/{id}/change-email`, with the
   version): uniqueness is checked (409), `session_epoch` is incremented (the user is signed
   out everywhere), pending reset links are revoked, invited users get a fresh invitation at
   the new address, and active users' previous address is notified. It is audited with old
   and new values. Changing **your own** email also requires your current password
   (throttled like sign-in), so a hijacked session can't become a permanent takeover.
-- A manager who is deactivated or loses `users.manage` takes their **pending invitations**
-  with them: they're revoked in the same transaction (counted in the audit event), so nobody
-  can leave a pre-approved account behind. The invited user shows "No active invitation"
-  until another admin resends.
+  **Another administrator's** email can't be changed at all (422, below).
+
+### Administrator account protection
+
+Risk R100: an administrator could change another administrator's email to a mailbox they
+read, use *Forgot password* there and sign in as them; or demote them, set a temporary
+password (allowed for sales users), sign in with it and choose a new one at the forced change.
+Each step was audited, but nothing stopped it. Since then **an administrator's credentials
+and standing are changed only by that administrator**. For another account whose *role* is
+administrator, whatever its status (active, invited or deactivated: the protection must not
+depend on a status another administrator can change):
+
+| Action on another administrator | Result |
+|---|---|
+| Change email | 422 `business_rule_violation`: "Administrators change their own email address in Settings." No exception for an invitation sent to a mistyped address: deactivate it and invite the right one. |
+| Set password | 422: "Administrators set their own passwords: …" (they use *Forgot password*, which mails only their own address). |
+| Change role (demote) | 422: "An administrator's role can't be changed by another administrator. To remove their access, deactivate the account." |
+| Edit first or last name | allowed |
+| Deactivate, reactivate, resend invitation | allowed and audited (off-boarding; gives no credentials: reactivation restores the account's own password, invitations go to the account's own address). The last active administrator still can't be deactivated. |
+| Support session | refused (support sessions are for CRM users only) |
+
+The checks are in `identity.services` (`_refuse_for_another_administrator`), under the
+user-administration advisory lock, against the target's **locked** row, and before the
+version check (a stale page gets the reason, not a conflict). So a promotion racing an
+email change either commits first, and the email change is refused, or commits after it
+(tested with real concurrency in `tests/security/test_admin_takeover.py`). Promoting a
+user to administrator stays allowed (with the guard above). How an operator removes or
+changes an administrator when the policy is in the way: [security.md](security.md#administrator-account-protection).
+- A manager who is deactivated takes their **pending invitations** with them: they're revoked
+  in the same transaction (counted in the audit event), so nobody can leave a pre-approved
+  account behind. The invited user shows "No active invitation" until another admin resends.
+  (A role change through `update_user` does the same, but since R100 no administrator can
+  change another administrator's role; an operator demoting one in the database revokes
+  their invitations by hand, see [security.md](security.md#administrator-account-protection).)
 - The rules check capabilities (`users.manage`) through `roles_with()`, never role names.
 
 MFA (TOTP) is a planned extension. Neither the capability model nor the session design needs
@@ -314,8 +346,8 @@ navigates that user's Dashboard, Pipeline, Leads and Activities, with a persiste
 - **Opening a workspace.** `GET /api/v1/workspaces/{workspace}` resolves the segment (and
   audits delegated access) and returns `{kind, subject: {id, full_name, status}}`, which the
   frontend uses for the "Viewing CRM for" banner. Anything the caller may not open is 404.
-- **Frontend reuse.** The same page components render at `/leads` and
-  `/admin/users/{id}/leads`; the workspace comes from the URL
+- **Frontend reuse.** The same page components render at `/pipeline` and
+  `/admin/users/{id}/pipeline` (and every other module); the workspace comes from the URL
   ([ADR-0010](adr/0010-frontend-workspace-routing.md)). The URL is parsed once, the way
   Next.js decodes the route param, and fails closed. The frame renders a page only when the
   URL's user and the layout's user are the same user. User names link to a workspace only for

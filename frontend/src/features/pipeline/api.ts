@@ -21,7 +21,10 @@ import type {
   StageHistoryPage,
   StageInput,
 } from "@/lib/api/types";
+import type { IdempotencyKey } from "@/lib/random";
 import { type Workspace, workspaceApiPath, workspaceApiSegment } from "@/lib/workspace";
+
+import type { AgreedTerms } from "./AgreedTerms";
 
 export const CARDS_PER_STAGE = 20;
 export const PAGE_SIZE = 25;
@@ -102,8 +105,8 @@ export const pipelineKeys = {
 /** Extra details of a move (only for the targets that take them). */
 export interface MoveDetails {
   lostReason?: string;
-  /** Entering a negotiation stage: the negotiated price, an exact decimal string. */
-  negotiatedPrice?: string;
+  /** Entering a negotiation stage: the agreed price and agreed CPT (ADR-0029). */
+  terms?: AgreedTerms;
 }
 
 const pipelinePath = (workspace: Workspace, id: string, action = "") =>
@@ -145,7 +148,9 @@ export const pipelineApi = {
     if (cursor) params.set("cursor", cursor);
     return apiFetch<StageHistoryPage>(`${opportunity(workspace, id, "history")}?${params.toString()}`);
   },
-  create: (workspace: Workspace, body: OpportunityCreateRequest, idempotencyKey: string) =>
+  /** The key is required (by the server, too): newIdempotencyKey() for a new opportunity, the
+   * same key again for a retry of the same request (OpportunityDrawer). */
+  create: (workspace: Workspace, body: OpportunityCreateRequest, idempotencyKey: IdempotencyKey) =>
     apiFetch<Opportunity>(workspaceApiPath(workspace, "opportunities"), {
       method: "POST",
       body,
@@ -159,14 +164,18 @@ export const pipelineApi = {
       stage,
       version,
       ...(details.lostReason ? { lost_reason: details.lostReason } : {}),
-      ...(details.negotiatedPrice ? { negotiated_price: details.negotiatedPrice } : {}),
+      ...(details.terms ? { negotiated_price: details.terms.price, agreed_cpt: details.terms.cpt } : {}),
     };
     return apiFetch<Opportunity>(opportunity(workspace, id, "move"), { method: "POST", body });
   },
   negotiatedPrices: (workspace: Workspace, id: string) =>
     apiFetch<NegotiationPricePage>(`${opportunity(workspace, id, "negotiated-prices")}?page_size=50`),
-  recordNegotiatedPrice: (workspace: Workspace, id: string, version: number, price: string) =>
-    apiFetch<Opportunity>(opportunity(workspace, id, "negotiated-prices"), { method: "POST", body: { version, price } }),
+  /** New agreed terms while negotiating: appended to the history, never overwriting it. */
+  recordNegotiatedPrice: (workspace: Workspace, id: string, version: number, terms: AgreedTerms) =>
+    apiFetch<Opportunity>(opportunity(workspace, id, "negotiated-prices"), {
+      method: "POST",
+      body: { version, price: terms.price, agreed_cpt: terms.cpt },
+    }),
   archive: (workspace: Workspace, id: string, version: number) =>
     apiFetch<Opportunity>(opportunity(workspace, id, "archive"), { method: "POST", body: { version } }),
   restore: (workspace: Workspace, id: string, version: number) =>

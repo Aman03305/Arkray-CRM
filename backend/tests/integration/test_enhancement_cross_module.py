@@ -48,7 +48,12 @@ def test_a_support_sessions_changes_record_the_administrator_the_user_and_the_se
     opp = OpportunityFactory(lead=lead, stage=default_stage("proposal"))
     moved = admin_client.post(
         f"/api/v1/workspaces/{user_a.pk}/opportunities/{opp.pk}/move",
-        {"stage": str(default_stage("negotiation").pk), "version": 1, "negotiated_price": "7"},
+        {
+            "stage": str(default_stage("negotiation").pk),
+            "version": 1,
+            "negotiated_price": "7",
+            "agreed_cpt": "Rs 18",
+        },
         format="json",
     )
     assert moved.status_code == 200, moved.content

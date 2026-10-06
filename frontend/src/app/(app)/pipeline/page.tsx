@@ -1,10 +1,9 @@
 import type { Metadata } from "next";
 
-import { SECTION_VIEWS } from "@/features/workspace/section-views";
+import { PipelineView } from "@/features/workspace/views/pipeline";
 
 export const metadata: Metadata = { title: "Pipeline" };
 
 export default function Page() {
-  const View = SECTION_VIEWS.pipeline;
-  return <View />;
+  return <PipelineView />;
 }

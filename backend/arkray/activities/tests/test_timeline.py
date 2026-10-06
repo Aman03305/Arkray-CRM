@@ -174,6 +174,7 @@ class TestWhatIsRecorded:
             version=1,
             stage_id=default_stage("negotiation").pk,
             negotiated_price=Decimal("1000"),
+            agreed_cpt="Rs 18",
         )
         assert TimelineEntry.objects.get(opportunity=won).kind == "opportunity.reopened"
 

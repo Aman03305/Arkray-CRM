@@ -103,6 +103,29 @@ describe("the board", () => {
     expect(await screen.findByText("(overdue)")).toBeInTheDocument();
   });
 
+  it("shows an open deal's agreed price with its agreed CPT just below", async () => {
+    const agreed = { stage_id: STAGES.negotiation.id, negotiated_price: "888800.00" };
+    mockApi({
+      ...CONFIG,
+      [`GET ${ME_BOARD}`]: {
+        status: 200,
+        body: makeBoard([
+          makeCard({ ...agreed, agreed_cpt: "Rs 18 per test" }),
+          makeCard({ ...agreed, id: OTHER_OPPORTUNITY_ID, title: "No CPT deal", agreed_cpt: "" }),
+        ]),
+      },
+    });
+    renderWithProviders(<PipelineView />, { viewer: salesViewer });
+    const withCpt = (await screen.findByRole("link", { name: "Hospital Analyzer Project" })).closest("article")!;
+    const labels = Array.from(withCpt.querySelectorAll("dt"), (dt) => dt.textContent);
+    expect(labels.indexOf("Agreed CPT")).toBe(labels.indexOf("Agreed") + 1);
+    expect(within(withCpt).getByText("Agreed CPT").nextElementSibling).toHaveTextContent("Rs 18 per test");
+    // An agreed price recorded before the CPT was asked for shows no empty CPT row.
+    const withoutCpt = screen.getByRole("link", { name: "No CPT deal" }).closest("article")!;
+    expect(within(withoutCpt).getByText("Agreed")).toBeInTheDocument();
+    expect(within(withoutCpt).queryByText("Agreed CPT")).not.toBeInTheDocument();
+  });
+
   it("shows a restricted customer without their name", async () => {
     mockApi({
       ...CONFIG,
@@ -305,14 +328,21 @@ describe("moving opportunities", () => {
     ]);
     await user.click(screen.getByRole("menuitem", { name: "Reopen in Negotiation" }));
     const dialog = screen.getByRole("alertdialog", { name: "Reopen in Negotiation?" });
-    // Reopening into a negotiation stage asks for the negotiated price too.
+    // Reopening into a negotiation stage asks for the agreed price and CPT too.
     await user.click(within(dialog).getByRole("button", { name: "Reopen" }));
-    expect(within(dialog).getByText("Enter the negotiated price.")).toBeInTheDocument();
+    expect(within(dialog).getByText("Enter the agreed price.")).toBeInTheDocument();
+    expect(within(dialog).getByText("Enter the agreed CPT.")).toBeInTheDocument();
     expect(api.callsTo("POST", moveUrl(won.id))).toHaveLength(0);
-    await user.type(within(dialog).getByLabelText("Negotiated price (₹)"), "9,50,000");
+    await user.type(within(dialog).getByLabelText("Agreed price (₹)"), "9,50,000");
+    await user.type(within(dialog).getByLabelText("Agreed CPT"), "Rs 18");
     await user.click(within(dialog).getByRole("button", { name: "Reopen" }));
     await screen.findByText('"Hospital Analyzer Project" was reopened in Negotiation.');
-    expect(api.callsTo("POST", moveUrl(won.id))[0]!.body).toEqual({ stage: STAGES.negotiation.id, version: 2, negotiated_price: "950000" });
+    expect(api.callsTo("POST", moveUrl(won.id))[0]!.body).toEqual({
+      stage: STAGES.negotiation.id,
+      version: 2,
+      negotiated_price: "950000",
+      agreed_cpt: "Rs 18",
+    });
   });
 
   it("a failure inside the confirmation keeps the dialog open with the reason", async () => {
@@ -434,10 +464,16 @@ describe("phones", () => {
     // The first stage with opportunities is selected.
     expect(within(tabs).getByRole("tab", { selected: true })).toHaveTextContent("Proposal");
     expect(await screen.findByRole("link", { name: "Hospital Analyzer Project" })).toBeInTheDocument();
+    // The cards' h3 headings follow the stage's h2 (hidden: the tab already shows it).
+    const panel = screen.getByRole("tabpanel");
+    expect(within(panel).getByRole("heading", { level: 2 })).toHaveTextContent("Proposal");
+    expect(within(panel).getByRole("heading", { level: 2 })).toHaveClass("sr-only");
+    expect(within(panel).getAllByRole("heading", { level: 3 }).length).toBeGreaterThan(0);
     const user = userEvent.setup();
     within(tabs).getByRole("tab", { selected: true }).focus();
     await user.keyboard("{ArrowRight}");
     expect(within(tabs).getByRole("tab", { selected: true })).toHaveTextContent("Negotiation");
+    expect(within(screen.getByRole("tabpanel")).getByRole("heading", { level: 2 })).toHaveTextContent("Negotiation");
     expect(await screen.findByText("No opportunities in Negotiation.")).toBeInTheDocument();
   });
 });
@@ -485,7 +521,7 @@ describe("filters", () => {
 
 
 describe("negotiation", () => {
-  it("dropping a card on a negotiation stage asks for the price first and moves nothing until then", async () => {
+  it("dropping a card on a negotiation stage asks for the agreed price and CPT first and moves nothing until then", async () => {
     const api = mockApi({
       ...CONFIG,
       [`GET ${ME_BOARD}`]: { status: 200, body: makeBoard() },
@@ -502,16 +538,24 @@ describe("negotiation", () => {
     // Not moved yet: still in Proposal, nothing sent.
     expect(within(columnOf("Proposal")).getByText("Hospital Analyzer Project")).toBeInTheDocument();
     expect(api.callsTo("POST", moveUrl(makeCard().id))).toHaveLength(0);
-    const price = within(dialog).getByLabelText("Negotiated price (₹)");
+    const price = within(dialog).getByLabelText("Agreed price (₹)");
     expect(price).toHaveFocus();
     await user.type(price, "10,50,000.50");
     await user.click(within(dialog).getByRole("button", { name: "Move" }));
+    // The CPT is asked for too: still nothing sent, nothing moved.
+    expect(within(dialog).getByLabelText("Agreed CPT")).toHaveAttribute("aria-invalid", "true");
+    expect(within(dialog).getByText("Enter the agreed CPT.")).toBeInTheDocument();
+    expect(api.callsTo("POST", moveUrl(makeCard().id))).toHaveLength(0);
+    expect(within(columnOf("Proposal")).getByText("Hospital Analyzer Project")).toBeInTheDocument();
+    await user.type(within(dialog).getByLabelText("Agreed CPT"), "Rs 18 per test");
+    await user.click(within(dialog).getByRole("button", { name: "Move" }));
     await screen.findByText('"Hospital Analyzer Project" moved to Negotiation.');
-    // An exact decimal string, never a float.
+    // An exact decimal string, never a float; the CPT as typed.
     expect(api.callsTo("POST", moveUrl(makeCard().id))[0]!.body).toEqual({
       stage: STAGES.negotiation.id,
       version: 2,
       negotiated_price: "1050000.50",
+      agreed_cpt: "Rs 18 per test",
     });
   });
 
@@ -528,6 +572,30 @@ describe("negotiation", () => {
     expect(api.callsTo("POST", moveUrl(makeCard().id))).toHaveLength(0);
   });
 
+  it("a CPT the server refuses is marked on its field with the server's reason (review P3)", async () => {
+    const reason = "Remove the invisible or control characters.";
+    mockApi({
+      ...CONFIG,
+      [`GET ${ME_BOARD}`]: { status: 200, body: makeBoard() },
+      [`POST ${moveUrl(makeCard().id)}`]: apiError(400, "validation_error", "Some fields are invalid.", { agreed_cpt: [reason] }),
+    });
+    renderWithProviders(<PipelineView />, { viewer: salesViewer });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Move Hospital Analyzer Project" }));
+    await user.click(screen.getByRole("menuitem", { name: "Move to Negotiation" }));
+    const dialog = screen.getByRole("alertdialog", { name: "Move to Negotiation?" });
+    await user.type(within(dialog).getByLabelText("Agreed price (₹)"), "10,50,000");
+    await user.type(within(dialog).getByLabelText("Agreed CPT"), "Rs 18");
+    await user.click(within(dialog).getByRole("button", { name: "Move" }));
+    expect(await within(dialog).findByText(reason)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Agreed CPT")).toHaveAttribute("aria-invalid", "true");
+    expect(within(dialog).getByLabelText("Agreed price (₹)")).not.toHaveAttribute("aria-invalid");
+    // Typing a new CPT clears the server's mark.
+    await user.type(within(dialog).getByLabelText("Agreed CPT"), "!");
+    expect(within(dialog).getByLabelText("Agreed CPT")).not.toHaveAttribute("aria-invalid");
+    expect(within(columnOf("Proposal")).getByText("Hospital Analyzer Project")).toBeInTheDocument();
+  });
+
   it("an invalid price is explained and never sent", async () => {
     const api = mockApi({ ...CONFIG, [`GET ${ME_BOARD}`]: { status: 200, body: makeBoard() } });
     renderWithProviders(<PipelineView />, { viewer: salesViewer });
@@ -535,9 +603,11 @@ describe("negotiation", () => {
     await user.click(await screen.findByRole("button", { name: "Move Hospital Analyzer Project" }));
     await user.click(screen.getByRole("menuitem", { name: "Move to Negotiation" }));
     const dialog = screen.getByRole("alertdialog", { name: "Move to Negotiation?" });
-    await user.type(within(dialog).getByLabelText("Negotiated price (₹)"), "1e6");
+    await user.type(within(dialog).getByLabelText("Agreed price (₹)"), "1e6");
+    await user.type(within(dialog).getByLabelText("Agreed CPT"), "Rs 18");
     await user.click(within(dialog).getByRole("button", { name: "Move" }));
-    expect(within(dialog).getByLabelText("Negotiated price (₹)")).toHaveAttribute("aria-invalid", "true");
+    expect(within(dialog).getByLabelText("Agreed price (₹)")).toHaveAttribute("aria-invalid", "true");
+    expect(within(dialog).getByLabelText("Agreed CPT")).not.toHaveAttribute("aria-invalid");
     expect(api.callsTo("POST", moveUrl(makeCard().id))).toHaveLength(0);
   });
 });

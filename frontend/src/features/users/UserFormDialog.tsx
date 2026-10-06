@@ -64,6 +64,8 @@ export function UserFormDialog({ mode, onClose, onSaved }: {
   const queryClient = useQueryClient();
   // Administrators always choose their own password (the server refuses one set for them).
   const invitedOnly = mode.kind === "create" && draft.role === "admin";
+  // Your own role, and another administrator's, can't be changed here (the API refuses both).
+  const roleLocked = mode.kind === "edit" && (mode.isSelf || mode.user.role === "admin");
   const withPassword = mode.kind === "create" && activation === "password" && !invitedOnly;
 
   const save = useMutation({
@@ -92,8 +94,9 @@ export function UserFormDialog({ mode, onClose, onSaved }: {
       );
     },
     onError: (error) => {
-      // Stale version: refresh the list so reopening the dialog starts from current data.
-      if (isApiError(error, 409) && mode.kind === "edit") {
+      // Stale version, or a refusal a stale page couldn't foresee (the user became an
+      // administrator meanwhile): refresh the list so reopening starts from current data.
+      if ((isApiError(error, 409) || isApiError(error, 422)) && mode.kind === "edit") {
         void queryClient.invalidateQueries({ queryKey: USERS_QUERY_KEY });
       }
     },
@@ -184,12 +187,14 @@ export function UserFormDialog({ mode, onClose, onSaved }: {
           value={draft.role}
           onChange={(e) => set({ role: e.target.value as Role })}
           options={ROLE_OPTIONS}
-          disabled={mode.kind === "edit" && mode.isSelf}
+          disabled={roleLocked}
           errors={errors.role}
           hint={
             mode.kind === "edit" && mode.isSelf
               ? "You can't change your own role."
-              : ROLE_OPTIONS.find((o) => o.value === draft.role)?.description
+              : roleLocked
+                ? "An administrator's role can't be changed here. To remove their access, deactivate the account."
+                : ROLE_OPTIONS.find((o) => o.value === draft.role)?.description
           }
         />
         {invitedOnly ? (

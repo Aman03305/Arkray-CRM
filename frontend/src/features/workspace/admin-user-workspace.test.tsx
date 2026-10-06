@@ -10,7 +10,10 @@ import userEvent from "@testing-library/user-event";
 import type { ReactElement, ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import UserWorkspaceSection from "@/app/(app)/admin/users/[userId]/[section]/page";
+import UnknownWorkspaceSection from "@/app/(app)/admin/users/[userId]/[section]/page";
+import UserActivitiesPage from "@/app/(app)/admin/users/[userId]/activities/page";
+import UserDashboardPage from "@/app/(app)/admin/users/[userId]/dashboard/page";
+import UserPipelinePage from "@/app/(app)/admin/users/[userId]/pipeline/page";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { pipelineKeys } from "@/features/pipeline/api";
 import { UsersPage } from "@/features/users/UsersPage";
@@ -21,7 +24,6 @@ import { createTestQueryClient, mockApi, renderWithProviders } from "@/test/rend
 import { ACTOR, inWorkspace, markersOf, type Person, PRIYA, RAHUL, workspaceWorld } from "@/test/workspace-world";
 
 import { workspaceKeys } from "./api";
-import { SECTION_VIEWS } from "./section-views";
 import { UserWorkspaceFrame } from "./UserWorkspaceFrame";
 import {
   ActivitiesView,
@@ -250,13 +252,12 @@ describe("Rahul's workspace has no Leads module", () => {
   });
 
   it("/admin/users/{id}/leads is not one of its sections: the route is not found", async () => {
-    const open = (section: string) =>
-      UserWorkspaceSection({ params: Promise.resolve({ userId: RAHUL.id, section }), searchParams: Promise.resolve({}) });
-    await expect(open("leads")).rejects.toThrow("NEXT_NOT_FOUND");
-    for (const section of ["dashboard", "pipeline", "activities"] as const) {
-      expect((await open(section)).type).toBe(SECTION_VIEWS[section]);
-    }
-    expect(Object.keys(SECTION_VIEWS)).toEqual(["dashboard", "pipeline", "activities"]);
+    // Each module has its own route beside [section] (a static segment wins over it), so each
+    // page loads only its module's code; any other section reaches [section]: not found.
+    expect(() => UnknownWorkspaceSection()).toThrow("NEXT_NOT_FOUND");
+    expect(UserDashboardPage().type).toBe(DashboardView);
+    expect(UserPipelinePage().type).toBe(PipelineView);
+    expect(UserActivitiesPage().type).toBe(ActivitiesView);
     // ...and no module of the sidebar claims that address as its page.
     workspaceWorld();
     nav.pathname = `${base(RAHUL)}/leads`;
@@ -357,6 +358,14 @@ describe("create and edit flows return to Rahul's workspace", () => {
     expect(await within(create).findByRole("alert")).toHaveTextContent(reason);
     expect(nav.replace).not.toHaveBeenCalled();
     expect(world.foreignCalls(RAHUL.id)).toEqual([]);
+  });
+
+  it("final audit UI-4: a deactivated user's board offers no New opportunity that could only fail", async () => {
+    workspaceWorld([{ ...RAHUL, status: "deactivated" }, PRIYA]);
+    openAt(`${base(RAHUL)}/pipeline`, RAHUL.id, <PipelineView />);
+    await waitFor(() => expect(banner()).toHaveTextContent("Status: Deactivated"));
+    expect((await screen.findAllByText("RAHUL-ONLY-OPPORTUNITY")).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "New opportunity" })).not.toBeInTheDocument();
   });
 });
 

@@ -1,13 +1,18 @@
-"""identity.0002 converts Phase 0 rows correctly, and can be rolled back with data present."""
+"""identity.0002 converts Phase 0 rows correctly, and can be rolled back with data present
+within the released range; from the latest schema, the rollback is refused (identity.0004:
+docs/deployment.md#rollback)."""
 
 import pytest
 from django.contrib.auth.hashers import make_password
 from django.db import connection
-from django.db.migrations.executor import MigrationExecutor
+from django.db.migrations.exceptions import IrreversibleError
+
+from tests.integration.migration_states import RELEASE_CANDIDATE, build, migrate, restore_latest
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
 BEFORE = [("identity", "0001_initial")]
+RELEASED = [node for node in RELEASE_CANDIDATE if node[0] == "identity"]  # identity.0003
 PHASE_0_ROWS = [
     # id, email, full_name, role, is_active, password
     ("11111111-1111-4111-8111-111111111111", "admin@x.test", "Anita Admin", "admin", True, "pw"),
@@ -32,24 +37,6 @@ PHASE_0_ROWS = [
 ]
 
 
-def migrate(targets):
-    executor = MigrationExecutor(connection)
-    executor.loader.build_graph()
-    executor.migrate(targets)
-
-
-def latest():
-    return MigrationExecutor(connection).loader.graph.leaf_nodes("identity")
-
-
-def everything():
-    """Every app's latest migration. Migrating identity back to 0001 also unapplies the
-    apps that depend on identity.0002 (leads, and pipeline through leads); restoring only
-    identity left their tables missing for any later transactional test (found in
-    Phase 3, when the first transactional tests after this one appeared)."""
-    return MigrationExecutor(connection).loader.graph.leaf_nodes()
-
-
 def rows(sql):
     with connection.cursor() as cursor:
         cursor.execute(sql)
@@ -57,7 +44,9 @@ def rows(sql):
 
 
 def test_forward_and_backward_with_phase_0_data():
-    migrate(BEFORE)
+    # Built forwards from an empty schema: the test database is at the latest migrations,
+    # and those after the release refuse to be reversed (migration_states.py).
+    build(BEFORE)
     try:
         with connection.cursor() as cursor:
             for pk, email, name, role, active, password in PHASE_0_ROWS:
@@ -66,7 +55,7 @@ def test_forward_and_backward_with_phase_0_data():
                     " created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, now(), now())",
                     [pk, email, name, role, active, make_password(password)],
                 )
-        migrate(latest())
+        migrate(RELEASED)
         assert rows(
             "SELECT email, first_name, last_name, status, is_active, activated_at IS NOT NULL,"
             " deactivated_at IS NOT NULL FROM identity_user ORDER BY email"
@@ -83,17 +72,31 @@ def test_forward_and_backward_with_phase_0_data():
                 ["C" * 100, "D" * 100, "long@x.test"],
             )
 
-        migrate(BEFORE)  # rollback with rows present
+        migrate(BEFORE)  # rollback with rows present, within the released range
         assert rows("SELECT email, full_name FROM identity_user ORDER BY email") == [
             ("admin@x.test", "Anita Admin"),
             ("gone@x.test", "Rahul Kumar Sharma"),
             ("invitee@x.test", "Neha"),
             ("long@x.test", ("C" * 100 + " " + "D" * 100)[:150]),
         ]
+
+        # Past the release (identity.0004, support sessions): forwards keeps the rows, and
+        # the way back is refused before anything is undone.
+        migrate([("identity", "0004_support_sessions")])
+        with pytest.raises(IrreversibleError, match=r"identity.0004_support_sessions"):
+            migrate(BEFORE)
+        assert rows("SELECT email, password_change_required FROM identity_user ORDER BY email") == [
+            ("admin@x.test", False),
+            ("gone@x.test", False),
+            ("invitee@x.test", False),
+            ("long@x.test", False),
+        ]
     finally:
-        with connection.cursor() as cursor:
-            cursor.execute("DELETE FROM identity_user")
-        migrate(everything())
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM identity_user")
+        finally:
+            restore_latest()
 
 
 def test_the_schema_is_complete_again_afterwards():
@@ -104,8 +107,10 @@ def test_the_schema_is_complete_again_afterwards():
             "leads_lead_status",
             "pipeline_opportunity",
             "pipeline_stage_history",
+            "pipeline_negotiation_price",
             "activities_activity",
             "activities_timeline_entry",
+            "identity_support_session",
         ):
             cursor.execute("SELECT to_regclass(%s)", [table])
             assert cursor.fetchone() == (table,), table

@@ -36,7 +36,7 @@ Conventions:
 - **Never logged:** request or response bodies, headers, cookies, query strings (they carry
   search terms), passwords, tokens, API keys, CRM free text, emails, phone numbers.
   Third-party loggers that would log request bodies at DEBUG (`anthropic`, `httpx`, `httpx2`,
-  `httpcore`, `urllib3`) are pinned to WARNING whatever `LOG_LEVEL` says, and production
+  `httpcore`, `httpcore2`, `urllib3`) are pinned to WARNING whatever `LOG_LEVEL` says, and production
   refuses `ANTHROPIC_LOG` (Phase 9). Unexpected AI failures are logged by exception type only
   (`ai_answer_failed`, `ai_provider_bad_response`): an exception's text can quote model or
   CRM text.
@@ -69,13 +69,19 @@ Conventions:
   tracebacks and correlation ids. A database outage is answered 503 `service_unavailable`
   (Phase 10), so an outage and a bug are different status codes in the access log.
 - Product enhancement phase (ids, kinds and counts only; never a file name, a password, a
-  price or a custom value): `attachment_upload_failed` (`reason`: storage),
-  `attachment_storage_failed` (`operation`), `attachment_rejected` (`extension`, `reason`:
+  price or a custom value): `attachment_upload_failed` (`reason`: storage, `error_class`),
+  `attachment_storage_failed` (`operation`, `error_class`, `backend`, `duration_ms`, `error`:
+  the exception's type only), `attachment_storage_circuit_opened` (`cooldown_s`, once per
+  process per outage), `attachment_object_missing` (WARNING, `attachment_id`, `operation`,
+  `security`: a stored file's object is gone), `attachment_marked_unavailable` (WARNING, by
+  `reconcile_attachments --repair`), `attachment_reconcile_finished` (INFO: mode, counts,
+  exit code), `attachment_rejected` (`extension`, `reason`:
   content), `attachment_malware_blocked` (`extension`, WARNING), `login_temporary_password_expired`;
   the activities housekeeping reports `abandoned`, `purged`, `storage_failures`,
   `queued_for_scanning`, `no_longer_scanned` and `pending_scans`. Audit: `pipeline.*`
   (created, renamed, stages_changed, fields_changed, archived, restored),
   `opportunity.negotiated_price_recorded`, `attachment.uploaded|deleted|rejected`,
+  `attachment.marked_unavailable` and `attachment.reconciled` (a reconciliation repair),
   `note.updated` (with `edited_by`), `auth.password_set_by_admin`,
   `auth.login_with_temporary_password`, `support_session.started|ended`; every event written
   during a support session carries its `support_session_id`.
@@ -155,6 +161,16 @@ at scrape time in a bounded number of queries, `config/metrics.py`):
 | `arkray_ai_questions_last_hour` | `status`, `mode`, `error` | Ask Arkray outcomes (router, llm, retrieval; timeout, ai_unavailable, ...) |
 | `arkray_ai_questions_pending` | — | questions waiting for an ai worker and not yet expired |
 | `arkray_ai_breaker_open` | — | the model provider's circuit breaker (its state is shared through the cache: no sample while the cache can't answer) |
+| `arkray_attachments` | `state` (uploading, failed, pending_scan) | attachment rows still in progress, failed with their object not yet removed, waiting for a malware scan |
+| `arkray_attachment_oldest_seconds` | `state` (uploading, unpurged) | age of the oldest unfinished upload; of the oldest failed or deleted file whose object isn't removed yet |
+| `arkray_attachment_storage_up` | `backend` (filesystem, s3) | the store answered a liveness check (S3 `head_bucket`; a directory: a sentinel written, read back, deleted), at most every 30 s per process, within the 2 s probe deadline |
+| `arkray_attachment_uploads_last_hour` | `outcome` (stored, failed), `reason` (too_large, rejected, storage_error, timeout, quota, other) | uploads in the last hour |
+| `arkray_attachment_download_failures_last_hour` | `reason` (storage_unavailable, missing) | downloads that answered 503 or 410 |
+| `arkray_attachment_objects_missing_last_hour` | — | stored files whose object the store said was gone (downloads, scans) |
+| `arkray_attachment_storage_errors_last_hour` | `operation` (save, open, delete, size, list, probe), `error_class` (timeout, connection, server_error, access_denied, no_space, integrity, missing, busy, circuit_open, other) | failed storage calls; `timeout` is the storage-timeout figure |
+| `arkray_attachment_storage_latency_last_hour` | `operation`, `le` (0.1, 0.5, 1, 2.5, 5, 10, +Inf s) | storage calls by duration, cumulative buckets: `histogram_quantile(0.95, max by (le) (arkray_attachment_storage_latency_last_hour{operation="save"}))` |
+| `arkray_attachment_reconcile_age_seconds`, `arkray_attachment_reconcile_outcome` | `mode` (check, repair) | since the last whole reconciliation ended; its exit status (0 healthy, 1 mismatches, 2 errors) |
+| `arkray_attachment_reconcile_mismatches` | `kind` (missing, orphaned, size_mismatch, hash_mismatch, stale_pending, stale_failed, pending_scan, restorable) | what it found |
 
 The embedding backlog is `arkray_outbox_events{queue="ai_index",status="pending"}`. Scrape
 it from inside the deployment (the proxy needn't route `/health/*`); the token keeps it off
@@ -162,6 +178,33 @@ the public internet even if it does. The scrape keeps answering during the outag
 (Phase 10 drills): with PostgreSQL down it reports `arkray_db_up 0` instead of failing, and
 its Redis probes have a 2 s deadline (a stopped Redis stalled each connection attempt about
 4 s in DNS) after which the broker or cache is reported down.
+
+### Attachment storage
+
+Final audit SRE-4: storage failures were log lines only. Three sources now, by what each
+event leaves behind:
+
+- **Database state, at scrape time** (like every other gauge): rows by state and the
+  oldest ages, in one query whose arms each read the housekeeping's partial index (a scrape
+  costs 9 queries in all). Stored files in total are not counted at scrape time (a scan of
+  the whole table every 30 s); the daily reconciliation's `healthy` count is that figure.
+- **Events without durable state** (an upload refused before a row exists, a download that
+  found storage down or the object gone: the download path never writes to the database;
+  each storage call's duration and failure class): counters in the shared cache (Redis),
+  10-minute windows with their own expiry, summed over the last six by a scrape. Not
+  in-process counters, which gunicorn's processes would each hold a fraction of: every
+  process and pod reports the same cluster-wide figure, so aggregate across pods with
+  `max()`, not `sum()`. Label values come from fixed lists (anything else counts as
+  `other`): a few hundred keys at most. Best effort: with the cache down they are lost
+  (and left out of the scrape rather than reported as zeros); the log lines remain.
+- **The last reconciliation**, published to the cache by `reconcile_attachments` (a check is
+  strictly read-only: it writes nothing to the database) for 8 days; a repair is also
+  audited (`attachment.reconciled`).
+
+Storage is a degraded signal, never readiness: `/health/ready` keeps its meaning
+(PostgreSQL required, Redis degraded), and a dead bucket shows as
+`arkray_attachment_storage_up 0`. The liveness check runs at scrape time on its own thread,
+never on a user's request.
 
 Not built (deployment options): OpenTelemetry metrics and traces (the correlation ids above
 already join logs across HTTP, outbox, workers and the AI provider), and a Sentry-compatible
@@ -179,6 +222,7 @@ The metric-based rows are shipped as Prometheus rules in `infrastructure/alerts/
 | Readiness | an instance not ready for 2 min; `degraded` for 10 min (probe) | runbooks: database down, Redis down |
 | Database unreachable | `arkray_db_up` = 0, or 503 `service_unavailable` responses, for 1 min | runbooks: database down |
 | Dependency breakers | `cache_circuit_opened` or `ai_dispatch_circuit_opened` repeating for 10 min; `arkray_cache_up` or `arkray_broker_up` = 0 | runbooks: Redis down |
+| Metrics unavailable | `up{job="arkray"}` = 0 or no `arkray_db_up` for 2 min: a stalled database leaves the scrape itself timing out, so the gauge can't report it (final audit SRE-3) | runbooks: database stalled |
 | Database saturation | `arkray_db_server_connections` > 80 % of `arkray_db_max_connections` for 5 min (idle connections included: persistent connections hold their slots) | runbooks: connection budget |
 | Background work stalled | `arkray_outbox_oldest_due_seconds` > 600 on any queue | runbooks: outbox backlog |
 | Work taken by no worker | `arkray_outbox_oldest_undelivered_seconds` > 300 on any queue (whole-software audit) | runbooks: workers |
@@ -191,4 +235,7 @@ The metric-based rows are shipped as Prometheus rules in `infrastructure/alerts/
 | Security | login failure spike; lockout spike; `workspace.accessed` volume anomaly (audit) | runbooks: security events |
 | Support sessions and passwords | any `support_session.started` outside support hours, or more than a handful a day; `auth.login_with_temporary_password` by an address the user never used (audit, security events feed) | runbooks: security events |
 | File storage | `attachment_storage_failed` or `attachment_upload_failed` repeating for 10 min; housekeeping `storage_failures` > 0 two runs in a row | runbooks: file storage |
+| Attachment storage down | `arkray_attachment_storage_up` = 0 for 5 min (`ArkrayAttachmentStorageDown`); storage errors and timeouts above 20 % of uploads in an hour (`ArkrayAttachmentUploadsFailing`) | runbooks: attachment storage degraded |
+| Attachment object missing | `arkray_attachment_objects_missing_last_hour` > 0 (`ArkrayAttachmentObjectMissing`) | runbooks: attachment object missing |
+| Attachment reconciliation | mismatches > 0, outcome 2, no whole pass for 48 h (`ArkrayAttachmentReconcile*`); an upload unfinished for over an hour (`ArkrayAttachmentUploadStuck`) | runbooks: attachment reconciliation |
 | Malware | any `attachment_malware_blocked`; `pending_scans` growing for an hour (scanner down: files don't download) | runbooks: file storage |

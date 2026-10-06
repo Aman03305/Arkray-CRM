@@ -31,6 +31,12 @@ ENV NODE_ENV=production \
 WORKDIR /app
 # OS security updates published since the base image was built (Phase 9 review).
 RUN apk upgrade --no-cache
+# The server is `node server.js`: npm, npx, corepack and yarn are build tools and never run
+# here. The base image bundles them with their own dependencies (brace-expansion, tar,
+# undici, ip-address, ...), which scanners report as HIGH findings in this image (final
+# remediation, R107): removing them removes the findings and the attack surface.
+RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \
+    /usr/local/bin/corepack /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg
 RUN addgroup -S -g 10001 arkray && adduser -S -u 10001 -G arkray arkray
 # Owned by root, read-only to the runtime user; only Next.js's own cache is writable.
 COPY --from=build /app/.next/standalone ./

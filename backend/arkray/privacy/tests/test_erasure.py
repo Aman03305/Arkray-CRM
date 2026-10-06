@@ -16,7 +16,9 @@ from django.utils import timezone
 from arkray.activities.models import Activity
 from arkray.ai.models import Conversation, KnowledgeChunk, Question, QuestionStatus, WorkspaceKind
 from arkray.audit.models import AuditEvent
+from arkray.core.access import AccessScope
 from arkray.leads.models import Lead
+from arkray.pipeline import services as pipeline_services
 from arkray.pipeline.models import Opportunity, Stage, StageHistory
 from arkray.privacy import services
 from tests.ai_fixtures import index, note
@@ -26,6 +28,7 @@ from tests.factories import (
     MeetingFactory,
     OpportunityFactory,
     TaskFactory,
+    default_stage,
 )
 
 pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("ai_on")]
@@ -221,7 +224,7 @@ def test_edits_in_flight_meet_a_new_version(person):
 
 def test_a_dry_run_counts_and_changes_nothing(person):
     out = erase(person["lead"], AdminFactory())
-    assert "3 activities, 1 opportunities, 1 stage-history lost reasons" in out
+    assert "3 activities, 1 opportunities, 1 history rows with free text" in out
     assert "3 Ask Arkray conversations" in out
     assert "Dry run" in out
     person["lead"].refresh_from_db()
@@ -393,3 +396,44 @@ def test_the_application_role_erases_a_lead_whose_opportunities_have_no_lost_rea
 def test_names_in_patterns_are_matched_literally():
     """An underscore or a percent sign in an email must not widen the match."""
     assert services._like("a_b%c") == "%a\\_b\\%c%"
+
+
+def test_free_text_columns_of_the_deal_and_its_agreed_cpt_are_erased_too(user_a):
+    """Final audit DOMAIN-2 / ARCH-4: work load and Expected CPT are free text a name is typed
+    into, and so is the append-only agreed CPT of every negotiated price."""
+    lead = LeadFactory(owner=user_a, first_name="Meera", last_name="Rao", email="meera@lab.example")
+    opportunity = OpportunityFactory(
+        lead=lead,
+        owner=user_a,
+        stage=default_stage("proposal"),
+        work_load="Meera Rao lab 300/day",
+        expected_cpt="Meera Rao special rate 4.5",
+    )
+    negotiation = Stage.objects.get(pipeline=opportunity.pipeline, is_negotiation=True)
+    scope = AccessScope.own(user_a.pk)
+    pipeline_services.move_opportunity(
+        actor=user_a,
+        scope=scope,
+        opportunity_id=opportunity.pk,
+        version=opportunity.version,
+        stage_id=negotiation.pk,
+        negotiated_price=Decimal("1100000"),
+        agreed_cpt="Meera Rao agreed 3.9",
+    )
+
+    out = erase(lead, AdminFactory(), "--yes")
+
+    opportunity.refresh_from_db()
+    assert (opportunity.work_load, opportunity.expected_cpt) == ("", "")
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT agreed_cpt, price FROM pipeline_negotiation_price WHERE opportunity_id = %s",
+            [opportunity.pk],
+        )
+        rows = cursor.fetchall()
+    assert rows == [("", Decimal("1100000.00"))]  # the figure stays, the words are gone
+    assert "1 history rows" in out
+    assert "Meera" not in dump(opportunity) + json.dumps([str(r) for r in rows])
+    # The table is append-only again afterwards.
+    with pytest.raises(DatabaseError), transaction.atomic(), connection.cursor() as cursor:
+        cursor.execute("UPDATE pipeline_negotiation_price SET agreed_cpt = 'x'")

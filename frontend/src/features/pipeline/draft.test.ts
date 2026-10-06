@@ -51,10 +51,10 @@ describe("creating", () => {
     expect(createRequest(COMPLETE, { owner: OWNER }).owner).toBe(OWNER);
   });
 
-  it("sends the deal's details, the negotiated price and only non-empty custom values", () => {
+  it("sends the deal's details, the agreed price and CPT and only non-empty custom values", () => {
     const body = createRequest(
       { ...COMPLETE, value: "1", contact_phone: " +91 98765 43210 ", address: "Line 1\nLine 2", work_load: "300 tests/day", expected_cpt: " 45 " },
-      { negotiatedPrice: "950000", customFields: { f1: "GEM/1", f2: "", f3: [], f4: false } },
+      { terms: { price: "950000", cpt: "Rs 18 per test" }, customFields: { f1: "GEM/1", f2: "", f3: [], f4: false } },
     );
     expect(body).toMatchObject({
       contact_phone: "+91 98765 43210",
@@ -62,6 +62,7 @@ describe("creating", () => {
       work_load: "300 tests/day",
       expected_cpt: "45",
       negotiated_price: "950000",
+      agreed_cpt: "Rs 18 per test",
       custom_fields: { f1: "GEM/1", f4: false },
     });
   });

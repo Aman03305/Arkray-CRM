@@ -22,7 +22,10 @@ instruments.INSTRUMENTS (checked here, never only in the browser).
 Lock order (docs/pipeline.md#lock-order), the same in every operation, so two operations
 can never wait for each other in a cycle:
 
-    1. the lead          leads.selectors.lock_lead: FOR NO KEY UPDATE, or FOR UPDATE when
+    0. request key       creates and conversions with an Idempotency-Key: an advisory lock
+                         on it (core.idempotency.claim), first in the transaction; taken by
+                         nothing that holds a row lock
+    1. the lead         leads.selectors.lock_lead: FOR NO KEY UPDATE, or FOR UPDATE when
                          the operation changes the lead (conversion; reassignment in leads)
     2. opportunities     FOR NO KEY UPDATE OF the opportunity row only (never the joined
                          stage: shared configuration rows are only key-share-checked);
@@ -55,7 +58,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
 from django.conf import settings
@@ -161,13 +164,15 @@ PIPELINE_ARCHIVED = "This pipeline is archived. Restore the pipeline to make cha
 STAGE_REMOVED_RESTORE = (
     "Its stage was removed from the pipeline, so it can't be restored. Its history is kept."
 )
-PRICE_REQUIRED = "Enter the negotiated price."
-PRICE_ONLY_FOR_NEGOTIATION = "Only a move into a negotiation stage takes a negotiated price."
+PRICE_REQUIRED = validation.PRICE_REQUIRED
+AGREED_CPT_REQUIRED = validation.AGREED_CPT_REQUIRED
+PRICE_ONLY_FOR_NEGOTIATION = "Only a move into a negotiation stage takes an agreed price."
+CPT_ONLY_FOR_NEGOTIATION = "Only a move into a negotiation stage takes an agreed CPT."
 SAME_STAGE_PRICE = (
-    "The opportunity is already in this stage. Record a new negotiated price instead."
+    "The opportunity is already in this stage. Update the agreed price and CPT instead."
 )
 NOT_IN_NEGOTIATION = (
-    "Negotiated prices are recorded while the opportunity is in a negotiation stage."
+    "The agreed price and CPT are recorded while the opportunity is in a negotiation stage."
 )
 ALREADY_CREATED_ELSEWHERE = (
     "This was already created by an earlier request and has since left this workspace."
@@ -315,38 +320,72 @@ def _stage(pipeline: Pipeline, stage_id: UUID | None) -> Stage:
     return stage
 
 
-def _price_for(stage: Stage, price: Decimal | None) -> Decimal | None:
-    """Entering a negotiation stage requires the negotiated price; no other stage takes one."""
-    if stage.is_negotiation and price is None:
-        raise InvalidInputError(details={"negotiated_price": [PRICE_REQUIRED]})
-    if not stage.is_negotiation and price is not None:
-        raise InvalidInputError(details={"negotiated_price": [PRICE_ONLY_FOR_NEGOTIATION]})
-    return price
+class AgreedTerms(NamedTuple):
+    """What entering a negotiation stage records (ADR-0029): the agreed (negotiated) price
+    and the agreed CPT, always together."""
+
+    price: Decimal
+    cpt: str
 
 
-def _clean_price(price: Any) -> Decimal | None:
-    if price is None:
-        return None
-    try:
-        return validation.clean_price(price)
-    except ValueError as exc:
-        raise InvalidInputError(details={"negotiated_price": [str(exc)]}) from None
+def _terms_for(stage: Stage, price: Decimal | None, cpt: str | None) -> AgreedTerms | None:
+    """Entering a negotiation stage requires the agreed price and the agreed CPT; no other
+    stage takes either. Every missing or refused one is reported at once."""
+    errors: dict[str, list[str]] = {}
+    if stage.is_negotiation:
+        if price is None:
+            errors["negotiated_price"] = [PRICE_REQUIRED]
+        if cpt is None:
+            errors["agreed_cpt"] = [AGREED_CPT_REQUIRED]
+    else:
+        if price is not None:
+            errors["negotiated_price"] = [PRICE_ONLY_FOR_NEGOTIATION]
+        if cpt is not None:
+            errors["agreed_cpt"] = [CPT_ONLY_FOR_NEGOTIATION]
+    if errors:
+        raise InvalidInputError(details=errors)
+    return AgreedTerms(price, cpt) if price is not None and cpt is not None else None
+
+
+def _clean_terms(
+    price: Any, cpt: Any, *, price_field: str = "negotiated_price"
+) -> tuple[Decimal | None, str | None]:
+    """The agreed price and CPT as sent, checked before anything is locked. None: not sent
+    (a blank CPT counts as not sent, so it is asked for, never recorded as an answer)."""
+    errors: dict[str, list[str]] = {}
+    amount: Decimal | None = None
+    text: str | None = None
+    if price is not None:
+        try:
+            amount = validation.clean_price(price)
+        except ValueError as exc:
+            errors[price_field] = [str(exc)]
+    if cpt is not None:
+        try:
+            text = validation.clean_agreed_cpt(cpt) or None
+        except ValueError as exc:
+            errors["agreed_cpt"] = [str(exc)]
+    if errors:
+        raise InvalidInputError(details=errors)
+    return amount, text
 
 
 def _record_price(
     opportunity: Opportunity,
     actor_id: UUID,
     *,
-    price: Decimal,
+    terms: AgreedTerms,
     stage: Stage,
     source: NegotiationSource,
     at: datetime,
 ) -> None:
-    """Append one negotiated price (never overwriting an earlier one) and keep the
-    opportunity's copy of the latest. The opportunity row is locked by the caller."""
+    """Append one agreed price and CPT (never overwriting earlier ones) to the history. The
+    caller keeps the opportunity's copy of the latest price (the CPT is read from the history);
+    the opportunity row is locked by it."""
     NegotiationPrice.objects.create(
         opportunity=opportunity,
-        price=price,
+        price=terms.price,
+        agreed_cpt=terms.cpt,
         currency=settings.CRM_CURRENCY,
         stage=stage,
         stage_name=stage.name,
@@ -433,6 +472,7 @@ def _insert(
     pipeline_id: UUID | None,
     stage_id: UUID | None,
     negotiated_price: Decimal | None,
+    agreed_cpt: str | None,
     via_conversion: bool,
     lead_created: bool = False,
 ) -> Opportunity:
@@ -447,7 +487,7 @@ def _insert(
     lost_reason = cleaned.get("lost_reason", "")
     if lost_reason and stage.category != StageCategory.LOST:
         raise InvalidInputError(details={"lost_reason": [LOST_REASON_ONLY_WHEN_LOST]})
-    price = _price_for(stage, negotiated_price)
+    terms = _terms_for(stage, negotiated_price, agreed_cpt)
     custom, _ = validation.clean_custom_values(
         selectors.active_fields(pipeline.pk),
         cleaned.get("custom_fields", {}),
@@ -488,17 +528,17 @@ def _insert(
         work_load=cleaned.get("work_load", ""),
         expected_cpt=cleaned.get("expected_cpt", ""),
         custom_fields=custom,
-        negotiated_price=price,
-        negotiated_at=now if price is not None else None,
+        negotiated_price=terms.price if terms else None,
+        negotiated_at=now if terms else None,
         created_by_id=actor.pk,
         created_at=now,
     )
     _history(opportunity, actor.pk, from_stage=None, to_stage=stage, at=now)
-    if price is not None:
+    if terms is not None:
         _record_price(
             opportunity,
             actor.pk,
-            price=price,
+            terms=terms,
             stage=stage,
             source=NegotiationSource.CREATION,
             at=now,
@@ -656,6 +696,7 @@ def create_opportunity(
     pipeline_id: UUID | None = None,
     stage_id: UUID | None = None,
     negotiated_price: Any = None,
+    agreed_cpt: Any = None,
     idempotency_key: UUID | None = None,
 ) -> CreateResult:
     """Create an opportunity in `scope`, for a lead of the scope or (`lead_id` None: the UI
@@ -664,7 +705,7 @@ def create_opportunity(
     (naming.py). Its owner is the lead's owner: for a new record, as for a lead created
     in `scope` (`owner_id` names it organisation-wide, where it is required). The pipeline
     defaults to the organisation's default pipeline and the stage to its first open stage.
-    Created in a negotiation stage, it needs the negotiated price.
+    Created in a negotiation stage, it needs the agreed price and agreed CPT.
 
     Lock order: a new record's owner is share-locked (leads.services.create_lead) before the
     pipeline. That can't close a cycle: nothing locks a pipeline and then a user row in a mode
@@ -672,7 +713,7 @@ def create_opportunity(
     lead row is invisible to everyone else until this commits."""
     authorize_write(actor, scope)
     cleaned = _creation_fields(fields)
-    price = _clean_price(negotiated_price)
+    price, cpt = _clean_terms(negotiated_price, agreed_cpt)
     customer: dict[str, Any] | None = None
     if lead_id is not None and owner_id is not None:
         raise InvalidInputError(details={"owner": [OWNER_FOLLOWS_LEAD]})
@@ -688,6 +729,9 @@ def create_opportunity(
         str(pipeline_id),
         str(stage_id),
         str(price),
+        # Only when sent: a request without one keeps the digest the previous release gave
+        # it, so its retry across a deploy still replays (review P3).
+        *([cpt] if cpt is not None else []),
     )
     if idempotency_key is not None:
         earlier = idempotency.replayed_resource(
@@ -697,6 +741,13 @@ def create_opportunity(
             return CreateResult(_replay(scope, earlier), replayed=True)
     try:
         with transaction.atomic():
+            # Before any row lock (docs/pipeline.md#lock-order): concurrent requests with
+            # this key queue here, and every one after the first replays it instead of
+            # creating (and rolling back) a lead and an opportunity of its own.
+            if idempotency_key is not None and (
+                earlier := idempotency.claim(actor.pk, IDEMPOTENT_CREATE, idempotency_key, digest)
+            ):
+                return CreateResult(_replay(scope, earlier), replayed=True)
             if customer is None:
                 assert lead_id is not None  # noqa: S101 — no customer record only with a lead
                 target = lead_id
@@ -716,6 +767,7 @@ def create_opportunity(
                 pipeline_id=pipeline_id,
                 stage_id=stage_id,
                 negotiated_price=price,
+                agreed_cpt=cpt,
                 via_conversion=False,
                 lead_created=customer is not None,
             )
@@ -748,6 +800,7 @@ def convert_lead(
     pipeline_id: UUID | None = None,
     stage_id: UUID | None = None,
     negotiated_price: Any = None,
+    agreed_cpt: Any = None,
     idempotency_key: UUID | None = None,
 ) -> ConversionResult:
     """Convert a lead: create its opportunity and move the lead to the Converted status, in
@@ -756,7 +809,7 @@ def convert_lead(
     the first conversion."""
     authorize_write(actor, scope)
     cleaned = _creation_fields(fields)
-    price = _clean_price(negotiated_price)
+    price, cpt = _clean_terms(negotiated_price, agreed_cpt)
     digest = idempotency.request_digest(
         scope.kind.value,
         str(scope.subject_user_id),
@@ -766,6 +819,9 @@ def convert_lead(
         str(pipeline_id),
         str(stage_id),
         str(price),
+        # Only when sent: a request without one keeps the digest the previous release gave
+        # it, so its retry across a deploy still replays (review P3).
+        *([cpt] if cpt is not None else []),
     )
     if idempotency_key is not None:
         earlier = idempotency.replayed_resource(
@@ -775,6 +831,10 @@ def convert_lead(
             return _replayed_conversion(scope, earlier)
     try:
         with transaction.atomic():
+            if idempotency_key is not None and (
+                earlier := idempotency.claim(actor.pk, IDEMPOTENT_CONVERT, idempotency_key, digest)
+            ):
+                return _replayed_conversion(scope, earlier)
             # FOR UPDATE from the start: this transaction changes the lead's status, and a
             # lock is never upgraded mid-transaction.
             lead = lead_selectors.lock_lead(scope, lead_id, exclusive=True)
@@ -802,6 +862,7 @@ def convert_lead(
                 pipeline_id=pipeline_id,
                 stage_id=stage_id,
                 negotiated_price=price,
+                agreed_cpt=cpt,
                 via_conversion=True,
             )
             # The leads module's own operation: status audit and LeadStatusChanged included.
@@ -953,14 +1014,15 @@ def move_opportunity(
     stage_id: UUID,
     lost_reason: str = "",
     negotiated_price: Any = None,
+    agreed_cpt: Any = None,
 ) -> Opportunity:
     """THE stage transition: every stage change (board drag and drop, the "Move to stage"
     menu, won, lost, reopen) goes through here.
 
-    - into a negotiation stage: the negotiated price is required (every time: leaving
-      negotiation and coming back asks again) and appended to the price history; no other
-      target takes one. No path can skip it: the API, the board and the detail page all
-      call this.
+    - into a negotiation stage: the agreed price and the agreed CPT are required (every
+      time: leaving negotiation and coming back asks again) and appended to the price
+      history; no other target takes either. No path can skip them: the API, the board and
+      the detail page all call this.
 
     - open -> open: the probability becomes the new stage's default (an override belongs to
       the stage it was made in);
@@ -977,16 +1039,22 @@ def move_opportunity(
         reason = validation.CLEANERS["lost_reason"](lost_reason)
     except ValueError as exc:
         raise InvalidInputError(details={"lost_reason": [str(exc)]}) from None
-    price = _clean_price(negotiated_price)
+    price, cpt = _clean_terms(negotiated_price, agreed_cpt)
     with transaction.atomic():
         opportunity, lead = _lock(scope, opportunity_id)
         if opportunity.stage_id == stage_id:
-            # A retry of a move that already happened: nothing to do. A lost reason or a
-            # price sent with it would be silently dropped, so it is refused instead.
+            # A retry of a move that already happened: nothing to do. A lost reason, price
+            # or CPT sent with it would be silently dropped, so it is refused instead.
             if reason:
                 raise InvalidInputError(details={"lost_reason": [SAME_STAGE_LOST_REASON]})
-            if price is not None:
-                raise InvalidInputError(details={"negotiated_price": [SAME_STAGE_PRICE]})
+            if price is not None or cpt is not None:
+                raise InvalidInputError(
+                    details={
+                        field: [SAME_STAGE_PRICE]
+                        for field, sent in (("negotiated_price", price), ("agreed_cpt", cpt))
+                        if sent is not None
+                    }
+                )
             return selectors.opportunity_by_id(opportunity.pk)
         _require_version(opportunity, version)
         _require_not_archived(opportunity)
@@ -997,7 +1065,7 @@ def move_opportunity(
             raise InvalidInputError(details={"stage": [INVALID_STAGE]})
         if reason and target.category != StageCategory.LOST:
             raise InvalidInputError(details={"lost_reason": [LOST_REASON_ONLY_WHEN_LOST]})
-        _price_for(target, price)
+        terms = _terms_for(target, price, cpt)
         source = opportunity.stage
         was_open = opportunity.is_open
         if not was_open and target.is_closed:
@@ -1024,8 +1092,8 @@ def move_opportunity(
         opportunity.probability_overridden = False
         opportunity.closed_at = now if target.is_closed else None
         opportunity.lost_reason = reason if target.category == StageCategory.LOST else ""
-        if price is not None:
-            opportunity.negotiated_price = price
+        if terms is not None:
+            opportunity.negotiated_price = terms.price
             opportunity.negotiated_at = now
         opportunity.version += 1
         opportunity.updated_at = now
@@ -1045,11 +1113,11 @@ def move_opportunity(
             ]
         )
         _history(opportunity, actor.pk, from_stage=source, to_stage=target, at=now)
-        if price is not None:
+        if terms is not None:
             _record_price(
                 opportunity,
                 actor.pk,
-                price=price,
+                terms=terms,
                 stage=target,
                 source=NegotiationSource.STAGE_ENTRY,
                 at=now,
@@ -1073,7 +1141,11 @@ def move_opportunity(
                 "to": target.key,
                 "from_status": source.category,
                 "to_status": target.category,
-                **({"negotiated_price_recorded": True} if price is not None else {}),
+                **(
+                    {"negotiated_price_recorded": True, "agreed_cpt_recorded": True}
+                    if terms is not None
+                    else {}
+                ),
             },
         )
         publish(
@@ -1109,30 +1181,38 @@ def record_negotiated_price(
     opportunity_id: UUID,
     version: int,
     price: Any,
+    agreed_cpt: Any = None,
 ) -> Opportunity:
-    """Record a new negotiated price while the opportunity is in a negotiation stage (the
-    negotiation goes on: ₹12,00,000 -> ₹11,00,000 -> ₹10,50,000). Appends to the history,
-    never overwrites it. The same price as the latest changes nothing (a retry)."""
+    """Record new agreed terms (price and CPT, both required) while the opportunity is in a
+    negotiation stage (the negotiation goes on: ₹12,00,000 -> ₹11,00,000 -> ₹10,50,000).
+    Appends to the history, never overwrites it. The same terms as the latest change nothing
+    (a retry)."""
     authorize_write(actor, scope)
-    amount = _clean_price(price)
-    if amount is None:
-        raise InvalidInputError(details={"price": [PRICE_REQUIRED]})
+    amount, cpt = _clean_terms(price, agreed_cpt, price_field="price")
+    if amount is None or cpt is None:
+        missing: dict[str, list[str]] = {}
+        if amount is None:
+            missing["price"] = [PRICE_REQUIRED]
+        if cpt is None:
+            missing["agreed_cpt"] = [AGREED_CPT_REQUIRED]
+        raise InvalidInputError(details=missing)
+    terms = AgreedTerms(amount, cpt)
     with transaction.atomic():
         opportunity, _ = _lock(scope, opportunity_id)
         stage = opportunity.stage
         latest = (
             NegotiationPrice.objects.filter(opportunity_id=opportunity.pk)
             .order_by("-occurred_at", "-id")
-            .values_list("price", "stage_id")
+            .values_list("price", "agreed_cpt", "stage_id")
             .first()
         )
         if (
-            latest == (amount, stage.pk)
+            latest == (terms.price, terms.cpt, stage.pk)
             and stage.is_negotiation
             and opportunity.is_open
             and opportunity.archived_at is None
         ):
-            # A retry of the price just recorded in this stage. (A stage retyped to
+            # A retry of the terms just recorded in this stage. (A stage retyped to
             # negotiation while the deal sat in it has no price of its own yet: recorded.)
             return selectors.opportunity_by_id(opportunity.pk)
         _require_version(opportunity, version)
@@ -1140,7 +1220,7 @@ def record_negotiated_price(
         if not stage.is_negotiation or not opportunity.is_open:
             raise BusinessRuleViolation(NOT_IN_NEGOTIATION)
         now = timezone.now()
-        opportunity.negotiated_price = amount
+        opportunity.negotiated_price = terms.price
         opportunity.negotiated_at = now
         opportunity.version += 1
         opportunity.updated_at = now
@@ -1150,7 +1230,7 @@ def record_negotiated_price(
         _record_price(
             opportunity,
             actor.pk,
-            price=amount,
+            terms=terms,
             stage=stage,
             source=NegotiationSource.REVISION,
             at=now,
@@ -1171,7 +1251,7 @@ def record_negotiated_price(
                 owner_id=opportunity.owner_id,
                 actor_id=actor.pk,
                 occurred_at=now,
-                fields=("negotiated_price",),
+                fields=("negotiated_price", "agreed_cpt"),
             )
         )
     return selectors.opportunity_by_id(opportunity.pk)

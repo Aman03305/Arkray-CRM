@@ -5,6 +5,7 @@ import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 interface HeaderMenuProps {
   /** The button's accessible name (also its tooltip). */
   label: string;
+  /** What the button shows; decorative (aria-hidden), the label names it. */
   trigger: ReactNode;
   triggerClassName: string;
   /** The panel's content; `close` closes it (after following one of its links). */
@@ -55,13 +56,16 @@ export function HeaderMenu({ label, trigger, triggerClassName, children }: Heade
       <button
         ref={button}
         type="button"
-        aria-label={label}
         title={label}
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
         onClick={() => setOpen((value) => !value)}
         className={triggerClassName}
       >
+        {/* Named by hidden text, not aria-label: an aria-label must contain what the button
+            shows (WCAG 2.5.3), and initials ("RS") would only make the name noisier. The
+            trigger itself is decorative (aria-hidden). */}
+        <span className="sr-only">{label}</span>
         {trigger}
       </button>
       {open ? (

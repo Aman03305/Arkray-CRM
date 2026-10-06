@@ -859,7 +859,8 @@ paths:
       description: |-
         Attach a file to a note. The body is the file itself (Content-Type:
         application/octet-stream) and the X-Filename header its name, percent-encoded. At most
-        ATTACHMENT_MAX_BYTES; allowed types only, recognised by their content.
+        ATTACHMENT_MAX_BYTES; allowed types only, recognised by their content. Uploads have
+        their own rate limit (API_THROTTLE_ATTACHMENTS) besides the per-user one.
       parameters:
       - in: header
         name: X-Filename
@@ -897,6 +898,9 @@ paths:
           description: ''
         '404':
           description: Not found, or outside this workspace.
+        '503':
+          description: File storage is unavailable (storage_unavailable); Retry-After
+            says when to try again.
   /api/v1/workspaces/{workspace}/activities/{activity_id}/cancel:
     post:
       operationId: activities_cancel
@@ -1286,6 +1290,12 @@ paths:
           description: ''
         '404':
           description: Not found, or outside this workspace.
+        '410':
+          description: 'The file''s stored object is gone (attachment_unavailable):
+            an administrator needs to look at it.'
+        '503':
+          description: File storage is unavailable (storage_unavailable); Retry-After
+            says when to try again.
   /api/v1/workspaces/{workspace}/attachments/{attachment_id}/preview:
     get:
       operationId: attachments_preview
@@ -1317,6 +1327,12 @@ paths:
           description: ''
         '404':
           description: Not found, or outside this workspace.
+        '410':
+          description: 'The file''s stored object is gone (attachment_unavailable):
+            an administrator needs to look at it.'
+        '503':
+          description: File storage is unavailable (storage_unavailable); Retry-After
+            says when to try again.
   /api/v1/workspaces/{workspace}/dashboard:
     get:
       operationId: dashboard
@@ -1955,9 +1971,12 @@ paths:
         schema:
           type: string
           format: uuid
-        description: A UUID chosen by the client. Repeating the same request with
-          the same key within 24 hours returns the lead created the first time instead
-          of a duplicate.
+        description: 'Required. A new UUID for each new opportunity, the same one
+          when retrying it: repeating the request with the key within 24 hours returns
+          the opportunity created the first time (header Idempotent-Replayed: true)
+          instead of a second one; the key with a different request is a 422. Missing
+          or not a UUID: 400, nothing is created.'
+        required: true
       - in: path
         name: workspace
         schema:
@@ -2198,8 +2217,8 @@ paths:
     get:
       operationId: opportunities_negotiated_prices
       description: |-
-        The negotiated price history (newest first, append-only), and recording a new price
-        while the opportunity is in a negotiation stage.
+        The agreed price history (newest first, append-only; each price with its agreed CPT),
+        and recording new agreed terms while the opportunity is in a negotiation stage.
       parameters:
       - in: query
         name: cursor
@@ -2241,8 +2260,8 @@ paths:
     post:
       operationId: opportunities_record_negotiated_price
       description: |-
-        The negotiated price history (newest first, append-only), and recording a new price
-        while the opportunity is in a negotiation stage.
+        The agreed price history (newest first, append-only; each price with its agreed CPT),
+        and recording new agreed terms while the opportunity is in a negotiation stage.
       parameters:
       - in: path
         name: opportunity_id
@@ -2843,6 +2862,10 @@ paths:
           description: ''
         '404':
           description: Not found, or outside this workspace.
+        '429':
+          description: Too many searches; see Retry-After.
+        '503':
+          description: 'search_busy: the search took too long; try again (Retry-After).'
 components:
   schemas:
     Activity:
@@ -4343,8 +4366,9 @@ components:
           maxLength: 100
         expected_cpt:
           type: string
-          description: Expected CPT as the salesperson states it (free text; no unit
-            is implied).
+          description: Expected CPT as the salesperson states it (no unit is implied).
+            Free text kept as written; CPT's business meaning and unit await product-owner
+            confirmation.
           maxLength: 100
         custom_fields:
           type: object
@@ -4384,7 +4408,14 @@ components:
           - type: integer
             minimum: 0
           nullable: true
-          description: Required when the stage is a negotiation stage; refused otherwise.
+          description: 'The agreed price: required when the stage is a negotiation
+            stage; refused otherwise.'
+        agreed_cpt:
+          type: string
+          description: 'The agreed CPT: required when the stage is a negotiation stage;
+            refused otherwise. Blank counts as not given. Free text kept as written;
+            CPT''s business meaning and unit await product-owner confirmation.'
+          maxLength: 100
         version:
           type: integer
           minimum: 1
@@ -4777,8 +4808,15 @@ components:
             example: '1250000.00'
           - type: integer
             minimum: 0
-          description: The negotiated price (INR), e.g. "1050000.00".
+          description: The agreed (negotiated) price (INR), e.g. "1050000.00".
+        agreed_cpt:
+          type: string
+          minLength: 1
+          description: The agreed CPT with this price. Free text kept as written;
+            CPT's business meaning and unit await product-owner confirmation.
+          maxLength: 100
       required:
+      - agreed_cpt
       - price
       - version
     NegotiationPrice:
@@ -4792,6 +4830,11 @@ components:
           type: string
           format: decimal
           readOnly: true
+        agreed_cpt:
+          type: string
+          readOnly: true
+          description: The agreed CPT recorded with this price (blank on prices recorded
+            before it was asked for).
         currency:
           type: string
           readOnly: true
@@ -4816,6 +4859,7 @@ components:
           readOnly: true
       required:
       - actor
+      - agreed_cpt
       - currency
       - id
       - occurred_at
@@ -4975,7 +5019,12 @@ components:
           format: decimal
           readOnly: true
           nullable: true
-          description: The latest negotiated price, if any.
+          description: The latest agreed (negotiated) price, if any.
+        agreed_cpt:
+          type: string
+          readOnly: true
+          description: The agreed CPT recorded with the latest agreed price, from
+            the price history (free text; blank when that price has none).
         closed_at:
           type: string
           format: date-time
@@ -5054,6 +5103,7 @@ components:
       required:
       - account_name
       - address
+      - agreed_cpt
       - archived_at
       - closed_at
       - contact_email
@@ -5153,6 +5203,11 @@ components:
           format: decimal
           readOnly: true
           nullable: true
+        agreed_cpt:
+          type: string
+          readOnly: true
+          description: The agreed CPT recorded with the latest agreed price (free
+            text; blank when that price has none).
         closed_at:
           type: string
           format: date-time
@@ -5176,6 +5231,7 @@ components:
           readOnly: true
       required:
       - account_name
+      - agreed_cpt
       - archived_at
       - closed_at
       - created_at
@@ -5228,8 +5284,9 @@ components:
           maxLength: 100
         expected_cpt:
           type: string
-          description: Expected CPT as the salesperson states it (free text; no unit
-            is implied).
+          description: Expected CPT as the salesperson states it (no unit is implied).
+            Free text kept as written; CPT's business meaning and unit await product-owner
+            confirmation.
           maxLength: 100
         custom_fields:
           type: object
@@ -5269,7 +5326,14 @@ components:
           - type: integer
             minimum: 0
           nullable: true
-          description: Required when the stage is a negotiation stage; refused otherwise.
+          description: 'The agreed price: required when the stage is a negotiation
+            stage; refused otherwise.'
+        agreed_cpt:
+          type: string
+          description: 'The agreed CPT: required when the stage is a negotiation stage;
+            refused otherwise. Blank counts as not given. Free text kept as written;
+            CPT''s business meaning and unit await product-owner confirmation.'
+          maxLength: 100
         lead:
           type: string
           format: uuid
@@ -5316,7 +5380,14 @@ components:
           - type: integer
             minimum: 0
           nullable: true
-          description: Required when moving into a negotiation stage; refused otherwise.
+          description: 'The agreed price: required when moving into a negotiation
+            stage; refused otherwise.'
+        agreed_cpt:
+          type: string
+          description: 'The agreed CPT: required when moving into a negotiation stage;
+            refused otherwise. Blank counts as not given. Free text kept as written;
+            CPT''s business meaning and unit await product-owner confirmation.'
+          maxLength: 100
       required:
       - stage
       - version
@@ -5562,8 +5633,9 @@ components:
           maxLength: 100
         expected_cpt:
           type: string
-          description: Expected CPT as the salesperson states it (free text; no unit
-            is implied).
+          description: Expected CPT as the salesperson states it (no unit is implied).
+            Free text kept as written; CPT's business meaning and unit await product-owner
+            confirmation.
           maxLength: 100
         custom_fields:
           type: object

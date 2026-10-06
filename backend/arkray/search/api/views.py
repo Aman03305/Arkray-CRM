@@ -9,7 +9,9 @@ salesperson's own search ("me"), an administrator's search of one user's workspa
 
 The query is never logged, audited or stored: the access log records the path without the
 query string (core.middleware), and search writes nothing (search.selectors). Each user may
-search 120 times a minute (a scoped throttle on top of the global per-user limit).
+search 120 times a minute (a scoped throttle on top of the global per-user limit); a refused
+search is answered before the workspace is resolved or anything is searched. A search the
+database gives up on is a 503 "search_busy" (docs/search.md#resource-protection).
 """
 
 from __future__ import annotations
@@ -17,13 +19,13 @@ from __future__ import annotations
 from typing import Any
 
 from django.utils import timezone
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle, UserRateThrottle
 
 from arkray.core.api import ApiView, validated
-from arkray.core.errors import PermissionDeniedError
+from arkray.core.errors import PermissionDeniedError, error_body
 from arkray.core.ranking import Matches
 from arkray.identity.models import User
 from arkray.identity.permissions import IsActiveUser
@@ -32,6 +34,10 @@ from arkray.leads.api.views import NOT_FOUND
 
 from .. import selectors
 from . import serializers as s
+
+# Longer than the web app retries by itself (4 s, lib/query-client.ts): a search that just
+# timed out isn't sent again automatically; the person chooses to try again.
+BUSY_RETRY_AFTER_S = 5
 
 
 def _group(matches: Matches[Any]) -> dict[str, Any]:
@@ -51,7 +57,14 @@ class SearchView(ApiView):
     @extend_schema(
         operation_id="search",
         parameters=[s.SearchQuerySerializer],
-        responses={200: s.SearchResultsSerializer, 404: NOT_FOUND},
+        responses={
+            200: s.SearchResultsSerializer,
+            404: NOT_FOUND,
+            429: OpenApiResponse(description="Too many searches; see Retry-After."),
+            503: OpenApiResponse(
+                description="search_busy: the search took too long; try again (Retry-After)."
+            ),
+        },
     )
     def get(self, request: Request, workspace: str) -> Response:
         actor = request.user
@@ -59,7 +72,12 @@ class SearchView(ApiView):
             raise PermissionDeniedError()
         scope = resolve_workspace(actor, workspace)
         query = validated(s.SearchQuerySerializer, request.query_params)["q"]
-        found = selectors.global_search(scope, query)
+        try:
+            found = selectors.global_search(scope, query)
+        except selectors.SearchBusy as busy:
+            response = Response(error_body(busy.code, busy.message), status=busy.http_status)
+            response["Retry-After"] = str(BUSY_RETRY_AFTER_S)
+            return response
         data = {
             "query": found.query.text,
             "terms": list(found.query.terms),

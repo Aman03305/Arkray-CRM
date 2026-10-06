@@ -13,7 +13,7 @@ controls are in [security.md](security.md#personal-data).
 |---|---|---|
 | Leads | names, organisation, job title, email, phone numbers, address, free-text description | `leads_lead` |
 | Activities | notes, task and meeting titles and descriptions, meeting places and links (often about a lead) | `activities_activity` |
-| Opportunities | titles, descriptions and lost reasons (may mention a person) | `pipeline_opportunity`; lost reasons also in the append-only `pipeline_stage_history` |
+| Opportunities | titles, descriptions, lost reasons, work load and Expected CPT (may mention a person) | `pipeline_opportunity`; lost reasons also in the append-only `pipeline_stage_history`, agreed CPTs in `pipeline_negotiation_price` |
 | Timeline | none: kinds, dates, statuses, stage names and ids; text is read live from the activity | `activities_timeline_entry` |
 | Users (staff) | name, email, role, sign-in times | `identity_user`, `django_session` |
 | Security evidence | client addresses and keyed hashes of submitted emails (never the email) | `identity_auth_throttle_event`; `audit_event` (client address of some events) |
@@ -35,7 +35,7 @@ computed locally.
 | Data | Kept | Mechanism |
 |---|---|---|
 | Leads, opportunities, activities | until erased on request or under the organisation's retention policy (archiving keeps them; it hides, it doesn't delete) | `manage.py erase_lead` ([below](#erasure)) |
-| Timeline entries, stage history | the life of the record | append-only; lost reasons redacted on erasure |
+| Timeline entries, stage history, negotiated prices | the life of the record | append-only; lost reasons and agreed CPTs redacted on erasure |
 | Audit trail | **indefinitely** (a security record; no field values) | append-only. Set a retention period with the business; deleting old rows is a DBA operation as the schema owner ([runbooks.md](runbooks.md#purge-old-audit-events)) |
 | Sessions | at most 12 hours (2 hours idle) | expired sessions deleted hourly; never in backups |
 | Login and reset throttle evidence | 24 hours | hourly housekeeping (`AUTH_THROTTLE_RETENTION_S`) |
@@ -88,12 +88,13 @@ says which). In one transaction it:
   the redacted text (an indexing job that read the old text meanwhile is overwritten);
 - records `lead.erased` (the administrator, the lead's id and counts, never a value);
 - blanks the opportunities' account, customer, contact and address fields and their custom
-  values (their names are derived from the customer since ADR-0028: the title is replaced
-  too; the instrument, work load and Expected CPT describe the deal, not the person, and
-  stay), deletes the files of the lead's notes (names and content hashes blanked, objects
+  values, their work load and Expected CPT (free text a name can be typed into; their names
+  are derived from the customer since ADR-0028: the title is replaced too; the instrument is
+  one of a fixed list and stays), deletes the files of the lead's notes (names and content hashes blanked, objects
   removed by a job; an upload in flight is removed when it finishes) and, the lead being
   archived, refuses new files and text on its notes (product enhancement phase);
-- last, redacts the lost reasons in the stage history, if there are any.
+- last, redacts the free text in the append-only tables, if there is any: the lost reasons in
+  the stage history and the agreed CPT of each negotiated price (ADR-0029).
 
 Ids, dates, statuses, stage names and amounts stay, so the pipeline's figures and history
 keep their shape without identifying anyone. An erased lead can't be erased again (nothing
@@ -102,7 +103,7 @@ conversations). The operator is found as at sign-in (`--by` normalised like an e
 must hold the CRM-management capability. **What it can't find:** the person named in
 other leads' notes, tasks or meetings (search for the name across the organisation and
 edit those by hand), and a conversation that names only the company of a person lead. Backups keep the old data until they expire (30 days), and versioned attachment buckets
-keep earlier object versions until their lifecycle expires them (R93). Implemented in
+keep earlier object versions until their lifecycle expires them (R93). A bucket restored from a backup brings erased files' objects back: `manage.py reconcile_attachments --repair` deletes them again (their rows say they are gone; [runbooks.md](runbooks.md#attachment-bucket-lost-or-restored)). Implemented in
 `arkray/privacy` and tested (`arkray/privacy/tests/test_erasure.py`: every planted value of
 the person gone from the lead, activities, opportunities, history, index, stored questions
 and answers (follow-ups and failed questions included) and the audit event; a second lead

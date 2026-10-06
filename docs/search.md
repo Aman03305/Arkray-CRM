@@ -351,7 +351,9 @@ records (never fewer), which only closes the gate earlier.
   the gate sees few candidates among the recent records, but the index returns all the old
   ones (risk R59): about 2.3 µs each, 132 ms of SQL for 50,000 and 441 ms for 190,000
   organisation-wide (29-55 ms in one user's workspace, where only their records are
-  looked up). The 10 s statement timeout would be reached at about 4 million.
+  looked up). The search's 2 s statement timeout would be reached at roughly 870,000 such
+  matches (fewer under contention): the search is then refused as busy (503), with "add
+  another word".
 - **Words just under the gate's threshold** (2 % of recent records) make the older pass
   collect up to 2 % of the kind's records (at 900,000 tasks, up to 18,000 rows): a planted
   1.8 % word measured 34-38 ms (notes) and 22-25 ms (tasks) in every scope (review).
@@ -365,6 +367,51 @@ records (never fewer), which only closes the gate earlier.
 - A **disk-cold** first search after a restart reads index pages from disk and is slower;
   production memory sizing is Phase 10/11 (as R53).
 
+## Resource protection
+
+What bounds one search, and one user's searching (checked for 100 concurrent active users):
+
+| Bound | Value | Where |
+|---|---|---|
+| Input | 2-100 characters, also after NFC; whitespace collapsed; invisible, control and bidi characters refused (400); at most 5 searched words, each with 3 letters or digits in a row; words of punctuation, symbols or 1-2 letters don't narrow, and alone are a 400 (nothing is searched: only the session and user lookups run); `% _ \ ' " : & \| ! ( ) *` are literal characters (escaped `LIKE`, no full-text query syntax). NFC, not NFKC: full-width letters ("ＲＡＨＵＬ") don't find "Rahul", as stored text isn't folded either | `core.text`, `core.ranking` |
+| Work per kind | the recent pass reads 5,000 newest records; the older pass runs only when the gate says the index narrows; 100 matches ranked; 6 rows read with what they display | `core.ranking` |
+| Results | 5 per kind with `has_more`; no counts, no pagination; note previews of 240 characters | [Result limits](#result-limits) |
+| Time | **2 s per statement** (`search.selectors.STATEMENT_TIMEOUT_MS`), set with `set_config(..., true)` (a `SET LOCAL`) in the transaction's first round trip, never above the connection's `DB_STATEMENT_TIMEOUT_MS`; five statements, so at most about 10 s for a whole search (under the web app's 15 s request timeout), instead of the 50 s five statements could take under the connection's 10 s | `search.selectors` |
+| A statement that runs out of time | **503 `search_busy`**, "Search is busy right now. Try again in a moment, or add another word.", `Retry-After: 5`; the transaction is rolled back; a warning `search_timed_out` with the workspace kind only (never the words). The web app retries a GET by itself only when Retry-After is at most 4 s, so it shows the message with "Try again" instead of sending the search again. Before, a timeout was a generic 500, which the web app retried twice: three times the work for a search that had already run out of time | `search.api.views` |
+| Rate | 120 searches a minute per user (`API_THROTTLE_SEARCH`) and 600 requests a minute overall (`API_THROTTLE_USER`), keyed by the user, not the address (an office behind one address isn't one budget; a new address isn't a new one); 429 with `Retry-After`, decided before the workspace is resolved: a refused search reads no record and writes no audit row | `search.api.views` |
+| Redis down | the rates don't apply (fail open, like every DRF rate); the input bounds, bounded work and statement timeout still do | |
+
+Ask Arkray's `find_records` tool uses the same `global_search`, so the same timeout applies
+to it (a timed-out search is a failed tool call the model can recover from).
+
+**Measured on a mid-size dataset** (final remediation, 2026-10-06; a throwaway database: 61
+users, 150,000 leads with one owner holding 15,000, 50,000 opportunities, 120,000 tasks,
+80,000 meetings, 100,000 notes, `bench_search.py`'s skewed vocabulary, "India" added to about
+35 % of every kind, planted rare, medium, 6 % and old-only words): 17 query shapes (rare,
+medium, 6 % and 35 % words, "the", "price", two words, Devanagari, accented, a customer name,
+an instrument, old-only matches, no match, common trigrams, a word with punctuation) in four
+workspaces (heavy owner, typical owner, an administrator in the heavy user's workspace, the
+organisation). Every statement, EXPLAIN ANALYZEd: **2-109 ms** (the slowest: old-only
+matches organisation-wide, the notes group, 109 ms; then 80 ms in the heavy user's
+workspace); no sequential scan, no sort spilled to disk, no statement near the 2 s timeout;
+`bench_search.py --check-plans`' checks over the same shapes: PASS (wherever the older pass
+ran it read the kind's trigram index, looked up with the owner in a user's workspace, so
+another user's records are only index candidates, never rechecked or ranked; the
+organisation's records are never sorted). Whole searches took 95-380 ms of wall clock on a
+machine shared with other test runs (contention, not the plans: the same shapes are 24-120
+ms at 1M leads on a quiet machine, above). The same old-only search organisation-wide under
+a deliberately tiny 30 ms timeout was refused as `search_busy` in 111 ms and the
+connection's own timeout was back afterwards.
+
+**What one user can still do.** DRF's rates count requests, not requests in flight, and
+their cache read-then-write isn't atomic, so a script firing searches in parallel can briefly
+pass a few over the rate and occupy as many web workers as it opens connections, each for at
+most the search's timeout (typically 25-120 ms). Every search stays bounded; concurrency per
+user is not. The edge is the place for that (a per-client connection limit at the reverse
+proxy); an application cap on searches in flight per user was considered and not built, since
+the web app's superseded searches still run on the server and a cap low enough to matter
+would refuse a fast typist on a slow day.
+
 ## Query counts
 
 Per request, pinned exactly in `arkray/search/tests/test_query_counts.py` (identical at 3 and
@@ -372,7 +419,7 @@ Per request, pinned exactly in `arkray/search/tests/test_query_counts.py` (ident
 
 | Workspace | Queries | Made of |
 |---|---|---|
-| Own (`me`) | **8** | session, user, `SET TRANSACTION`, 5 searches |
+| Own (`me`) | **8** | session, user, `SET TRANSACTION` (with the search's statement timeout, one round trip), 5 searches |
 | A selected user (`{userId}`) | **9** | + the subject user's existence check (+1 audit insert once per 15-minute window) |
 | Organisation (`all`) | **8** | (+1 audit insert once per window) |
 
@@ -459,9 +506,9 @@ the `SET TRANSACTION` isn't sent (7 / 8 / 7).
 Search reads PostgreSQL only. Redis down: it works (the cache isn't used; the throttle and
 audit window fail open towards more auditing). Broker down: irrelevant (no task is
 enqueued). AI or embedding provider down: irrelevant (never called; `test_privacy.py`
-checks that nothing on the search path imports an AI, HTTP or task library). The 10 s
-statement timeout is the hard guardrail: a timeout is a generic 500, with no SQL or query
-text (`test_privacy.py` provokes a real one).
+checks that nothing on the search path imports an AI, HTTP or task library). The search's
+own statement timeout (2 s per statement, below) is the hard guardrail: a timeout is a 503
+`search_busy`, with no SQL or query text (`test_privacy.py` provokes a real one).
 
 Rate limits: besides the global per-user limit (600 requests a minute), search has its own
 scope, **120 searches a minute per user** (`API_THROTTLE_SEARCH`, DRF's scoped throttle as
@@ -469,7 +516,7 @@ for sign-in): search is the most expensive read per request and is sent as peopl
 a runaway client or script is held to about two searches a second, far above what a person
 typing produces (a 250 ms debounce). A 429 shows in the dialog as an error with "Try
 again". Like every throttle it lives in the cache: with Redis down it doesn't apply and
-search still answers. Phase 9 tunes rate limits.
+search still answers. [Resource protection](#resource-protection) has every bound.
 
 ## Security tests
 
@@ -480,6 +527,8 @@ search still answers. Phase 9 tunes rate limits.
 | Restricted leads aren't revealed or matched; results re-authorise when opened; deactivated users' workspaces | `arkray/search/tests/test_api.py` |
 | Input bounds, malformed encodings, lone surrogates, bidi and control characters, every script, SQL and regex syntax, wildcards | `arkray/search/tests/test_input.py` |
 | Read-only, nothing logged or audited, statement timeout, no AI or network imports | `arkray/search/tests/test_privacy.py` |
+| Resource protection: every statement under the search's timeout (never above the connection's), `search_busy` 503 with Retry-After, other database errors not disguised, 20 parallel runaway searches bounded while another user's search stays fast, 5 per kind for a word in every record, input refused before searching, a refused search searches nothing, the throttle keyed by the user | `arkray/search/tests/test_resource_protection.py` |
+| One user's spam refused while another user's requests succeed (writes, administration, Ask Arkray, sign-in, password resets); DRF rates fail open with Redis down | `tests/security/test_abuse_limits.py` |
 | Redis and broker outages | `tests/security/test_outages.py::TestSearchKeepsWorking` |
 | Frontend: entry, shortcut rules, debounce, grouping, keyboard, states, links in all three workspaces, the slow-response race, workspace switch, cache keys, storage, XSS payloads, highlighting | `frontend/src/features/search/search.test.tsx` |
 | Review regressions: words an index can't look up (punctuation, symbols, generic combining marks), PostgreSQL's word table vs `[[:alnum:]]` for every character, the gate (words, candidates), length after NFC, repeated words, messages, cluster-safe previews, activity recency, one read of each recent text; Enter on stale results, focus trap, announcements, guessed workspace, client rules, layout, IME, non-Latin Ctrl+K | `backend/tests/security/test_phase7_review_regressions.py`, `frontend/src/features/search/review-regressions.test.tsx` |

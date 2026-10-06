@@ -57,7 +57,7 @@ export function activeStages(pipeline: PipelineDto | undefined): Stage[] {
   return (pipeline?.stages ?? []).filter((s) => s.is_active);
 }
 
-/** A negotiation stage: entering it asks for the negotiated price (its type, never its name). */
+/** A negotiation stage: entering it asks for the agreed price and CPT (its type, never its name). */
 export function isNegotiation(stage: Pick<Stage, "type"> | undefined | null): boolean {
   return stage?.type === "negotiation";
 }
@@ -102,6 +102,7 @@ function asCard(opportunity: Opportunity, previous: OpportunityCard): Opportunit
     expected_close_date: opportunity.expected_close_date,
     account_name: opportunity.account_name,
     negotiated_price: opportunity.negotiated_price,
+    agreed_cpt: opportunity.agreed_cpt,
     closed_at: opportunity.closed_at,
     archived_at: opportunity.archived_at,
     version: opportunity.version,

@@ -92,7 +92,10 @@ the system can't verify them.
 5. Roll out api, workers and web; beat last. Readiness gates traffic; the web server and
    workers refuse a privileged database role.
 6. Smoke: sign in, open the dashboard, a lead, the board; `/health/ready` OK; no error lines.
-7. Rollback = the previous image (migrations are backward compatible).
+7. Rollback = the previous image, while it can still write to the new schema (additive
+   migrations since it; not across `pipeline.0006` / `identity.0004`); otherwise roll forward
+   or restore the backup ([deployment.md](deployment.md#release-process); never a
+   down-migration).
 
 ## After go-live
 

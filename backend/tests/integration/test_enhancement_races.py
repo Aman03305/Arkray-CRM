@@ -193,6 +193,7 @@ def test_two_moves_into_negotiation_record_one_price():
                     version=1,
                     stage_id=negotiation.pk,
                     negotiated_price=price,
+                    agreed_cpt="Rs 18",
                 )
                 for price in (Decimal("100.00"), Decimal("90.00"), Decimal("80.00"))
             )
@@ -219,11 +220,17 @@ def test_concurrent_price_revisions_from_one_version():
         version=1,
         stage_id=negotiation.pk,
         negotiated_price=Decimal("1000"),
+        agreed_cpt="Rs 18",
     )
     results = run_concurrently(
         *(
             lambda price=price: services.record_negotiated_price(
-                actor=owner, scope=OWN(owner.pk), opportunity_id=opp.pk, version=2, price=price
+                actor=owner,
+                scope=OWN(owner.pk),
+                opportunity_id=opp.pk,
+                version=2,
+                price=price,
+                agreed_cpt="Rs 18",
             )
             for price in (Decimal("900"), Decimal("800"))
         )

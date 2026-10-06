@@ -2,7 +2,7 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useRef, useState } from "react";
 
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -27,6 +27,7 @@ export function AccessAsUserDialog({ user, onClose }: { user: AdminUser; onClose
   const [reason, setReason] = useState("");
   const router = useRouter();
   const queryClient = useQueryClient();
+  const starting = useRef(false);
   const start = useMutation({
     mutationFn: () => supportApi.start({ user: user.id, reason: reason.trim() }),
     onSuccess: (session) => {
@@ -42,7 +43,10 @@ export function AccessAsUserDialog({ user, onClose }: { user: AdminUser; onClose
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
-    if (!start.isPending && !start.isSuccess) start.mutate();
+    // A ref, not the mutation state: two clicks inside one frame both see "not pending".
+    if (starting.current || start.isSuccess) return;
+    starting.current = true;
+    start.mutate(undefined, { onSettled: () => (starting.current = false) });
   };
 
   const reasonErrors = fieldErrors(start.error).reason;

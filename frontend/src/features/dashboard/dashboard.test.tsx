@@ -176,6 +176,22 @@ describe("the six figures", () => {
     expect(within(leads).getByRole("link", { name: "View pipeline" })).toHaveAttribute("href", `/admin/users/${RAHUL_ID}/pipeline`);
   });
 
+  it("a row of New leads, Upcoming meetings or Tasks opens its record from anywhere on it (final audit UI-8)", async () => {
+    mockApi({ [`GET ${ME}`]: { status: 200, body: makeDashboard() } });
+    renderWithProviders(<DashboardView />, { viewer: salesViewer });
+    for (const panel of ["New leads", "Upcoming meetings", "Tasks requiring attention"]) {
+      const region = await screen.findByRole("region", { name: panel });
+      for (const row of within(region).getAllByRole("listitem")) {
+        // The link's hit area (its ::after) covers the row, its nearest positioned ancestor:
+        // not the 20 px line of its name alone.
+        const links = within(row).getAllByRole("link");
+        expect(links).toHaveLength(1);
+        expect(links[0]).toHaveClass("after:absolute", "after:inset-0");
+        expect(row).toHaveClass("relative");
+      }
+    }
+  });
+
   it("keep money exact: digits a JavaScript number would lose, paise, Indian grouping", async () => {
     mockApi({
       [`GET ${ME}`]: {

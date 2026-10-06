@@ -34,6 +34,9 @@ and update the old one's status line.
 | [0026](0026-user-pipelines-support-sessions-attachments.md) | User-defined pipelines, negotiated prices, support sessions without impersonation, admin-set passwords, note attachments |
 | [0027](0027-leads-removed-from-the-ui.md) | Leads removed from the UI; the lead stays as each deal's hidden customer record (partly superseded by 0028) |
 | [0028](0028-opportunity-creates-its-lead.md) | A new opportunity creates its lead; derived opportunity names; the instrument list; Expected CPT; a read-only lead page |
+| [0029](0029-agreed-price-and-cpt-on-negotiation.md) | Entering negotiation asks for the agreed price and the agreed CPT, recorded together in the append-only history |
+| [0030](0030-administrator-accounts-change-only-by-their-owner.md) | An administrator's email, password and role are changed only by that administrator (closes the admin-to-admin takeover); deactivation stays the off-boarding path |
+| [0031](0031-opportunity-creation-requires-an-idempotency-key.md) | Opportunity creation requires an `Idempotency-Key`; concurrent duplicates wait on an advisory lock and replay the first result |
 
 Template:
 

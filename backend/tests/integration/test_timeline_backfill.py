@@ -22,6 +22,7 @@ from tests.factories import (
     UserFactory,
     default_stage,
 )
+from tests.integration.migration_states import build, everything_but
 
 pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.usefixtures("crm_configuration")]
 
@@ -67,7 +68,10 @@ def history(opportunity, actor, at, from_key, to_key):
 
 
 def test_phase_2_and_3_history_becomes_the_timeline():
-    migrate([("activities", None)])  # as before Phase 4: no activity tables at all
+    # As before Phase 4: no activity tables at all. Built forwards from an empty schema, since
+    # activities.0010 refuses to be reversed (docs/deployment.md#rollback); that re-seeds the
+    # statuses and the default pipeline too.
+    build(everything_but("activities"))
     try:
         owner, other, admin = UserFactory(), UserFactory(), AdminFactory()
         lead = LeadFactory(owner=other)

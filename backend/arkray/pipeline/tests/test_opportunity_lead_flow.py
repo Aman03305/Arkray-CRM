@@ -22,7 +22,7 @@ from arkray.leads.models import Lead
 from arkray.pipeline import instruments, naming, services
 from arkray.pipeline.models import TITLE_MAX_LENGTH, Opportunity, StageHistory
 from tests.factories import LeadFactory, OpportunityFactory, default_stage
-from tests.helpers import signed_in
+from tests.helpers import key_header, signed_in
 
 from .conftest import opportunities_url, opportunity_url
 
@@ -56,7 +56,10 @@ SERVICE_DEAL = {
 
 def post(client, body=None, workspace="me", **headers):
     return client.post(
-        opportunities_url(workspace), body or DEAL, format="json", headers=headers or None
+        opportunities_url(workspace),
+        body or DEAL,
+        format="json",
+        headers=headers or key_header(),
     )
 
 
@@ -310,7 +313,7 @@ class TestCreate:
 
     def test_a_refused_opportunity_leaves_no_lead(self, user_a_client, stages):
         before = counts()
-        # A negotiation stage needs the negotiated price: refused after the lead was made.
+        # A negotiation stage needs the agreed price and CPT: refused after the lead was made.
         response = post(user_a_client, {**DEAL, "stage": str(stages["negotiation"].pk)})
         assert response.status_code == 400
         assert counts() == before
@@ -436,13 +439,18 @@ class TestAfterwards:
         before = Lead.objects.count()
         moved = user_a_client.post(
             opportunity_url(created.pk, action="move"),
-            {"stage": str(stages["negotiation"].pk), "version": 1, "negotiated_price": "800000"},
+            {
+                "stage": str(stages["negotiation"].pk),
+                "version": 1,
+                "negotiated_price": "800000",
+                "agreed_cpt": "Rs 18",
+            },
             format="json",
         )
         assert moved.status_code == 200, moved.content
         priced = user_a_client.post(
             opportunity_url(created.pk, action="negotiated-prices"),
-            {"price": "790000", "version": moved.json()["version"]},
+            {"price": "790000", "agreed_cpt": "Rs 17", "version": moved.json()["version"]},
             format="json",
         )
         assert priced.status_code == 200, priced.content

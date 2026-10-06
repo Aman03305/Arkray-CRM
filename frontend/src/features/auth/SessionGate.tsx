@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -21,15 +21,19 @@ import { ForcedPasswordChange } from "./ForcedPasswordChange";
  */
 export function SessionGate({ children }: { children: ReactNode }) {
   const viewer = useViewerQuery();
-  const signedInAs = useRef<string | null>(null);
-
-  // Someone else signed in on this browser meanwhile: reload rather than mix identities.
+  const id = viewer.data?.id;
+  // Who this page was loaded for: the first viewer it saw.
+  const [signedInAs, setSignedInAs] = useState<string | null>(null);
+  if (id && signedInAs === null) setSignedInAs(id);
+  // Someone else signed in on this browser meanwhile (another tab; /auth/me is asked again
+  // whenever the tab regains focus): reload rather than mix identities. Until the page goes,
+  // nothing renders: the cache still holds the previous person's records, and the shell would
+  // show them under the new person's name.
+  const switched = Boolean(id && signedInAs && signedInAs !== id);
   useEffect(() => {
-    const id = viewer.data?.id;
-    if (!id) return;
-    if (signedInAs.current && signedInAs.current !== id) hardNavigate(currentLocation());
-    signedInAs.current = id;
-  }, [viewer.data?.id]);
+    if (switched) hardNavigate(currentLocation());
+  }, [switched]);
+  if (switched) return null;
 
   if (viewer.isError && !isApiError(viewer.error, 401)) {
     const { message, requestId } = describeError(viewer.error);

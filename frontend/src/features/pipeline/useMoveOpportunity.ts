@@ -1,11 +1,15 @@
 "use client";
 
-import { type QueryKey, useMutation, useQueryClient } from "@tanstack/react-query";
+import { type MutateOptions, type QueryKey, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useCallback } from "react";
 
-import { describeError, isApiError } from "@/lib/api/errors";
+import { useSingleFlight } from "@/components/ui/useSingleFlight";
+
+import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
 import type { Board, Opportunity, Stage } from "@/lib/api/types";
 import type { Workspace } from "@/lib/workspace";
 
+import type { AgreedTerms } from "./AgreedTerms";
 import { pipelineApi, pipelineKeys } from "./api";
 import { syncAfterOpportunityWrite } from "./hooks";
 import { moveCardInBoard } from "./transitions";
@@ -16,12 +20,21 @@ export interface MoveRequest {
   version: number;
   target: Stage;
   lostReason?: string;
-  /** Required when the target is a negotiation stage (exact decimal string). */
-  negotiatedPrice?: string;
+  /** Required when the target is a negotiation stage: the agreed price and CPT. */
+  terms?: AgreedTerms;
+}
+
+/** Why a move failed. `fields`: a refusal's field errors, for the inputs the dialog shows (the
+ * agreed price and CPT: the server may refuse what the browser accepted, e.g. invisible
+ * characters in the CPT, review). */
+export interface MoveProblem {
+  message: string;
+  requestId: string | null;
+  fields?: Record<string, string[]>;
 }
 
 /** What went wrong, in words that say what the user sees now. */
-export function moveErrorMessage(error: unknown, request: Pick<MoveRequest, "title" | "target">): { message: string; requestId: string | null } {
+export function moveErrorMessage(error: unknown, request: Pick<MoveRequest, "title" | "target">): MoveProblem {
   if (isApiError(error, 409)) {
     return {
       message: `"${request.title}" was changed by someone else a moment ago, so it wasn't moved. The pipeline shows the latest version now; please try again.`,
@@ -35,8 +48,11 @@ export function moveErrorMessage(error: unknown, request: Pick<MoveRequest, "tit
   if (isApiError(error, 0)) {
     return { message: `Couldn't move "${request.title}": ${message} It is back where it was.`, requestId };
   }
-  return { message: `Couldn't move "${request.title}" to ${request.target.name}: ${message}`, requestId };
+  return { message: `Couldn't move "${request.title}" to ${request.target.name}: ${message}`, requestId, fields: fieldErrors(error) };
 }
+
+/** What a move remembers to put the board back if the server refuses it. */
+type MoveContext = { key?: QueryKey; snapshot?: Board };
 
 /**
  * The one stage-transition call, for every path (drag and drop, the "Move to" menu,
@@ -47,9 +63,8 @@ export function moveErrorMessage(error: unknown, request: Pick<MoveRequest, "tit
  */
 export function useMoveOpportunity(workspace: Workspace, boardKey?: QueryKey) {
   const queryClient = useQueryClient();
-  return useMutation<Opportunity, unknown, MoveRequest, { key?: QueryKey; snapshot?: Board }>({
-    mutationFn: ({ id, target, version, lostReason, negotiatedPrice }) =>
-      pipelineApi.move(workspace, id, target.id, version, { lostReason, negotiatedPrice }),
+  const mutation = useMutation<Opportunity, unknown, MoveRequest, MoveContext>({
+    mutationFn: ({ id, target, version, lostReason, terms }) => pipelineApi.move(workspace, id, target.id, version, { lostReason, terms }),
     onMutate: async ({ id, target }) => {
       if (!boardKey) return {};
       await queryClient.cancelQueries({ queryKey: boardKey });
@@ -64,4 +79,17 @@ export function useMoveOpportunity(workspace: Workspace, boardKey?: QueryKey) {
     // Success or not, reload what the server has (counts, totals, order, versions).
     onSettled: () => void queryClient.invalidateQueries({ queryKey: pipelineKeys.all }),
   });
+  // One move per card at a time, guarded synchronously: a second activation before the
+  // pending state renders (a double click, Enter then a click in the dialog) would carry the
+  // same version and come back 409, "changed by someone else", about the user's own first
+  // move. A refused duplicate is dropped: the first one is already on its way.
+  const flight = useSingleFlight();
+  const { mutateAsync } = mutation;
+  const mutate = useCallback(
+    (request: MoveRequest, options?: MutateOptions<Opportunity, unknown, MoveRequest, MoveContext>) => {
+      flight(() => mutateAsync(request, options), request.id);
+    },
+    [flight, mutateAsync],
+  );
+  return { ...mutation, mutate };
 }

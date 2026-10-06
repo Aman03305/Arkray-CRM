@@ -16,6 +16,11 @@ any transaction; then the row is marked stored and audited. A storage failure ma
 failed (503 to the client); a crash in between leaves an "uploading" row that the hourly
 housekeeping resolves (object deleted if present, row failed). Deleting hides the file at
 once and removes the object by a job (and, failing that, the housekeeping). All idempotent.
+
+A row is "stored" only once storage.save() returned, which reads the object's size back
+from the store. A stored file whose object is gone is answered truthfully: 410
+`attachment_unavailable`, never the outage's 503 (the download path writes nothing; the
+daily reconciliation flags the row, and `reconcile_attachments --repair` marks it failed).
 """
 
 from __future__ import annotations
@@ -46,7 +51,7 @@ from arkray.core.errors import (
 from arkray.identity.models import User
 from arkray.identity.workspaces import authorize_write
 
-from . import selectors, storage
+from . import selectors, storage, telemetry
 from .models import (
     Activity,
     ActivityType,
@@ -62,6 +67,8 @@ TOPIC_PURGE = "activities.purge_attachment"
 AUDIT_UPLOADED = "attachment.uploaded"
 AUDIT_DELETED = "attachment.deleted"
 AUDIT_REJECTED = "attachment.rejected"
+AUDIT_UNAVAILABLE = "attachment.marked_unavailable"
+AUDIT_RECONCILED = "attachment.reconciled"
 
 NOTES_ONLY = "Files can be attached to notes."
 ARCHIVED_NOTE = "This note is archived. Restore it to change its files."
@@ -71,6 +78,7 @@ STORAGE_DOWN = "File storage is unavailable right now. Try again in a few minute
 SCANNING = "This file is still being checked for viruses. Try again in a minute."
 BLOCKED = "This file was blocked by the virus scan and can't be downloaded."
 NOT_PREVIEWABLE = "Only images can be previewed."
+GONE = "This file is no longer available. Ask an administrator."
 # How long an upload may stay unfinished before housekeeping gives up on it.
 ABANDONED_AFTER = timedelta(hours=1)
 ERASED_SHA256 = "0" * 64
@@ -86,8 +94,28 @@ class FileTooLarge(DomainError):
 
 
 class StorageDown(ServiceUnavailableError):
+    """503 with Retry-After (the API views add the header)."""
+
     code = "storage_unavailable"
     default_message = STORAGE_DOWN
+    retry_after = storage.STORAGE_RETRY_AFTER_S
+
+    def __init__(self, message: str | None = None, *, error_class: str = "other") -> None:
+        super().__init__(message)
+        self.error_class = error_class  # for logs and metrics only
+
+
+class NoteFull(BusinessRuleViolation):
+    """The note already has ATTACHMENT_MAX_PER_NOTE files."""
+
+
+class AttachmentUnavailable(DomainError):
+    """The row says the file is stored, and the store says its object is gone: lost data
+    to investigate (docs/runbooks.md#attachment-object-missing), not an outage to wait out."""
+
+    code = "attachment_unavailable"
+    http_status = 410
+    default_message = GONE
 
 
 def may_change_note(actor: User, scope: AccessScope, note: Activity) -> bool:
@@ -144,6 +172,36 @@ def upload(
     if not may_change_note(actor, scope, note):
         raise PermissionDeniedError(EDIT_ONLY)
     try:
+        attachment = _upload(actor, scope, note_id, filename, stream, declared_length)
+    except (NotFoundError, PermissionDeniedError):
+        raise  # the note went away or out of reach meanwhile: not an upload outcome
+    except Exception as exc:
+        telemetry.upload_failed(_upload_failure(exc))
+        raise
+    telemetry.upload_stored()
+    return attachment
+
+
+def _upload_failure(exc: Exception) -> str:
+    """The metric's reason for a failed upload (telemetry.UPLOAD_REASONS)."""
+    if isinstance(exc, FileTooLarge):
+        return "too_large"
+    if isinstance(exc, InvalidInputError | BusinessRuleViolation):
+        return "quota" if isinstance(exc, NoteFull) else "rejected"
+    if isinstance(exc, StorageDown):
+        return "timeout" if exc.error_class == "timeout" else "storage_error"
+    return "other"
+
+
+def _upload(
+    actor: User,
+    scope: AccessScope,
+    note_id: UUID,
+    filename: str,
+    stream: storage.Readable,
+    declared_length: int | None,
+) -> Attachment:
+    try:
         name, extension = storage.clean_filename(filename)
     except storage.RejectedFile as exc:
         raise InvalidInputError(details={"file": [str(exc)]}) from None
@@ -161,12 +219,17 @@ def upload(
         attachment = _reserve(actor, scope, note_id, name, extension, kind, received)
         try:
             storage.save(attachment.storage_key, received.file)
-        except storage.StorageUnavailable:
+        except storage.StorageUnavailable as exc:
+            # Never stored: the row can't be downloaded, and housekeeping removes whatever
+            # part of the object may have been written.
             Attachment.objects.filter(pk=attachment.pk, state=AttachmentState.UPLOADING).update(
                 state=AttachmentState.FAILED
             )
-            logger.warning("attachment_upload_failed", extra={"reason": "storage"})
-            raise StorageDown() from None
+            logger.warning(
+                "attachment_upload_failed",
+                extra={"reason": "storage", "error_class": exc.error_class},
+            )
+            raise StorageDown(error_class=exc.error_class) from None
         return _finish(actor, scope, attachment)
     except storage.RejectedFile as exc:
         logger.info("attachment_rejected", extra={"extension": extension, "reason": "content"})
@@ -199,7 +262,7 @@ def _reserve(
             state__in=[AttachmentState.UPLOADING, AttachmentState.STORED],
         ).count()
         if live >= settings.ATTACHMENT_MAX_PER_NOTE:
-            raise BusinessRuleViolation(TOO_MANY.format(limit=settings.ATTACHMENT_MAX_PER_NOTE))
+            raise NoteFull(TOO_MANY.format(limit=settings.ATTACHMENT_MAX_PER_NOTE))
         now = timezone.now()
         return Attachment.objects.create(
             note=note,
@@ -315,8 +378,30 @@ def open_for_download(
         raise BusinessRuleViolation(SCANNING)
     try:
         return Download(attachment, storage.open_file(attachment.storage_key))
-    except storage.StorageUnavailable:
-        raise StorageDown() from None
+    except storage.ObjectMissing:
+        _object_missing(attachment, "download")
+        telemetry.download_failed("missing")
+        raise AttachmentUnavailable() from None
+    except storage.StorageUnavailable as exc:
+        telemetry.download_failed("storage_unavailable")
+        raise StorageDown(error_class=exc.error_class) from None
+
+
+def _object_missing(attachment: Attachment, operation: str) -> None:
+    """A stored file whose object the store says is gone: lost data, worth a security
+    review (deleted outside the application? a bucket restored from an older backup?).
+    Logged with the file's id only, never its key or name; counted for the metrics. Nothing
+    is written here (the download path never writes): reconciliation flags the row."""
+    telemetry.object_missing()
+    logger.warning(
+        "attachment_object_missing",
+        extra={
+            "attachment_id": str(attachment.pk),
+            "operation": operation,
+            "backend": storage.backend_name(),
+            "security": True,
+        },
+    )
 
 
 # --- delete ---------------------------------------------------------------------------------------
@@ -385,7 +470,13 @@ def scan(attachment_id: UUID) -> str | None:
     ).first()
     if attachment is None:
         return None
-    file = storage.open_file(attachment.storage_key)
+    try:
+        file = storage.open_file(attachment.storage_key)
+    except storage.ObjectMissing:
+        # Retrying can't bring it back: the job ends, the file stays "being checked" (never
+        # downloadable) and reconciliation reports it missing.
+        _object_missing(attachment, "scan")
+        return None
     try:
         clean = storage.scan(file)
     finally:
@@ -478,3 +569,110 @@ def erase_for_notes(note_ids: list[UUID], now: datetime) -> int:
     for attachment_id in targets:
         outbox.enqueue(TOPIC_PURGE, {"attachment_id": str(attachment_id)})
     return len(targets)
+
+
+# --- reconciliation repairs (reconcile.py) --------------------------------------------------------
+# Each takes the row as reconciliation saw it and applies only if the row still says so, under
+# a brief row lock taken with SKIP LOCKED (a row an upload or a purge holds is left for the
+# next run). Storage is never called under the lock: what the store holds was checked
+# before. All idempotent.
+@dataclass(frozen=True, slots=True)
+class Seen:
+    state: str
+    deleted_at: datetime | None
+    purged_at: datetime | None
+
+
+def _locked_as_seen(attachment_id: UUID, seen: Seen) -> Attachment | None:
+    row = Attachment.objects.select_for_update(skip_locked=True).filter(pk=attachment_id).first()
+    if row is None or Seen(row.state, row.deleted_at, row.purged_at) != seen:
+        return None
+    return row
+
+
+def mark_unavailable(attachment_id: UUID, seen: Seen) -> bool:
+    """A stored file whose object the store says is gone: failed, so it stops answering as
+    a healthy file (it leaves the note's list; the row, its audit trail and its note stay).
+    Marked purged too: there is nothing to remove, and a bucket restored later brings the
+    object back for an administrator to look at, not for the housekeeping to delete."""
+    with transaction.atomic():
+        row = _locked_as_seen(attachment_id, seen)
+        if row is None or row.state != AttachmentState.STORED or row.deleted_at is not None:
+            return False
+        row.state = AttachmentState.FAILED
+        row.purged_at = timezone.now()
+        row.save(update_fields=["state", "purged_at"])
+        note = Activity.objects.only("id", "owner_id").get(pk=row.note_id)
+        _audit(AUDIT_UNAVAILABLE, None, row, note, reason="object_missing")
+    logger.warning(
+        "attachment_marked_unavailable",
+        extra={"attachment_id": str(attachment_id), "security": True},
+    )
+    return True
+
+
+def was_marked_unavailable(attachment_id: UUID) -> bool:
+    """Whether reconciliation once marked this file unavailable (its audit event, by target:
+    an indexed lookup)."""
+    from arkray.audit.models import AuditEvent
+
+    return AuditEvent.objects.filter(
+        target_type="attachment", target_id=str(attachment_id), action=AUDIT_UNAVAILABLE
+    ).exists()
+
+
+def fail_stale_upload(attachment_id: UUID, seen: Seen) -> bool:
+    """An upload that never finished and whose object is absent or incomplete: failed
+    (never downloadable); whatever was written is removed by the purge job."""
+    with transaction.atomic():
+        row = _locked_as_seen(attachment_id, seen)
+        if row is None or row.state != AttachmentState.UPLOADING:
+            return False
+        row.state = AttachmentState.FAILED
+        row.save(update_fields=["state"])
+        outbox.enqueue(TOPIC_PURGE, {"attachment_id": str(row.pk)})
+    return True
+
+
+def finish_stale_upload(attachment_id: UUID, seen: Seen) -> bool:
+    """An upload whose request died after its object was written whole (checked against
+    the row's size, and its hash when asked): finished as _finish would have, recorded as
+    done by the system."""
+    scanning = storage.scanning_enabled()
+    with transaction.atomic():
+        row = _locked_as_seen(attachment_id, seen)
+        if row is None or row.state != AttachmentState.UPLOADING:
+            return False
+        row.state = AttachmentState.STORED
+        row.stored_at = timezone.now()
+        if row.deleted_at is None:
+            row.scan_status = ScanStatus.PENDING if scanning else ScanStatus.NOT_SCANNED
+        row.save(update_fields=["state", "stored_at", "scan_status"])
+        note = Activity.objects.only("id", "owner_id").get(pk=row.note_id)
+        _audit(
+            AUDIT_UPLOADED,
+            None,
+            row,
+            note,
+            extension=row.extension,
+            size=_size_bucket(row.size),
+            repaired=True,
+        )
+        if row.deleted_at is not None:
+            outbox.enqueue(TOPIC_PURGE, {"attachment_id": str(row.pk)})
+        elif scanning:
+            outbox.enqueue(TOPIC_SCAN, {"attachment_id": str(row.pk)})
+    return True
+
+
+def purge_again(attachment_id: UUID, seen: Seen) -> bool:
+    """The object of a deleted, failed or blocked file is still (or again: a late write, a
+    bucket restore) in storage: removed through the purge path."""
+    with transaction.atomic():
+        row = _locked_as_seen(attachment_id, seen)
+        if row is None or row.state == AttachmentState.UPLOADING:
+            return False
+        if row.purged_at is not None:
+            row.purged_at = None
+            row.save(update_fields=["purged_at"])
+    return purge(attachment_id)

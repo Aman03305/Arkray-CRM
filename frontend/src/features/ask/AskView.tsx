@@ -3,7 +3,7 @@
 /**
  * Ask Arkray in one workspace (docs/rag-architecture.md).
  *
- * Rendered inside a key per workspace segment (features/workspace/views.tsx): moving from
+ * Rendered inside a key per workspace segment (features/workspace/views/): moving from
  * Rahul's workspace to Priya's starts a fresh view, so no question, answer, draft or
  * conversation of Rahul's is ever shown under Priya's. Requests started before the switch
  * may still finish; their results land in Rahul's cache entries (features/ask/api.ts) and

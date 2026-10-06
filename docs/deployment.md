@@ -107,6 +107,13 @@ application depends on, whatever proxy or load balancer is used:
   here): a replaced container gets a new address, and an address resolved once at start
   turned every API request into a 502 after a redeploy (Phase 11). With a 10 s resolver
   validity, a backend that moves is followed within seconds.
+- **The public authentication routes are rate limited per address at the edge**
+  (`/api/v1/auth/login`, `password-reset`, `invitations`: 5 a second, bursts of 30, answered
+  429 in the API's JSON shape with `Retry-After`), so a flood from one address is refused before
+  it takes a gunicorn worker: in the capacity test it had raised every other user's p99 to 3.2 s
+  ([capacity.md](capacity.md#abuse)). Django's own limits stay the authority. There is
+  deliberately **no** global per-address limit: an office shares one address. A platform edge
+  without nginx needs an equivalent rule.
 - Request bodies are JSON only: 1 MB at the proxy (Django refuses more than 2.5 MB anyway);
   the proxy's read timeout (35 s) is longer than gunicorn's (30 s).
 
@@ -116,10 +123,13 @@ application depends on, whatever proxy or load balancer is used:
    commit SHA.
 2. **Once per environment**, a database administrator runs `infrastructure/postgres/roles.sql`
    (the database, `arkray_owner`, `arkray_app`, the extensions, R63's logging settings).
-3. Run the **migrate job** with the new image, as `arkray_owner`:
+3. Run the **migrate job** with the new image, as `arkray_owner`, after the
+   [pre-upgrade checklist](#before-an-upgrade):
    `manage.py migrate --noinput && manage.py grant_app_privileges arkray_app`. Migrations
-   follow expand → migrate → contract ([database.md](database.md#migrations)), so the
-   running old version keeps working; the grant gives new tables to the application role.
+   normally follow expand → migrate → contract ([database.md](database.md#migrations)), so the
+   running old version keeps working; **not across the product-enhancement release**: from
+   the v1.0 RC, stop web, workers and beat first ([Upgrading](#upgrading)). The grant gives
+   new tables to the application role.
 4. **Check the release** with the application's credentials:
    `manage.py check --deploy --database default`. It fails on a runtime role that could
    rewrite the audit trail (R74) and warns when PostgreSQL would log failing statements or rows (R63).
@@ -129,8 +139,78 @@ application depends on, whatever proxy or load balancer is used:
    and the workers check their database role at start and refuse to run as a superuser or a
    role that owns the append-only tables (`DB_REQUIRE_RESTRICTED_ROLE`, on in production).
 6. Beat restarts last.
-7. Rollback = redeploy the previous image. Because migrations are backward compatible, no
-   down-migration is needed during the release window.
+7. Rollback: [below](#rollback). Down-migrations are refused; the way back is the backup
+   taken before the upgrade (with the previous images), or a forward fix.
+
+## Upgrading
+
+### Which previous release can run beside the new schema
+
+A rolling deploy (old and new pods at once), and redeploying the previous images without a
+restore, both need the previous release's code to work on the new schema. Its INSERTs fail
+on any new NOT NULL column it never names that has no database default. Tested with each
+previous release's own models (the migrations' historical models at its leaf nodes:
+`tests/integration/test_upgrade_from_release.py`):
+
+| Database (and code) before the upgrade | Leaf nodes | Upgrade to the current release |
+|---|---|---|
+| **v1.0 RC** `64bb641` | `pipeline.0005`, `identity.0003`, `activities.0009`, `audit.0002` (`leads.0006`, `core.0005`, `ai.0003`) | **Stopped deploy only**: stop web, workers and beat, migrate, start the new release. On the new schema the RC can't create opportunities (`opportunity_date`, `account_name`, `customer_name`, `contact_phone`, `contact_email`, `address`, `instrument_name`, `work_load`, `custom_fields` have no database default), pipelines (`version`), stages (`is_negotiation`) or users (`password_change_required`). A database default can't fix it: the account and customer names may not be empty. Its reads and edits of existing rows would work; its creates fail. |
+| `0c31aee` (product enhancements) | `pipeline.0006`, `identity.0004`, `activities.0010`, `audit.0004` | rolling deploy possible: since then only `expected_cpt` and `agreed_cpt` are new, both with a database default |
+| `5b05177` (ADR-0027) | `pipeline.0007` | rolling deploy possible (same) |
+| `989830b` (ADR-0028) | `pipeline.0008` | rolling deploy possible (`agreed_cpt` keeps its default) |
+
+Every new migration is checked the same way before a rolling deploy is planned (add the
+release to `CANNOT_INSERT` in that test).
+
+### Before an upgrade
+
+1. **Back up and verify**: `scripts/backup.sh` (it checks the archive reads back and writes
+   its SHA-256); note the point-in-time-recovery timestamp too. Before a release that can't
+   run beside its predecessor (the table above), restore the dump into a scratch database
+   (`scripts/restore.sh`) and compare row counts with the source: that copy is the rollback.
+2. **Record the schema state**: `manage.py showmigrations > pre-upgrade-migrations.txt` (the
+   last `[X]` per app are the leaf nodes: they say which release the backup belongs with),
+   and `manage.py migrate --plan` with the new image to see what will run.
+3. **Keep the previous release's images** (by commit SHA) with the backup: a rollback needs
+   both.
+4. **Size the window**: backup + restore check + migrations + a smoke test. Measured
+   2026-10-06 (development machine, PostgreSQL 16 in Docker), RC → current at 200,000 leads,
+   60,000 opportunities, 100,000 activities and 200,000 audit events: **8.6 s** of migrations,
+   `pipeline.0006` 7.0 s (its backfill UPDATE alone 5.7 s, holding the opportunity table),
+   `pipeline.0007` 1.1 s (concurrent), the rest 0.05-0.14 s each. At 300,000 opportunities
+   `pipeline.0006` took 21 s ([database.md](database.md#migrations)). It ran under a 1 s
+   statement timeout (`DB_STATEMENT_TIMEOUT_MS=1000`) and passed: 0006 lifts the timeout for
+   its own transaction, as the table-wide migrations must. Every opportunity's id, stage,
+   value, owner, version and timestamps had the same checksum before and after.
+5. Stopped deploy: stop web, workers and beat (no writes during the migration), run the
+   migrate job, then start the new release (step 3 above).
+
+## Rollback
+
+**Rollback and downgrade policy.** Schema down-migrations are **not supported past the v1.0
+RC** (`64bb641`). Every migration after it (`pipeline` 0006-0009, `identity.0004`,
+`activities.0010`, `audit` 0003-0004) refuses to be reversed: `migrate pipeline 0005` (or any
+target that would undo one of them) stops with `IrreversibleError: <migration> can't be
+reversed: that would delete ... restore the database backup taken before the upgrade (with
+that release), or deploy a forward fix` **before changing anything**, whether or not anything
+was recorded since (tested on an empty database and on one holding negotiated price
+history: the migration records, the schema and every row unchanged). Reversing them would
+delete the negotiated price history and agreed CPTs, user pipelines and custom fields, every
+opportunity's customer, contact, instrument details and Expected CPT, support sessions,
+attachments' records and note edit stamps ([database.md](database.md#reversibility)).
+
+To go back:
+
+- **Restore the backup taken before the upgrade** ([runbooks.md](runbooks.md#restore-from-backup))
+  into a new database, and deploy the previous release's images against it. Everything
+  recorded after the backup is lost unless re-entered (point-in-time recovery to just before
+  the migrate job is the same). Attachment files uploaded since stay in the bucket without a
+  row (invisible; R93).
+- **Or roll forward**: fix the problem in a new release on the new schema. Prefer this
+  when people have already recorded work on it.
+- **Redeploying the previous images without a restore** works only from a release the
+  [table above](#which-previous-release-can-run-beside-the-new-schema) marks rolling-deploy
+  possible, never from the v1.0 RC.
 
 ## Verifying a release
 
@@ -205,6 +285,7 @@ value on the server alone made the API and the screens disagree (whole-software 
 | `DB_STATEMENT_TIMEOUT_MS` | no | 10,000 (web); set 60,000 for workers |
 | `DB_LOCK_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | no | 5,000; 60,000 |
 | `DB_CONN_MAX_AGE_S` | no | 60 (persistent connections; ignored with the pool) |
+| `DB_TRANSACTION_POOLER` | no | `false`. `true` when `DATABASE_URL` names a transaction-mode pooler (PgBouncer, Supavisor): no startup `options`, no server-side cursors or prepared statements; the timeouts then come from the role ([Database poolers](#database-poolers)) |
 | `DB_POOL_ENABLED`, `DB_POOL_MIN_SIZE`, `DB_POOL_MAX_SIZE`, `DB_POOL_TIMEOUT_S` | no | `false`, 1, 4, 5: a per-process psycopg pool, for threaded servers ([reliability.md](reliability.md#connection-budget)) |
 
 **Redis, background work and email**
@@ -231,6 +312,11 @@ PostgreSQL: a database backup is not a backup of the files ([below](#attachments
 | `ATTACHMENT_S3_ENDPOINT_URL`, `ATTACHMENT_S3_REGION` | no | for S3-compatible stores (MinIO, R2, ...) |
 | `ATTACHMENT_S3_ACCESS_KEY_ID`, `ATTACHMENT_S3_SECRET_ACCESS_KEY` | no | prefer an instance/workload role; keys, if used, may only read, write and delete in the bucket's prefix |
 | `ATTACHMENT_S3_PREFIX` | no | `attachments` |
+| `ATTACHMENT_S3_CONNECT_TIMEOUT_S`, `ATTACHMENT_S3_READ_TIMEOUT_S`, `ATTACHMENT_S3_MAX_ATTEMPTS` | no | `3`, `10`, `2` (attempts in total): a dead endpoint costs a request about 7 to 12 s, inside the 30 s worker timeout (botocore's defaults took 113 s against a black hole and could pin every web worker: final audit SRE-1) |
+| `ATTACHMENT_STORAGE_DEADLINE_S`, `ATTACHMENT_STORAGE_MAX_IN_FLIGHT` | no | `12`, `4`: a request stops waiting for storage after 12 s whatever the retries add up to, and each process runs at most 4 storage calls at once (more answer 503 at once) ([reliability.md](reliability.md#attachment-storage)) |
+| `ATTACHMENT_STORAGE_MAX_IN_FLIGHT_SHARED` | no | `3`: storage calls in flight at once across every process sharing the cache; more answer 503 at once. Keep it well below `WEB_CONCURRENCY` so a failing store can never hold most web workers ([capacity.md](capacity.md#attachment-storage-failures)) |
+| `ATTACHMENT_STORAGE_BREAKER_FAILURES`, `ATTACHMENT_STORAGE_BREAKER_COOLDOWN_S` | no | `3`, `15`: after 3 outage-like storage failures in a row a process answers 503 at once for 15 s (doubling to 2 minutes while it lasts), checking in the background whether storage is back |
+| `ATTACHMENT_RECONCILE_DAILY` | no | `true`: the daily read-only `reconcile_attachments --check` (22:10 UTC), its outcome on the metrics endpoint ([runbooks.md](runbooks.md#attachment-reconciliation)) |
 | `ATTACHMENT_MAX_BYTES` | no | 10 MB per file; the proxy's body limit on the upload route must be a little above it ([below](#reverse-proxy)) |
 | `ATTACHMENT_MAX_PER_NOTE` | no | 10 |
 | `ATTACHMENT_ALLOWED_EXTENSIONS` | no | `pdf,png,jpg,jpeg,webp,docx,xlsx,csv,txt`; only from the catalog the server can recognise by content (adds: `gif`, `pptx`); anything else fails startup |
@@ -245,6 +331,7 @@ PostgreSQL: a database backup is not a backup of the files ([below](#attachments
 | `API_THROTTLE_AUTH` | `20/min` | sign-in, password change and reset requests, **per client address**. Everyone in an office behind one NAT shares it (R77): size it to the number of people who sign in within a minute from one address (60/min for an office of 50 is reasonable). Guessing stays bounded whatever the value: 5 failures per account and browser, and 50 per address, in 15 minutes ([authorization.md](authorization.md#sign-in-throttling)) |
 | `API_THROTTLE_SEARCH` | `120/min` | global and list search |
 | `API_THROTTLE_ASK` | `20/min` | Ask Arkray questions |
+| `API_THROTTLE_ATTACHMENTS` | `30/min` | file uploads (each may move 10 MB to object storage) |
 
 The format is `<count>/<period>` with a period of `s`, `min`, `h` or `day`; production
 refuses anything else at startup (DRF would otherwise fail on the first request).
@@ -297,7 +384,7 @@ refuses anything else at startup (DRF would otherwise fail on the first request)
   trigger, `session_replication_role` and DDL are all refused; started as the owner, the
   web server and a worker refuse to run.
 - PgBouncer in transaction mode once replicas × workers approaches the connection budget;
-  set `DISABLE_SERVER_SIDE_CURSORS=True` when it is in place.
+  set `DB_TRANSACTION_POOLER=true` when it is in place ([Database poolers](#database-poolers)).
 
 **PostgreSQL settings** (parameter group or `postgresql.conf`):
 
@@ -317,7 +404,29 @@ refuses anything else at startup (DRF would otherwise fail on the first request)
 | `/dev/shm` (self-run containers) | ≥ 256 MB, and ≥ `maintenance_work_mem` for parallel index builds | Docker's 64 MB default breaks parallel maintenance (Phase 10) |
 
 `jit`, the statement, lock and idle-in-transaction timeouts are set per connection by the
-application.
+application (as startup options; behind a transaction pooler on the role instead, below).
+
+### Database poolers
+
+A transaction-mode pooler serves each *transaction* from any server connection, so nothing
+that lives on the session may be relied on. With `DB_TRANSACTION_POOLER=true` the application
+sends no startup `options` (PgBouncer and Supavisor refuse the parameter), disables
+server-side cursors and automatic server-side prepared statements, and the timeouts must be
+set on the role, once, by the administrator:
+
+```sql
+ALTER ROLE arkray_app SET statement_timeout = '10s';
+ALTER ROLE arkray_app SET lock_timeout = '5s';
+ALTER ROLE arkray_app SET idle_in_transaction_session_timeout = '60s';
+ALTER ROLE arkray_app SET jit = off;
+```
+
+The workers want `statement_timeout` 60 s (the Compose stack sets it per container): use a
+second login role for them. Everything the application does with advisory locks and
+`SET LOCAL` is transaction-scoped, so it is safe behind a pooler. **Migrations never go
+through a transaction pooler**: run them on a direct or session-mode connection as the owner
+(`CREATE INDEX CONCURRENTLY` cannot run inside a pooled transaction, and they lift the
+statement timeout with `SET LOCAL`). Platform notes: [hosting-compatibility.md](hosting-compatibility.md).
 
 ## Backup, restore and disaster recovery
 
@@ -339,6 +448,37 @@ application.
   failed against the container's 256 MB `/dev/shm`); vacuum 13-21 s; every table's row count
   identical to the source; `migrate --check` clean; the heaviest owner's dashboard 47 ms and
   the organisation's 122 ms on the restored copy (the vacuumed baseline). A small database restores in seconds.
+- **Verified 2026-10-06** (R108 drill, development machine; the scripts unchanged, run in a
+  throwaway `pgvector/pgvector:0.8.6-pg16` container on the compose network; the target
+  databases prepared by `infrastructure/postgres/roles.sql` with the role names suffixed for
+  the drill, `arkray_mig_owner` / `arkray_mig_app`): a new database migrated to the latest
+  schema as the owner, `grant_app_privileges`, then filled as the application role through
+  the test factories and today's services (4 users, 1,000 leads, 400 opportunities, 170
+  activities, 20 deals entered into negotiation at ₹12,34,567.89 and revised to
+  ₹11,00,000.50, each with its agreed CPT: 40 price rows; edited notes; a support session).
+  `DATABASE_URL=postgres://arkray_mig_owner:...@postgres:5432/<source> scripts/backup.sh /out`
+  (248 KB, 1 s), then `TARGET_DATABASE_URL=postgres://arkray_mig_owner:...@postgres:5432/<new>
+  scripts/restore.sh /out/arkray-<stamp>.dump` (checksum ok, restored and vacuumed in under a
+  second). Compared with the source: all 29 tables, every row's md5 identical (1,966 rows;
+  `django_session`'s data is left out by design), the negotiated price history identical to
+  the cent, the four append-only triggers in place, every constraint validated and every
+  index valid; then `grant_app_privileges`, `manage.py check` and `migrate --check` clean,
+  and as the application role (Django test client) sign-in, `/api/v1/auth/me`, the
+  opportunity list and a deal's negotiated-price history all 200 with the exact decimals.
+  The schema catalogue matched too, except that PostgreSQL re-renders `IN (...)` lists after
+  a reload (`= ANY ((ARRAY['a'::character varying, ...])::text[])` comes back as
+  `= ANY (ARRAY[('a'::character varying)::text, ...])`) in 26 CHECK constraints, 2 partial
+  indexes and 1 generated column: the same meaning, so a catalogue comparison must allow for
+  it. `check --deploy` was not run (it needs the production settings).
+  **Upgrade from a restored backup**, the same day: a database at the v1.0 RC schema (built
+  as the owner) with 200,000 leads, 60,000 opportunities, 100,000 activities and 200,000
+  audit events, backed up the same way (24 MB, 12 s), restored into a new database (30 s,
+  vacuum 5 s), compared (all 25 tables and 560,118 rows identical), then migrated forward
+  **on the restored copy** with a 1 s statement timeout: 4.5 s in all (`pipeline.0006` 3.4 s,
+  `0007` 0.8 s). Afterwards every opportunity's id, stage, value, owner, version and
+  timestamps had the same checksum as before, each had its account and customer names and
+  opportunity date, no constraint was unvalidated and no index invalid, and
+  `grant_app_privileges`, `manage.py check` and `migrate --check` were clean.
 - **Targets: RPO ≤ 5 minutes** (point-in-time recovery), **RTO ≤ 1 hour**: a restore at this
   size takes about 7 minutes of database time, leaving the rest for provisioning, DNS and
   the release check. Confirm both with the business, and drill quarterly

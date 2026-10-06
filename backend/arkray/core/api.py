@@ -93,10 +93,27 @@ def idempotency_key(request: Request) -> UUID | None:
     raw = request.headers.get(IDEMPOTENCY_HEADER)
     if raw is None:
         return None
+    # Several headers arrive joined with ", ": never a UUID, so refused like any other.
     if not _CANONICAL_UUID.fullmatch(raw.strip()):
         message = f"{IDEMPOTENCY_HEADER} must be a UUID."
         raise InvalidInputError(message, details={"idempotency_key": [message]})
     return UUID(raw.strip())
+
+
+IDEMPOTENCY_KEY_REQUIRED = (
+    f"Send an {IDEMPOTENCY_HEADER} header: a new UUID for each new request, "
+    "the same one when retrying it."
+)
+
+
+def required_idempotency_key(request: Request, message: str = IDEMPOTENCY_KEY_REQUIRED) -> UUID:
+    """The request's Idempotency-Key, for creates that must never run twice by accident
+    (docs/api-conventions.md lists them): missing or malformed is a 400, the same envelope
+    and field as a malformed optional key. Call it before anything is written."""
+    key = idempotency_key(request)
+    if key is None:
+        raise InvalidInputError(message, details={"idempotency_key": [message]})
+    return key
 
 
 def validated[S: serializers.Serializer[Any]](

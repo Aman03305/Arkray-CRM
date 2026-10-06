@@ -17,21 +17,24 @@ administrator runs `manage.py erase_lead`, which in one transaction:
   and the audit trail keep their shape;
 - redacts the text of its activities (notes, task and meeting titles and descriptions,
   meeting places and links) and of its opportunities (titles, descriptions, lost reasons,
-  account and customer names, contact phone and email, address, custom field values);
+  account and customer names, contact phone and email, address, work load, expected CPT,
+  custom field values): the free-text columns a person's name can be typed into;
 - deletes the files attached to its notes (names blanked, objects removed from storage by
   the purge job and, failing that, the hourly housekeeping);
 - deletes the Ask Arkray index chunks of those records, and queues their re-indexing from
   the redacted text (an indexing job that read the old text concurrently is overwritten);
 - records `lead.erased` in the audit trail: the operator, the lead's id and counts, never
   any of the erased values;
-- last, redacts the lost reasons kept in the append-only stage history, the one free-text
-  column it holds, when there are any: the trigger is disabled for that single statement,
-  inside the transaction, which needs the schema owner's credentials; the lock this takes
-  holds stage moves for the moment between it and the commit.
+- last, redacts the free text kept in the append-only tables, when there is any: the lost
+  reasons of the stage history and the agreed CPT of every negotiated price. The trigger is
+  disabled for each single statement, inside the transaction, which needs the schema owner's
+  credentials; the lock this takes holds stage moves and price entries for the moment
+  between it and the commit.
 
-What stays: ids, dates, statuses, stage names, amounts and the audit trail, none of which
-identifies the person once the text is gone. What it can't find: the person named in other
-leads' notes. Backups keep the old data until they expire (docs/privacy.md#retention).
+What stays: ids, dates, statuses, stage names, the instrument (one of a fixed list),
+amounts and the audit trail, none of which identifies the person once the text is gone.
+What it can't find: the person named in other leads' notes. Backups keep the old data until
+they expire (docs/privacy.md#retention).
 """
 
 from __future__ import annotations
@@ -69,8 +72,12 @@ LEAD_TEXT_FIELDS = (
     "country",
     "description",
 )
-HISTORY_TABLE = "pipeline_stage_history"
-HISTORY_TRIGGER = f"{HISTORY_TABLE}_append_only"
+# The append-only tables holding free text, and that column: erasure redacts it with the
+# trigger disabled for the one statement (the schema owner only).
+HISTORY_COLUMNS = (
+    ("pipeline_stage_history", "lost_reason"),
+    ("pipeline_negotiation_price", "agreed_cpt"),
+)
 # An operator's command over every stored answer: not a web request's 10 s.
 STATEMENT_TIMEOUT = "120s"
 UUID_IN_TEXT = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -107,39 +114,49 @@ class Erasure:
 
 def _owns_history() -> bool:
     with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT pg_has_role(current_user, relowner, 'MEMBER') FROM pg_class"
-            " WHERE oid = %s::regclass",
-            [HISTORY_TABLE],
-        )
-        return bool(cursor.fetchone()[0])
+        for table, _column in HISTORY_COLUMNS:
+            cursor.execute(
+                "SELECT pg_has_role(current_user, relowner, 'MEMBER') FROM pg_class"
+                " WHERE oid = %s::regclass",
+                [table],
+            )
+            if not cursor.fetchone()[0]:
+                return False
+    return True
 
 
 def _history_with_reasons(opportunity_ids: list[UUID]) -> int:
+    """Rows of the append-only tables holding free text for these opportunities."""
     if not opportunity_ids:
         return 0
+    total = 0
     with connection.cursor() as cursor:
-        cursor.execute(
-            f"SELECT count(*) FROM {HISTORY_TABLE}"  # noqa: S608 — a code constant
-            " WHERE opportunity_id = ANY(%s) AND lost_reason <> ''",
-            [opportunity_ids],
-        )
-        return int(cursor.fetchone()[0])
+        for table, column in HISTORY_COLUMNS:
+            cursor.execute(
+                f"SELECT count(*) FROM {table}"  # noqa: S608 — code constants
+                f" WHERE opportunity_id = ANY(%s) AND {column} <> ''",
+                [opportunity_ids],
+            )
+            total += int(cursor.fetchone()[0])
+    return total
 
 
 def _redact_history(opportunity_ids: list[UUID]) -> int:
+    redacted = 0
     with connection.cursor() as cursor:
         # ALTER TABLE refuses a table with deferred constraint checks still queued in this
         # transaction: run them now (they would run at commit anyway).
         cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
-        cursor.execute(f"ALTER TABLE {HISTORY_TABLE} DISABLE TRIGGER {HISTORY_TRIGGER}")
-        cursor.execute(
-            f"UPDATE {HISTORY_TABLE} SET lost_reason = ''"  # noqa: S608 — a code constant
-            " WHERE opportunity_id = ANY(%s) AND lost_reason <> ''",
-            [opportunity_ids],
-        )
-        redacted = int(cursor.rowcount)
-        cursor.execute(f"ALTER TABLE {HISTORY_TABLE} ENABLE TRIGGER {HISTORY_TRIGGER}")
+        for table, column in HISTORY_COLUMNS:
+            trigger = f"{table}_append_only"
+            cursor.execute(f"ALTER TABLE {table} DISABLE TRIGGER {trigger}")
+            cursor.execute(
+                f"UPDATE {table} SET {column} = ''"  # noqa: S608 — code constants
+                f" WHERE opportunity_id = ANY(%s) AND {column} <> ''",
+                [opportunity_ids],
+            )
+            redacted += int(cursor.rowcount)
+            cursor.execute(f"ALTER TABLE {table} ENABLE TRIGGER {trigger}")
     return redacted
 
 
@@ -271,6 +288,8 @@ def erase(lead_id: UUID, *, operator_id: UUID) -> Erasure:
         contact_phone="",
         contact_email="",
         address="",
+        work_load="",
+        expected_cpt="",
         custom_fields={},
         **bump,
     )

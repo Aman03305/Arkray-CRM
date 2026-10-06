@@ -38,6 +38,25 @@ describe("apiFetch", () => {
     expect(init?.body).toBe(JSON.stringify({ first_name: "Rahul" }));
   });
 
+  it("never sends an opportunity create without a valid Idempotency-Key (R103)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, { id: "o1" }));
+    for (const workspace of ["me", "all", "6f1c2b9e-3d4a-4c5b-8e7f-0a1b2c3d4e5f"]) {
+      const path = `/api/v1/workspaces/${workspace}/opportunities`;
+      await expect(apiFetch(path, { method: "POST", body: {} })).rejects.toThrow(/Idempotency-Key/);
+      for (const key of ["", "1", "not-a-uuid", "6f1c2b9e-3d4a-4c5b-8e7f-0a1b2c3d4e5f, 6f1c2b9e-3d4a-4c5b-8e7f-0a1b2c3d4e5f"]) {
+        await expect(apiFetch(path, { method: "POST", body: {}, headers: { "Idempotency-Key": key } })).rejects.toThrow(/Idempotency-Key/);
+      }
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+    const key = "6f1c2b9e-3d4a-4c5b-8e7f-0a1b2c3d4e5f";
+    await apiFetch("/api/v1/workspaces/me/opportunities", { method: "POST", body: {}, headers: { "Idempotency-Key": key } });
+    expect((fetchMock.mock.calls[0]![1]?.headers as Record<string, string>)["Idempotency-Key"]).toBe(key);
+    // Other requests to and under the path are not creates: no key needed.
+    await apiFetch("/api/v1/workspaces/me/opportunities?status=open");
+    await apiFetch("/api/v1/workspaces/me/opportunities/o1/move", { method: "POST", body: {} });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("refuses to call anything other than the same-origin API", async () => {
     await expect(apiFetch("https://evil.example/api/v1/x")).rejects.toThrow(/same-origin/);
     await expect(apiFetch("//evil.example/api")).rejects.toThrow(/same-origin/);

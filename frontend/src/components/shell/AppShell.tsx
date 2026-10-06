@@ -58,13 +58,13 @@ export function AppShell({ children }: { children: ReactNode }) {
       <Topbar onMenuClick={() => setMobileNavOpen(true)} />
 
       {/* Desktop rail */}
-      <aside className="fixed bottom-0 left-0 top-12 z-20 hidden w-18 lg:block">
+      <aside aria-label="Sidebar" className="fixed bottom-0 left-0 top-12 z-20 hidden w-18 lg:block">
         <NavRail />
       </aside>
 
       {/* Pipelines panel (Pipeline pages, desktop) */}
       {panelWorkspace ? (
-        <aside className={`fixed bottom-0 left-18 top-12 z-20 hidden lg:block ${panelCollapsed ? "w-8" : "w-52"}`}>
+        <aside aria-label="Pipelines" className={`fixed bottom-0 left-18 top-12 z-20 hidden lg:block ${panelCollapsed ? "w-8" : "w-52"}`}>
           <PipelinesPanel workspace={panelWorkspace} />
         </aside>
       ) : null}

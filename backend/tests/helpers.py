@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
+from uuid import UUID, uuid4
 
 from django.core import mail
 from django.db import connections
@@ -61,6 +62,12 @@ def last_secret(path: str) -> str:
     found = emailed_secrets(path)
     assert found, f"no {path} link was emailed"
     return found[-1]
+
+
+def key_header(key: str | UUID | None = None) -> dict[str, str]:
+    """An Idempotency-Key header (a new key unless one is given): creating an opportunity
+    requires one (docs/api-conventions.md#idempotency). `client.post(..., headers=...)`."""
+    return {"Idempotency-Key": str(uuid4() if key is None else key)}
 
 
 def without_request_id(response: Any) -> Any:

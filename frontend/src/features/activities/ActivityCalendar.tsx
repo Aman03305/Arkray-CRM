@@ -107,14 +107,15 @@ function entryTitle(item: ActivityListItem, showOwner: boolean): string {
 }
 
 /** A month cell's entry (and a short one in the week and day views): the time and subject
- * on one line, opening the activity. */
+ * on one line, opening the activity. 24 px tall, the least a target may be (WCAG 2.5.8):
+ * three rows of that fit a month cell under its day button. */
 function EntryChip({ item, workspace, showOwner, className = "" }: { item: ActivityListItem; workspace: Workspace; showOwner: boolean; className?: string }) {
   const at = scheduledAt(item);
   return (
     <Link
       href={activityHref(workspace, item.id)}
       title={entryTitle(item, showOwner)}
-      className={`block truncate rounded border px-1.5 py-0.5 text-xs ${toneOf(item)} ${className}`}
+      className={`block truncate rounded border px-1.5 py-0.75 text-xs ${toneOf(item)} ${className}`}
     >
       {/* Separating spaces sit outside the hidden text: trailing ones inside are dropped. */}
       <span className="sr-only">{entryWords(item, showOwner)}:</span> <EntryIcon item={item} />
@@ -288,7 +289,7 @@ function MonthCell({
             type="button"
             onClick={() => onSchedule(scheduleFor(day))}
             aria-label={`Schedule on ${label}`}
-            className="rounded p-1 text-slate-500 opacity-0 hover:bg-slate-100 hover:text-slate-800 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+            className="rounded p-1.5 text-slate-500 opacity-0 hover:bg-slate-100 hover:text-slate-800 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
           >
             <Plus aria-hidden="true" className="size-3.5" />
           </button>
@@ -302,7 +303,7 @@ function MonthCell({
           ))}
         </span>
       ) : null}
-      <ul className="mt-0.5 hidden space-y-0.5 sm:block">
+      <ul className="mt-0.5 hidden space-y-px sm:block">
         {shown.map((item) => (
           <li key={item.id}>
             <EntryChip item={item} workspace={workspace} showOwner={showOwner} />
@@ -314,7 +315,7 @@ function MonthCell({
               type="button"
               onClick={() => onOpenDay(day)}
               aria-label={`${more} more on ${label}`}
-              className="rounded px-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+              className="min-h-6 rounded px-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900"
             >
               +{more} more
             </button>
@@ -361,7 +362,7 @@ function TimeGrid({ days, clock, ...grid }: GridProps & { days: string[]; clock:
                   type="button"
                   onClick={() => grid.onSchedule(scheduleFor(day))}
                   aria-label={`Schedule on ${dayLabel(day)}`}
-                  className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+                  className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-800"
                 >
                   <Plus aria-hidden="true" className="size-3.5" />
                 </button>
@@ -497,7 +498,7 @@ export function ActivityCalendar({ workspace, canWrite, onSchedule }: { workspac
             type="button"
             aria-label={`Previous ${unit}`}
             onClick={() => calendar.update({ anchor: shiftAnchor(calendar.view, calendar.anchor, -1) })}
-            className="rounded-full p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+            className="rounded-full p-2 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
           >
             <ChevronLeft aria-hidden="true" className="size-4" />
           </button>
@@ -505,7 +506,7 @@ export function ActivityCalendar({ workspace, canWrite, onSchedule }: { workspac
             type="button"
             aria-label={`Next ${unit}`}
             onClick={() => calendar.update({ anchor: shiftAnchor(calendar.view, calendar.anchor, 1) })}
-            className="rounded-full p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+            className="rounded-full p-2 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
           >
             <ChevronRight aria-hidden="true" className="size-4" />
           </button>

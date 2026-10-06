@@ -25,7 +25,7 @@ from arkray.core.access import AccessScope
 from arkray.core.api import ExactDecimalField, OpaqueIdField, StrictInputSerializer
 from arkray.leads.api.serializers import LeadSerializer, UserRefSerializer
 
-from .. import configuration
+from .. import configuration, validation
 from .. import models as m
 from ..selectors import BOARD_CARDS_DEFAULT, BOARD_CARDS_MAX, DEFAULT_ORDERING, ORDERINGS
 
@@ -187,6 +187,7 @@ CARD_FIELDS = [
     "weighted_value",
     "expected_close_date",
     "negotiated_price",
+    "agreed_cpt",
     "closed_at",
     "archived_at",
     "version",
@@ -205,6 +206,11 @@ class OpportunityCardSerializer(_ScopedLead, serializers.ModelSerializer[m.Oppor
     probability = percentage()
     weighted_value = money()
     negotiated_price = money(allow_null=True)
+    agreed_cpt = serializers.CharField(
+        read_only=True,
+        help_text="The agreed CPT recorded with the latest agreed price (free text; blank "
+        "when that price has none).",
+    )
 
     class Meta:
         model = m.Opportunity
@@ -221,7 +227,14 @@ class OpportunitySerializer(_ScopedLead, serializers.ModelSerializer[m.Opportuni
     value = money(help_text="The instrument installation price (INR): the deal's value.")
     probability = percentage()
     weighted_value = money()
-    negotiated_price = money(allow_null=True, help_text="The latest negotiated price, if any.")
+    negotiated_price = money(
+        allow_null=True, help_text="The latest agreed (negotiated) price, if any."
+    )
+    agreed_cpt = serializers.CharField(
+        read_only=True,
+        help_text="The agreed CPT recorded with the latest agreed price, from the price "
+        "history (free text; blank when that price has none).",
+    )
     custom_fields = serializers.DictField(
         read_only=True,
         help_text="Custom field id -> canonical value (strings, booleans or option ids).",
@@ -328,6 +341,11 @@ class StageHistoryPageSerializer(serializers.Serializer[Any]):
 class NegotiationPriceSerializer(serializers.ModelSerializer[m.NegotiationPrice]):
     id = OpaqueIdField("negotiation-price")
     price = money()
+    agreed_cpt = serializers.CharField(
+        read_only=True,
+        help_text="The agreed CPT recorded with this price (blank on prices recorded "
+        "before it was asked for).",
+    )
     actor = UserRefSerializer(read_only=True)
 
     class Meta:
@@ -335,6 +353,7 @@ class NegotiationPriceSerializer(serializers.ModelSerializer[m.NegotiationPrice]
         fields = [
             "id",
             "price",
+            "agreed_cpt",
             "currency",
             "stage_id",
             "stage_name",
@@ -377,6 +396,35 @@ def _text(max_length: int, **kwargs: Any) -> serializers.CharField:
     )
 
 
+# Said once for every CPT field in the API description: CPT is free text on purpose (R104).
+CPT_MEANING = (
+    "Free text kept as written; CPT's business meaning and unit await product-owner confirmation."
+)
+
+
+class CptField(serializers.CharField):
+    """A CPT as sent: a string only (validation.clean_cpt decides the rest). DRF's CharField
+    would accept a JSON number and re-spell it (18.50 arrives as "18.5")."""
+
+    default_error_messages = {"not_text": validation.CPT_NOT_TEXT}
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("max_length", m.CPT_MAX_LENGTH)
+        kwargs.setdefault("trim_whitespace", False)
+        super().__init__(**kwargs)
+
+    def to_internal_value(self, data: Any) -> str:
+        if not isinstance(data, str):
+            self.fail("not_text")
+        return str(super().to_internal_value(data))
+
+
+def _cpt(help_text: str, **kwargs: Any) -> CptField:
+    kwargs.setdefault("allow_blank", True)
+    kwargs.setdefault("required", False)
+    return CptField(help_text=f"{help_text} {CPT_MEANING}", **kwargs)
+
+
 def _custom_values() -> serializers.DictField:
     return serializers.DictField(
         child=serializers.JSONField(allow_null=True),
@@ -401,10 +449,7 @@ class DealFieldsMixin(serializers.Serializer[Any]):
         help_text="One of the instruments listed by /config/opportunity-options (or blank).",
     )
     work_load = _text(m.WORK_LOAD_MAX_LENGTH)
-    expected_cpt = _text(
-        m.EXPECTED_CPT_MAX_LENGTH,
-        help_text="Expected CPT as the salesperson states it (free text; no unit is implied).",
-    )
+    expected_cpt = _cpt("Expected CPT as the salesperson states it (no unit is implied).")
     custom_fields = _custom_values()
 
 
@@ -418,7 +463,12 @@ class OpportunityFieldsSerializer(DealFieldsMixin, StrictInputSerializer):
     negotiated_price = _value(
         required=False,
         allow_null=True,
-        help_text="Required when the stage is a negotiation stage; refused otherwise.",
+        help_text="The agreed price: required when the stage is a negotiation stage; refused "
+        "otherwise.",
+    )
+    agreed_cpt = _cpt(
+        "The agreed CPT: required when the stage is a negotiation stage; refused otherwise. "
+        "Blank counts as not given."
     )
 
 
@@ -468,13 +518,19 @@ class OpportunityMoveSerializer(StrictInputSerializer):
     negotiated_price = _value(
         required=False,
         allow_null=True,
-        help_text="Required when moving into a negotiation stage; refused otherwise.",
+        help_text="The agreed price: required when moving into a negotiation stage; refused "
+        "otherwise.",
+    )
+    agreed_cpt = _cpt(
+        "The agreed CPT: required when moving into a negotiation stage; refused otherwise. "
+        "Blank counts as not given."
     )
 
 
 class NegotiatedPriceInputSerializer(StrictInputSerializer):
     version = serializers.IntegerField(min_value=1)
-    price = _value(help_text='The negotiated price (INR), e.g. "1050000.00".')
+    price = _value(help_text='The agreed (negotiated) price (INR), e.g. "1050000.00".')
+    agreed_cpt = _cpt("The agreed CPT with this price.", allow_blank=False, required=True)
 
 
 # --- input: configuration -------------------------------------------------------------------

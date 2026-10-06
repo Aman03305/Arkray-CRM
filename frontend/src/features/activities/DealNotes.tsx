@@ -8,6 +8,7 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { useSingleFlight } from "@/components/ui/useSingleFlight";
 import { cursorOf } from "@/lib/api/pagination";
 import { PersonName } from "@/components/ui/PersonName";
 import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
@@ -16,6 +17,7 @@ import { randomUuid } from "@/lib/random";
 import type { Workspace } from "@/lib/workspace";
 
 import { activitiesApi, activityKeys } from "./api";
+import { activityName } from "./ActivityBits";
 import { MAX_FILES_PER_NOTE, pickFiles } from "./attachments";
 import { useDealNotesCache, useUploadQueue } from "./deal-notes";
 import { useActivityWriteSync } from "./hooks";
@@ -205,9 +207,7 @@ function NoteComposer({
     },
   });
 
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    if (save.isPending) return;
+  const send = async () => {
     if (!text.trim()) {
       setProblem("Write the note first.");
       box.current?.focus();
@@ -228,6 +228,13 @@ function NoteComposer({
     }
     setNoteId(note.id);
     if (await queue.start(note.id, toUpload)) onClose(savedWith(toUpload.length));
+  };
+  // The note and its uploads run once per Save: a second Save in the same moment (before
+  // `save.isPending` shows) would replay the create and upload every file again.
+  const once = useSingleFlight();
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    once(send);
   };
 
   const serverProblem = save.isError ? (fieldErrors(save.error).description?.join(" ") ?? describeError(save.error).message) : null;
@@ -260,7 +267,7 @@ function NoteComposer({
   }
 
   return (
-    <form id={id} onSubmit={(event) => void submit(event)} noValidate className="mb-5 space-y-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+    <form id={id} onSubmit={submit} noValidate className="mb-5 space-y-3 rounded-md border border-slate-200 bg-slate-50 p-3">
       <div>
         <label htmlFor={fieldId} className="mb-1.5 block text-sm font-medium text-slate-700">
           Note
@@ -351,6 +358,9 @@ function DealNoteItem({ workspace, opportunityId, note }: { workspace: Workspace
   const pending = queue.items.filter((entry) => entry.status !== "failed").length;
   const room = MAX_FILES_PER_NOTE - note.attachments.length - pending;
   const editor = note.edited_by;
+  // Every note has an Edit and an Add files: each says which note ("Edit note: Budget
+  // approved"), not the same words down the list.
+  const named = activityName({ type: "note", title: "", preview: note.description });
 
   return (
     <li ref={item} tabIndex={-1} className="min-w-0 py-4 first:pt-0 last:pb-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-600">
@@ -386,11 +396,12 @@ function DealNoteItem({ workspace, opportunityId, note }: { workspace: Workspace
                 setEditing(true);
               }}
             >
-              Edit <span className="sr-only">note</span>
+              Edit <span className="sr-only">{named}</span>
             </Button>
             {room > 0 ? (
               <FilePicker
                 label="Add files"
+                context={`to ${named}`}
                 disabled={queue.busy}
                 onPick={(picked) => {
                   const { accepted, refused } = pickFiles(picked, room);
@@ -496,16 +507,17 @@ function NoteEditor({
   });
   const [problem, setProblem] = useState<string | null>(null);
   const box = useRef<HTMLTextAreaElement>(null);
+  const once = useSingleFlight();
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (save.isPending) return;
     if (!text.trim()) {
       setProblem("Write the note first.");
       box.current?.focus();
       return;
     }
     setProblem(null);
-    save.mutate();
+    // A second save at once would carry the same version and report a conflict with this one.
+    once(() => save.mutateAsync());
   };
   const message =
     problem ??

@@ -235,6 +235,35 @@ describe("the task form on a deal's page", () => {
     nav.pathname = `/pipeline/${OPPORTUNITY_ID}`;
   });
 
+  it("429: says how long to wait, keeps the typing, and Create works again with the same idempotency key", async () => {
+    let attempt = 0;
+    const api = mockApi(
+      dealRoutes(undefined, {
+        [`POST ${LIST}`]: () => {
+          attempt += 1;
+          return attempt === 1
+            ? { ...apiError(429, "rate_limited", "Request was throttled. Expected available in 30 seconds."), headers: { "Retry-After": "30" } }
+            : { status: 201, body: makeActivity({ title: "Call back" }) };
+        },
+      }),
+    );
+    renderWithProviders(<OpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: SALES });
+    const user = userEvent.setup();
+    const openWork = await screen.findByRole("region", { name: "Open work" });
+    await user.click(within(openWork).getByRole("button", { name: "New task" }));
+    const dialog = screen.getByRole("dialog", { name: "New task" });
+    await user.type(within(dialog).getByRole("textbox", { name: "Subject" }), "Call back");
+    await user.click(within(dialog).getByRole("button", { name: "Create task" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Expected available in 30 seconds.");
+    expect(within(dialog).getByRole("textbox", { name: "Subject" })).toHaveValue("Call back");
+    const create = within(dialog).getByRole("button", { name: "Create task" });
+    expect(create).not.toHaveAttribute("aria-disabled");
+    await user.click(create);
+    expect(await within(openWork).findByText("Task created.")).toBeInTheDocument();
+    const [first, second] = api.callsTo("POST", LIST);
+    expect(second!.headers["Idempotency-Key"]).toBe(first!.headers["Idempotency-Key"]);
+  });
+
   it("has no picker: it says what it is about, focuses the first problem, then creates the task for the deal with an idempotency key reused on retry", async () => {
     let attempt = 0;
     const api = mockApi(

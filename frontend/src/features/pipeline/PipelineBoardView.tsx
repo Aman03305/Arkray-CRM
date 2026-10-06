@@ -16,10 +16,12 @@ import type { Board, BoardColumn, OpportunityCard, PipelineTotals, Stage } from 
 import { setFlash, useFlash } from "@/lib/flash";
 import { businessToday } from "@/lib/format";
 import { formatPercent } from "@/lib/money";
+import { receivesNewWork, selectedUserId, useWorkspaceSubject } from "@/features/workspace/api";
 import { hasCapability } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
 import { opportunityHref, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
 
+import type { AgreedTerms } from "./AgreedTerms";
 import { activeBoardFilterCount, type BoardFilters, CARDS_PER_STAGE, pipelineApi, pipelineKeys } from "./api";
 import { choosePipeline, isNegotiation, pipelinePermissions, useBoardState, usePipelines, useWideLayout } from "./hooks";
 import { DRAG_TYPE, OpportunityCardView } from "./OpportunityCardView";
@@ -29,9 +31,9 @@ import { Amount, StageName } from "./PipelineBits";
 import { StageListView } from "./StageListView";
 import { TransitionDialog } from "./TransitionDialog";
 import { transitionKind } from "./transitions";
-import { moveErrorMessage, useMoveOpportunity } from "./useMoveOpportunity";
+import { moveErrorMessage, type MoveProblem, useMoveOpportunity } from "./useMoveOpportunity";
 
-type Problem = { message: string; requestId: string | null };
+type Problem = MoveProblem;
 
 /**
  * The Pipeline, rendered unchanged in every workspace: a salesperson's own (/pipeline),
@@ -47,6 +49,8 @@ export function PipelineBoardView({ workspace, create = false }: { workspace: Wo
   const [settings, setSettings] = useState<"edit" | "new" | null>(null);
   const segment = workspaceApiSegment(workspace);
   const permissions = pipelinePermissions(viewer, workspace);
+  // A deactivated user takes no new work: no "New opportunity" that could only fail.
+  const subject = useWorkspaceSubject(selectedUserId(workspace));
   const wide = useWideLayout();
   const state = useBoardState(segment);
   const pipelines = usePipelines(workspace);
@@ -94,13 +98,13 @@ export function PipelineBoardView({ workspace, create = false }: { workspace: Wo
   const columns = data?.columns ?? [];
   const stages = columns.map((c) => c.stage);
 
-  function runMove(card: OpportunityCard, target: Stage, lostReason = "", fromDialog = false, negotiatedPrice?: string) {
+  function runMove(card: OpportunityCard, target: Stage, lostReason = "", fromDialog = false, terms?: AgreedTerms) {
     setProblem(null);
     setNotice(null);
     setDialogError(null);
     focusCard.current = { id: card.id, stageId: target.id };
     move.mutate(
-      { id: card.id, title: card.title, version: card.version, target, lostReason, negotiatedPrice },
+      { id: card.id, title: card.title, version: card.version, target, lostReason, terms },
       {
         onSuccess: () => {
           setConfirm(null);
@@ -152,7 +156,7 @@ export function PipelineBoardView({ workspace, create = false }: { workspace: Wo
 
   if (isApiError(board.error, 404)) return <NotFoundView />;
 
-  const newOpportunity = permissions.canWrite ? (
+  const newOpportunity = permissions.canWrite && receivesNewWork(subject.data) ? (
     <Button icon={<Plus aria-hidden="true" className="size-4" />} onClick={() => setCreating(true)}>
       New opportunity
     </Button>
@@ -378,7 +382,7 @@ export function PipelineBoardView({ workspace, create = false }: { workspace: Wo
           target={confirm.target}
           busy={move.isPending}
           error={dialogError}
-          onConfirm={(target, reason, price) => runMove(findCard(confirm.card.id) ?? confirm.card, target, reason, true, price)}
+          onConfirm={(target, reason, terms) => runMove(findCard(confirm.card.id) ?? confirm.card, target, reason, true, terms)}
           onClose={() => {
             setConfirm(null);
             setDialogError(null);
@@ -597,6 +601,10 @@ function StageTabs({
         })}
       </div>
       <div role="tabpanel" id={`${baseId}-panel`} aria-labelledby={`${baseId}-tab-${index}`}>
+        {/* The cards' h3 headings follow an h2, as on the board's columns. */}
+        <h2 className="sr-only">
+          <StageName stage={current.stage} />
+        </h2>
         <p className="mb-2 text-xs text-slate-500">
           <Amount value={current.total_value} />
           {current.stage.category === "open" ? (

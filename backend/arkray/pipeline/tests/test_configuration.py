@@ -16,7 +16,7 @@ from arkray.leads import services as lead_services
 from arkray.pipeline import models as m
 from arkray.pipeline.models import Opportunity, Pipeline, Stage, StageHistory
 from tests.factories import LeadFactory, OpportunityFactory, UserFactory
-from tests.helpers import signed_in
+from tests.helpers import key_header, signed_in
 
 from .conftest import board_url, opportunities_url, opportunity_url
 
@@ -405,6 +405,7 @@ class TestStageEditing:
                 "pipeline": body["id"],
             },
             format="json",
+            headers=key_header(),
         )
         assert response.status_code == 201, response.content
         opp = response.json()
@@ -443,8 +444,10 @@ class TestProbabilityAndTotals:
                 "pipeline": body["id"],
                 "stage": commercial["id"],
                 "negotiated_price": "95000",
+                "agreed_cpt": "Rs 18",
             },
             format="json",
+            headers=key_header(),
         )
         assert response.status_code == 201, response.content
         assert response.json()["weighted_value"] == "60000.00"
@@ -491,6 +494,7 @@ class TestArchive:
             opportunities_url(),
             {"lead": str(lead.pk), "value": "1", "pipeline": body["id"]},
             format="json",
+            headers=key_header(),
         )
         assert refused.status_code == 400
         restored = user_a_client.post(
@@ -577,6 +581,7 @@ class TestDealsAfterReassignment:
             opportunities_url("all"),
             {"lead": str(lead.pk), "value": "1", "pipeline": priyas["id"]},
             format="json",
+            headers=key_header(),
         )
         assert response.status_code == 400
         assert "pipeline" in response.json()["error"]["details"]
@@ -659,6 +664,7 @@ class TestReviewRegressions:
             version=opportunity.version,
             stage_id=n.pk,
             negotiated_price=Decimal("100"),
+            agreed_cpt="Rs 18",
         )
         opportunity = services.move_opportunity(
             actor=owner,
@@ -681,6 +687,7 @@ class TestReviewRegressions:
             opportunity_id=opportunity.pk,
             version=opportunity.version,
             price=Decimal("100"),
+            agreed_cpt="Rs 18",
         )
         latest = NegotiationPrice.objects.filter(opportunity_id=opportunity.pk).latest("id")
         assert (latest.stage_id, latest.price) == (b.pk, Decimal("100.00"))
@@ -692,5 +699,6 @@ class TestReviewRegressions:
             opportunity_id=opportunity.pk,
             version=opportunity.version,
             price=Decimal("100"),
+            agreed_cpt="Rs 18",
         )
         assert NegotiationPrice.objects.filter(opportunity_id=opportunity.pk).count() == count

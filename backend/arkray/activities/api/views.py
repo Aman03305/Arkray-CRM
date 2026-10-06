@@ -19,11 +19,12 @@ from uuid import UUID
 from django.http import StreamingHttpResponse
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import OpenApiParameter, extend_schema
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework import status as http
 from rest_framework.permissions import SAFE_METHODS
 from rest_framework.request import Request
 from rest_framework.response import Response
+from rest_framework.throttling import BaseThrottle, ScopedRateThrottle, UserRateThrottle
 
 from arkray.core.access import AccessScope
 from arkray.core.api import ApiView, idempotency_key, validated
@@ -361,14 +362,37 @@ class OpportunityNotesView(ApiView):
 
 # --- attachments ----------------------------------------------------------------------------------
 FILENAME_HEADER = "X-Filename"
+STORAGE_DOWN = OpenApiResponse(
+    description="File storage is unavailable (storage_unavailable); Retry-After says when to"
+    " try again."
+)
+FILE_GONE = OpenApiResponse(
+    description="The file's stored object is gone (attachment_unavailable): an administrator"
+    " needs to look at it."
+)
 
 
-class NoteAttachmentsView(ApiView):
+class _StorageView(ApiView):
+    """A view that touches attachment storage: its outage answers carry Retry-After."""
+
+    def handle_exception(self, exc: Exception) -> Response:
+        response = super().handle_exception(exc)
+        if isinstance(exc, attachments.StorageDown):
+            response["Retry-After"] = str(exc.retry_after)
+        return response
+
+
+class NoteAttachmentsView(_StorageView):
     """Attach a file to a note. The body is the file itself (Content-Type:
     application/octet-stream) and the X-Filename header its name, percent-encoded. At most
-    ATTACHMENT_MAX_BYTES; allowed types only, recognised by their content."""
+    ATTACHMENT_MAX_BYTES; allowed types only, recognised by their content. Uploads have
+    their own rate limit (API_THROTTLE_ATTACHMENTS) besides the per-user one."""
 
     permission_classes = [IsActiveUser]
+    throttle_scope = "attachments"
+
+    def get_throttles(self) -> list[BaseThrottle]:
+        return [UserRateThrottle(), ScopedRateThrottle()]
 
     @extend_schema(
         operation_id="activities_attachments_upload",
@@ -382,7 +406,7 @@ class NoteAttachmentsView(ApiView):
                 description="The file's name, percent-encoded (UTF-8).",
             )
         ],
-        responses={201: s.AttachmentSerializer, 404: NOT_FOUND},
+        responses={201: s.AttachmentSerializer, 404: NOT_FOUND, 503: STORAGE_DOWN},
     )
     def post(self, request: Request, workspace: str, activity_id: UUID) -> Response:
         actor, scope = _scope(request, workspace)
@@ -437,7 +461,7 @@ def _file_response(download: attachments.Download, *, inline: bool) -> Streaming
     return response
 
 
-class AttachmentDownloadView(ApiView):
+class AttachmentDownloadView(_StorageView):
     """The file, as a download, if its note is visible in this workspace now (re-checked on
     every request) and the virus scan allows it."""
 
@@ -445,7 +469,12 @@ class AttachmentDownloadView(ApiView):
 
     @extend_schema(
         operation_id="attachments_download",
-        responses={(200, "application/octet-stream"): OpenApiTypes.BINARY, 404: NOT_FOUND},
+        responses={
+            (200, "application/octet-stream"): OpenApiTypes.BINARY,
+            404: NOT_FOUND,
+            410: FILE_GONE,
+            503: STORAGE_DOWN,
+        },
     )
     def get(self, request: Request, workspace: str, attachment_id: UUID) -> StreamingHttpResponse:
         _, scope = _scope(request, workspace)
@@ -453,14 +482,19 @@ class AttachmentDownloadView(ApiView):
         return _file_response(download, inline=False)
 
 
-class AttachmentPreviewView(ApiView):
+class AttachmentPreviewView(_StorageView):
     """An image file, shown inline (PNG, JPEG, WebP, GIF only; validated at upload)."""
 
     permission_classes = [IsActiveUser]
 
     @extend_schema(
         operation_id="attachments_preview",
-        responses={(200, "image/*"): OpenApiTypes.BINARY, 404: NOT_FOUND},
+        responses={
+            (200, "image/*"): OpenApiTypes.BINARY,
+            404: NOT_FOUND,
+            410: FILE_GONE,
+            503: STORAGE_DOWN,
+        },
     )
     def get(self, request: Request, workspace: str, attachment_id: UUID) -> StreamingHttpResponse:
         _, scope = _scope(request, workspace)

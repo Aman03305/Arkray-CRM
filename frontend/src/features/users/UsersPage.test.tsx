@@ -622,6 +622,98 @@ describe("UsersPage: editing and lifecycle", () => {
     expect(await screen.findByText("Rahul Sharma was reactivated.")).toBeInTheDocument();
   });
 
+  describe("another administrator's account (only they change its email, password and role)", () => {
+    const bina = makeAdminUser({
+      id: "3b2a1c0d-2222-4333-8444-555566667777",
+      email: "bina@example.test",
+      first_name: "Bina",
+      last_name: "Admin",
+      full_name: "Bina Admin",
+      role: "admin",
+      role_label: "Admin",
+    });
+
+    it.each([
+      ["active", bina],
+      ["deactivated", { ...bina, status: "deactivated" as const, status_label: "Deactivated" }],
+      ["invited", { ...bina, status: "invited" as const, status_label: "Invited", last_login: null }],
+    ])("offers no email change, whatever the status (%s)", async (_status, target) => {
+      mockApi({ [LIST]: page([target]) });
+      renderPage();
+      await openActions("Bina Admin");
+      expect(screen.getByRole("menuitem", { name: "Edit details" })).toBeInTheDocument();
+      expect(screen.queryByRole("menuitem", { name: "Change email" })).not.toBeInTheDocument();
+    });
+
+    it("still offers your own email change, and deactivation of another administrator", async () => {
+      mockApi({ [LIST]: page([self, bina]) });
+      renderPage();
+      let user = await openActions("Anita Admin");
+      expect(screen.getByRole("menuitem", { name: "Change email" })).toBeInTheDocument();
+      await user.keyboard("{Escape}");
+      user = await openActions("Bina Admin");
+      expect(screen.getByRole("menuitem", { name: "Deactivate" })).toBeInTheDocument();
+    });
+
+    it("locks the role with the reason, while the name can still be corrected", async () => {
+      const api = mockApi({
+        [LIST]: page([bina]),
+        [`PATCH /api/v1/admin/users/${bina.id}`]: { status: 200, body: { ...bina, last_name: "Kapoor", version: 2 } },
+      });
+      renderPage();
+      const user = await openActions("Bina Admin");
+      await user.click(screen.getByRole("menuitem", { name: "Edit details" }));
+      const role = screen.getByLabelText("Role");
+      expect(role).toBeDisabled();
+      expect(role).toHaveAccessibleDescription(
+        "An administrator's role can't be changed here. To remove their access, deactivate the account.",
+      );
+      const lastName = screen.getByLabelText(/Last name/);
+      await user.clear(lastName);
+      await user.type(lastName, "Kapoor");
+      await user.click(screen.getByRole("button", { name: "Save changes" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+      expect(api.callsTo("PATCH", `/api/v1/admin/users/${bina.id}`)[0]!.body).toEqual({ last_name: "Kapoor", version: 1 });
+    });
+
+    it("offers no password or support tools in the details panel", async () => {
+      mockApi({ [LIST]: page([bina]), [`GET /api/v1/admin/users/${bina.id}`]: { status: 200, body: bina } });
+      renderPage();
+      await userEvent.setup().click(await screen.findByRole("button", { name: "Bina Admin" }));
+      const drawer = screen.getByRole("dialog", { name: "Bina Admin" });
+      expect(drawer).toHaveTextContent("Not available for administrators.");
+      expect(within(drawer).queryByRole("button", { name: "Set new password" })).not.toBeInTheDocument();
+    });
+
+    // The list said "User", but they were made an administrator meanwhile: the server's
+    // reason is shown, and the list is fetched again.
+    it.each([
+      ["change-email", "Administrators change their own email address in Settings."],
+      ["role", "An administrator's role can't be changed by another administrator. To remove their access, deactivate the account."],
+    ])("shows the server's refusal when a stale page tries anyway (%s)", async (what, message) => {
+      const api = mockApi({
+        [LIST]: page([rahul]),
+        [`POST /api/v1/admin/users/${rahul.id}/change-email`]: apiError(422, "business_rule_violation", message),
+        [`PATCH /api/v1/admin/users/${rahul.id}`]: apiError(422, "business_rule_violation", message),
+      });
+      renderPage();
+      const user = await openActions("Rahul Sharma");
+      if (what === "change-email") {
+        await user.click(screen.getByRole("menuitem", { name: "Change email" }));
+        const field = screen.getByLabelText("New email");
+        await user.clear(field);
+        await user.type(field, "elsewhere@example.test");
+        await user.click(screen.getByRole("button", { name: "Change email" }));
+      } else {
+        await user.click(screen.getByRole("menuitem", { name: "Edit details" }));
+        await user.selectOptions(screen.getByLabelText("Role"), "admin");
+        await user.click(screen.getByRole("button", { name: "Save changes" }));
+      }
+      expect(await screen.findByRole("alert")).toHaveTextContent(message);
+      await waitFor(() => expect(api.callsTo("GET", "/api/v1/admin/users").length).toBeGreaterThan(1));
+    });
+  });
+
   it("changes email as a separate, explained action", async () => {
     const api = mockApi({
       [LIST]: page([rahul]),

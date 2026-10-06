@@ -105,7 +105,16 @@ class TestRedaction:
 
 # --- P2-2: request bodies are never logged ---------------------------------------------------
 class TestQuietLoggers:
-    NAMES = ("anthropic", "anthropic._base_client", "httpx", "httpx2", "httpcore", "urllib3")
+    NAMES = (
+        "anthropic",
+        "anthropic._base_client",
+        "httpx",
+        "httpx2",
+        "httpcore",
+        "httpcore2",  # the SDK 1.x transport: its DEBUG lines carried hosts and headers
+        "httpcore2.http11",
+        "urllib3",
+    )
 
     def test_http_and_sdk_loggers_never_log_requests(self):
         for name in self.NAMES:

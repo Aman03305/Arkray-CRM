@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 
-import { EditOpportunityView } from "@/features/workspace/views";
+import { EditOpportunityView } from "@/features/workspace/views/pipeline";
 import { isUuid } from "@/lib/workspace";
 
 export const metadata: Metadata = { title: "Edit opportunity" };

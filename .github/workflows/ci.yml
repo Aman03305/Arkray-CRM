@@ -96,6 +96,24 @@ jobs:
       # The images start as production runs them: production settings, a read-only root
       # filesystem, no capabilities. (No database here: the startup role check only warns
       # when it can't connect; readiness would report the database.)
+      # Known vulnerabilities in what the images contain: OS packages and every bundled language
+      # package (the final audit's R107 findings were npm inside the base image, invisible to
+      # `pnpm audit`). A HIGH or CRITICAL finding with a fix available fails the build; one the
+      # distribution has not fixed yet (no fixed version) is listed, not blocking, and judged
+      # for reachability in docs/risk-register.md. The scanner image is pinned by digest.
+      - name: Scan the images for known vulnerabilities
+        run: |
+          set -euo pipefail
+          trivy=aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e
+          for image in arkray-backend:ci arkray-frontend:ci; do
+            echo "== $image: everything HIGH or CRITICAL (informational)"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$trivy" image \
+              --skip-version-check --scanners vuln --severity HIGH,CRITICAL "$image"
+            echo "== $image: fixable HIGH or CRITICAL (blocking)"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$trivy" image \
+              --skip-version-check --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+              --exit-code 1 "$image"
+          done
       - name: Smoke-test the images
         run: |
           set -euo pipefail

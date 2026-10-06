@@ -88,9 +88,17 @@ export function OpportunityCardView({ card, workspace, stages, showOwner, canWri
           <>
             <dt className="text-slate-500">Agreed</dt>
             <dd className="text-slate-700">
-              <span className="sr-only">Negotiated price </span>
+              <span className="sr-only">price </span>
               <Amount value={card.negotiated_price} />
             </dd>
+            {card.agreed_cpt ? (
+              <>
+                <dt className="text-slate-500">Agreed CPT</dt>
+                <dd className="truncate text-slate-700" title={card.agreed_cpt}>
+                  {card.agreed_cpt}
+                </dd>
+              </>
+            ) : null}
           </>
         ) : null}
         <dt className="text-slate-500">Close</dt>

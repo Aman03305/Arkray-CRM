@@ -190,16 +190,25 @@ def money_in(text: str) -> set[Decimal]:
     return found
 
 
+# The deal's CPT fields are the CRM's own statement of a per-test rate ("Rs 18 per test"):
+# the model repeating one is stating a recorded fact, not inventing money (final audit RAG-2:
+# the figure was "ungrounded" and the whole narrative withheld). Any other user-written text
+# still grounds no money.
+_CPT_KEYS = frozenset({"expected_cpt", "agreed_cpt", "latest_agreed_cpt"})
+
+
 def _money_values(value: Any) -> Iterable[Decimal]:
-    """Amounts of the money values a tool computed ({"amount", "currency", "display"}),
-    never numbers inside user-written text."""
+    """Amounts of the money values a tool computed ({"amount", "currency", "display"}) and the
+    figures of a deal's CPT fields, never numbers inside other user-written text."""
     if isinstance(value, dict):
         if "amount" in value and "currency" in value:
             amount = _value(str(value["amount"]), None)
             if amount is not None:
                 yield amount
         for key, item in value.items():
-            if key not in _SKIPPED_KEYS:
+            if key in _CPT_KEYS and isinstance(item, str):
+                yield from numbers_in(item)
+            elif key not in _SKIPPED_KEYS:
                 yield from _money_values(item)
     elif isinstance(value, list):
         for item in value:

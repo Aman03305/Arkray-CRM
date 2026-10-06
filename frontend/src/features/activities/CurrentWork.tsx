@@ -8,6 +8,8 @@ import { useEffect, useId, useRef, useState } from "react";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { TALLER_HIT } from "@/components/ui/targets";
+import { useSingleFlight } from "@/components/ui/useSingleFlight";
 import { describeError, isApiError } from "@/lib/api/errors";
 import type { ActivityListItem } from "@/lib/api/types";
 import { activityHref, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
@@ -55,30 +57,34 @@ export function CurrentWork({
     queryFn: () => activitiesApi.current(workspace, target),
   });
   const action = useActivityAction(workspace);
+  const once = useSingleFlight();
   const rows = work.data?.results;
 
-  const complete = (row: ActivityListItem) => {
-    setNotice(null);
-    action.mutate(
-      { activity: row, action: "complete" },
-      {
-        onSuccess: () => {
-          focusNotice.current = true;
-          setNotice({ tone: "success", text: `${row.title} completed.` });
+  // Once per row at a time: a second click in the same moment would carry the same version
+  // and report "changed by someone else" about the first.
+  const complete = (row: ActivityListItem) =>
+    once(() => {
+      setNotice(null);
+      return action.mutateAsync(
+        { activity: row, action: "complete" },
+        {
+          onSuccess: () => {
+            focusNotice.current = true;
+            setNotice({ tone: "success", text: `${row.title} completed.` });
+          },
+          onError: (error) => {
+            focusNotice.current = true;
+            setNotice({
+              tone: "error",
+              text: isApiError(error, 409)
+                ? `${row.title} was changed by someone else a moment ago. The list has been refreshed; try again.`
+                : describeError(error).message,
+              requestId: describeError(error).requestId,
+            });
+          },
         },
-        onError: (error) => {
-          focusNotice.current = true;
-          setNotice({
-            tone: "error",
-            text: isApiError(error, 409)
-              ? `${row.title} was changed by someone else a moment ago. The list has been refreshed; try again.`
-              : describeError(error).message,
-            requestId: describeError(error).requestId,
-          });
-        },
-      },
-    );
-  };
+      );
+    }, row.id);
 
   return (
     <section aria-labelledby={headingId} className="rounded-lg border border-slate-200 bg-white p-5">
@@ -118,7 +124,7 @@ export function CurrentWork({
             return (
               <li key={row.id} className="flex items-start justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
                 <div className="min-w-0">
-                  <Link href={activityHref(workspace, row.id)} className="block truncate text-sm font-medium text-brand-700 hover:underline">
+                  <Link href={activityHref(workspace, row.id)} className={`block truncate text-sm font-medium text-brand-700 hover:underline ${TALLER_HIT}`}>
                     {row.title}
                   </Link>
                   <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">

@@ -2,11 +2,11 @@
 (arkray.core.domain_events). Identifiers, keys and statuses only: never titles, amounts,
 descriptions or lost reasons.
 
-Phase 3 has no subscribers of its own events. Planned consumers: the lead/opportunity
-timeline (Phase 4) subscribes to OpportunityCreated and OpportunityStageChanged; Ask Arkray
-(Phase 8) subscribes to every event to re-index through the outbox; notifications and
-automation subscribe to OpportunityWon / OpportunityLost. Dashboards (Phase 5) do NOT
-consume events: they query the authoritative tables (arkray.pipeline.metrics).
+Subscribers: the lead/opportunity timeline (arkray.activities) subscribes to
+OpportunityCreated and OpportunityStageChanged; Ask Arkray (arkray.ai) subscribes to every
+event to re-index through the outbox. Notifications and automation would subscribe to
+OpportunityWon / OpportunityLost. Dashboards do NOT consume events: they query the
+authoritative tables (arkray.pipeline.metrics).
 """
 
 from __future__ import annotations

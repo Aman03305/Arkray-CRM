@@ -19,6 +19,7 @@ from django.utils.crypto import constant_time_compare
 from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
 
+from arkray.activities import metrics as attachment_metrics
 from arkray.ai import metrics as ai_metrics
 from arkray.core import metrics
 from arkray.core.views import database_unavailable
@@ -58,6 +59,7 @@ def metrics_view(request: HttpRequest) -> HttpResponse:
         metrics.outbox,
         metrics.database,
         ai_metrics.gauges,
+        attachment_metrics.gauges,
     )
     for collect in collectors:
         try:
@@ -72,4 +74,6 @@ def metrics_view(request: HttpRequest) -> HttpResponse:
             )
     database_up.add(1 if reachable else 0)
     gauges = [database_up, *from_database, *metrics.broker(), *metrics.cache_up()]
+    # Attachment storage: a degraded signal, like the cache (the CRM works without it).
+    gauges += attachment_metrics.storage_up() + attachment_metrics.events()
     return HttpResponse(metrics.render(gauges), content_type="text/plain; version=0.0.4")

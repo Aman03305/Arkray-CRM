@@ -11,7 +11,9 @@
  * - Errors are normalised to `ApiError` from the backend envelope
  *   `{"error": {"code", "message", "details", "request_id"}}`.
  * - JSON bodies go through `apiFetch`; a file goes through `apiUpload` (same rules).
+ * - A create that requires an Idempotency-Key is never sent without a valid one.
  */
+import { isIdempotencyKey } from "@/lib/random";
 
 /**
  * Over HTTPS the backend names its CSRF cookie `__Host-arkray_csrftoken` (Secure, host-only,
@@ -176,11 +178,26 @@ async function request<T>(
   return payload as T;
 }
 
+/**
+ * Creates the server refuses without an Idempotency-Key (docs/api-conventions.md#idempotency).
+ * Checked here as well, before anything is sent: a create without a key, or with one that
+ * isn't a UUID, is a bug in the calling code, never a request to make.
+ */
+const KEY_REQUIRED: readonly RegExp[] = [/^\/api\/v1\/workspaces\/[^/?#]+\/opportunities\/?(?:\?.*)?$/];
+
+function requireIdempotencyKey(path: string, method: string, headers: Record<string, string> | undefined): void {
+  if (method !== "POST" || !KEY_REQUIRED.some((pattern) => pattern.test(path))) return;
+  if (!isIdempotencyKey(headers?.["Idempotency-Key"])) {
+    throw new Error(`POST ${path} needs an Idempotency-Key (a new UUID per new record).`);
+  }
+}
+
 export async function apiFetch<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
   if (!path.startsWith("/api/")) {
     throw new Error(`apiFetch only calls same-origin API paths, got: ${path}`);
   }
   const { method = "GET", body, signal, timeoutMs = DEFAULT_TIMEOUT_MS, headers } = options;
+  requireIdempotencyKey(path, method, headers);
   const payload = body === undefined ? undefined : { encode: () => JSON.stringify(body), contentType: "application/json" };
   return request<T>(path, method, payload, { signal, timeoutMs, headers });
 }

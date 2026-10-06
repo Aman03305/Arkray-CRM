@@ -68,7 +68,7 @@ flowchart LR
 | **Account enumeration** | identical status, body and cookies for every failed sign-in, with the hasher run in every case (decoy hash); throttling keyed by the submitted email, whether or not it exists; password-reset requests do constant work (the job decides eligibility); workspace 404s identical for missing and forbidden users; admin-only 403s never depend on whether the target exists | built (P1) |
 | **Privilege escalation via admin impersonation** | no impersonation feature exists; admin workspace access is scoped reads/writes as the admin, audited; a test fails if any route looks like "login as" / "switch user", and the session stays the admin's through a whole workspace visit | built (P0); verified end to end (P6) |
 | **Wrong-workspace data on screen** (one user's records under another user's banner) | the workspace comes from the URL, parsed once like the route param and failing closed (a malformed id is "not found", never the organisation or one's own records); the selected-user frame renders only when the URL's and the layout's user agree and canonicalises other spellings; every query key carries the workspace; views remount per workspace; placeholders never cross workspaces; failures show errors, not fallbacks ([admin-user-workspace.md](admin-user-workspace.md#cache-isolation)) | built (P6; the review found and fixed a percent-encoded id showing organisation data under a user's banner) |
-| **Privilege escalation via user management** | capability checks (`users.manage`) in the view **and** under the admin lock in every service; no self role change or self deactivation; at least one active administrator always remains; demotion and deactivation take effect on the next request | built (P1) |
+| **Privilege escalation via user management** | capability checks (`users.manage`) in the view **and** under the admin lock in every service; no self role change or self deactivation; at least one active administrator always remains; role changes and deactivation take effect on the next request; another administrator's email, password and role can't be changed at all ([below](#administrator-account-protection)) | built (P1; R100) |
 | **Data left on a shared browser** | a sign-in, sign-out or session end reloads the page after rendering nothing; pages restored from the back/forward cache reload; app pages are `Cache-Control: no-store`; other tabs are told (BroadcastChannel) and reload; the viewer is re-checked when a tab regains focus | built (P1) |
 | **Account takeover via emailed links** | 256-bit random, single-use, expiring, superseded on reissue, purpose-bound; only SHA-256 digests stored; the secret is minted by the email job so it never touches a web request, the outbox or logs; email changes revoke pending links; link pages send `Referrer-Policy: no-referrer` and `Cache-Control: no-store` ([ADR-0013](adr/0013-account-lifecycle-and-one-time-tokens.md)) | built (P1) |
 | **Audit tampering** | append-only at ORM and DB-trigger level (`audit_event`, `pipeline_stage_history`, `activities_timeline_entry`); the trigger binds the application's role only when that role neither owns the tables nor is a superuser (an owner can disable triggers or TRUNCATE: shown by the Phase 9 review), so production runs the app as a separate, non-owner role (P11); the actor is always the authenticated user (body fields, `X-Request-ID` and forwarding headers are never adopted); delegated viewing's audit window lives in PostgreSQL, so no cache entry can suppress an audit row (P9); metadata redacts secret keys and `key=value` secrets, bounds keys, depth and size, drops NUL, control and bidi characters (P9) | trigger built; window and metadata P9; roles P11 |
@@ -115,7 +115,8 @@ flowchart LR
 
 | Threat | Control |
 |---|---|
-| An administrator learning a user's password | Never stored or returned in plaintext; admin-set passwords are temporary (forced change, 72 h expiry) and audited; administrators are invited, never given a password, and can't be promoted while one is pending; a sign-in with a temporary password is a security event; administrators see that a password changed, never what it is ([authorization.md](authorization.md#password-change-notification)) |
+| An administrator learning a user's password | Never stored or returned in plaintext; admin-set passwords are temporary (forced change, 72 h expiry) and audited; administrators are invited, never given a password, and can't be promoted while one is pending; a sign-in with a temporary password is a security event; administrators see that a password changed, never what it is ([authorization.md](authorization.md#password-change-notification); [password secrecy](#password-secrecy)) |
+| One administrator taking over another's account (R100) | Another administrator's email, password and role can't be changed, whatever the account's status ([below](#administrator-account-protection)) |
 | "Log in as" turning into impersonation | Support sessions keep the administrator's identity, bind to their browser session, expire in 30 minutes, open only the target's workspace, refuse identity and security operations, and stamp every write with actor, subject and session ([admin-user-workspace.md](admin-user-workspace.md#support-sessions)); no route named like impersonation exists (tested) |
 | Support-session fixation or reuse | The session's marker is server-side and checked against a digest of the browser session's key; a copied marker, a rotated key, sign-out, expiry or a deactivated target ends it |
 | Malicious uploads (executables, scripts, HTML/SVG XSS, macro documents, polyglots, zip bombs) | Extension allowlist **and** content recognition; OOXML refused with any macro, OLE object, ActiveX control or external template (by part name, embedded type, declared content type and relationship; bounded reads); files served as `attachment` with `nosniff` and a `default-src 'none'; sandbox` CSP; images previewed only when validated; optional ClamAV scanning |
@@ -123,6 +124,96 @@ flowchart LR
 | Oversized uploads | Content-Length checked first, then every byte counted while streaming (413); proxy limit on that route only; per-note count under the note's lock |
 | IDOR on files, notes, prices, pipelines | Every read and write goes through the caller's scope (404 outside it); downloads re-check the note on every request; tested route by route with another user's ids |
 | Custom-field abuse (HTML, formulas, schema growth) | Plain-text names and values (markup refused), typed canonical values, bounded counts and sizes, JSONB values (never DDL), ids audited not values |
+
+## Administrator account protection
+
+**Policy (R100):** an administrator's credentials and standing are changed only by that
+administrator. The audit found that Admin A could change Admin B's sign-in email to a mailbox
+A reads and then use *Forgot password* there, or demote B, set a temporary password and choose
+a new one at B's forced change: either way A held B's account and B was locked out. Every step
+was audited, but nothing stopped it.
+
+For another account whose **role** is administrator (active, invited or deactivated alike),
+the API now refuses with 422 `business_rule_violation` and a plain reason:
+
+- changing its **email** (the administrator changes it in Settings, with their password);
+- **setting its password** (they use *Forgot password*, which mails only their own address);
+- changing its **role** (demotion).
+
+Still allowed, and audited: editing the name, **deactivating** (sessions end at once, pending
+links and the invitations they sent are revoked) and reactivating (the account's own password
+comes back; a never-activated one gets an invitation at its own address), resending an
+invitation. The last active administrator can't be deactivated. Promoting a user to
+administrator is unchanged. The checks run in the service layer, under the
+user-administration lock, against the target's locked row, so a concurrent promotion can't
+slip between the check and the write (`tests/security/test_admin_takeover.py`, including real
+races). The admin Users page doesn't offer the refused actions for another administrator.
+
+**This is a deliberate behaviour change that needs product confirmation**: before it, an
+administrator could fix another administrator's email or demote them in the UI.
+
+**When the policy is in the way:**
+
+- *Remove an administrator's access*: deactivate the account (Users page).
+- *Wrong or obsolete email*: the administrator changes it themselves in Settings. If they
+  can't (they left, or the invitation went to a mistyped address), deactivate the account and
+  invite the right address as a new user; reassign their records if needed.
+- *Demote an administrator who stays*: ask them to sign out, then an operator with database
+  access makes the change in `manage.py shell` and leaves an audit note in the same
+  transaction, for example:
+
+  ```python
+  from django.db import transaction
+  from django.db.models import F
+  from django.utils import timezone
+  from arkray.audit import services as audit
+  from arkray.identity.models import AccountToken, User
+
+  with transaction.atomic():
+      user = User.objects.select_for_update().get(email="bina@example.com")
+      User.objects.filter(pk=user.pk).update(
+          role="sales_user", version=F("version") + 1, session_epoch=F("session_epoch") + 1
+      )
+      revoked = AccountToken.objects.filter(
+          created_by=user, purpose="invitation", status="pending"
+      ).update(status="revoked", revoked_at=timezone.now())
+      audit.record(
+          "user.role_changed", actor_id=None, target_type="user", target_id=user.pk,
+          metadata={"from": "admin", "to": "sales_user", "revoked_invitations": revoked,
+                    "reason": "operator: <ticket reference>"},
+      )
+  ```
+
+  It appears in the security events as a role change by the system.
+
+Residual: an administrator can still create or promote *new* administrator accounts (that is
+what the role is for); off-boarding an administrator should include reviewing the
+administrators they created or promoted (security events: `user.created`,
+`user.role_changed`).
+
+## Password secrecy
+
+Nobody, administrators included, can retrieve a user's password (current, previous, temporary
+or new), its hash, or a reset or invitation link's secret:
+
+- passwords are stored only as Argon2id hashes (`PASSWORD_HASHERS`); no serializer has a
+  password, hash, token or session-epoch field, and every serializer of users is pinned to its
+  exact fields by a test;
+- a password typed by an administrator (a new user's initial one, or a temporary one) exists
+  only in that request: the administrator knows what they typed (ADR-0026), but no API ever
+  returns it again, and the user must replace it at their next sign-in. The password a user
+  chooses is never visible to anyone;
+- reset and invitation secrets are minted by the email job, stored as SHA-256 digests, used
+  once, and mailed only to the account's own address;
+- `tests/security/test_password_secrecy.py` runs every password flow (initial and temporary
+  passwords set by an administrator, the user's own changes, a failed sign-in, a reset by
+  email, an accepted invitation, and an unexpected error in the middle of a set-password
+  request) with unique canary values, then finds none of the passwords, hashes or link
+  secrets in any API response body or header, the audit table, the outbox, the log output at
+  DEBUG, any email (and each link only in the email to its own account), the decoded
+  sessions, or any text or JSON column of any table (the current hash only in the user's
+  `password` column). The password-reset request's outbox payload holds the requested
+  *email address* until housekeeping blanks it (SEC-8, accepted), never a secret.
 
 ## Security headers
 
@@ -154,7 +245,7 @@ Two roles in production:
 
 | Role | Used by | Privileges |
 |---|---|---|
-| `arkray_owner` | the migrate job; an erasure that must redact stage-history lost reasons; a DBA's audit purge and index rebuild | owns schema; DDL |
+| `arkray_owner` | the migrate job; an erasure that must redact stage-history lost reasons and agreed CPTs; a DBA's audit purge and index rebuild | owns schema; DDL |
 | `arkray_app` | web, workers | `SELECT, INSERT, UPDATE, DELETE` on ordinary tables; **`SELECT, INSERT` only** on the append-only tables `audit_event`, `pipeline_stage_history`, `activities_timeline_entry`; no DDL, no TRUNCATE, no TRIGGER; not a superuser and owner of nothing |
 
 The append-only trigger stops UPDATE and DELETE for the app role because that role neither

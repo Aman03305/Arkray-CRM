@@ -48,7 +48,8 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     "api/v1/auth/password-reset/confirm": _rule("public", "POST"),
     "api/v1/auth/invitations/verify": _rule("public", "POST"),
     "api/v1/auth/invitations/accept": _rule("public", "POST"),
-    # --- user administration (Phase 1) ----------------------------------------------------
+    # --- user administration (Phase 1). Since R100 the services also refuse another
+    # administrator's email, password and role (tests/security/test_admin_takeover.py). ----
     "api/v1/admin/users": _rule(USERS_MANAGE, "GET", "POST"),
     "api/v1/admin/users/<uuid:user_id>": _rule(USERS_MANAGE, "GET", "PATCH"),
     "api/v1/admin/users/<uuid:user_id>/change-email": _rule(USERS_MANAGE, "POST"),

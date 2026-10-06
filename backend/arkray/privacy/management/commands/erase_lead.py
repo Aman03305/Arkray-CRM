@@ -43,8 +43,8 @@ class Command(BaseCommand):
             raise CommandError(str(exc)) from None
         self.stdout.write(
             f"Lead {lead_id}: {found.activities} activities, {found.opportunities} opportunities,"
-            f" {found.history_rows} stage-history lost reasons, {found.chunks} index chunks,"
-            f" {found.conversations} Ask Arkray conversations."
+            f" {found.history_rows} history rows with free text (lost reasons, agreed CPTs),"
+            f" {found.chunks} index chunks, {found.conversations} Ask Arkray conversations."
         )
         if not yes:
             self.stdout.write("Dry run: add --yes to erase (irreversible).")

@@ -8,7 +8,7 @@ Opportunities:
 - Value (shown as "Installation price"): a Decimal (or int) amount in the organisation
   currency, 0 to 999,999,999,999.99, at most 2 decimal places. Floats are refused outright:
   money is never converted through binary floating point, and NaN/Infinity can't even be
-  represented. The negotiated price follows the same rules.
+  represented. The agreed (negotiated) price follows the same rules.
 - Probability: a Decimal (or int) percentage, 0 to 100, at most 2 decimal places.
 - Opportunity date and expected close date: dates (not datetimes: no time zone can shift
   them), 2000-2099.
@@ -17,8 +17,9 @@ Opportunities:
 - Address: multi-line, up to 1,000. Instrument: one line, up to 200, and one of
   instruments.INSTRUMENTS (checked by the services, which know the current value: an
   opportunity from before the list keeps its own text until the instrument is changed).
-  Work load and Expected CPT: one line, up to 100 (free text: the product defines no
-  workload unit and no meaning or unit for CPT, so none is invented).
+  Work load: one line, up to 100 (free text: the product defines no workload unit). Expected
+  CPT and the agreed CPT asked for on entering negotiation (ADR-0029): clean_cpt, one rule
+  for both (free text; CPT's meaning and unit await the product owner, R104).
 - Description: multi-line text up to 5,000 characters. Lost reason: up to 500.
 
 Configuration (docs/pipeline.md#configuration): stage and custom-field specifications,
@@ -49,6 +50,8 @@ from . import models as m
 VALUE_INVALID = "Enter an amount such as 1250000 or 1250000.50."
 PROBABILITY_INVALID = "Enter a percentage from 0 to 100, with at most 2 decimal places."
 NAME_REQUIRED = "Enter a name."
+PRICE_REQUIRED = "Enter the agreed price."
+AGREED_CPT_REQUIRED = "Enter the agreed CPT."
 MARKUP_REFUSED = "Use plain text: tags such as <b> aren't allowed."
 # Something that starts like an HTML/XML tag, a comment or a processing instruction. Plain
 # comparisons ("< 5 tests") stay allowed. Values are always rendered as text, never markup;
@@ -79,10 +82,42 @@ def clean_value(value: Any) -> Decimal:
 
 
 def clean_price(value: Any) -> Decimal:
-    """A negotiated price: the same rules as the value."""
+    """An agreed (negotiated) price: the same rules as the value."""
     if value is None:
-        raise ValueError("Enter the negotiated price.")
+        raise ValueError(PRICE_REQUIRED)
     return clean_value(value)
+
+
+# --- CPT ---------------------------------------------------------------------------------------
+CPT_MAX_LENGTH = m.CPT_MAX_LENGTH
+CPT_NOT_TEXT = 'Enter the CPT as text, for example "Rs 18 per test".'
+
+
+def clean_cpt(value: Any) -> str:
+    """THE rule for every CPT: Expected CPT (opportunity.expected_cpt) and the agreed CPT
+    recorded with each agreed price (negotiation_price.agreed_cpt, ADR-0029).
+
+    One line of free text, kept as the salesperson wrote it: a string (a JSON number is
+    refused rather than re-spelled: 18.50 would arrive as 18.5), NFC, characters that are
+    invisible or change how text displays refused (controls, NUL, bidi, zero-width, lone
+    surrogates: core.text), whitespace runs (tabs and newlines included) collapsed, trimmed,
+    at most CPT_MAX_LENGTH code points after that; blank means "not given". Never parsed,
+    converted, summed or compared as a number; not searched and not in the semantic index;
+    always rendered as text (markup is stored as typed and shown escaped).
+
+    The CPT's business meaning and unit require product-owner confirmation (risk R104).
+    Until then nothing interprets it. A typed value later goes in new columns beside this
+    text (expand, backfill what parses unambiguously, contract: docs/pipeline.md#expected-cpt),
+    so `expected_cpt` and `agreed_cpt` keep this meaning for API clients."""
+    if not isinstance(value, str):
+        raise ValueError(CPT_NOT_TEXT)
+    return _line(CPT_MAX_LENGTH)(value)
+
+
+def clean_agreed_cpt(value: Any) -> str:
+    """The agreed CPT (clean_cpt). Whether it is required depends on the stage, which the
+    services know."""
+    return clean_cpt(value)
 
 
 def clean_probability(value: Any) -> Decimal | None:
@@ -166,7 +201,7 @@ CLEANERS: Mapping[str, Callable[[Any], Any]] = {
     "address": _multiline(m.ADDRESS_MAX_LENGTH),
     "instrument_name": _line(m.INSTRUMENT_NAME_MAX_LENGTH),
     "work_load": _line(m.WORK_LOAD_MAX_LENGTH),
-    "expected_cpt": _line(m.EXPECTED_CPT_MAX_LENGTH),
+    "expected_cpt": clean_cpt,
     "custom_fields": _custom_values_shape,
 }
 # What PATCH may change. Lead, owner, pipeline, stage, status, closed_at, provenance,

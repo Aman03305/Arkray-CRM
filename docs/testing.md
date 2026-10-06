@@ -82,6 +82,16 @@ architecture test fails if a route is missing from the matrix.
   recovery.
 - **Frontend states:** every data view tests loading (skeleton), empty, error (with retry)
   and populated states, plus permission-driven visibility.
+- **Accessibility in unit tests** (`src/test/a11y.ts`): every workspace page rendered in the
+  shell (`features/workspace/a11y-pages.test.tsx`) has one `h1` and no skipped heading level,
+  no unnamed button or link, no control repeated down a list under the same name, and no
+  `aria-label` that leaves out the text the control shows (axe's label-content-name-mismatch).
+  jsdom has no layout, so target sizes (WCAG 2.2 2.5.8, at least 24 × 24 px; 32 px for icon
+  buttons where there is room) are asserted through the classes that give them (`components/ui/targets.ts`);
+  the measured check stays a manual one in a real browser (Playwright + axe, as in the audits).
+- **Double submission:** a second click before the first request's pending state reaches the
+  screen (TanStack Query publishes it a tick later) sends nothing
+  (`features/activities/double-submit.test.tsx`, `components/ui/useSingleFlight.ts`).
 
 ## The whole-software audit and the release candidate
 
@@ -202,6 +212,106 @@ since v0.7.0 rolled back to exactly v0.7.0's schema (the `vector` extension stay
   semantic Ask 156 / 249, a note 157 / 246, a stage move 167 / 284; global search 339 /
   1,281 (R59: the run's own notes pushed "price" out of the recent window); at most 13
   database connections; the indexing backlog at most 46 and drained.
+
+## The final whole-software audit (after ADR-0029 and the performance pass)
+
+Seven independent reviewers, each with its own database or isolated Compose project and
+editing nothing, attacked the working tree in turn: domain and data integrity, architecture
+and schema, application security, database and performance, frontend and accessibility,
+Ask Arkray and search, and operations (failure injection in a production-shaped stack).
+Their scripts and evidence stayed outside the repository.
+
+| | P0 | P1 | P2 | P3 |
+|---|---|---|---|---|
+| Found (distinct findings; a few aggregate several small items) | 0 | 1 | 18 | 47 |
+| Fixed | 0 | 1 | 8 | 12 |
+
+**The P1, fixed:** an S3-compatible attachment store that stops answering held a web worker
+for 113 s (botocore's defaults), beyond the 30 s worker timeout, so a few retrying users
+could pin every worker. The client now has a 3 s connect timeout, a 10 s read timeout and
+two attempts in total: measured 7 s against a black-holed endpoint, 5 s against a refused
+one (`test_production_settings.py`).
+
+**P2s fixed:** a crafted note held an Ask Arkray worker for 10 s (quadratic redaction
+patterns, now linear: 1 ms where it took 1 s); the model repeating a recorded CPT withheld
+the whole answer; the organisation-wide stage breakdown overflowed the tool budget above
+about 35 pipelines (HTTP 500; now the ten largest by open value plus a count of the rest);
+an erasure left work load, Expected CPT and the append-only agreed CPT; the drawer's error
+banner could be off-screen after a submit at the bottom of a long form, and focus was lost
+after Discard; the `pnpm audit` gate was red (a build-time advisory); a stalled database
+fired no alert (`ArkrayMetricsUnavailable`). **Accepted or open, with reasons:**
+R100 and R103-R109 in the risk register.
+
+**Final gates, on the final code** (after the last change):
+
+- **Backend:** ruff, `ruff format --check` (349 files), strict mypy, import-linter (1
+  contract kept), `makemigrations --check`, `check`, `check --deploy` with the production
+  settings (only the documented HSTS policy notes), **4,826 passed, 0 failed, 0 skipped**
+  (18 min 26 s), coverage **96 %** (11,858 statements, 456 missed), pip-audit: no known
+  vulnerabilities.
+- **Frontend:** API schema drift, ESLint (0 warnings), TypeScript, **837 passed** (58
+  files), production build, `pnpm audit --prod --audit-level high`: no known
+  vulnerabilities.
+
+## Attachment storage faults
+
+Final audit R105 and SRE-4 ([reliability.md](reliability.md#attachment-storage)): how file
+storage fails, and that nothing else does. Run them like any backend test, with a database
+of your own:
+
+```
+DATABASE_URL=postgres://.../arkray_<you> uv run pytest -p no:cacheprovider \
+  tests/integration/test_attachment_storage_faults.py \
+  arkray/activities/tests/test_attachment_failures.py \
+  arkray/activities/tests/test_storage_guard.py \
+  arkray/activities/tests/test_reconcile.py
+```
+
+(about 2 minutes; nothing outside the process: no Docker, no network).
+
+- **The fault matrix** (`tests/integration/test_attachment_storage_faults.py`): the real
+  API, the real django-storages `S3Storage` and botocore client built by the production
+  builder (`config.settings.base.attachment_s3_backend`, timeouts lowered for speed),
+  against `tests/integration/fake_s3.py`, a small S3-compatible endpoint on a real socket
+  (PUT, GET, HEAD, DELETE, multipart, ListObjectsV2, `head_bucket`) with a fault switch per
+  request: 403, 404, 500, 503 SlowDown, slow, slow mid-body, dropped mid-body, never
+  answering, keeping half a write. Plus a refused port and a black-holed address
+  (10.255.255.1; skipped, saying so, on a host that answers it at once). Each case checks the
+  time it costs against the deadline, the API's status and code (503 `storage_unavailable`
+  with `Retry-After`, or 410 `attachment_unavailable` for a lost object), the row afterwards
+  (`failed`, never `stored`, never downloadable), the log line's `error_class` and the
+  metrics, and that neither the response nor the logs at INFO name the bucket, the endpoint
+  or the key. The breaker opens after three outages (a 403 or a 404 never opens it), fails
+  fast without a network call, and closes after a background check; twelve uploads at once
+  to a dead store all come back within the deadline (transactional, real threads); the CRM's
+  other endpoints answer in time while an upload hangs; readiness stays `ok` while
+  `arkray_attachment_storage_up` is 0. The filesystem backend: an unwritable root, a full
+  disk, a short write and a slow disk (failing storage subclasses), a lost file.
+- **Every step of an upload** (`activities/tests/test_attachment_failures.py`): the write
+  failing, the write done and the process dying (or the finishing transaction failing)
+  before the row is marked, a deletion whose purge fails; the upload rate limit.
+- **The guard** (`activities/tests/test_storage_guard.py`): error classification (botocore,
+  OS errors, wrapped causes), the breaker's counting, the deadline and the stop signal, the
+  in-flight cap; the gauges (values, no names or keys, the partial index, a stalled probe
+  or cache left out within the deadline).
+- **Reconciliation** (`activities/tests/test_reconcile.py`): each kind of mismatch, each
+  repair and what it never does (delete a row, delete an orphan, touch a mismatch or a
+  restorable file), a check that issues nothing but SELECTs, an outage stopping the pass
+  with exit 2 and no file reported missing, the mass-missing brake, a row locked by an
+  upload skipped at once, a row committed during the pass, the keyset query on the
+  storage_key index at 20,000 rows, the command's report, JSON and exit codes.
+
+**Mutation-checked** (each fix removed, the tests seen failing, the fix restored): the size
+read back after a write; marking the row failed when the write fails; the breaker's trip;
+the missing-versus-outage distinction (a 404 answered as 503); the confirmation of a
+missing object before it is reported; check mode's read-only guard.
+
+**What a local fake can't show** (R99 stays open until the deployment's bucket is tested):
+the provider's consistency and multipart limits, server-side encryption, IAM policies
+(including the 403-for-missing-objects of a role without `s3:ListBucket`), real latency and
+throttling. Before go-live: a smoke upload, download and delete against the real bucket,
+`reconcile_attachments --check` against it, and one outage drill (block the endpoint at the
+network: uploads answer 503 within 12 s, `arkray_attachment_storage_up` 0, recovery).
 
 ## What exists after the product enhancement phase
 

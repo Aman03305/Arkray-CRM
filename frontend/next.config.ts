@@ -25,6 +25,13 @@ const secretLinkHeaders = [
 const nextConfig: NextConfig = {
   output: "standalone",
   poweredByHeader: false,
+  experimental: {
+    // Pages are rendered per request only for the CSP nonce; what the server renders depends
+    // on the URL alone (no cookies, no data: every record is fetched by the browser). So a
+    // page visited in the last 5 minutes opens again from the router's cache, without a
+    // round trip. The default (0 s) re-requested every page on every click.
+    staleTimes: { dynamic: 300 },
+  },
   async rewrites() {
     return [{ source: "/api/:path*", destination: `${apiOrigin}/api/:path*` }];
   },

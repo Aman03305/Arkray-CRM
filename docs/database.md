@@ -412,7 +412,7 @@ Configuration rows seeded by `pipeline.0003` ([pipeline.md](pipeline.md#stages))
 | `contact_phone`, `contact_email`, `address` (≤ 1,000), `instrument_name` (≤ 200), `work_load` (≤ 100) | optional; a new or changed `instrument_name` is one of `pipeline/instruments.py` (checked by the services; no CHECK, so older free text survives) |
 | `expected_cpt` varchar(100) DEFAULT '' | optional free text (ADR-0028; meaning and unit to be confirmed by the business); added by `pipeline.0008` with a constant default it keeps, a catalogue-only change (no rewrite, no backfill) |
 | `custom_fields` jsonb | CHECK `jsonb_typeof = 'object'`; values keyed by field id, validated against the pipeline's definitions ([pipeline.md](pipeline.md#custom-fields)) |
-| `negotiated_price` NUMERIC(14,2) NULL, `negotiated_at` NULL | the latest negotiated price (a copy of the history's newest row); CHECK set together, price ≥ 0 |
+| `negotiated_price` NUMERIC(14,2) NULL, `negotiated_at` NULL | the latest agreed (negotiated) price (a copy of the history's newest row); CHECK set together, price ≥ 0. Its agreed CPT has no copy here: the detail query reads it from the newest `pipeline_negotiation_price` row (ADR-0029) |
 
 Composite foreign keys (`pipeline.0002`, [ADR-0018](adr/0018-pipeline-integrity-by-composite-keys.md)):
 
@@ -468,8 +468,9 @@ the opportunity entered the stage, `lost_reason`, `actor_id` FK, `occurred_at`.
 
 ### `pipeline_negotiation_price` (product enhancement phase, append-only)
 
-`id bigint`, `opportunity_id` FK PROTECT, `price NUMERIC(14,2)` (CHECK ≥ 0), `currency`
-(CHECK `^[A-Z]{3}$`, INR), `stage_id` FK and `stage_name` (a copy, CHECK non-empty),
+`id bigint`, `opportunity_id` FK PROTECT, `price NUMERIC(14,2)` (CHECK ≥ 0), `agreed_cpt
+varchar(100) DEFAULT ''` (ADR-0029: the agreed CPT recorded with the price; `''` on rows from
+before it was asked for), `currency` (CHECK `^[A-Z]{3}$`, INR), `stage_id` FK and `stage_name` (a copy, CHECK non-empty),
 `source` (`stage_entry`, `revision`, `creation`), `opportunity_version` (the version the
 price was recorded at), `actor_id` FK, `subject_user_id` NULL (the owner when the actor is
 someone else), `support_session_id` NULL, `occurred_at`. Append-only: `AppendOnlyModel` plus
@@ -756,7 +757,10 @@ pipelines list's visibility subquery 11.6 → 1.8 ms, a personal board 10.4 → 
 `pipeline.0006` 21 s forward (backfilling 300,000 opportunities: it holds the opportunity
 table for that time, so run it in the release window), 2.5 s back; the others under a second
 each; the full rollback to the previous release's schema and forward again 17.5 s, with a
-checksum of every opportunity's id, stage, value, owner and version unchanged.
+checksum of every opportunity's id, stage, value, owner and version unchanged. (Measured
+before the reverse guard: since 2026-10-06 that rollback is refused, see
+[Reversibility](#reversibility); the forward figures stand, and were re-measured then:
+[Migrations](#migrations).)
 
 ## Migrations
 
@@ -764,7 +768,11 @@ checksum of every opportunity's id, stage, value, owner and version unchanged.
   Hand-written `RunSQL` is used only for what Django cannot express (triggers, extensions).
 - Production changes follow **expand → migrate → contract**: add nullable or defaulted
   columns first, deploy code that writes both shapes, backfill in batches, then tighten
-  constraints in a later release. No long table locks during business hours.
+  constraints in a later release. No long table locks during business hours. **Exception:**
+  the product-enhancement release (`pipeline.0006`, `identity.0004`) added NOT NULL columns
+  without database defaults and backfilled in the same migration, so the v1.0 RC can't run
+  beside it: upgrading from the RC is a stopped deploy
+  ([deployment.md](deployment.md#upgrading); final audit ARCH-1, R108).
 - Migrations run under the application's statement timeout (`DB_STATEMENT_TIMEOUT_MS`,
   10 s). One that backfills, rewrites or indexes a whole large table lifts it for its own
   transaction first (`SET LOCAL statement_timeout = 0`; `activities.0003`, `0005`, `0006`,
@@ -787,11 +795,70 @@ checksum of every opportunity's id, stage, value, owner and version unchanged.
   INVALID index, still maintained on writes: drop it and rerun.
 - `pipeline.0008` (ADR-0028) adds `pipeline_opportunity.expected_cpt` (`varchar(100) NOT NULL
   DEFAULT ''`). The column **keeps** its database default (`db_default`): the previous release
-  never names it and must still insert while it runs beside the new one in a rolling deploy,
-  or after a rollback to it (backend review, P2; tested with the previous release's INSERT
-  shape). PostgreSQL 11+ stores a constant default in the catalogue, so this takes only a
-  brief ACCESS EXCLUSIVE lock at any size; it is not table-wide and needs no lifted timeout.
-  Reversible (the column is dropped); tested forwards, backwards and forwards again on a copy
-  of the development database, and from an empty database.
+  never names it and must still insert while it runs beside the new one in a rolling deploy
+  (backend review, P2; tested with the previous release's own model,
+  `tests/integration/test_upgrade_from_release.py`). PostgreSQL 11+ stores a constant default
+  in the catalogue, so this takes only a brief ACCESS EXCLUSIVE lock at any size; it is not
+  table-wide and needs no lifted timeout. Refuses to be reversed (it would drop every Expected
+  CPT): [Reversibility](#reversibility).
+- `pipeline.0009` (ADR-0029) adds `agreed_cpt` (`varchar(100) NOT NULL DEFAULT ''`) to the
+  append-only `pipeline_negotiation_price` (its trigger fires on UPDATE/DELETE, not on ALTER
+  TABLE). It keeps its database default, for the same rolling-deploy reason as 0008 (tested
+  with 989830b's own model; the test fails if the default is dropped). Catalogue-only, a
+  brief lock at any size. Refuses to be reversed (it would drop every agreed CPT).
 - Extensions (`vector`, `pg_trgm`, `btree_gin`) are created by the migration of the module
   that needs them. All are "trusted" extensions installable by the database owner role.
+- **Upgrade from the previous release, tested** (`tests/integration/test_upgrade_from_release.py`):
+  a database at the v1.0 RC's schema, filled through the RC's own (historical) models with
+  realistic data and its edge cases (200 leads with padded, Devanagari, combining-accent,
+  201-character, organisation-only, spaces-only and tab names; the seeded pipeline renamed,
+  a stage of its own and a second pipeline; 90 opportunities in every stage, won, lost,
+  archived, several in negotiation; stage history, tasks, meetings, notes, timeline and audit
+  rows), is migrated through every later state (0c31aee, 5b05177, 989830b, with negotiated
+  price history and Expected CPT added on the way) to the latest. Every table's rows, as the
+  release knew them, are byte-identical afterwards (md5 of every row; opportunities' version
+  and `updated_at` included: the backfill is not an edit), every constraint is validated and
+  every index valid, deals already in negotiation move and are edited through today's
+  services, and the upgraded schema equals a new installation's (columns, defaults,
+  constraints, indexes, triggers, functions, storage options; no allowed differences) with
+  `makemigrations --check` clean.
+- **`pipeline.0006`'s backfill** (each opportunity's opportunity date from its creation time
+  in Asia/Kolkata, account and customer names from its lead): names are cut to 200
+  characters (only a 201-character "first last" name can exceed it; the lead keeps the whole
+  name; not recorded elsewhere). A lead whose names are spaces only (only reachable past the
+  lead validation) has an empty display name, which used to abort the whole migration on the
+  "name present" constraints; it now gets `Unknown customer` (editable). That is the only
+  change: no applied database could have contained such a row, and every other outcome is
+  byte-identical to the released backfill (tested against its exact expressions). Still
+  aborting, cleanly, only on data no code path writes: an opportunity created before 2000 or
+  after 2099 (`pipeline_opp_date_range`), and two active pipelines whose names differ only in
+  case (`pipeline_pipeline_shared_name_unique`; the RC had no way to create pipelines).
+
+### Reversibility
+
+**Schema down-migrations past the v1.0 RC are refused** ([deployment.md](deployment.md#rollback)).
+Every migration after the RC ends with `RefuseReverse`
+(`arkray/core/migrations/_reverse_guard.py`): nothing forwards; backwards it raises
+`IrreversibleError` ("... can't be reversed: that would delete ... restore the database
+backup taken before the upgrade ..., or deploy a forward fix"). It is the **last** operation,
+so it runs first when reversing: a refused rollback undoes nothing, with or without data
+recorded since (tested: `django_migrations`, the schema catalogue and every row's checksum
+unchanged after `migrate pipeline 0005`, `pipeline 0008`, `identity 0003`, `activities 0009`,
+`audit 0002`, `leads 0005`). The index-only ones refuse too, so the rule has no exceptions and
+no backwards plan stops part-way. `tests/architecture/test_migrations.py` pins the set, and
+fails when a migration whose reverse drops a table or column (or deletes rows) can be reached
+by a backwards plan from the latest schema without a refusal first.
+
+| Migration | Reverse |
+|---|---|
+| `pipeline.0006` (pipelines' owners, negotiation stages, the opportunity's details, negotiated price history, custom fields) | **refused** |
+| `pipeline.0007` (search index swap, holds no data) | **refused** (one rule) |
+| `pipeline.0008` (`expected_cpt`), `pipeline.0009` (`agreed_cpt`) | **refused** |
+| `identity.0004` (support sessions, password-change state) | **refused** |
+| `activities.0010` (note edit stamps, attachments: the stored files' only record) | **refused** |
+| `audit.0003` (`support_session_id` on audit events), `audit.0004` (its index) | **refused** |
+| `activities.0003` (timeline backfill) | no-op (the rows stay) |
+| every other migration up to the RC (`core` 0001-0005, `identity` 0001-0003, `audit` 0001-0002, `leads` 0001-0006, `pipeline` 0001-0005, `activities` 0001-0002, 0004-0009, `ai` 0001-0003) | reversible, for development history; from the latest schema a backwards plan meets a refusal first, except `ai.0001` (the notes' search index, rebuilt by `ai_reindex`, and Ask Arkray conversations, deleted after 30 days anyway) and `core.0003`/`0004` (the outbox's claim tokens, and idempotency records kept 24 hours) |
+
+A new migration is added to the pinned set with its own guard, unless it is a deliberate,
+documented exception.

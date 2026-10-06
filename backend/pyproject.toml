@@ -100,7 +100,7 @@ disallow_untyped_calls = false
 check_untyped_defs = false
 
 [[tool.mypy.overrides]]
-module = ["environ.*", "django_redis.*"]
+module = ["environ.*", "django_redis.*", "botocore.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

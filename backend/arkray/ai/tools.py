@@ -313,6 +313,25 @@ def _lead_row(ctx: ToolContext, lead: Lead) -> dict[str, Any]:
 
 
 # --- the tools -----------------------------------------------------------------------------------
+# The by-stage listing of "all pipelines" is bounded (final audit DBPERF-1): beyond this many
+# pipelines (the largest open value first) it names how many more there are and asks for a
+# pipeline by name; the totals above it always cover every pipeline.
+MAX_PIPELINES_LISTED = 10
+MAX_STAGE_ROWS_LISTED = 120  # a pipeline may have 20 stages: keep the listing inside the budget
+
+
+def _listed_pipelines(ctx: ToolContext) -> tuple[list[Pipeline], int]:
+    """The pipelines whose stages an all-pipelines summary lists, and how many more exist."""
+    visible = _pipelines(ctx)
+    if len(visible) <= MAX_PIPELINES_LISTED:
+        return visible, 0
+    rank = {
+        pk: place for place, pk in enumerate(pipeline_selectors.pipelines_by_open_value(ctx.scope))
+    }
+    ordered = sorted(visible, key=lambda p: rank.get(p.pk, len(rank)))  # stable: ties keep order
+    return ordered[:MAX_PIPELINES_LISTED], len(ordered) - MAX_PIPELINES_LISTED
+
+
 def get_pipeline_summary(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     _check_keys(args, {"pipeline"})
     name = _text(args, "pipeline", required=False, max_length=100)
@@ -323,13 +342,23 @@ def get_pipeline_summary(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
     ctx.amount("Pipeline value", totals.pipeline_value)
     ctx.amount("Weighted pipeline", totals.weighted_pipeline)
     ctx.count("Open opportunities", totals.open_count)
-    pipelines = []
-    for pipeline in [chosen] if chosen is not None else _pipelines(ctx):
+    pipelines: list[dict[str, Any]] = []
+    more_pipelines = 0
+    if chosen is not None:
+        listed = [chosen]
+    else:
+        listed, more_pipelines = _listed_pipelines(ctx)
+    stage_rows = 0
+    for index, pipeline in enumerate(listed):
         breakdown = pipeline_selectors.stage_breakdown(ctx.scope, pipeline)
         # A retired pipeline still holding opportunities is listed too: the totals count
         # them, so the breakdown must add up to them (whole-software audit).
         if not pipeline.is_active and not any(row.count for row in breakdown):
             continue
+        if pipelines and stage_rows + len(breakdown) > MAX_STAGE_ROWS_LISTED:
+            more_pipelines += len(listed) - index
+            break
+        stage_rows += len(breakdown)
         pipelines.append(
             {
                 "pipeline": pipeline.name if pipeline.is_active else f"{pipeline.name} (retired)",
@@ -357,6 +386,17 @@ def get_pipeline_summary(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
             "Won and lost opportunities never count."
         ),
         "by_stage": pipelines,
+        **(
+            {
+                "more_pipelines": more_pipelines,
+                "note": (
+                    f"Only the {len(pipelines)} pipelines with the largest open value are broken "
+                    f"down by stage; {more_pipelines} more exist. Ask about one by name."
+                ),
+            }
+            if more_pipelines
+            else {}
+        ),
     }
 
 
@@ -735,6 +775,10 @@ def _opportunity_details(ctx: ToolContext, opportunity_id: UUID) -> dict[str, An
     if found.expected_cpt:
         # Free text as the salesperson wrote it: the CRM defines no unit for CPT.
         row["expected_cpt"] = fmt.label(found.expected_cpt)
+    # Recorded with the latest agreed price, read from the history (ADR-0029); free text.
+    agreed_cpt: str = found.agreed_cpt  # type: ignore[attr-defined]
+    if agreed_cpt:
+        row["agreed_cpt"] = fmt.label(agreed_cpt)
     row["negotiation_history"] = _negotiation_rows(ctx, opportunity_id)
     row["recent_activities"] = _recent_activities(
         ctx, ActivityFilters(opportunity_id=opportunity_id)
@@ -752,6 +796,7 @@ def _negotiation_rows(ctx: ToolContext, opportunity_id: UUID) -> list[dict[str, 
     return [
         {
             "price": fmt.money(price.price),
+            **({"agreed_cpt": fmt.label(price.agreed_cpt)} if price.agreed_cpt else {}),
             "stage": fmt.label(price.stage_name),
             "recorded": fmt.when(price.occurred_at),
             # Whoever recorded it, by name, unless it was the person asking: an
@@ -764,8 +809,8 @@ def _negotiation_rows(ctx: ToolContext, opportunity_id: UUID) -> list[dict[str, 
 
 
 def get_negotiation_history(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    """The negotiated prices of one opportunity, newest first: authoritative amounts from
-    the append-only history, never computed."""
+    """The agreed prices (and agreed CPTs) of one opportunity, newest first: authoritative
+    amounts from the append-only history, never computed."""
     _check_keys(args, {"ref"})
     _, record_id = _ref(_text(args, "ref", required=True, max_length=60) or "", ("opportunity",))
     try:
@@ -775,9 +820,11 @@ def get_negotiation_history(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
         raise ToolError("No such opportunity in this workspace.") from None
     if found.negotiated_price is not None:
         ctx.amount("Latest negotiated price", found.negotiated_price)
+    latest_cpt: str = found.agreed_cpt  # type: ignore[attr-defined]  # the newest row's
     return {
         "ref": ctx.cite("opportunity", found.pk, found.title),
         "latest": fmt.money(found.negotiated_price) if found.negotiated_price is not None else None,
+        "latest_agreed_cpt": fmt.label(latest_cpt) if latest_cpt else None,
         "history": rows,
         "shown": len(rows),
     }
@@ -984,9 +1031,10 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         "get_negotiation_history",
-        "The negotiated prices recorded for one opportunity (its reference, opportunity:<id>), "
-        "newest first, with the stage, when and by whom. Use for 'what price did we last "
-        "negotiate' questions; find the opportunity first with find_records.",
+        "The agreed (negotiated) prices recorded for one opportunity (its reference, "
+        "opportunity:<id>), newest first, each with its agreed CPT, the stage, when and by "
+        "whom. Use for 'what price (or CPT) did we last agree' questions; find the "
+        "opportunity first with find_records.",
         _schema({"ref": {"type": "string"}}, ("ref",)),
         get_negotiation_history,
     ),

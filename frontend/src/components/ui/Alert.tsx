@@ -1,5 +1,7 @@
+"use client";
+
 import { CircleAlert, CircleCheck, Info } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 
 type Tone = "error" | "success" | "info";
 
@@ -18,11 +20,17 @@ interface AlertProps {
   action?: ReactNode;
 }
 
-/** Errors are announced immediately (role="alert"); other messages politely. */
+/** Errors are announced immediately (role="alert"); other messages politely. An error that
+ * appears inside a scrolled panel (a long drawer's form, submitted from its sticky footer)
+ * is scrolled into view, so sighted users see it as screen-reader users hear it. */
 export function Alert({ tone = "info", title, children, requestId, action }: AlertProps) {
   const { box, icon: Icon } = TONES[tone];
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (tone === "error") ref.current?.scrollIntoView?.({ block: "nearest" });
+  }, [tone]);
   return (
-    <div role={tone === "error" ? "alert" : "status"} className={`flex gap-3 rounded-md border px-3.5 py-3 text-sm ${box}`}>
+    <div ref={ref} role={tone === "error" ? "alert" : "status"} className={`flex gap-3 rounded-md border px-3.5 py-3 text-sm ${box}`}>
       <Icon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
       <div className="min-w-0 flex-1">
         {title ? <p className="font-medium">{title}</p> : null}

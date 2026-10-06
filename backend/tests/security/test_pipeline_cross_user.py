@@ -23,7 +23,7 @@ from arkray.core.keyset import INVALID_CURSOR
 from arkray.leads.models import Lead
 from arkray.pipeline.models import Opportunity, Pipeline, Stage, StageHistory
 from tests.factories import LeadFactory, OpportunityFactory, UserFactory, default_stage
-from tests.helpers import signed_in, without_request_id
+from tests.helpers import key_header, signed_in, without_request_id
 
 pytestmark = pytest.mark.django_db
 
@@ -257,6 +257,7 @@ class TestWrites:
             f"{ME}/opportunities",
             {"lead": str(victim_lead.pk), "description": "Mine now", "value": "1"},
             format="json",
+            headers=key_header(),
         )
         assert response.status_code == 404
         assert not Opportunity.objects.filter(description="Mine now").exists()
@@ -303,6 +304,7 @@ class TestWrites:
             f"{ME}/opportunities",
             {"lead": str(own_lead.pk), "description": "Mallory", "value": "1", **extra(victim)},
             format="json",
+            headers=key_header(),
         )
         assert response.status_code == 400
         assert not Opportunity.objects.filter(description="Mallory").exists()
@@ -315,6 +317,7 @@ class TestWrites:
             f"{ME}/opportunities",
             {"lead": str(own_lead.pk), "description": "Mallory", "value": "1"},
             format="json",
+            headers=key_header(),
         )
         assert response.status_code == 201, response.content
         assert response.json()["owner"]["id"] == str(attacker.pk)
@@ -410,6 +413,7 @@ def opportunity_without_a_lead(owner):
             "value": "250000",
         },
         format="json",
+        headers=key_header(),
     )
     assert response.status_code == 201, response.content
     body = response.json()

@@ -121,7 +121,7 @@ class ChatProvider(Protocol):
 
 
 # Loggers that would write request bodies at DEBUG (also pinned in settings.LOGGING).
-QUIET_LOGGERS = ("anthropic", "httpx", "httpx2", "httpcore", "urllib3")
+QUIET_LOGGERS = ("anthropic", "httpx", "httpx2", "httpcore", "httpcore2", "urllib3")
 
 
 class AnthropicProvider:

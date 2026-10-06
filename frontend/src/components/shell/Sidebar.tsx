@@ -141,7 +141,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
                 disabled={signOut.isPending || signOut.isSuccess}
                 aria-label="Sign out"
                 title={signOut.isError ? "Sign-out failed. Try again." : "Sign out"}
-                className="focus-on-shell rounded-md p-1.5 text-shell-muted hover:bg-white/10 hover:text-white disabled:opacity-50"
+                className="focus-on-shell -m-0.5 rounded-md p-2 text-shell-muted hover:bg-white/10 hover:text-white disabled:opacity-50"
               >
                 {signOut.isPending ? <Spinner /> : <LogOut aria-hidden="true" className="size-4" />}
               </button>

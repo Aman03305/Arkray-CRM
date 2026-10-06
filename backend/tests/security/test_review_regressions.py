@@ -158,7 +158,9 @@ class TestResetLinks:
 
 
 class TestInvitationsOfRemovedManagers:
-    @pytest.mark.parametrize("removal", ["deactivate", "demote"])
+    # "demote" was a second removal path until R100: another administrator's role can no
+    # longer be changed (tests/security/test_admin_takeover.py), deactivation is the way.
+    @pytest.mark.parametrize("removal", ["deactivate"])
     def test_a_removed_admins_pending_invitations_die_with_their_access(self, admin, removal):
         """Review (admin) #2 (P2): a rogue admin could leave a backdoor admin invitation."""
         rogue = AdminFactory()

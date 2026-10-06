@@ -1,6 +1,7 @@
 """The cache must degrade to "miss" instantly during a Redis outage, never stall requests."""
 
 import logging
+import threading
 import time
 
 import pytest
@@ -16,7 +17,20 @@ from arkray.core.redis import FailFastConnection, cache_breaker, fail_fast_pool_
 def closed_breaker():
     cache_breaker.reset()
     yield
+    finish_probe()
     cache_breaker.reset()
+
+
+def finish_probe():
+    thread = cache_breaker._probe_thread
+    if thread is not None:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+class FakeSocket:
+    def close(self):
+        pass
 
 
 def test_breaker_skips_connection_attempts_after_a_failure(monkeypatch):
@@ -98,10 +112,72 @@ def test_a_successful_connection_resets_the_back_off(monkeypatch):
     expire(cache_breaker)
     cache_breaker.trip()
     expire(cache_breaker)
-    monkeypatch.setattr(Connection, "connect", lambda self: None)
-    FailFastConnection(host="redis.invalid", port=6379).connect()
+    monkeypatch.setattr(Connection, "_connect", lambda self: FakeSocket())
+    with pytest.raises(RedisConnectionError, match="checking"):
+        FailFastConnection(host="redis.invalid", port=6379).connect()
+    finish_probe()
     cache_breaker.trip()
     assert cache_breaker._cooldown == 15.0
+
+
+def test_after_a_cooldown_redis_is_checked_off_the_request(monkeypatch):
+    """2026-10-06: with the dev Redis crash-looping, the request that ended each cool-down
+    waited about 4 s for DNS, in every process every 2 minutes. Now requests never wait:
+    one background check per process, and attempts meanwhile fail fast."""
+    cache_breaker.trip()
+    expire(cache_breaker)
+    release = threading.Event()
+    checks = []
+
+    def slow_failing_connect(self):
+        checks.append(1)
+        release.wait(5)
+        raise OSError("Name or service not known")
+
+    monkeypatch.setattr(Connection, "_connect", slow_failing_connect)
+    inline = []
+    monkeypatch.setattr(Connection, "connect", lambda self: inline.append(1))
+    conn = FailFastConnection(host="redis.invalid", port=6379)
+    started = time.monotonic()
+    for _ in range(5):
+        with pytest.raises(RedisConnectionError, match="checking"):
+            conn.connect()
+    assert time.monotonic() - started < 0.5
+    release.set()
+    finish_probe()
+    assert checks == [1]
+    assert inline == []
+    assert cache_breaker.is_open()
+    assert cache_breaker._cooldown == 30.0  # still down: the back-off goes on
+
+
+def test_once_redis_answers_the_check_connections_are_made_again(monkeypatch):
+    cache_breaker.trip()
+    expire(cache_breaker)
+    monkeypatch.setattr(Connection, "_connect", lambda self: FakeSocket())
+    inline = []
+    monkeypatch.setattr(Connection, "connect", lambda self: inline.append(1))
+    conn = FailFastConnection(host="redis.invalid", port=6379)
+    with pytest.raises(RedisConnectionError, match="checking"):
+        conn.connect()
+    finish_probe()
+    assert not cache_breaker.is_open()
+    assert not cache_breaker.recovering()
+    conn.connect()
+    assert inline == [1]
+
+
+def test_a_check_that_cannot_start_a_thread_is_tried_again_later(monkeypatch):
+    cache_breaker.trip()
+    expire(cache_breaker)
+
+    def no_threads(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", no_threads)
+    cache_breaker.probe(lambda: None)
+    assert cache_breaker._probe_thread is None
+    assert cache_breaker.recovering()
 
 
 def test_an_outage_logs_once_per_cooldown_not_per_operation(caplog):

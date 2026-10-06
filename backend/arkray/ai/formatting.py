@@ -84,11 +84,17 @@ def day(value: date | datetime | None) -> dict[str, str] | None:
 # What never leaves the deployment from user-written text (docs/rag-architecture.md#privacy):
 # web links, with or without a scheme (they often carry meeting passcodes or document
 # tokens), email addresses and phone numbers. The record itself is a click away.
+#
+# Linear time on any input (final audit RAG-1): a pattern that may start at every position of
+# a long run and re-scan it (the old host pattern, `[\w.+-]+@`) is quadratic, and one crafted
+# 10,000-character note held an AI worker for 10 s. Each run-shaped alternative therefore
+# starts only where its run starts (a lookbehind), and its repeated labels are separated by a
+# character the labels cannot contain, so there is exactly one way to match them.
 _SENSITIVE = re.compile(
     r"(?P<link>(?:https?|ftp)://\S+|www\.\S+"
     # scheme-less host/path: zoom.us/j/123?pwd=..., meet.google.com/abc-defg-hij
-    r"|\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}/\S*)"
-    r"|(?P<email>[\w.+-]+@[\w-]+(?:\.[\w-]+)+)"
+    r"|(?<![a-z0-9.-])[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/\S*)"
+    r"|(?P<email>(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+)"
     # +country numbers, and Indian mobiles (10 digits from 6-9, optionally 5+5): never a
     # grouped amount such as 7,77,77,777 (commas and dots around digits don't match).
     r"|(?P<phone>\+\d[\d ()-]{7,}\d|(?<![\d,.])[6-9]\d{4}[ -]?\d{5}(?![\d,]))",

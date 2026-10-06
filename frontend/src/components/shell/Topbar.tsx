@@ -53,13 +53,12 @@ function HomeLink() {
   return (
     <Link
       href={session ? userWorkspaceHref(session.target.id) : "/dashboard"}
-      aria-label="Arkray CRM"
       className="focus-on-shell flex shrink-0 items-center gap-2 rounded-md lg:w-18 lg:justify-center xl:w-auto xl:pl-5 xl:pr-3"
     >
       <BrandMark />
-      <span aria-hidden="true" className="hidden text-[15px] font-semibold tracking-tight sm:inline lg:hidden xl:inline">
-        Arkray CRM
-      </span>
+      {/* The link's name at every width: shown where there is room, read out everywhere
+          (not an aria-label, which would leave out the text shown: WCAG 2.5.3). */}
+      <span className="sr-only text-[15px] font-semibold tracking-tight sm:not-sr-only lg:sr-only xl:not-sr-only">Arkray CRM</span>
     </Link>
   );
 }

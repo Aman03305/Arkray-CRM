@@ -5,7 +5,8 @@
 # failures, security events) come from the access log and belong in the log platform.
 #
 # Scrape every 30 s with `Authorization: Bearer $METRICS_TOKEN`, each pod directly (the
-# edge proxy doesn't route /health). Every alert links its runbook.
+# edge proxy doesn't route /health), under the job name `arkray` (ArkrayMetricsUnavailable
+# names it). Every alert links its runbook.
 # tests/architecture/test_alert_rules.py checks that each metric named here exists.
 groups:
   - name: arkray
@@ -17,6 +18,18 @@ groups:
         annotations:
           summary: "The API can't reach PostgreSQL: requests answer 503."
           runbook: docs/runbooks.md#database-down
+
+      # A database that stalls (paused, failing over) instead of refusing leaves the scrape
+      # itself hanging until the web server kills the worker: Prometheus then sees a failed
+      # target, never `arkray_db_up 0` (final audit SRE-3). The same rule catches a crashed or
+      # unreachable pod.
+      - alert: ArkrayMetricsUnavailable
+        expr: up{job="arkray"} == 0 or absent(arkray_db_up)
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "An API pod's metrics scrape fails or times out: a stalled database, a hung web tier or a pod that is down."
+          runbook: docs/runbooks.md#database-stalled
 
       - alert: ArkrayDatabaseSaturated
         expr: arkray_db_server_connections / arkray_db_max_connections > 0.8
@@ -96,3 +109,70 @@ groups:
         annotations:
           summary: "Ask Arkray's index is falling behind (over 1,000 sources waiting)."
           runbook: docs/runbooks.md#re-indexing
+
+      # --- attachment storage (final audit SRE-4; docs/observability.md#attachment-storage) ---
+      # The *_last_hour counters live in the shared cache: every pod reports the same
+      # cluster-wide figure, hence max() rather than sum() across pods.
+      - alert: ArkrayAttachmentStorageDown
+        expr: max by (backend) (arkray_attachment_storage_up) == 0
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "Attachment storage ({{ $labels.backend }}) fails its liveness check: uploads and downloads answer 503; the rest of the CRM works."
+          runbook: docs/runbooks.md#attachment-storage-degraded
+
+      - alert: ArkrayAttachmentObjectMissing
+        expr: max(arkray_attachment_objects_missing_last_hour) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "A stored file's object is gone from storage (downloads answer 410): lost data to investigate."
+          runbook: docs/runbooks.md#attachment-object-missing
+
+      - alert: ArkrayAttachmentUploadsFailing
+        expr: >
+          max(sum by (instance) (arkray_attachment_uploads_last_hour{outcome="failed",reason=~"storage_error|timeout"}))
+          / clamp_min(max(sum by (instance) (arkray_attachment_uploads_last_hour)), 1) > 0.2
+          and max(sum by (instance) (arkray_attachment_uploads_last_hour)) >= 5
+        labels: {severity: ticket}
+        annotations:
+          summary: "Over 20 % of file uploads failed on storage (errors or timeouts) in the last hour."
+          runbook: docs/runbooks.md#attachment-storage-degraded
+
+      - alert: ArkrayAttachmentUploadStuck
+        expr: max(arkray_attachment_oldest_seconds{state="uploading"}) > 3600
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: "An upload has been unfinished for over an hour: the hourly housekeeping isn't resolving it."
+          runbook: docs/runbooks.md#attachment-reconciliation
+
+      - alert: ArkrayAttachmentReconcileMismatch
+        expr: max by (kind) (arkray_attachment_reconcile_mismatches) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "The last attachment reconciliation found {{ $labels.kind }} files."
+          runbook: docs/runbooks.md#attachment-reconciliation
+
+      - alert: ArkrayAttachmentReconcileFailed
+        expr: max(arkray_attachment_reconcile_outcome) == 2
+        labels: {severity: ticket}
+        annotations:
+          summary: "The last attachment reconciliation couldn't finish (storage errors or its time budget)."
+          runbook: docs/runbooks.md#attachment-reconciliation
+
+      - alert: ArkrayAttachmentReconcileNotRun
+        expr: min(arkray_attachment_reconcile_age_seconds) > 172800
+        labels: {severity: ticket}
+        annotations:
+          summary: "No whole attachment reconciliation in 48 hours (the daily check is off or failing to start, or beat is down)."
+          runbook: docs/runbooks.md#attachment-reconciliation
+
+      # No result at all (never ran since the cache was emptied, or ATTACHMENT_RECONCILE_DAILY
+      # is off) while the cache answers; 48 h, so a fresh deployment's first night isn't one.
+      - alert: ArkrayAttachmentReconcileNeverRun
+        expr: absent(arkray_attachment_reconcile_age_seconds) and on() max(arkray_cache_up) == 1
+        for: 48h
+        labels: {severity: ticket}
+        annotations:
+          summary: "No attachment reconciliation result for 48 hours."
+          runbook: docs/runbooks.md#attachment-reconciliation

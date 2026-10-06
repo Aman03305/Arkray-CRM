@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useId } from "react";
 
+import { LinkPending } from "@/components/ui/LinkPending";
 import { selectedUserId, useWorkspaceSubject } from "@/features/workspace/api";
 import {
   administrationNavigation,
@@ -25,12 +26,13 @@ function RailLink({ item, active }: { item: NavItem; active: boolean }) {
       href={item.href}
       aria-current={active ? "page" : undefined}
       title={item.label}
-      className={`focus-on-shell flex flex-col items-center gap-1 px-1 py-2.5 text-[11px] font-medium leading-tight transition-colors focus-visible:-outline-offset-2 ${
+      className={`focus-on-shell relative flex flex-col items-center gap-1 px-1 py-2.5 text-[11px] font-medium leading-tight transition-colors focus-visible:-outline-offset-2 ${
         active ? "bg-brand-600 font-semibold text-white" : "text-shell-muted hover:bg-white/10 hover:text-white"
       }`}
     >
       <Icon aria-hidden="true" className="size-5" />
       <span className="max-w-full truncate">{item.label}</span>
+      <LinkPending className="inset-x-3 bottom-1 h-0.5 rounded-full bg-white" />
     </Link>
   );
 }

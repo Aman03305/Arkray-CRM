@@ -26,7 +26,8 @@ const CONFIG = PIPELINE_ROUTES;
 const ME_BOARD = "/api/v1/workspaces/me/pipeline-board";
 const ME = `/api/v1/workspaces/me/opportunities/${OPPORTUNITY_ID}`;
 const moveUrl = (id: string) => `/api/v1/workspaces/me/opportunities/${id}/move`;
-// Moves go to Qualified/New: entering Negotiation asks for the price (pipeline-board.test.tsx).
+// Moves go to Qualified/New: entering Negotiation asks for the agreed price and CPT
+// (pipeline-board.test.tsx).
 const stageOf = (call: RecordedCall) => Object.values(STAGES).find((s) => s.id === (call.body as { stage: string }).stage)!;
 
 function dataTransfer() {

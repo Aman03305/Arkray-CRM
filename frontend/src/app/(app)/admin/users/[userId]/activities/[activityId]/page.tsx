@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 
-import { ActivityView } from "@/features/workspace/views";
+import { ActivityView } from "@/features/workspace/views/activities";
 import { isUuid } from "@/lib/workspace";
 
 export const metadata: Metadata = { title: "Activity · User workspace" };

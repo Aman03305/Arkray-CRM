@@ -7,6 +7,13 @@ Flow for a create endpoint (see arkray.leads.services.create_lead):
     2. In the creating transaction, remember() inserts the record. Two concurrent requests
        with one key serialise on the unique index: the loser's transaction rolls back
        entirely (IntegrityError, see is_duplicate_key) and it replays the winner's result.
+
+Operations that create several rows (pipeline.services.create_opportunity: a lead and its
+opportunity) call claim() first in their transaction instead of relying on step 2 alone:
+concurrent requests with one key then wait for each other up front and replay the first,
+so only one of them ever does (and rolls back) the work.
+
+A record expires after RETENTION: the same key sent again later is a new request.
 """
 
 from __future__ import annotations
@@ -17,7 +24,7 @@ from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
-from django.db import IntegrityError
+from django.db import IntegrityError, connection
 from django.utils import timezone
 
 from .errors import BusinessRuleViolation
@@ -25,6 +32,7 @@ from .models import IdempotencyRecord
 
 RETENTION = timedelta(hours=24)
 _UNIQUE_CONSTRAINT = "core_idempotency_unique_key"
+_LOCK_NAMESPACE = 0x41524B34  # "ARK4": one request key (actor, operation, key) at a time
 
 
 class IdempotencyKeyReused(BusinessRuleViolation):
@@ -56,6 +64,24 @@ def replayed_resource(actor_id: UUID, operation: str, key: UUID, digest: str) ->
     if record.request_hash != digest:
         raise IdempotencyKeyReused()
     return record.resource_id
+
+
+def claim(actor_id: UUID, operation: str, key: UUID, digest: str) -> UUID | None:
+    """Serialise on the key, then replayed_resource(). Call FIRST in the creating
+    transaction, before any row lock: requests sharing the key wait here for the one
+    holding it to commit or roll back, then see its record (READ COMMITTED: each statement
+    sees what committed before it) and replay it, or do the work themselves when it failed.
+    The lock is never requested while holding a row lock, so it can't close a cycle.
+    remember()'s unique index stays the backstop (32-bit hash collisions only make two
+    unrelated requests wait for each other)."""
+    if not connection.in_atomic_block:
+        # Outside a transaction the lock would be released at once (autocommit).
+        raise RuntimeError("idempotency.claim() must run inside the creating transaction")
+    name = f"{actor_id}:{operation}:{key}".encode()
+    lock_id = int.from_bytes(hashlib.sha256(name).digest()[:4], "big", signed=True)
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [_LOCK_NAMESPACE, lock_id])
+    return replayed_resource(actor_id, operation, key, digest)
 
 
 def remember(actor_id: UUID, operation: str, key: UUID, digest: str, resource_id: UUID) -> None:

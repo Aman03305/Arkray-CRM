@@ -11,6 +11,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { NotFoundView } from "@/components/ui/NotFoundView";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { PersonName } from "@/components/ui/PersonName";
+import { useSingleFlight } from "@/components/ui/useSingleFlight";
 import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
 import type { Activity } from "@/lib/api/types";
 import { formatDateTime, formatRelative } from "@/lib/format";
@@ -99,9 +100,10 @@ export function ActivityDetailView({ workspace, activityId }: { workspace: Works
     queryFn: () => activitiesApi.get(workspace, activityId),
   });
   const action = useActivityAction(workspace);
+  const once = useSingleFlight();
 
   const back = (
-    <Link href={workspaceHref(workspace, "activities")} className="mb-4 inline-flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900">
+    <Link href={workspaceHref(workspace, "activities")} className="-mt-1 mb-3 inline-flex items-center gap-1 py-1 text-sm text-slate-600 hover:text-slate-900">
       <ArrowLeft aria-hidden="true" className="size-4" />
       Activities
     </Link>
@@ -149,28 +151,32 @@ export function ActivityDetailView({ workspace, activityId }: { workspace: Works
   const completable = canComplete(activity, clock);
 
   const run = (kind: LifecycleAction) => {
-    setNotice(null);
-    setProblem(null);
-    action.mutate(
-      { activity, action: kind },
-      {
-        onSuccess: () => {
-          setConfirm(null);
-          focusNotice.current = true;
-          setNotice(ACTION_DONE[kind]);
+    // One action at a time: a second Complete would carry the same version and report
+    // "someone else changed this" about the first.
+    once(() => {
+      setNotice(null);
+      setProblem(null);
+      return action.mutateAsync(
+        { activity, action: kind },
+        {
+          onSuccess: () => {
+            setConfirm(null);
+            focusNotice.current = true;
+            setNotice(ACTION_DONE[kind]);
+          },
+          onError: (error) => {
+            setConfirm(null);
+            focusNotice.current = true;
+            if (isApiError(error, 409)) void queryClient.invalidateQueries({ queryKey: activityKeys.detail(workspace, activity.id) });
+            setProblem(
+              isApiError(error, 409)
+                ? { message: "Someone else changed this a moment ago. The latest details are shown now; please try again.", requestId: null }
+                : describeError(error),
+            );
+          },
         },
-        onError: (error) => {
-          setConfirm(null);
-          focusNotice.current = true;
-          if (isApiError(error, 409)) void queryClient.invalidateQueries({ queryKey: activityKeys.detail(workspace, activity.id) });
-          setProblem(
-            isApiError(error, 409)
-              ? { message: "Someone else changed this a moment ago. The latest details are shown now; please try again.", requestId: null }
-              : describeError(error),
-          );
-        },
-      },
-    );
+      );
+    });
   };
 
   const heading = note ? "Note" : activity.title;
@@ -406,10 +412,12 @@ function NoteBody({
       setConflict(!latest ? "unavailable" : latest.archived_at ? "archived" : "changed");
     },
   });
+  const once = useSingleFlight();
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (save.isPending) return;
-    save.mutate();
+    // Not `save.isPending` (seen a tick late): a second save would carry the same version,
+    // get a 409 and show a conflict with the author's own first save.
+    once(() => save.mutateAsync());
   };
   const message = save.isError && !isApiError(save.error, 409) ? (fieldErrors(save.error).description?.join(" ") ?? describeError(save.error).message) : null;
 

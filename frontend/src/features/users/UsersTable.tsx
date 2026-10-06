@@ -15,7 +15,9 @@ import { UserStatus } from "./UserStatus";
 export type UserAction = "edit" | "change-email" | "resend" | "deactivate" | "activate";
 
 export function actionsFor(user: AdminUser, isSelf: boolean): UserAction[] {
-  const actions: UserAction[] = ["edit", "change-email"];
+  const actions: UserAction[] = ["edit"];
+  // Another administrator changes their own email in Settings (the API refuses it).
+  if (isSelf || user.role !== "admin") actions.push("change-email");
   if (user.status === "invited") actions.push("resend");
   if (user.status === "deactivated") actions.push("activate");
   else if (!isSelf) actions.push("deactivate"); // the API refuses self-deactivation too

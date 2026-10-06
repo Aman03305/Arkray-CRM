@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/Button";
 import { NotFoundView } from "@/components/ui/NotFoundView";
 import { PersonName } from "@/components/ui/PersonName";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { ROW_LINK } from "@/components/ui/targets";
 import { usePipelines } from "@/features/pipeline/hooks";
 import { Amount, CloseDate, OutcomeBadge } from "@/features/pipeline/PipelineBits";
 import { describeError, isApiError } from "@/lib/api/errors";
@@ -83,8 +84,9 @@ function LeadOpportunities({ workspace, leadId }: { workspace: Workspace; leadId
       ) : (
         <ul className="divide-y divide-slate-100">
           {rows.map((row) => (
-            <li key={row.id} className="py-2.5 first:pt-0 last:pb-0">
-              <Link href={opportunityHref(workspace, row.id)} className="text-sm font-medium text-brand-700 [overflow-wrap:anywhere] hover:underline">
+            // The whole row opens the opportunity (the title alone was a 20 px target).
+            <li key={row.id} className="relative py-2.5 first:pt-0 last:pb-0">
+              <Link href={opportunityHref(workspace, row.id)} className={`text-sm font-medium text-brand-700 [overflow-wrap:anywhere] hover:underline ${ROW_LINK}`}>
                 {row.title}
               </Link>
               <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
@@ -120,7 +122,7 @@ export function LeadDetailView({ workspace, leadId }: { workspace: Workspace; le
     queryFn: () => leadsApi.get(workspace, leadId),
   });
   const back = (
-    <Link href={workspaceHref(workspace, "dashboard")} className="mb-3 inline-flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900">
+    <Link href={workspaceHref(workspace, "dashboard")} className="-mt-1 mb-2 inline-flex items-center gap-1 py-1 text-sm text-slate-600 hover:text-slate-900">
       <ArrowLeft aria-hidden="true" className="size-4" />
       Dashboard
     </Link>

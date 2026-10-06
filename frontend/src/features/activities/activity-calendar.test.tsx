@@ -154,6 +154,23 @@ describe("the Activities calendar", () => {
     expect(within(day).getAllByRole("link")).toHaveLength(4);
   });
 
+  it("every target is at least 24 px (WCAG 2.5.8): entries, +more, Schedule, Previous and Next", async () => {
+    // jsdom has no layout: the sizes are the classes'. A chip is 12 px text on a 16 px line
+    // + 2 x 3 px padding + 2 x 1 px border; Schedule is a 14 px icon + 2 x 6 px; the arrows
+    // a 16 px icon + 2 x 8 px.
+    const busy = [9, 10, 11, 12].map((hour) =>
+      asListItem(makeActivity({ id: `busy-${hour}`, title: `Call ${hour}`, due_at: new Date(Date.UTC(2026, 9, 8, hour - 5, 30)).toISOString() })),
+    );
+    mockApi(routes(ME, { task: busy }));
+    renderWithProviders(<ActivitiesView />, { viewer: salesViewer });
+    await openCalendar();
+    const chip = await screen.findByRole("link", { name: /Call 9$/ });
+    expect(chip).toHaveClass("text-xs", "py-0.75", "border");
+    expect(screen.getByRole("button", { name: "2 more on Thursday, 8 October 2026" })).toHaveClass("min-h-6");
+    expect(screen.getByRole("button", { name: "Schedule on Thursday, 8 October 2026" })).toHaveClass("p-1.5");
+    for (const name of ["Previous month", "Next month"]) expect(screen.getByRole("button", { name })).toHaveClass("p-2");
+  });
+
   it("week view places entries by time and length; a short one is a single line", async () => {
     const callBack = asListItem(makeActivity({ id: "a1c1e000-0000-4000-8000-0000000000b3", title: "Call back", due_at: "2026-10-07T09:30:00Z" })); // 15:00
     mockApi(routes(ME, { task: [callBack], meeting: [MEETING] }));

@@ -1,3 +1,6 @@
 ignoredBuiltDependencies:
   - sharp
   - unrs-resolver
+overrides:
+  # GHSA-68fv-2mgg-jv7q: next's postcss pins source-map-js < 1.2.2 (build-time only).
+  source-map-js: ">=1.2.2"

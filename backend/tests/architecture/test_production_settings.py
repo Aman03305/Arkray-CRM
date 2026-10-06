@@ -286,3 +286,35 @@ def test_switching_the_role_check_off_needs_the_insecure_opt_in():
     )
     assert local.returncode == 0, local.stderr
     assert local.stdout.strip() == "False"
+
+
+def test_wildcard_allowed_hosts_is_rejected():
+    """'*' disables Host-header validation, which emailed links and redirects rely on."""
+    result = load_production_settings(DJANGO_ALLOWED_HOSTS="*")
+    assert result.returncode != 0
+    assert "DJANGO_ALLOWED_HOSTS" in result.stderr
+    # A leading-dot subdomain wildcard is Django's own, bounded syntax: still allowed.
+    assert load_production_settings(DJANGO_ALLOWED_HOSTS=".example.com").returncode == 0
+
+
+@pytest.mark.parametrize("value", ["S3", "s3 ", "minio", "disk"])
+def test_attachment_storage_must_be_exactly_filesystem_or_s3(value):
+    """A typo would silently put attachments on the container's local disk."""
+    result = load_production_settings(ATTACHMENT_STORAGE=value)
+    assert result.returncode != 0
+    assert "ATTACHMENT_STORAGE" in result.stderr
+
+
+def test_s3_attachment_storage_has_bounded_client_timeouts():
+    """A dead S3 endpoint must cost a request seconds, not a web worker (final audit SRE-1:
+    botocore's defaults took 113 s against a black hole, beyond gunicorn's 30 s timeout)."""
+    options = "settings.STORAGES['attachments']['OPTIONS']['client_config']"
+    result = load_production_settings(
+        f"{options}.connect_timeout, {options}.read_timeout, {options}.retries",
+        ATTACHMENT_STORAGE="s3",
+        ATTACHMENT_S3_BUCKET="arkray-attachments",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "3 10 {'total_max_attempts': 2, 'mode': 'standard'}"
+    # (connect + read) x total attempts, for the one call that can stall: inside gunicorn's 30 s
+    assert (3 + 10) * 2 < 30

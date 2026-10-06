@@ -78,6 +78,19 @@ anyone learning, using or resetting the user's password and without impersonatio
   `support_session.ended` (how: exited, expired, signed_out, not_allowed, session_changed;
   the system is the actor when it ended it), both carrying the session id; they appear in the
   security events feed.
+- **Attack tests** (`backend/arkray/identity/tests/test_support_sessions.py`): every identity
+  route is enumerated from the URLconf, and all but a short, reasoned allowlist (sign-in and
+  sign-out, who am I, exit, the public link flows, the target's workspace description and
+  owner picker) must answer 403 `support_session_active` against the user, another user,
+  another administrator and the administrator themselves: no password change, role
+  escalation, email change, (de)activation, invitation, security events or second session.
+  A new identity route is refused unless it is added to the allowlist on purpose. Also
+  tested: the user promoted to administrator mid-session (the next request ends it, audited
+  `not_allowed`), forged identity or session headers (ignored: the session lives only
+  server-side), another account's browser session carrying the session id, and an ended
+  session's id put back (never revived).
+- Support sessions are never available for administrators, so they can't be used against
+  another administrator's account either ([security.md](security.md#administrator-account-protection)).
 
 The existing selected-user workspace (`/admin/users/{id}/…`, "Viewing CRM for") is
 unchanged; a support session is the explicit, time-boxed form of it.
@@ -90,6 +103,8 @@ unchanged; a support session is the explicit, time-boxed form of it.
 | `/admin/users/{id}/dashboard` | The user's Dashboard (Phase 5 view) |
 | `/admin/users/{id}/pipeline`, `…/pipeline/new`, `…/pipeline/{opportunityId}`, `…/{opportunityId}/edit` | Pipeline |
 | `/admin/users/{id}/activities`, `…/activities/{activityId}` | Activities (tasks and meetings are created and edited in dialogs) |
+| `/admin/users/{id}/leads/{leadId}` | A lead, read-only (leads are created only through opportunities, ADR-0027/0028) |
+| `/admin/users/{id}/ask` | Ask Arkray in the user's workspace |
 
 - **One builder.** Every workspace link comes from `frontend/src/lib/workspace.ts`
   (`workspaceHref`, `opportunityHref`, `activityHref`, `newOpportunityHref`,
@@ -153,10 +168,11 @@ id (`/admin/users/{self}`) resolves to one's own workspace (SELF scope) and the 
   activities and figures are history (ADR-0005). The banner shows "Deactivated" and explains
   that new records can't be added for them.
 - New current work can't go to an inactive owner. The domain rules are unchanged: creating
-  a lead in the workspace gives 400 *"This user's account isn't active, so new leads can't be
-  added to their workspace."* Opportunities, tasks and meetings on their leads give 422
-  *"This lead's owner is deactivated. Reassign the lead to an active user first."* The New lead
-  page explains this up front instead of offering a form that can't be saved.
+  an opportunity (and so its lead) in the workspace gives 400 *"This user's account isn't
+  active, so nothing new can be added to their workspace."* Tasks and meetings on their leads
+  give 422 *"This lead's owner is deactivated. Reassign the lead to an active user first."*
+  The board offers no "New opportunity" button for such a workspace instead of a form that
+  can't be saved.
 - Nothing is reactivated or reassigned automatically. Reassigning the user's leads to an
   active user is an explicit admin action (`crm.assign_any`).
 - An **invited** user (who hasn't accepted the invitation) is treated the same way: readable,
@@ -183,7 +199,7 @@ following measures ensure this:
   workspace segment (`["leads", "detail", "{rahulId}", leadId]`, `["dashboard", "{rahulId}"]`,
   `["workspace", "{rahulId}"]`, …). The only keys without one are workspace-independent
   configuration: lead options, pipelines, assignees.
-- **Views are keyed by workspace.** `features/workspace/views.tsx` mounts every module view
+- **Views are keyed by workspace.** `features/workspace/views/` mounts every module view
   with `key={segment}` (and the record id). Moving from Rahul to Priya starts from fresh
   component state: no filters, cursors, drafts or open dialogs carry over.
 - **Placeholders never cross workspaces.** List `placeholderData` keeps the previous page
@@ -309,7 +325,7 @@ Details are in [testing.md](testing.md#what-exists-after-phase-6).
 | P3 | Inside a user's workspace the sidebar marked both the module and "Users" as the current page | Users is current only outside a workspace |
 | P3 | "Page not found" for a record in a user's workspace linked to the organisation's Dashboard | `NotFoundView` takes a workspace-aware way back |
 | P3 | In a deactivated user's workspace the lead form was offered, then failed with "Choose an active user." (there is nothing to choose there) | The form explains the rule up front; the service says why in that workspace |
-| P3 | User names were links even for a manager without `workspace.view_any` (a dead 404 link), and their accessible name didn't say what they open | `UserWorkspaceLink`: a link only with the capability, named "{name}, open CRM workspace" |
+| P3 | User names were links even for a manager without `workspace.view_any` (a dead 404 link), and their accessible name didn't say what they open | A link only with the capability, named "{name}, open CRM workspace" (the component was removed in the final audit: nothing used it any more) |
 | P3 | The workspace description was fetched by two separate implementations (frame and lead form) | One `useWorkspaceSubject` hook; the sidebar shares the same request |
 
 Found by the independent review (three reviewers: API security, frontend, backend domain).

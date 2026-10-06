@@ -20,6 +20,31 @@ for _fallback in SECRET_KEY_FALLBACKS:  # noqa: F405
         )
 if not ALLOWED_HOSTS:  # noqa: F405
     raise ImproperlyConfigured("DJANGO_ALLOWED_HOSTS must be set in production.")
+if "*" in ALLOWED_HOSTS:  # noqa: F405
+    # A wildcard turns off Host-header validation, which password-reset and invitation
+    # links, cache keys and redirects rely on (final audit SEC-3).
+    raise ImproperlyConfigured("DJANGO_ALLOWED_HOSTS must name the hosts, not '*'.")
+if ATTACHMENT_STORAGE not in {"filesystem", "s3"}:  # noqa: F405
+    # Anything else would silently fall back to local disk (a typo like "S3").
+    raise ImproperlyConfigured("ATTACHMENT_STORAGE must be 'filesystem' or 's3'.")
+if not 0 < ATTACHMENT_STORAGE_DEADLINE_S <= 25:  # noqa: F405
+    # Within gunicorn's 30 s worker timeout, with room for the rest of the request.
+    raise ImproperlyConfigured("ATTACHMENT_STORAGE_DEADLINE_S must be between 0 and 25.")
+if (
+    min(
+        ATTACHMENT_STORAGE_MAX_IN_FLIGHT,  # noqa: F405
+        ATTACHMENT_STORAGE_MAX_IN_FLIGHT_SHARED,  # noqa: F405
+        ATTACHMENT_STORAGE_BREAKER_FAILURES,  # noqa: F405
+    )
+    < 1
+):
+    raise ImproperlyConfigured(
+        "ATTACHMENT_STORAGE_MAX_IN_FLIGHT, ATTACHMENT_STORAGE_MAX_IN_FLIGHT_SHARED and"
+        " ATTACHMENT_STORAGE_BREAKER_FAILURES must be"
+        " at least 1."
+    )
+if ATTACHMENT_STORAGE_BREAKER_COOLDOWN_S <= 0:  # noqa: F405
+    raise ImproperlyConfigured("ATTACHMENT_STORAGE_BREAKER_COOLDOWN_S must be positive.")
 if "EMAIL_URL" not in os.environ:
     # Without it Django would print every email (invitation and reset links!) to stdout.
     raise ImproperlyConfigured("EMAIL_URL must be set explicitly in production.")

@@ -13,6 +13,10 @@
 #
 # Table-wide (the backfill updates every opportunity), so it lifts the statement timeout for
 # its own transaction first (tests/architecture/test_migrations.py).
+#
+# Not reversible: reversing would drop the negotiated price history and everything else
+# recorded in these tables and columns since, so it refuses (RefuseReverse, last operation;
+# docs/deployment.md#rollback).
 
 import datetime
 import uuid
@@ -27,6 +31,17 @@ from django.db import migrations, models
 
 import arkray.pipeline.models
 from arkray.core.db import append_only_trigger
+from arkray.core.migrations._reverse_guard import RefuseReverse
+
+
+# A lead whose only names are spaces (reachable only past the lead validation) has an empty
+# display name; the names below may not be empty, so the backfill used to abort the whole
+# migration on it. Such a lead now gets this placeholder (its opportunities can be renamed).
+# Every other lead's outcome is exactly what it was: only '' is replaced, nothing is trimmed
+# (tests/integration/test_upgrade_from_release.py). Names over 200 characters (a 100-character
+# first name, a space, and a 100-character last name) are cut to 200, as before; the lead
+# keeps the full name.
+UNKNOWN_CUSTOMER = "Unknown customer"
 
 
 def backfill_opportunities(apps, schema_editor):
@@ -35,12 +50,15 @@ def backfill_opportunities(apps, schema_editor):
             """
             UPDATE pipeline_opportunity AS o
                SET opportunity_date = (o.created_at AT TIME ZONE %s)::date,
-                   account_name = LEFT(COALESCE(NULLIF(l.organization_name, ''), l.display_name), 200),
-                   customer_name = LEFT(l.display_name, 200)
+                   account_name = COALESCE(
+                       NULLIF(LEFT(COALESCE(NULLIF(l.organization_name, ''), l.display_name), 200), ''),
+                       %s
+                   ),
+                   customer_name = COALESCE(NULLIF(LEFT(l.display_name, 200), ''), %s)
               FROM leads_lead AS l
              WHERE l.id = o.lead_id
             """,
-            [settings.CRM_TIME_ZONE],
+            [settings.CRM_TIME_ZONE, UNKNOWN_CUSTOMER, UNKNOWN_CUSTOMER],
         )
 
 
@@ -462,5 +480,11 @@ class Migration(migrations.Migration):
                     ),
                 ],
             },
+        ),
+        # Last, so it runs first when reversing (arkray/core/migrations/_reverse_guard.py).
+        RefuseReverse(
+            "pipeline.0006_ownership_negotiation_fields",
+            "the negotiated price history, user pipelines, custom fields and every"
+            " opportunity's customer, contact and instrument details",
         ),
     ]

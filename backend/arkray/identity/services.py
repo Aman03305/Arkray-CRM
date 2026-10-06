@@ -114,6 +114,21 @@ def _manages_users(user: User) -> bool:
     return user.status == UserStatus.ACTIVE and user.role in roles_with(Capability.USERS_MANAGE)
 
 
+def _is_administrator(user: User) -> bool:
+    """An administrator account whatever its status: an invited or deactivated one is
+    protected like an active one, or deactivating it would unlock its credentials."""
+    return user.role in roles_with(Capability.USERS_MANAGE)
+
+
+def _refuse_for_another_administrator(actor: User, user: User, message: str) -> None:
+    """An administrator's credentials and standing are changed only by that administrator
+    (risk R100: email change, then Forgot password at the new address, was a takeover).
+    Called with the target's *locked* row, under the admin lock, so a concurrent promotion
+    or demotion can't slip between the check and the write."""
+    if user.pk != actor.pk and _is_administrator(user):
+        raise BusinessRuleViolation(message)
+
+
 def _another_manager_remains(excluding: UUID) -> bool:
     return (
         User.objects.filter(status=UserStatus.ACTIVE, role__in=roles_with(Capability.USERS_MANAGE))
@@ -259,7 +274,9 @@ def create_user(
 
 
 def update_user(*, actor_id: UUID, user_id: UUID, version: int, changes: Mapping[str, str]) -> User:
-    """Edit names and role. Email and status have dedicated, audited operations."""
+    """Edit names and role. Email and status have dedicated, audited operations. Another
+    administrator's role is not changed here (deactivate them instead): demote, then set a
+    password, was a takeover of their account (R100)."""
     unknown = set(changes) - EDITABLE_FIELDS
     if unknown:
         raise InvalidInputError(details={"non_field_errors": ["These fields cannot be edited."]})
@@ -267,6 +284,9 @@ def update_user(*, actor_id: UUID, user_id: UUID, version: int, changes: Mapping
         _serialise_user_administration()
         actor = _acting_manager(actor_id)
         user = _lock_user(user_id)
+        if changes.get("role", user.role) != user.role:
+            # Before the version check: a stale page gets the reason, not a conflict.
+            _refuse_for_another_administrator(actor, user, ADMINISTRATOR_ROLE_REFUSED)
         _require_version(user, version)
 
         changed: list[str] = []
@@ -336,6 +356,8 @@ def change_user_email(
     still_signed_in: Callable[[User], bool] | None = None,
 ) -> User:
     """Change a user's sign-in identity. Explicit, audited, and it ends their sessions.
+    An administrator's email is changed only by that administrator (R100: a new address
+    plus Forgot password would hand their account to whoever chose the address).
 
     `still_signed_in`: for a change to one's own email, checked against the locked user, so
     a password reset that ended the requesting session meanwhile can't be undone by it."""
@@ -347,6 +369,9 @@ def change_user_email(
             user = _lock_user(user_id)
             if still_signed_in is not None and not still_signed_in(user):
                 raise PermissionDeniedError(SESSION_ENDED)
+            # No exception for an invited administrator: the new address would receive the
+            # invitation. A mistyped one is deactivated and the right address invited.
+            _refuse_for_another_administrator(actor, user, ADMINISTRATOR_EMAIL_REFUSED)
             _require_version(user, version)
             previous_email = user.email
             if new_email == previous_email:
@@ -400,6 +425,12 @@ ADMINISTRATOR_ACCOUNT_REFUSED = (
     "Administrators set their own passwords: ask them to use Forgot password if they're locked out."
 )
 ADMINISTRATOR_INVITED = "Administrators choose their own password: send an invitation instead."
+# Another administrator's sign-in email and role are theirs alone (R100).
+ADMINISTRATOR_EMAIL_REFUSED = "Administrators change their own email address in Settings."
+ADMINISTRATOR_ROLE_REFUSED = (
+    "An administrator's role can't be changed by another administrator. To remove their"
+    " access, deactivate the account."
+)
 PROMOTION_REFUSED_UNTIL_OWN_CHOICE = (
     "This user must first choose their own password (at their next sign-in): then they can be"
     " made an administrator."
@@ -411,18 +442,19 @@ def set_user_password(*, actor_id: UUID, user_id: UUID, version: int, new_passwo
     sessions end, outstanding reset links are voided, and the user must choose their own
     password at their next sign-in. Audited as `auth.password_set_by_admin` (who, for whom,
     when; never the password). Not for one's own account (Settings) nor another
-    administrator's (that would let one administrator sign in as another)."""
+    administrator's, whatever its status (that would let one administrator sign in as
+    another)."""
     with transaction.atomic():
         _serialise_user_administration()
         actor = _acting_manager(actor_id)
         if user_id == actor.pk:
             raise BusinessRuleViolation(OWN_ACCOUNT_REFUSED)
         user = _lock_user(user_id)
+        # By role, before the status: a deactivated or invited administrator is refused too.
+        _refuse_for_another_administrator(actor, user, ADMINISTRATOR_ACCOUNT_REFUSED)
         _require_version(user, version)
         if user.status != UserStatus.ACTIVE:
             raise BusinessRuleViolation(INACTIVE_ACCOUNT_REFUSED)
-        if _manages_users(user):
-            raise BusinessRuleViolation(ADMINISTRATOR_ACCOUNT_REFUSED)
         check_new_password(new_password, user, field="new_password")
         now = timezone.now()
         user.set_password(new_password)

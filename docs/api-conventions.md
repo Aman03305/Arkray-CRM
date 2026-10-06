@@ -139,6 +139,7 @@ Every error, from DRF, from domain services or from Django's 404/500 handlers, h
 | Dates | `"2026-09-30"` |
 | Enums | lower-case strings (`"open"`, `"won"`, `"task"`) |
 | Related records | `{"id": "…", "label": "…"}`; `{"id": null, "restricted": true}` if not visible |
+| CPT (`expected_cpt`, `agreed_cpt`) | one line of free text, ≤ 100 characters, kept as written; a JSON number, boolean, list or object is a 400 (send `"18.50"`, not `18.50`). **CPT's business meaning and unit require product-owner confirmation** (R104): nothing interprets it ([pipeline.md](pipeline.md#expected-cpt)) |
 
 ## Concurrency
 
@@ -146,15 +147,39 @@ Editable resources include `version`. `PATCH` without it → 400; with a stale v
 
 ## Idempotency
 
-`POST` create endpoints where a double submit is harmful (lead create from Phase 2;
-opportunity create and lead conversion from Phase 3; CSV import later) accept an `Idempotency-Key` header (canonical UUID; anything else is a 400).
-The key, the actor, the operation, a SHA-256 of the validated request and the created
-record's id are stored in PostgreSQL (`core_idempotency_record`) for 24 h, never the
-body. A replay returns `201` with the record's current representation and
-`Idempotent-Replayed: true`; the same key with a different body → `422
-idempotency_key_reused`. Keys are private to each actor. Concurrent requests with one
-key create one record. Action endpoints are naturally idempotent where possible (moving to
-the current stage is a no-op).
+`POST` create endpoints where a double submit is harmful accept an `Idempotency-Key` header
+(a canonical UUID: `8-4-4-4-12` hex digits, either case; anything else, two values or an
+empty header included, is a 400 with `details.idempotency_key`).
+
+| Operation | Key |
+|---|---|
+| `POST /workspaces/{ws}/opportunities` (`opportunities_create`; own, a user's and the organisation-wide workspace alike) | **required** (since the final audit, R103): one create writes a lead and an opportunity, so a retry without a key would make a second pair. Missing → `400 validation_error`, `details: {"idempotency_key": ["Send an Idempotency-Key header: a new UUID for each new opportunity, the same one when retrying it."]}`; nothing is written. Checked after the workspace (404/403) and before the body |
+| `POST /workspaces/{ws}/leads` (lead create), `POST /workspaces/{ws}/activities` (task, meeting, note), `POST /workspaces/{ws}/leads/{id}/convert` | optional (a conversion can't run twice anyway: the second finds the lead converted) |
+
+Rules for every keyed create:
+
+- The key, the actor, the operation, a SHA-256 of the validated request (for an opportunity:
+  the workspace kind and user, lead, owner, fields, pipeline, stage, agreed price and agreed
+  CPT) and the created record's id are stored in PostgreSQL (`core_idempotency_record`) for
+  **24 h** (`core.idempotency.RETENTION`), never the body. After that the key is forgotten:
+  sent again, it creates anew.
+- A replay returns `201` with the record's current representation and
+  `Idempotent-Replayed: true`; the same key with a different request (any field, or another
+  workspace) → `422 idempotency_key_reused`, nothing written. Keys are private to each
+  actor: another user's identical key is their own request.
+- A create that fails (any 4xx or 5xx, also one refused after its lead was inserted: it all
+  rolls back) records nothing: correct it and send it again with the same key.
+- Concurrent requests with one key create one record. Opportunity create and conversion
+  take a transaction-scoped advisory lock on (actor, operation, key) first in their
+  transaction (`core.idempotency.claim`): duplicates wait for the first, then replay it,
+  without starting a create of their own (tested with 2, 20 and 100 at once,
+  `tests/integration/test_opportunity_idempotency.py`). The unique index stays the backstop.
+- Clients: a new key per new record, the same key for every retry of the same request
+  (timeout, network error, 429, 5xx), a new key once the request changes. The web client
+  refuses to send an opportunity create without one (`lib/api/client.ts`).
+
+Action endpoints are naturally idempotent where possible (moving to the current stage is a
+no-op).
 
 ## Rate limits
 

@@ -4,13 +4,15 @@ import { type FormEvent, useId, useState } from "react";
 
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
-import { TextAreaField, TextField } from "@/components/ui/Field";
+import { TextAreaField } from "@/components/ui/Field";
 import { Dialog, DialogActions } from "@/components/ui/Dialog";
 import type { Stage, StageCategory } from "@/lib/api/types";
-import { formatPercent, parseAmountInput } from "@/lib/money";
+import { formatPercent } from "@/lib/money";
 
+import { type AgreedTerms, AgreedTermsFields, parseAgreedTerms } from "./AgreedTerms";
 import { StageName } from "./PipelineBits";
 import { moveTargets, transitionKind } from "./transitions";
+import type { MoveProblem } from "./useMoveOpportunity";
 
 const LOST_REASON_MAX = 500;
 
@@ -27,9 +29,9 @@ interface TransitionDialogProps {
   /** A chosen target (drag and drop, a menu item), or null to let the user choose. */
   target: Stage | null;
   busy: boolean;
-  error: { message: string; requestId: string | null } | null;
-  /** `negotiatedPrice`: an exact decimal string, given when the target is a negotiation stage. */
-  onConfirm: (stage: Stage, lostReason: string, negotiatedPrice?: string) => void;
+  error: MoveProblem | null;
+  /** `terms`: the agreed price and CPT, given when the target is a negotiation stage. */
+  onConfirm: (stage: Stage, lostReason: string, terms?: AgreedTerms) => void;
   onClose: () => void;
 }
 
@@ -59,13 +61,15 @@ export function TransitionDialog({ subject, stages, target, busy, error, onConfi
   const [chosen, setChosen] = useState<string>(target?.id ?? "");
   const [reason, setReason] = useState("");
   const [price, setPrice] = useState("");
-  const [priceError, setPriceError] = useState<string | null>(null);
+  const [cpt, setCpt] = useState("");
+  const [termsErrors, setTermsErrors] = useState<{ price?: string[]; cpt?: string[] }>({});
   const groupId = useId();
   const stage = target ?? choices.find((s) => s.id === chosen) ?? null;
   const kind = stage ? transitionKind(subject, stage) : null;
-  // Entering a negotiation stage (its type, whatever its name) needs the negotiated price,
-  // every time, also after leaving negotiation and coming back. Cancelling changes nothing.
-  const asksPrice = stage?.type === "negotiation" && (kind === "move" || kind === "reopen");
+  // Entering a negotiation stage (its type, whatever its name) needs the agreed price and the
+  // agreed CPT, every time, also after leaving negotiation and coming back (ADR-0029).
+  // Cancelling changes nothing.
+  const asksTerms = stage?.type === "negotiation" && (kind === "move" || kind === "reopen");
 
   const title =
     target === null
@@ -83,13 +87,13 @@ export function TransitionDialog({ subject, stages, target, busy, error, onConfi
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (busy || !stage || kind === "same" || kind === "reopen-first") return;
-    if (asksPrice) {
-      const parsed = parseAmountInput(price);
+    if (asksTerms) {
+      const parsed = parseAgreedTerms(price, cpt);
       if (!parsed.ok) {
-        setPriceError(price.trim() ? parsed.error : "Enter the negotiated price.");
+        setTermsErrors(parsed.errors);
         return;
       }
-      setPriceError(null);
+      setTermsErrors({});
       onConfirm(stage, "", parsed.value);
       return;
     }
@@ -132,19 +136,22 @@ export function TransitionDialog({ subject, stages, target, busy, error, onConfi
           </fieldset>
         ) : null}
         {stage && kind && consequence(kind, stage) ? <p className="text-sm text-slate-600">{consequence(kind, stage)}</p> : null}
-        {asksPrice ? (
-          <TextField
-            label="Negotiated price (₹)"
-            name="negotiated_price"
-            inputMode="decimal"
-            autoComplete="off"
-            value={price}
-            onChange={(e) => {
-              setPrice(e.target.value);
-              setPriceError(null);
+        {asksTerms ? (
+          <AgreedTermsFields
+            price={price}
+            cpt={cpt}
+            // A field's own error, else the server's refusal of it; typing clears both.
+            onPriceChange={(value) => {
+              setPrice(value);
+              setTermsErrors((e) => ({ ...e, price: [] }));
             }}
-            errors={priceError ? [priceError] : undefined}
-            data-autofocus={target !== null || undefined}
+            onCptChange={(value) => {
+              setCpt(value);
+              setTermsErrors((e) => ({ ...e, cpt: [] }));
+            }}
+            priceErrors={termsErrors.price ?? error?.fields?.negotiated_price}
+            cptErrors={termsErrors.cpt ?? error?.fields?.agreed_cpt}
+            autoFocus={target !== null}
           />
         ) : null}
         {kind === "lose" ? (
@@ -164,7 +171,7 @@ export function TransitionDialog({ subject, stages, target, busy, error, onConfi
             variant="secondary"
             onClick={onClose}
             disabled={busy}
-            data-autofocus={(target !== null && kind !== "lose" && !asksPrice) || undefined}
+            data-autofocus={(target !== null && kind !== "lose" && !asksTerms) || undefined}
           >
             Cancel
           </Button>

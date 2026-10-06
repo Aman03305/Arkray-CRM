@@ -1,10 +1,9 @@
 import type { Metadata } from "next";
 
-import { SECTION_VIEWS } from "@/features/workspace/section-views";
+import { DashboardView } from "@/features/workspace/views/dashboard";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
 export default function Page() {
-  const View = SECTION_VIEWS.dashboard;
-  return <View />;
+  return <DashboardView />;
 }

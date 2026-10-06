@@ -34,8 +34,9 @@ export function ChangeEmailDialog({ user, isSelf, onClose, onSaved }: {
       }),
     onSuccess: (updated) => onSaved(updated, `${updated.full_name} now signs in with ${updated.email}.`),
     onError: (error) => {
-      if (isApiError(error, 409) && !fieldErrors(error).email) {
-        void queryClient.invalidateQueries({ queryKey: USERS_QUERY_KEY }); // stale version
+      // A stale version, or a refusal (e.g. the user became an administrator meanwhile).
+      if ((isApiError(error, 409) && !fieldErrors(error).email) || isApiError(error, 422)) {
+        void queryClient.invalidateQueries({ queryKey: USERS_QUERY_KEY });
       }
     },
   });

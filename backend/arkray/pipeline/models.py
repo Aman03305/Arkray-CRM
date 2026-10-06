@@ -50,8 +50,12 @@ INSTRUMENT_NAME_MAX_LENGTH = 200
 WORK_LOAD_MAX_LENGTH = 100
 # Expected CPT, free text for the same reason: nothing in the CRM's documentation defines CPT
 # or its unit, so the salesperson's own words are kept until the business confirms them
-# (docs/pipeline.md#expected-cpt).
-EXPECTED_CPT_MAX_LENGTH = 100
+# (docs/pipeline.md#expected-cpt). One bound and one rule for every CPT: validation.clean_cpt.
+CPT_MAX_LENGTH = 100
+EXPECTED_CPT_MAX_LENGTH = CPT_MAX_LENGTH
+# The agreed CPT asked for with the agreed (negotiated) price on entering a negotiation stage
+# (ADR-0029): free text for the same reason as Expected CPT.
+AGREED_CPT_MAX_LENGTH = CPT_MAX_LENGTH
 # Configuration bounds (per owner / per pipeline), so nobody can grow the configuration
 # without limit (docs/pipeline.md#configuration).
 MAX_PIPELINES_PER_OWNER = 25
@@ -189,9 +193,9 @@ class Stage(UUIDPrimaryKeyModel, TimeStampedModel):
         max_digits=PROBABILITY_DIGITS, decimal_places=PROBABILITY_PLACES
     )
     category = models.CharField(max_length=8, choices=StageCategory.choices)
-    # A negotiation stage (an open stage): entering it requires the negotiated price, which
-    # is recorded in NegotiationPrice (docs/pipeline.md#negotiation). Domain data, not the
-    # name: "Negotiation" renamed to "Commercial discussion" keeps the behaviour.
+    # A negotiation stage (an open stage): entering it requires the agreed price and agreed
+    # CPT, which are recorded in NegotiationPrice (docs/pipeline.md#negotiation). Domain
+    # data, not the name: "Negotiation" renamed to "Commercial discussion" keeps the behaviour.
     is_negotiation = models.BooleanField(default=False)
     # Retired stages stay (opportunities and history may reference them) but nothing can
     # move into them.
@@ -341,9 +345,12 @@ class Opportunity(UUIDPrimaryKeyModel, TimeStampedModel):
     # Values of the pipeline's custom fields, {field id: canonical value}; validated against
     # the definitions by validation.clean_custom_values (never arbitrary keys or HTML).
     custom_fields = models.JSONField(default=dict, blank=True)
-    # The latest negotiated price (INR) and when it was recorded: a copy of the newest
-    # NegotiationPrice row (the history is authoritative). Kept after the deal leaves
-    # negotiation; entering a negotiation stage again asks for a new one.
+    # The latest agreed (negotiated) price (INR) and when it was recorded: a copy of the
+    # newest NegotiationPrice row (the history is authoritative). Kept after the deal leaves
+    # negotiation; entering a negotiation stage again asks for new terms. The agreed CPT has
+    # no copy here: it is read from that newest row (selectors.LATEST_AGREED_CPT), so it
+    # always goes with the price shown, also beside a price the previous release recorded
+    # without one (ADR-0029, review P2).
     negotiated_price = models.DecimalField(
         max_digits=MONEY_DIGITS, decimal_places=MONEY_PLACES, null=True, blank=True
     )
@@ -575,7 +582,7 @@ class StageHistory(AppendOnlyModel):
 
 
 class NegotiationSource(models.TextChoices):
-    """How a negotiated price was recorded."""
+    """How an agreed price (and CPT) was recorded."""
 
     STAGE_ENTRY = "stage_entry", "Entered a negotiation stage"
     REVISION = "revision", "Revised during negotiation"
@@ -583,10 +590,11 @@ class NegotiationSource(models.TextChoices):
 
 
 class NegotiationPrice(AppendOnlyModel):
-    """One negotiated price of an opportunity (docs/pipeline.md#negotiation). Insert-only
-    (ORM guard + PostgreSQL trigger): a new price never overwrites an earlier one, so the
-    history ₹12,00,000 -> ₹11,00,000 -> ₹10,50,000 stays auditable. Written in the
-    transaction that changes the opportunity, under its lock."""
+    """One agreed (negotiated) price of an opportunity and the agreed CPT recorded with it
+    (docs/pipeline.md#negotiation). Insert-only (ORM guard + PostgreSQL trigger): new terms
+    never overwrite earlier ones, so the history ₹12,00,000 -> ₹11,00,000 -> ₹10,50,000
+    stays auditable. Written in the transaction that changes the opportunity, under its
+    lock."""
 
     id = models.BigAutoField(primary_key=True)
     opportunity = models.ForeignKey(
@@ -594,6 +602,11 @@ class NegotiationPrice(AppendOnlyModel):
     )
     price = models.DecimalField(max_digits=MONEY_DIGITS, decimal_places=MONEY_PLACES)
     currency = models.CharField(max_length=3)
+    # Free text as the salesperson stated it (ADR-0029); "" on rows recorded before the agreed
+    # CPT was asked for. db_default: the previous release inserts rows without it.
+    agreed_cpt = models.CharField(
+        max_length=AGREED_CPT_MAX_LENGTH, blank=True, default="", db_default=""
+    )
     # The negotiation stage the deal was in (and its name then: stages may be renamed).
     stage = models.ForeignKey(Stage, on_delete=models.PROTECT, related_name="+", db_index=False)
     stage_name = models.CharField(max_length=STAGE_NAME_MAX_LENGTH)

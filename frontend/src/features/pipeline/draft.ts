@@ -9,6 +9,8 @@
 import type { CustomField, Opportunity, OpportunityCreateRequest, OpportunityUpdateRequest } from "@/lib/api/types";
 import { amountInputValue, parseAmountInput, parsePercentInput, sameDecimal } from "@/lib/money";
 
+import type { AgreedTerms } from "./AgreedTerms";
+
 export const DRAFT_FIELDS = [
   "opportunity_date",
   "account_name",
@@ -105,7 +107,9 @@ export function changedFields(before: Draft, after: Draft): DraftField[] {
   return DRAFT_FIELDS.filter((f) => comparable(f, before[f]) !== comparable(f, after[f]));
 }
 
-export type Problems = Partial<Record<DraftField | "owner" | "pipeline" | "stage" | "negotiated_price" | `custom_fields.${string}`, string[]>>;
+export type Problems = Partial<
+  Record<DraftField | "owner" | "pipeline" | "stage" | "negotiated_price" | "agreed_cpt" | `custom_fields.${string}`, string[]>
+>;
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const inRange = (date: string) => DATE.test(date) && date >= "2000-01-01" && date <= "2099-12-31";
@@ -165,7 +169,8 @@ export function createRequest(
     stage?: string;
     stageProbability?: string;
     lost?: boolean;
-    negotiatedPrice?: string;
+    /** A negotiation stage: the agreed price and CPT (ADR-0029). */
+    terms?: AgreedTerms;
     customFields?: Record<string, CustomValue>;
   },
 ): OpportunityCreateRequest {
@@ -184,7 +189,10 @@ export function createRequest(
   if (draft.expected_close_date) body.expected_close_date = draft.expected_close_date;
   if (draft.description.trim()) body.description = draft.description;
   if (target.lost && draft.lost_reason.trim()) body.lost_reason = draft.lost_reason.trim();
-  if (target.negotiatedPrice) body.negotiated_price = target.negotiatedPrice;
+  if (target.terms) {
+    body.negotiated_price = target.terms.price;
+    body.agreed_cpt = target.terms.cpt;
+  }
   const custom = Object.fromEntries(Object.entries(target.customFields ?? {}).filter(([, v]) => !isEmptyValue(v)));
   if (Object.keys(custom).length) body.custom_fields = custom;
   return body;

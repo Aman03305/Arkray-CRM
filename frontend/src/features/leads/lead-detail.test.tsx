@@ -93,6 +93,18 @@ describe("a lead's page", () => {
     expect(screen.queryByRole("button", { name: /edit|archive|delete|convert/i })).not.toBeInTheDocument();
   });
 
+  it("its opportunity opens from anywhere on the row, and Back to the Dashboard is 28 px to hit (WCAG 2.5.8)", async () => {
+    routes("me");
+    renderWithProviders(<LeadView leadId={LEAD_ID} />, { viewer: salesViewer });
+    const deal = await screen.findByRole("link", { name: "ABC Diagnostics Mumbai — Adams 8380 V-lite" });
+    // The title alone was a 20 px line: its hit area (::after) now covers the row.
+    expect(deal).toHaveClass("after:absolute", "after:inset-0");
+    expect(deal.closest("li")).toHaveClass("relative");
+    expect(within(deal.closest("li")!).getAllByRole("link")).toHaveLength(1);
+    // 8 px of padding, given back as margin: taller to hit, nothing moves.
+    expect(screen.getByRole("link", { name: "Dashboard" })).toHaveClass("py-1", "-mt-1", "mb-2");
+  });
+
   it("in a user's workspace opened by an administrator, reads and links only inside it", async () => {
     nav.pathname = `/admin/users/${RAHUL_ID}/leads/${LEAD_ID}`;
     const api = routes(RAHUL_ID);

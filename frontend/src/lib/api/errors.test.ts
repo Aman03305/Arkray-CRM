@@ -46,6 +46,18 @@ describe("describeError", () => {
     const error = new ApiError(429, "rate_limited", "Too many sign-in attempts. Try again in 1 minute.");
     expect(describeError(error).message).toBe("Too many sign-in attempts. Try again in 1 minute.");
   });
+
+  it("says when to try again after a 429 that carries Retry-After", () => {
+    const limited = (message: string, wait: number | null) => describeError(new ApiError(429, "rate_limited", message, null, "r", wait)).message;
+    expect(limited("Too many attempts. Please try again later.", 30)).toBe("Too many attempts. Try again in 30 seconds.");
+    expect(limited("Too many new opportunities at once.", 1)).toBe("Too many new opportunities at once. Try again in 1 second.");
+    expect(limited("", 45)).toBe("Too many requests. Try again in 45 seconds.");
+    // Already said, or no Retry-After: as sent.
+    expect(limited("Request was throttled. Expected available in 45 seconds.", 45)).toBe("Request was throttled. Expected available in 45 seconds.");
+    expect(limited("Too many sign-in attempts. Try again in 1 minute.", 60)).toBe("Too many sign-in attempts. Try again in 1 minute.");
+    expect(limited("Too many attempts. Please try again later.", null)).toBe("Too many attempts. Please try again later.");
+    expect(describeError(new ApiError(429, "rate_limited", "Slow down.", null, "req-9", 5)).requestId).toBe("req-9");
+  });
 });
 
 describe("fieldErrors", () => {

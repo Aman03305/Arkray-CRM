@@ -4,6 +4,7 @@ import type { AnchorHTMLAttributes, MouseEvent } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { forgetBoardState, useBoardSelection } from "@/features/pipeline/hooks";
+import { labelInNameProblems, unnamedControls } from "@/test/a11y";
 import { adminViewer, RAHUL_ID, salesViewer } from "@/test/fixtures";
 import { PIPELINE_ROUTES, PIPELINES, STAGES } from "@/test/pipeline-fixtures";
 import { mockApi, renderWithProviders } from "@/test/render";
@@ -41,6 +42,7 @@ vi.mock("next/link", () => ({
       {children}
     </a>
   ),
+  useLinkStatus: () => ({ pending: false }),
 }));
 
 const CONFIG = PIPELINE_ROUTES;
@@ -175,6 +177,18 @@ describe("the header", () => {
     expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
     await user.click(document.body);
     expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
+  });
+
+  it("names its controls with words that include what they show (axe label-content-name-mismatch, final audit UI-6a)", () => {
+    renderWithProviders(<Topbar onMenuClick={() => undefined} />, { viewer: salesViewer });
+    // The account button shows initials ("PP"), the product link a mark ("A") and, where
+    // there is room, "Arkray CRM": neither is named by an aria-label that leaves those out.
+    const account = screen.getByRole("button", { name: "Account: Priya Patel" });
+    const home = screen.getByRole("link", { name: "Arkray CRM" });
+    for (const control of [account, home]) expect(control).not.toHaveAttribute("aria-label");
+    expect(account).toHaveAttribute("title", "Account: Priya Patel");
+    expect(labelInNameProblems(document.body)).toEqual([]);
+    expect(unnamedControls(document.body)).toEqual([]);
   });
 });
 

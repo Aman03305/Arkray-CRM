@@ -33,6 +33,13 @@ backend/.models/
 # Local attachment storage (ATTACHMENT_ROOT): never committed, never served
 backend/var/
 
+# Database backups and logs: a dump holds every personal field (scripts/backup.sh writes
+# arkray-<timestamp>.dump to the current directory by default)
+*.dump
+*.dump.sha256
+*.sql.gz
+*.log
+
 # Editors / OS
 .idea/
 .vscode/*

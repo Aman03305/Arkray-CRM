@@ -120,7 +120,8 @@ export function ActionMenu({ label, actions, disabled = false }: { label: string
             if (!disabled) setOpen(true);
           }
         }}
-        className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-800 aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+        // 32 px to hit, taking the 28 px of room it always had (rows and cards keep their height).
+        className="-m-0.5 rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800 aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
       >
         <MoreHorizontal aria-hidden="true" className="size-4" />
       </button>

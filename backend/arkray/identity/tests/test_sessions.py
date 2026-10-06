@@ -10,6 +10,7 @@ from rest_framework.test import APIClient
 from arkray.audit.models import AuditEvent
 from arkray.identity import services
 from arkray.identity.authentication import AUDIT_LOGOUT
+from arkray.identity.models import User
 from arkray.identity.sessions import AUTH_AT, SEEN_AT
 from tests.factories import DEFAULT_PASSWORD, AdminFactory
 from tests.helpers import signed_in
@@ -150,12 +151,8 @@ class TestRevocation:
         other_admin = AdminFactory()
         client = signed_in(other_admin)
         assert client.get("/api/v1/admin/users").status_code == 200
-        services.update_user(
-            actor_id=admin.pk,
-            user_id=other_admin.pk,
-            version=other_admin.version,
-            changes={"role": "sales_user"},
-        )
+        # Another administrator can't demote them (R100); an operator can, in the database.
+        User.objects.filter(pk=other_admin.pk).update(role="sales_user")
         assert client.get("/api/v1/admin/users").status_code == 403
         assert client.get(ME).json()["capabilities"] == ["ai.query", "crm.access_own"]
 

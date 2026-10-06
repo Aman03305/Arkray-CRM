@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from arkray.pipeline.models import Opportunity, Stage
 from tests.factories import LeadFactory, OpportunityFactory, UserFactory
+from tests.helpers import key_header
 
 from .conftest import board_url, opportunities_url, opportunity_url, summary_url
 
@@ -58,6 +59,7 @@ class TestCreateAndDetail:
                 description="Two analysers",
             ),
             format="json",
+            headers=key_header(),
         )
         assert response.status_code == 201, response.content
         body = response.json()
@@ -79,7 +81,10 @@ class TestCreateAndDetail:
     def test_the_title_is_derived_never_sent(self, user_a_client, user_a, stages):
         lead = LeadFactory(owner=user_a)
         refused = user_a_client.post(
-            opportunities_url(), create_body(lead, title="Hospital Analyzer Project"), format="json"
+            opportunities_url(),
+            create_body(lead, title="Hospital Analyzer Project"),
+            format="json",
+            headers=key_header(),
         )
         assert refused.status_code == 400
         assert refused.json()["error"]["details"] == {
@@ -90,6 +95,7 @@ class TestCreateAndDetail:
             opportunities_url(),
             create_body(lead, account_name="City Hospital", instrument_name="PCBA with Printer"),
             format="json",
+            headers=key_header(),
         )
         assert created.status_code == 201, created.content
         # The customer name defaults to the lead's, which names it before the account.
@@ -100,6 +106,7 @@ class TestCreateAndDetail:
             opportunities_url(),
             create_body(LeadFactory(owner=user_a), value=1200000),
             format="json",
+            headers=key_header(),
         )
         assert (response.status_code, response.json()["value"]) == (201, "1200000.00")
 
@@ -130,7 +137,10 @@ class TestCreateAndDetail:
     )
     def test_amounts_are_only_plain_decimal_strings(self, user_a_client, user_a, stages, value):
         response = user_a_client.post(
-            opportunities_url(), create_body(LeadFactory(owner=user_a), value=value), format="json"
+            opportunities_url(),
+            create_body(LeadFactory(owner=user_a), value=value),
+            format="json",
+            headers=key_header(),
         )
         assert response.status_code == 400, response.content
         assert "value" in response.json()["error"]["details"]
@@ -139,7 +149,9 @@ class TestCreateAndDetail:
     def test_nan_as_a_json_literal_is_malformed(self, user_a_client, user_a, stages):
         lead = LeadFactory(owner=user_a)
         body = f'{{"lead": "{lead.pk}", "value": NaN}}'
-        response = user_a_client.post(opportunities_url(), body, content_type="application/json")
+        response = user_a_client.post(
+            opportunities_url(), body, content_type="application/json", headers=key_header()
+        )
         assert response.status_code == 400
         assert not Opportunity.objects.exists()
 
@@ -149,6 +161,7 @@ class TestCreateAndDetail:
             opportunities_url(),
             create_body(LeadFactory(owner=user_a), probability=probability),
             format="json",
+            headers=key_header(),
         )
         assert response.status_code == 400
         assert "probability" in response.json()["error"]["details"]
@@ -164,6 +177,7 @@ class TestCreateAndDetail:
             opportunities_url(),
             create_body(LeadFactory(owner=user_a), expected_close_date=date_value),
             format="json",
+            headers=key_header(),
         )
         assert response.status_code == 400
 
@@ -183,7 +197,10 @@ class TestCreateAndDetail:
     )
     def test_system_fields_are_refused(self, user_a_client, user_a, stages, extra):
         response = user_a_client.post(
-            opportunities_url(), create_body(LeadFactory(owner=user_a), **extra), format="json"
+            opportunities_url(),
+            create_body(LeadFactory(owner=user_a), **extra),
+            format="json",
+            headers=key_header(),
         )
         assert response.status_code == 400
         assert not Opportunity.objects.exists()
@@ -193,6 +210,7 @@ class TestCreateAndDetail:
             opportunities_url(),
             {"lead": "5a1e4d2c-0000-4000-8000-00000000abcd", "value": "1"},
             format="json",
+            headers=key_header(),
         )
         assert response.status_code == 404
 
@@ -321,6 +339,7 @@ class TestEditMoveArchiveHistory:
             body = {"stage": str(stages[key].pk), "version": version}
             if key == "negotiation":
                 body["negotiated_price"] = "1000"
+                body["agreed_cpt"] = "Rs 18"
             assert (
                 user_a_client.post(
                     opportunity_url(opportunity.pk, action="move"), body, format="json"
@@ -410,6 +429,7 @@ class TestBoard:
             "archived_at",
             "account_name",
             "negotiated_price",
+            "agreed_cpt",
             "version",
             "created_at",
             "updated_at",

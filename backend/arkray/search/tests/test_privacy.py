@@ -115,7 +115,7 @@ class TestNothingIsLogged:
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.usefixtures("crm_configuration")
     def test_not_when_the_database_gives_up(self, records, user_a, monkeypatch):
-        """A real statement timeout inside a search: a generic 500, no SQL, no query."""
+        """A real statement timeout inside a search: "search busy" (503), no SQL, no query."""
 
         def slow(scope, query, *, limit):
             with connection.cursor() as cursor:
@@ -127,8 +127,8 @@ class TestNothingIsLogged:
         client = signed_in(user_a)
         client.raise_request_exception = False
         response = client.get(search_url(MARKER))
-        assert response.status_code == 500
-        assert response.json()["error"]["code"] == "server_error"
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "search_busy"
         body = response.content.decode()
         for leaked in (MARKER, "SELECT", "statement"):
             assert leaked not in body

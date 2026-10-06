@@ -10,6 +10,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { NotFoundView } from "@/components/ui/NotFoundView";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { useSingleFlight } from "@/components/ui/useSingleFlight";
 import { cursorOf } from "@/lib/api/pagination";
 import { OwnerSelect } from "@/features/users/OwnerSelect";
 import { DealPicker } from "@/features/pipeline/DealPicker";
@@ -97,31 +98,36 @@ export function ActivitiesListView({ workspace }: { workspace: Workspace }) {
   // Counts the server now refuses (or can't give) aren't left on screen.
   const counts = summary.isError ? undefined : summary.data;
   const action = useActivityAction(workspace);
+  const once = useSingleFlight();
 
   const run = (kind: LifecycleAction, activity: ActivityListItem) => {
-    setNotice(null);
-    setProblem(null);
-    // Always the version the list shows now (after a 409 the list reloads).
-    const current = activities.data?.results.find((a) => a.id === activity.id) ?? activity;
-    action.mutate(
-      { activity: current, action: kind },
-      {
-        onSuccess: () => {
-          setPending(null);
-          focusNotice.current = true;
-          setNotice(done(kind, current));
+    // One action per row at a time: a second Complete in the same moment would carry the same
+    // version and report "changed by someone else" about the first.
+    once(() => {
+      setNotice(null);
+      setProblem(null);
+      // Always the version the list shows now (after a 409 the list reloads).
+      const current = activities.data?.results.find((a) => a.id === activity.id) ?? activity;
+      return action.mutateAsync(
+        { activity: current, action: kind },
+        {
+          onSuccess: () => {
+            setPending(null);
+            focusNotice.current = true;
+            setNotice(done(kind, current));
+          },
+          onError: (error) => {
+            setPending(null);
+            focusNotice.current = true;
+            setProblem(
+              isApiError(error, 409)
+                ? { message: "That activity was changed by someone else a moment ago. The list has been refreshed; try again.", requestId: null }
+                : describeError(error),
+            );
+          },
         },
-        onError: (error) => {
-          setPending(null);
-          focusNotice.current = true;
-          setProblem(
-            isApiError(error, 409)
-              ? { message: "That activity was changed by someone else a moment ago. The list has been refreshed; try again.", requestId: null }
-              : describeError(error),
-          );
-        },
-      },
-    );
+      );
+    }, activity.id);
   };
   const onRowAction = (kind: LifecycleAction, activity: ActivityListItem) => {
     if (CONFIRMED.has(kind)) {

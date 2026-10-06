@@ -15,7 +15,7 @@ from arkray.core.business_time import business_date
 from arkray.pipeline import models as m
 from arkray.pipeline.models import CustomField, Opportunity
 from tests.factories import LeadFactory, OpportunityFactory
-from tests.helpers import signed_in
+from tests.helpers import key_header, signed_in
 
 from .conftest import opportunities_url, opportunity_url
 from .test_configuration import SHORT, created, pipeline_url
@@ -38,7 +38,9 @@ FULL = {
 
 
 def create(client, lead, **body):
-    return client.post(opportunities_url(), {"lead": str(lead.pk), **body}, format="json")
+    return client.post(
+        opportunities_url(), {"lead": str(lead.pk), **body}, format="json", headers=key_header()
+    )
 
 
 class TestDealFields:

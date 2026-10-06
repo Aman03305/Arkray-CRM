@@ -4,6 +4,7 @@ import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { Dialog } from "./Dialog";
+import { Drawer } from "./Drawer";
 
 function Harness({ busy = false, onClose = vi.fn() }: { busy?: boolean; onClose?: () => void }) {
   const [open, setOpen] = useState(false);
@@ -62,5 +63,19 @@ describe("Dialog", () => {
     await user.keyboard("{Escape}");
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Close dialog" })).toBeDisabled();
+  });
+
+  it("its close button, and a drawer's, is 32 px to hit (a 16 px icon + 2 x 8 px) in the room of the old 28 px", () => {
+    const modals = [
+      ["Close dialog", <Dialog key="d" open title="Edit user" onClose={vi.fn()}>Body</Dialog>],
+      ["Close panel", <Drawer key="p" open title="New opportunity" onClose={vi.fn()}>Body</Drawer>],
+    ] as const;
+    for (const [name, modal] of modals) {
+      const view = render(modal);
+      const close = screen.getByRole("button", { name });
+      expect(close).toHaveClass("p-2", "-my-0.5", "-mr-1.5");
+      expect(close.querySelector("svg")).toHaveClass("size-4");
+      view.unmount();
+    }
   });
 });

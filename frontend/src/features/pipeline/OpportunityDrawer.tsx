@@ -14,11 +14,12 @@ import { OwnerSelect } from "@/features/users/OwnerSelect";
 import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
 import type { CustomField, Opportunity, OpportunityCreateRequest } from "@/lib/api/types";
 import { businessToday } from "@/lib/format";
-import { formatPercent, parseAmountInput } from "@/lib/money";
-import { randomUuid } from "@/lib/random";
+import { formatPercent } from "@/lib/money";
+import { type IdempotencyKey, newIdempotencyKey } from "@/lib/random";
 import { useViewer } from "@/lib/viewer-context";
 import type { Workspace } from "@/lib/workspace";
 
+import { AgreedTermsFields, parseAgreedTerms } from "./AgreedTerms";
 import { pipelineApi, pipelineKeys } from "./api";
 import { CustomFieldInputs } from "./CustomFields";
 import {
@@ -92,6 +93,7 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
   const [pipelineId, setPipelineId] = useState(boardPipeline ?? "");
   const [stageId, setStageId] = useState("");
   const [negotiatedPrice, setNegotiatedPrice] = useState("");
+  const [agreedCpt, setAgreedCpt] = useState("");
   const [manualProbability, setManualProbability] = useState(Boolean(base.probability));
   const [clientErrors, setClientErrors] = useState<Problems>({});
   const [conflict, setConflict] = useState<Opportunity | null>(null);
@@ -99,14 +101,21 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
   const [archivedMeanwhile, setArchivedMeanwhile] = useState(false);
   const [reviewFields, setReviewFields] = useState<string[]>([]);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
-  // One logical create, one key: a double click or a retry of the same form replays the
-  // first request (one opportunity, one lead), never makes a second pair.
-  const idempotency = useRef<{ body: string; key: string } | null>(null);
-  const keyFor = (body: OpportunityCreateRequest): string => {
-    const serialised = JSON.stringify(body);
-    if (idempotency.current?.body !== serialised) idempotency.current = { body: serialised, key: randomUuid() };
+  // One logical create, one key (the server requires one): a double click or a retry of the
+  // same request (after a timeout, a network error, 429, 503) sends the same key, so the server
+  // replays the first creation (one opportunity, one lead) instead of making a second pair.
+  // A different request (any field, or the workspace, changed) gets a new key, so a key is
+  // never sent with two different bodies. After a successful create the key is forgotten and
+  // the panel takes no further submit; a new panel (another opening, a reload, another tab)
+  // starts with no key: it is a new submission.
+  const idempotency = useRef<{ request: string; key: IdempotencyKey } | null>(null);
+  const keyFor = (body: OpportunityCreateRequest): IdempotencyKey => {
+    const request = JSON.stringify([workspace, body]);
+    if (idempotency.current?.request !== request) idempotency.current = { request, key: newIdempotencyKey() };
     return idempotency.current.key;
   };
+  // Synchronous: a second click can arrive before the mutation's pending state renders.
+  const submitting = useRef(false);
 
   const usable = (pipelines.data?.results ?? []).filter((p) => p.is_active);
   // Editing: the deal's own pipeline, also when archived (its fields stay editable).
@@ -147,20 +156,33 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
           updateRequest(base, manualDraft(), version, { before: customRequest(fields, customBase), after: values }),
         );
       }
-      const price = parseAmountInput(negotiatedPrice);
+      const terms = parseAgreedTerms(negotiatedPrice, agreedCpt);
       const body = createRequest(manualDraft(), {
         owner: choosesOwner ? owner : undefined,
         pipeline: pipeline?.id,
         stage: stageId || undefined,
         stageProbability: stage?.probability,
         lost,
-        negotiatedPrice: isNegotiation(stage) && price.ok ? price.value : undefined,
+        terms: isNegotiation(stage) && terms.ok ? terms.value : undefined,
         customFields: values,
       });
       return pipelineApi.create(workspace, body, keyFor(body));
     },
-    onSuccess: sync,
+    onSuccess: (saved) => {
+      idempotency.current = null;
+      return sync(saved);
+    },
+    onSettled: () => {
+      submitting.current = false;
+    },
     onError: async (error) => {
+      // The server refused the key itself (missing, malformed, or used for another request):
+      // the next attempt gets a new one. Nothing was created with it.
+      if (keyRefused(error)) idempotency.current = null;
+      // The stage became (or stopped being) a negotiation stage after the panel opened: reload
+      // the pipelines, so the agreed price and CPT fields show (or go) with the server's word.
+      const terms = fieldErrors(error);
+      if (!opportunity && (terms.negotiated_price || terms.agreed_cpt)) void pipelines.refetch();
       if (!opportunity || !isApiError(error, 409)) return;
       setReloadFailed(false);
       try {
@@ -202,7 +224,9 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
-    if (save.isPending) return;
+    // Created: the panel is closing (or the page leaving for the new deal); another submit
+    // would be a second creation.
+    if (submitting.current || save.isPending || (!editing && save.isSuccess)) return;
     if (conflict) {
       focusLater("[data-conflict-apply]");
       return;
@@ -216,8 +240,11 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
       problems.pipeline = [pipelines.isError ? "Pipelines couldn't be loaded. Try again." : "Pipelines are still loading."];
     }
     if (!editing && isNegotiation(stage)) {
-      const price = parseAmountInput(negotiatedPrice);
-      if (!price.ok) problems.negotiated_price = [negotiatedPrice.trim() ? price.error : "Enter the negotiated price."];
+      const terms = parseAgreedTerms(negotiatedPrice, agreedCpt);
+      if (!terms.ok) {
+        if (terms.errors.price) problems.negotiated_price = terms.errors.price;
+        if (terms.errors.cpt) problems.agreed_cpt = terms.errors.cpt;
+      }
     }
     setClientErrors(problems);
     if (Object.keys(problems).length) return;
@@ -226,6 +253,7 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
       return;
     }
     setReloadFailed(false);
+    submitting.current = true;
     save.mutate(undefined, { onSuccess: (saved) => onSaved(saved, !editing) });
   };
 
@@ -262,9 +290,20 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
 
   // An owner error shows under the Owner field organisation-wide; elsewhere there is none (a
   // deactivated user's workspace takes nothing new), so it is the banner's.
-  const known = new Set([...Object.keys(EMPTY_DRAFT), ...(choosesOwner ? ["owner"] : []), "stage", "pipeline", "negotiated_price"]);
+  // The agreed terms only while their fields are shown: a stage retyped to negotiation
+  // after the panel opened is refused with nothing on screen, so the banner says why (review).
+  const known = new Set([
+    ...Object.keys(EMPTY_DRAFT),
+    ...(choosesOwner ? ["owner"] : []),
+    "stage",
+    "pipeline",
+    ...(!editing && isNegotiation(stage) ? ["negotiated_price", "agreed_cpt"] : []),
+  ]);
+  // A 409 means "someone else changed it" only for an edit (the latest version is reloaded);
+  // a create's 409 (already created elsewhere) shows the server's message.
+  const staleVersion = editing && isApiError(save.error, 409);
   const unmapped =
-    save.isError && !isApiError(save.error, 409) && !Object.keys(server).some((f) => known.has(f) || f.startsWith("custom_fields"));
+    save.isError && !staleVersion && !Object.keys(server).some((f) => known.has(f) || f.startsWith("custom_fields"));
   const banner = describeError(save.error);
   // A stray click beside the panel or Escape never throws typing away (enhancement review).
   const close = () => {
@@ -330,7 +369,7 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
           <Alert tone="error" title="This opportunity was archived meanwhile">
             Your changes can&apos;t be saved until it is restored. They are still in the form.
           </Alert>
-        ) : isApiError(save.error, 409) ? (
+        ) : staleVersion ? (
           reloadFailed ? (
             <Alert tone="error">Someone else changed this opportunity and the latest version couldn&apos;t be loaded. Your changes are still here.</Alert>
           ) : (
@@ -338,7 +377,9 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
           )
         ) : unmapped ? (
           <Alert tone="error" requestId={banner.requestId}>
-            {(server.non_field_errors ?? server.owner)?.join(" ") ?? banner.message}
+            {keyRefused(save.error)
+              ? KEY_REFUSED
+              : ((server.non_field_errors ?? server.owner ?? server.negotiated_price ?? server.agreed_cpt)?.join(" ") ?? banner.message)}
           </Alert>
         ) : null}
         {reviewFields.length ? (
@@ -348,7 +389,16 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
         ) : null}
 
         <Group title="Customer">
-          {text("account_name", 200)}
+          <TextField
+            label={FIELD_LABELS.account_name}
+            name="account_name"
+            maxLength={200}
+            value={draft.account_name}
+            onChange={(e) => set("account_name")(e.target.value)}
+            errors={errors.account_name}
+            autoComplete="off"
+            data-autofocus={!editing || undefined}
+          />
           <TextField
             label={FIELD_LABELS.customer_name}
             name="customer_name"
@@ -455,14 +505,13 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
                 errors={errors.stage}
               />
               {isNegotiation(stage) ? (
-                <TextField
-                  label="Negotiated price (₹)"
-                  name="negotiated_price"
-                  inputMode="decimal"
-                  value={negotiatedPrice}
-                  onChange={(e) => setNegotiatedPrice(e.target.value)}
-                  errors={errors.negotiated_price}
-                  autoComplete="off"
+                <AgreedTermsFields
+                  price={negotiatedPrice}
+                  cpt={agreedCpt}
+                  onPriceChange={setNegotiatedPrice}
+                  onCptChange={setAgreedCpt}
+                  priceErrors={errors.negotiated_price}
+                  cptErrors={errors.agreed_cpt}
                 />
               ) : null}
             </>
@@ -509,6 +558,13 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
     </Drawer>
   );
 }
+
+/** The server refused the request's Idempotency-Key: missing or malformed (400), or already
+ * used for a different request (422). Never expected from this form. */
+function keyRefused(error: unknown): boolean {
+  return (isApiError(error, 400) && Boolean(fieldErrors(error).idempotency_key)) || isApiError(error, 422, "idempotency_key_reused");
+}
+const KEY_REFUSED = "This couldn't be sent. Please try again.";
 
 function Group({ title, children }: { title: string; children: ReactNode }) {
   const id = useId();

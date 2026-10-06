@@ -37,7 +37,8 @@ export function SetPasswordDialog({ user, onClose, onDone }: {
       onDone(updated, `${updated.full_name} must choose a new password at next sign-in.`);
     },
     onError: (error) => {
-      if (isApiError(error, 409)) void queryClient.invalidateQueries({ queryKey: USERS_QUERY_KEY }); // stale version
+      // A stale version, or a refusal (e.g. the user became an administrator meanwhile).
+      if (isApiError(error, 409) || isApiError(error, 422)) void queryClient.invalidateQueries({ queryKey: USERS_QUERY_KEY });
     },
   });
 

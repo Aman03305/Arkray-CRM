@@ -11,10 +11,10 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Dialog, DialogActions } from "@/components/ui/Dialog";
-import { TextField } from "@/components/ui/Field";
 import { NotFoundView } from "@/components/ui/NotFoundView";
 import { PersonName } from "@/components/ui/PersonName";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { TALLER_HIT } from "@/components/ui/targets";
 import { activityKeys, timelineKeys } from "@/features/activities/api";
 import { leadKeys } from "@/features/leads/api";
 import { CurrentWork } from "@/features/activities/CurrentWork";
@@ -27,17 +27,18 @@ import type { Opportunity, Stage, StageHistoryEntry } from "@/lib/api/types";
 import { mailtoHref, telHref } from "@/lib/contact-links";
 import { setFlash, useFlash } from "@/lib/flash";
 import { businessToday, formatDateOnly, formatDateTime, formatRelative } from "@/lib/format";
-import { formatPercent, parseAmountInput } from "@/lib/money";
+import { formatPercent } from "@/lib/money";
 import { useViewer } from "@/lib/viewer-context";
 import { leadHref, opportunityHref, sectionBack, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
 
+import { type AgreedTerms, AgreedTermsFields, parseAgreedTerms } from "./AgreedTerms";
 import { pipelineApi, pipelineKeys } from "./api";
 import { formatCustomValue } from "./CustomFields";
 import { isNegotiation, pipelinePermissions, useOpportunityWriteSync, usePipeline } from "./hooks";
 import { OpportunityDrawer } from "./OpportunityDrawer";
 import { Amount, CloseDate, OutcomeBadge, StageName } from "./PipelineBits";
 import { TransitionDialog } from "./TransitionDialog";
-import { moveErrorMessage, useMoveOpportunity } from "./useMoveOpportunity";
+import { moveErrorMessage, type MoveProblem, useMoveOpportunity } from "./useMoveOpportunity";
 
 type Pending = { target: Stage | null } | null;
 type Tab = "overview" | "notes" | "history";
@@ -100,7 +101,7 @@ export function OpportunityDetailView({
   const permissions = pipelinePermissions(viewer, workspace);
   const [notice, setNotice] = useFlash();
   const [pending, setPending] = useState<Pending>(null);
-  const [moveError, setMoveError] = useState<{ message: string; requestId: string | null } | null>(null);
+  const [moveError, setMoveError] = useState<MoveProblem | null>(null);
   const [lifecycleDialog, setLifecycleDialog] = useState<"archive" | "restore" | null>(null);
   const [editing, setEditing] = useState(editOnOpen);
   const [priceDialog, setPriceDialog] = useState(false);
@@ -135,7 +136,7 @@ export function OpportunityDetailView({
   });
 
   const back = (
-    <Link href={workspaceHref(workspace, "pipeline")} className="mb-3 inline-flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900">
+    <Link href={workspaceHref(workspace, "pipeline")} className="-mt-1 mb-2 inline-flex items-center gap-1 py-1 text-sm text-slate-600 hover:text-slate-900">
       <ArrowLeft aria-hidden="true" className="size-4" />
       Pipeline
     </Link>
@@ -190,10 +191,10 @@ export function OpportunityDetailView({
   const fields = pipeline.data?.custom_fields ?? [];
   const stored = (opportunity.custom_fields ?? {}) as Record<string, unknown>;
 
-  const confirmMove = (target: Stage, lostReason: string, negotiatedPrice?: string) => {
+  const confirmMove = (target: Stage, lostReason: string, terms?: AgreedTerms) => {
     setMoveError(null);
     move.mutate(
-      { id: opportunity.id, title: opportunity.title, version: opportunity.version, target, lostReason, negotiatedPrice },
+      { id: opportunity.id, title: opportunity.title, version: opportunity.version, target, lostReason, terms },
       {
         onSuccess: (updated) => {
           setPending(null);
@@ -299,7 +300,7 @@ export function OpportunityDetailView({
                 actions={
                   inNegotiation && canChange ? (
                     <Button variant="secondary" size="sm" onClick={() => setPriceDialog(true)}>
-                      Update price
+                      Update price &amp; CPT
                     </Button>
                   ) : null
                 }
@@ -310,7 +311,7 @@ export function OpportunityDetailView({
                     ...(opportunity.negotiated_price
                       ? ([
                           [
-                            "Negotiated price",
+                            "Agreed price",
                             <span key="n">
                               <Amount value={opportunity.negotiated_price} className="font-semibold" />{" "}
                               <span className="text-xs text-slate-500">
@@ -318,6 +319,8 @@ export function OpportunityDetailView({
                               </span>
                             </span>,
                           ],
+                          // Recorded with the agreed price (ADR-0029); prices from before have none.
+                          ["Agreed CPT", opportunity.agreed_cpt || null],
                         ] as [string, ReactNode][])
                       : []),
                     [
@@ -348,7 +351,7 @@ export function OpportunityDetailView({
                       opportunity.lead.restricted || !opportunity.lead.id ? (
                         <span key="l" className="italic text-slate-500">In another workspace</span>
                       ) : (
-                        <Link key="l" href={leadHref(workspace, opportunity.lead.id)} className="text-brand-700 [overflow-wrap:anywhere] hover:underline">
+                        <Link key="l" href={leadHref(workspace, opportunity.lead.id)} className={`inline-block ${TALLER_HIT} text-brand-700 [overflow-wrap:anywhere] hover:underline`}>
                           {opportunity.lead.display_name}
                         </Link>
                       ),
@@ -500,7 +503,7 @@ export function OpportunityDetailView({
           onSaved={(updated) => {
             sync(updated);
             setPriceDialog(false);
-            setNotice("Negotiated price recorded.");
+            setNotice("Agreed price and CPT recorded.");
           }}
         />
       ) : null}
@@ -672,7 +675,7 @@ function OwnerDialog({
   );
 }
 
-/** Record a new negotiated price while in a negotiation stage (appended to the history). */
+/** Record new agreed terms (price and CPT) while in a negotiation stage (appended to the history). */
 function PriceDialog({
   workspace,
   opportunity,
@@ -686,9 +689,14 @@ function PriceDialog({
 }) {
   const queryClient = useQueryClient();
   const [price, setPrice] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  // The CPT often stays while the price moves: the one on record, until the user types one.
+  // Derived, not copied: after a 409 reloads the deal, an untouched CPT is the latest one,
+  // never the one this dialog opened with (review P2).
+  const [typedCpt, setTypedCpt] = useState<string | null>(null);
+  const cpt = typedCpt ?? opportunity.agreed_cpt;
+  const [errors, setErrors] = useState<{ price?: string[]; cpt?: string[] }>({});
   const save = useMutation({
-    mutationFn: (value: string) => pipelineApi.recordNegotiatedPrice(workspace, opportunity.id, opportunity.version, value),
+    mutationFn: (terms: AgreedTerms) => pipelineApi.recordNegotiatedPrice(workspace, opportunity.id, opportunity.version, terms),
     onSuccess: onSaved,
     // Someone changed the deal meanwhile: load it, so a retry sends its new version.
     onError: (failure) => {
@@ -697,43 +705,46 @@ function PriceDialog({
   });
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    const parsed = parseAmountInput(price);
+    const parsed = parseAgreedTerms(price, cpt);
     if (!parsed.ok) {
-      setError(price.trim() ? parsed.error : "Enter the negotiated price.");
+      setErrors(parsed.errors);
       return;
     }
-    setError(null);
+    setErrors({});
     save.mutate(parsed.value);
   };
   const server = fieldErrors(save.error);
-  const problem = save.isError && !server.price ? describeError(save.error) : null;
+  const problem = save.isError && !server.price && !server.agreed_cpt ? describeError(save.error) : null;
   return (
-    <Dialog open title="Update negotiated price" description={<p>{opportunity.title}</p>} onClose={onClose} busy={save.isPending} size="sm">
+    <Dialog open title="Update agreed price and CPT" description={<p>{opportunity.title}</p>} onClose={onClose} busy={save.isPending} size="sm">
       <form onSubmit={submit} noValidate className="space-y-4">
         {problem ? (
           <Alert tone="error" requestId={problem.requestId}>
             {isApiError(save.error, 409) ? "It changed a moment ago. The latest version is loaded now: check and save again." : problem.message}
           </Alert>
         ) : null}
-        <TextField
-          label="Negotiated price (₹)"
-          name="price"
-          inputMode="decimal"
-          autoComplete="off"
-          value={price}
-          onChange={(e) => {
-            setPrice(e.target.value);
-            setError(null);
+        <AgreedTermsFields
+          price={price}
+          cpt={cpt}
+          onPriceChange={(value) => {
+            setPrice(value);
+            setErrors((e) => ({ ...e, price: undefined }));
           }}
-          errors={error ? [error] : server.price}
-          data-autofocus
+          onCptChange={(value) => {
+            setTypedCpt(value);
+            setErrors((e) => ({ ...e, cpt: undefined }));
+          }}
+          priceErrors={errors.price ?? server.price}
+          cptErrors={errors.cpt ?? server.agreed_cpt}
+          priceName="price"
+          autoFocus
         />
         <DialogActions>
           <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
             Cancel
           </Button>
           <Button type="submit" loading={save.isPending}>
-            Save price
+            Save
           </Button>
         </DialogActions>
       </form>
@@ -741,7 +752,7 @@ function PriceDialog({
   );
 }
 
-/** Every negotiated price, newest first (append-only: nothing is overwritten). */
+/** Every agreed price with its agreed CPT, newest first (append-only: nothing is overwritten). */
 function NegotiationHistory({ workspace, opportunityId, version }: { workspace: Workspace; opportunityId: string; version: number }) {
   const history = useQuery({
     queryKey: [...pipelineKeys.negotiation(workspace, opportunityId), version],
@@ -751,7 +762,7 @@ function NegotiationHistory({ workspace, opportunityId, version }: { workspace: 
   const rows = history.data?.results;
   if (rows && rows.length === 0) return null;
   return (
-    <Section title="Negotiated prices">
+    <Section title="Agreed prices">
       {history.isError ? (
         <p className="text-sm text-red-700">The prices couldn&apos;t be loaded. {describeError(history.error).message}</p>
       ) : !rows ? (
@@ -760,8 +771,16 @@ function NegotiationHistory({ workspace, opportunityId, version }: { workspace: 
         <ol className="space-y-2">
           {rows.map((row) => (
             <li key={row.id} className="flex flex-wrap items-baseline justify-between gap-x-4 border-l-2 border-amber-300 pl-3 text-sm">
-              <span className="font-semibold text-slate-900">
-                <Amount value={row.price} />
+              <span>
+                <span className="font-semibold text-slate-900">
+                  <Amount value={row.price} />
+                </span>
+                {row.agreed_cpt ? (
+                  <>
+                    {" "}
+                    <span className="ml-2 text-slate-700">CPT: {row.agreed_cpt}</span>
+                  </>
+                ) : null}
               </span>
               <span className="text-xs text-slate-500">
                 {row.stage_name} · <PersonName person={row.actor} /> · <time dateTime={row.occurred_at}>{formatDateTime(row.occurred_at)}</time>

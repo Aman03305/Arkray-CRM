@@ -278,7 +278,7 @@ describe("the new-opportunity panel", () => {
     expect(await screen.findByText("“Analyser” created.")).toBeInTheDocument();
   });
 
-  it("a negotiation stage at creation asks for the negotiated price", async () => {
+  it("a negotiation stage at creation asks for the agreed price and CPT", async () => {
     mockApi({
       [`GET ${PIPELINES_URL}`]: { status: 200, body: { results: [PIPELINE] } },
       [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) },
@@ -287,9 +287,11 @@ describe("the new-opportunity panel", () => {
     const user = userEvent.setup();
     await user.click((await screen.findAllByRole("button", { name: "New opportunity" }))[0]!);
     const panel = screen.getByRole("dialog", { name: "New opportunity" });
-    expect(within(panel).queryByLabelText("Negotiated price (₹)")).not.toBeInTheDocument();
+    expect(within(panel).queryByLabelText("Agreed price (₹)")).not.toBeInTheDocument();
+    expect(within(panel).queryByLabelText("Agreed CPT")).not.toBeInTheDocument();
     await user.selectOptions(within(panel).getByLabelText("Stage"), STAGES.negotiation.id);
-    expect(within(panel).getByLabelText("Negotiated price (₹)")).toBeInTheDocument();
+    expect(within(panel).getByLabelText("Agreed price (₹)")).toBeInTheDocument();
+    expect(within(panel).getByLabelText("Agreed CPT")).toHaveAttribute("maxlength", "100");
   });
 
   it("the /new route opens the panel over the board and closing returns to the board", async () => {

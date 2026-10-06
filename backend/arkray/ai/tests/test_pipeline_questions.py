@@ -74,6 +74,7 @@ def tender(user_a):
         version=1,
         stage_id=stages["Commercial discussion"].pk,
         negotiated_price=Decimal("950000.50"),
+        agreed_cpt="Rs 19 per test",
     )
     talking.refresh_from_db()
     pipeline_services.record_negotiated_price(
@@ -82,6 +83,7 @@ def tender(user_a):
         opportunity_id=talking.pk,
         version=talking.version,
         price=Decimal("925000"),
+        agreed_cpt="Rs 18 per test",
     )
     OpportunityFactory(
         lead=lead, title="District lab", stage=stages["Bid"], value=Decimal("500000")
@@ -133,6 +135,9 @@ class TestNegotiation:
         assert not is_error, body
         assert body["latest"]["amount"] == "925000.00"
         assert [h["price"]["amount"] for h in body["history"]] == ["925000.00", "950000.50"]
+        # Each price with the agreed CPT recorded with it (ADR-0029).
+        assert body["latest_agreed_cpt"] == "Rs 18 per test"
+        assert [h["agreed_cpt"] for h in body["history"]] == ["Rs 18 per test", "Rs 19 per test"]
 
     def test_another_users_history_isnt_found(self, user_b, tender):
         _, _, talking = tender
@@ -147,6 +152,7 @@ class TestNegotiation:
         body, _ = run(OWN(user_a.pk), "get_record", {"ref": f"opportunity:{talking.pk}"})
         assert len(body["negotiation_history"]) == 2
         assert body["negotiated_price"]["amount"] == "925000.00"
+        assert body["agreed_cpt"] == "Rs 18 per test"
 
 
 class TestRouting:
@@ -226,6 +232,7 @@ class TestReviewRegressions:
             opportunity_id=talking.pk,
             version=talking.version,
             price=Decimal("900000"),
+            agreed_cpt="Rs 17 per test",
         )
         ref = {"ref": f"opportunity:{talking.pk}"}
         as_admin, _ = run(delegated, "get_negotiation_history", ref)

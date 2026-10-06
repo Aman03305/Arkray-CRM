@@ -1,5 +1,5 @@
-import { QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { focusManager, QueryClientProvider } from "@tanstack/react-query";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -77,6 +77,34 @@ describe("SessionGate", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("We couldn't load your account");
     await userEvent.setup().click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("Signed in as Rahul Sharma")).toBeInTheDocument();
+  });
+
+  it("someone else signed in on this browser (another tab): back in this tab, it reloads and never shows Rahul's page as Priya's", async () => {
+    let me: typeof ME = ME;
+    mockApi({ "GET /api/v1/auth/me": () => ({ status: 200, body: me }) });
+    renderWithProviders(
+      <SessionGate>
+        <WhoAmI />
+        <p>RAHUL-ONLY-DEAL</p>
+      </SessionGate>,
+    );
+    expect(await screen.findByText("Signed in as Rahul Sharma")).toBeInTheDocument();
+    // Priya signs in in another tab, and the message to this one never arrives (an old
+    // browser, a frozen tab): coming back to this tab asks /auth/me again.
+    me = { ...ME, id: "u2", email: "priya@example.test", first_name: "Priya", last_name: "Patel", full_name: "Priya Patel" };
+    const shown: string[] = [];
+    const observer = new MutationObserver(() => shown.push(document.body.textContent ?? ""));
+    observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+    act(() => {
+      focusManager.setFocused(false);
+      focusManager.setFocused(true);
+    });
+    await waitFor(() => expect(nav.hardNavigate).toHaveBeenCalledWith("/leads"));
+    observer.disconnect();
+    // Not one frame of Rahul's page under Priya's name; nothing of his while it reloads.
+    expect(shown.filter((text) => text.includes("Priya"))).toEqual([]);
+    expect(document.body.textContent).not.toContain("RAHUL-ONLY-DEAL");
+    focusManager.setFocused(undefined);
   });
 });
 

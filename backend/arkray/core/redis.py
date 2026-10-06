@@ -4,10 +4,13 @@ The cache is an optimisation, so it must never make the CRM slow. During a Redis
 single connection attempt can take seconds (DNS resolution is not bounded by socket
 timeouts), and DRF throttling touches the cache on every API request. So cache connections:
 
-- never retry (redis-py's retry/backoff is disabled), and
+- never retry (redis-py's retry/backoff is disabled),
 - share a per-process circuit breaker: after a connection failure, every cache connection
   attempt fails instantly for COOLDOWN_SECONDS. django-redis (IGNORE_EXCEPTIONS) turns those
-  failures into cache misses, and the CRM carries on at full speed.
+  failures into cache misses, and the CRM carries on at full speed, and
+- find out whether Redis is back on a background thread, never in a request: when a
+  cool-down runs out, one thread per process tries to connect while requests go on failing
+  fast; its success closes the circuit, its failure starts a longer cool-down.
 
 Only the cache uses this. The Celery broker has its own connection handling, and outbox work
 waits durably in PostgreSQL while the broker is down.
@@ -18,6 +21,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 from redis.backoff import NoBackoff
@@ -39,7 +43,12 @@ class CircuitBreaker:
     Phase 10 drill: the probe that ends a cool-down stalls its request until it fails (with
     Redis's container stopped, about 4 s for the DNS lookup alone; about 10 s for a broker
     publish), and every gunicorn process probes on its own. At a fixed 15 s that took a
-    quarter of each process's time for as long as an outage lasted."""
+    quarter of each process's time for as long as an outage lasted.
+
+    Callers that can check the dependency without doing real work (the cache) hand that
+    check to `probe()`, which runs it on a background thread; the stall then costs no request
+    at all (2026-10-06: with the dev Redis crash-looping, every process still held a request
+    about 4 s every 2 minutes, which made pages feel randomly slow)."""
 
     def __init__(
         self,
@@ -55,9 +64,43 @@ class CircuitBreaker:
         self._event = event
         self._open_until = 0.0
         self._lock = threading.Lock()
+        self._probe_thread: threading.Thread | None = None
 
     def is_open(self) -> bool:
         return time.monotonic() < self._open_until
+
+    def recovering(self) -> bool:
+        """A cool-down after a failure has run out: the next attempt finds out whether the
+        dependency is back."""
+        return self._failures > 0 and not self.is_open()
+
+    def probe(self, check: Callable[[], object]) -> None:
+        """Run `check` on a background thread, one at a time per process: if it returns, the
+        circuit closes; if it raises, it opens again for a longer cool-down. Meanwhile
+        `recovering()` stays true, so attempts keep failing fast instead of waiting."""
+        with self._lock:
+            if self._probe_thread is not None:
+                return
+            thread = threading.Thread(
+                target=self._run_probe, args=(check,), name="circuit-probe", daemon=True
+            )
+            self._probe_thread = thread
+        try:
+            thread.start()
+        except RuntimeError:  # no thread to be had: a later attempt tries again
+            with self._lock:
+                self._probe_thread = None
+
+    def _run_probe(self, check: Callable[[], object]) -> None:
+        try:
+            check()
+        except Exception:  # noqa: BLE001 — any failure means "still unavailable"
+            self.trip()
+        else:
+            self.succeeded()
+        finally:
+            with self._lock:
+                self._probe_thread = None
 
     def trip(self) -> None:
         with self._lock:
@@ -95,12 +138,22 @@ class _FailFastMixin:
     def connect(self) -> None:
         if cache_breaker.is_open():
             raise RedisConnectionError("Redis cache unavailable (circuit open).")
+        if cache_breaker.recovering():
+            # Whether Redis is back is found out off the request: while it is still down
+            # that can take seconds (DNS), and this request must not wait for it.
+            cache_breaker.probe(self._probe_connect)
+            raise RedisConnectionError("Redis cache unavailable (checking).")
         try:
             super().connect()  # type: ignore[misc]
         except (RedisConnectionError, RedisTimeoutError, OSError):
             cache_breaker.trip()
             raise
         cache_breaker.succeeded()
+
+    def _probe_connect(self) -> None:
+        # redis-py's own socket set-up for this connection (address, TLS, timeouts). It only
+        # reads the connection's settings, so it is safe beside the pool's use of the object.
+        self._connect().close()  # type: ignore[attr-defined]
 
 
 class FailFastConnection(_FailFastMixin, Connection):

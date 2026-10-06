@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import type { Attachment, Note } from "@/lib/api/types";
+import { ambiguousControls } from "@/test/a11y";
 import { ATTACHMENT_ID, makeAttachment, makeDealNote, makeNote, NOTE_ID, page } from "@/test/activity-fixtures";
 import { PRIYA_ID } from "@/test/fixtures";
 import { OPPORTUNITY_ID } from "@/test/pipeline-fixtures";
@@ -64,7 +65,7 @@ describe("a deal's notes", () => {
     const [create] = api.callsTo("POST", CREATE);
     expect(create!.body).toEqual({ type: "note", opportunity: OPPORTUNITY_ID, description: "Budget approved.\nOrder next week." });
     expect(create!.headers["Idempotency-Key"]).toMatch(/^[0-9a-f-]{36}$/);
-    const text = await screen.findByText(/Budget approved\./);
+    const text = await screen.findByText(/Budget approved\./, { selector: "p" });
     expect(text.textContent).toBe("Budget approved.\nOrder next week.");
     expect(text).toHaveClass("whitespace-pre-wrap");
     expect(screen.getByRole("button", { name: "Add note" })).toHaveFocus();
@@ -208,7 +209,7 @@ describe("a deal's notes", () => {
     const user = userEvent.setup();
     await screen.findByText("Prefers morning calls.");
     const item = noteItem("Prefers morning calls.");
-    await user.upload(within(item).getByLabelText("Add files"), [file("Big.pdf")]);
+    await user.upload(within(item).getByLabelText(/^Add files/), [file("Big.pdf")]);
     expect(await within(item).findByRole("alert")).toHaveTextContent("Files can be at most 10 MB.");
     expect(within(item).getByRole("button", { name: "Retry Big.pdf" })).toBeInTheDocument();
   });
@@ -238,7 +239,7 @@ describe("a deal's notes", () => {
     await screen.findByText("Prefers morning calls.");
     // Someone else edits it meanwhile.
     current = makeDealNote({ description: "Calls after 4 pm.", version: 2 });
-    await user.click(screen.getByRole("button", { name: "Edit note" }));
+    await user.click(screen.getByRole("button", { name: /^Edit note/ }));
     const box = screen.getByLabelText("Edit note");
     expect(box).toHaveFocus();
     expect(box).toHaveValue("Prefers morning calls.");
@@ -255,14 +256,14 @@ describe("a deal's notes", () => {
     expect(api.callsTo("PATCH", NOTE)[1]!.body).toEqual({ version: 2, description: "Prefers evening calls." });
     expect(screen.queryByLabelText("Edit note")).not.toBeInTheDocument();
     expect(screen.getByText(/Edited by/)).toHaveTextContent("Edited by Priya Nair");
-    expect(screen.getByRole("button", { name: "Edit note" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: /^Edit note/ })).toHaveFocus();
   });
 
   it("an emptied note is not saved; cancelling keeps the note and returns focus to Edit", async () => {
     const api = mockApi({ [`GET ${NOTES}`]: { status: 200, body: page([makeDealNote()]) } });
     renderNotes();
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "Edit note" }));
+    await user.click(await screen.findByRole("button", { name: /^Edit note/ }));
     await user.clear(screen.getByLabelText("Edit note"));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Save" }));
@@ -271,8 +272,19 @@ describe("a deal's notes", () => {
     await user.type(screen.getByLabelText("Edit note"), "Changed.");
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.getByText("Prefers morning calls.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Edit note" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: /^Edit note/ })).toHaveFocus();
     expect(api.callsTo("PATCH", NOTE)).toHaveLength(0);
+  });
+
+  it("each note's Edit and Add files say which note they are for (no repeated names down the list)", async () => {
+    const older = makeDealNote({ id: "a1c1e000-0000-4000-8000-0000000000b9", description: "First contact." });
+    mockApi({ [`GET ${NOTES}`]: { status: 200, body: page([makeDealNote(), older]) } });
+    renderNotes();
+    await screen.findByText("First contact.");
+    expect(screen.getByRole("button", { name: "Edit note: Prefers morning calls." })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit note: First contact." })).toBeInTheDocument();
+    expect(screen.getByLabelText("Add files to note: First contact.")).toHaveAttribute("type", "file");
+    expect(ambiguousControls(document.body)).toEqual([]);
   });
 
   it("shows who edited a note (an administrator, not the author)", async () => {
@@ -300,8 +312,8 @@ describe("a deal's notes", () => {
     mockApi({ [`GET ${NOTES}`]: { status: 200, body: page([makeDealNote({ can_edit: false, attachments: [makeAttachment()] })]) } });
     renderNotes({ canAdd: false });
     expect(await screen.findByTitle("Quotation.pdf")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Edit note" })).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Add files")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Edit note/ })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Add files/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Remove/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Add note" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Download/ })).toBeInTheDocument();
@@ -392,7 +404,7 @@ describe("a deal's notes", () => {
     await screen.findByText("Prefers morning calls.");
     const item = noteItem("Prefers morning calls.");
     const minutes = file("Minutes.txt");
-    await user.upload(within(item).getByLabelText("Add files"), [minutes]);
+    await user.upload(within(item).getByLabelText(/^Add files/), [minutes]);
     expect(await within(item).findByRole("link", { name: "Download Minutes.txt" })).toBeInTheDocument();
     const bodies = uploadedBodies(api);
     expect(bodies).toHaveLength(1);

@@ -26,7 +26,7 @@ from arkray.leads.models import Lead
 from arkray.pipeline import services
 from arkray.pipeline.models import Opportunity
 from tests.factories import LeadFactory, OpportunityFactory, TaskFactory, UserFactory
-from tests.helpers import collected, signed_in
+from tests.helpers import collected, key_header, signed_in
 
 from .conftest import opportunities_url, opportunity_url
 
@@ -284,7 +284,9 @@ class TestApi:
         }
 
     def test_create_without_a_lead(self, user_a_client, user_a, stages):
-        response = user_a_client.post(opportunities_url(), self.body(), format="json")
+        response = user_a_client.post(
+            opportunities_url(), self.body(), format="json", headers=key_header()
+        )
         assert response.status_code == 201
         body = response.json()
         assert body["owner"]["id"] == str(user_a.pk)
@@ -292,11 +294,16 @@ class TestApi:
         assert body["title"] == "Asharaf Panka"
 
     def test_organisation_wide_needs_an_owner(self, admin_client, user_b, stages):
-        missing = admin_client.post(opportunities_url("all"), self.body(), format="json")
+        missing = admin_client.post(
+            opportunities_url("all"), self.body(), format="json", headers=key_header()
+        )
         assert missing.status_code == 400
         assert missing.json()["error"]["details"] == {"owner": [services.OWNER_REQUIRED]}
         made = admin_client.post(
-            opportunities_url("all"), self.body(owner=str(user_b.pk)), format="json"
+            opportunities_url("all"),
+            self.body(owner=str(user_b.pk)),
+            format="json",
+            headers=key_header(),
         )
         assert (made.status_code, made.json()["owner"]["id"]) == (201, str(user_b.pk))
 

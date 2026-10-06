@@ -114,8 +114,9 @@ def test_an_invalid_query_costs_no_search_queries(user_a):
 @pytest.mark.usefixtures("crm_configuration")
 def test_search_runs_in_one_read_only_snapshot(admin, user_a):
     """Outside a test transaction (as in production) the five queries run in one REPEATABLE
-    READ, READ ONLY transaction opened by `SET TRANSACTION`: one more query (plus BEGIN and
-    COMMIT). PostgreSQL itself refuses any write inside it."""
+    READ, READ ONLY transaction opened by `SET TRANSACTION`, which also sets the search's
+    statement timeout in the same round trip: one more query (plus BEGIN and COMMIT).
+    PostgreSQL itself refuses any write inside it."""
     seed(2, [user_a])
     for client, workspace, expected in (
         (signed_in(user_a), "me", OWN + 1),
@@ -128,5 +129,8 @@ def test_search_runs_in_one_read_only_snapshot(admin, user_a):
         statements = [q["sql"] for q in captured.captured_queries]
         assert len([s for s in statements if s not in ("BEGIN", "COMMIT")]) == expected
         begin = statements.index("BEGIN")
-        assert statements[begin + 1] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+        assert statements[begin + 1].startswith(
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY; "
+            "SELECT set_config('statement_timeout'"
+        )
         assert statements[begin + 7 :] == ["COMMIT"]  # the five searches, then commit

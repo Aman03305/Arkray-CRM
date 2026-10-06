@@ -75,8 +75,9 @@ empty or 502 in its access log); gunicorn logs `WORKER TIMEOUT`; readiness 503;
    PostgreSQL's outbox. Sign-in and reset throttling, Ask Arkray's bulkheads and the
    admin-workspace audit window are PostgreSQL-backed and unaffected. The general request
    rate limit fails open meanwhile.
-2. Expect a few requests per process to stall (about 4 s in DNS, 10 s for an Ask hand-off)
-   while the breakers probe; their cool-downs grow to 2 minutes (R75). Semantic Ask
+2. Cache misses cost requests nothing: the cache breaker checks Redis on a background
+   thread. An Ask hand-off can still stall its request about 10 s while that breaker probes;
+   the cool-downs grow to 2 minutes (R75). Semantic Ask
    questions fail `ai_unavailable`; routed ones are still answered.
 3. Fix Redis. Workers and beat reconnect by themselves; the outbox drains within the
    in-flight caps (406 events in 50 s in the drill).
@@ -205,12 +206,15 @@ reconciliation re-indexes any source whose chunks drifted.
 ## File storage
 
 *Alert: `attachment_storage_failed` / `attachment_upload_failed` repeating; housekeeping
-storage failures; `attachment_malware_blocked`; pending scans growing.*
+storage failures; `attachment_malware_blocked`; pending scans growing. The metric-based
+alerts have their own sections: [storage degraded](#attachment-storage-degraded),
+[object missing](#attachment-object-missing), [reconciliation](#attachment-reconciliation).*
 
 1. Uploads and downloads answer 503 `storage_unavailable` while the bucket (or volume) is
-   unreachable; nothing else in the CRM depends on it. Check the bucket's credentials,
-   policy and region (`ATTACHMENT_S3_*`), or the volume's mount and free space.
-2. Uploads that failed are marked failed (no row without an object can be downloaded);
+   unreachable; nothing else in the CRM depends on it
+   ([Attachment storage degraded](#attachment-storage-degraded)). Check the bucket's
+   credentials, policy and region (`ATTACHMENT_S3_*`), or the volume's mount and free space.
+2. Uploads that failed are marked failed (no row without a whole object can be downloaded);
    objects of deleted, failed or blocked files are removed by the hourly
    `activities.housekeeping`, idempotently, once storage is back.
 3. Scanner down (`ATTACHMENT_SCANNER`): new files stay "being checked" and don't download;
@@ -219,6 +223,141 @@ storage failures; `attachment_malware_blocked`; pending scans growing.*
 4. Malware blocked: the file was never downloadable, its object is deleted, the event is
    `attachment.rejected` (note and uploader in the audit trail). Treat the uploader's
    account as possibly compromised: [Security incident](#security-incident).
+
+## Attachment storage degraded
+
+*Alert: `ArkrayAttachmentStorageDown` (`arkray_attachment_storage_up` 0 for 5 minutes),
+`ArkrayAttachmentUploadsFailing` (over 20 % of uploads failing on storage in an hour).*
+
+1. **What users see:** uploads and downloads answer 503 "File storage is unavailable right
+   now. Try again in a few minutes." with `Retry-After: 30`; notes, deals and everything
+   else work, and readiness stays `ok` (storage is never a readiness dependency, by
+   design). A failed upload leaves no file on the note (its row is `failed`, never
+   downloadable).
+2. **What the server does:** every storage call has a 12 s deadline, at most 4 run at once
+   per process, and after 3 outage-like failures in a row a process answers 503 at once for
+   15 s (doubling to 2 minutes), checking in the background whether storage is back
+   (`attachment_storage_circuit_opened` once per process per outage).
+   [reliability.md](reliability.md#attachment-storage) has the settings.
+3. **Find out why:** `attachment_storage_failed` lines carry `operation`, `error_class` and
+   `backend` (never a key or a name); `arkray_attachment_storage_errors_last_hour` counts
+   them. `access_denied` is configuration: the credentials, the bucket policy (the role
+   needs `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` on the prefix, and
+   `s3:ListBucket` on the bucket: without it S3 answers 403 instead of 404 for a missing
+   object), the region; on a volume, its permissions. `timeout` / `connection`: the
+   endpoint, DNS, the network path, the provider's status page. `server_error`: the
+   provider (503 SlowDown is throttling: fewer clients or a higher limit). `no_space`: the
+   volume, or the bucket's quota.
+4. When it is fixed, the next background check closes each process's breaker within its
+   cool-down (at most 2 minutes) and `arkray_attachment_storage_up` returns to 1 within
+   30 s. Nothing to replay: failed uploads were refused, never half-stored; the hourly
+   housekeeping removes what they may have written. Run a
+   [reconciliation check](#attachment-reconciliation) afterwards if the outage involved
+   lost or restored data, not for a plain outage.
+
+## Attachment object missing
+
+*Alert: `ArkrayAttachmentObjectMissing` (a download or a scan found a stored file's object
+gone), or a reconciliation's `missing` count.*
+
+1. **What users see:** that one file answers 410 "This file is no longer available. Ask an
+   administrator." (code `attachment_unavailable`), distinct from an outage's 503. The rest
+   of the note, and other files, work.
+2. Treat it as possible tampering or data loss until explained: the log line
+   `attachment_object_missing` (WARNING, `security: true`) names the attachment id and the
+   operation, never the key or the file name. Was the object deleted outside the
+   application (bucket lifecycle rule, a person with bucket access; check the provider's
+   access log for the key, which the operator can read from `activities_attachment`), or
+   was the bucket restored from an older backup than the database?
+3. Run `manage.py reconcile_attachments` ([below](#attachment-reconciliation)) to see how
+   many files are affected. One or a few: if the object can be recovered (a bucket version,
+   a backup), put it back under the same key and the file works again. Otherwise run
+   `--repair`: each lost file is marked unavailable (state `failed`, audited as
+   `attachment.marked_unavailable`), leaves the note's list of files and stops alerting;
+   its row, its audit trail and its note stay. Tell the note's author.
+4. Many at once: stop. That is a wrong bucket or prefix (`ATTACHMENT_S3_BUCKET`,
+   `ATTACHMENT_S3_PREFIX`), an unmounted volume, or a restore in progress, not lost files.
+   `--repair` marks at most 50 per run unavailable for this reason.
+
+## Attachment reconciliation
+
+*Alerts: `ArkrayAttachmentReconcileMismatch`, `ArkrayAttachmentReconcileFailed`,
+`ArkrayAttachmentReconcileNotRun` / `NeverRun`, `ArkrayAttachmentUploadStuck`.*
+
+`manage.py reconcile_attachments` compares every row of `activities_attachment` with the
+objects in storage: rows by keyset on the unique `storage_key` index, objects by listing
+the bucket's prefix (or walking the volume) a page at a time, merged in key order; each
+difference is confirmed on its own before it is reported. 300,000 files cost about 300
+listing calls and 600 queries.
+
+- **`--check`** (the default, and what the daily `activities.reconcile_check` runs at 22:10
+  UTC): strictly read-only. Exit 0 healthy, 1 mismatches, 2 errors (storage failing: after
+  5 failures in a row the pass stops instead of reporting files missing). The report names
+  attachments by id; `--json` for scripts; `--show-keys` adds orphaned object keys
+  (operators only: a key leads to a customer's file; never paste it into a ticket).
+  `--limit`, `--batch-size`, `--rate` (storage calls per second, default 50) bound the
+  cost; `--verify-hash` also downloads and hashes a sample (`--hash-sample`, default 1 %,
+  at most `--hash-limit`, default 100).
+- **What it finds:** `missing` (a stored file without its object), `orphaned` (an object no
+  row names), `pending` (an upload unfinished past `--stale-after`, default 1 h),
+  `pending_scan` (a malware scan pending past `--scan-stale-after`), `failed` (a deleted,
+  failed or blocked file whose object is still there, or whose purge never finished),
+  `restorable` (a file marked unavailable whose object came back), `size_mismatch`,
+  `hash_mismatch`.
+- **`--repair` is safe to run any time** (idempotent, resumable, each fix under a brief
+  SKIP LOCKED row lock, re-checked against the row as it was seen; uploads younger than the
+  grace period are never touched): stale uploads are finished when their object is whole
+  (size, and hash with `--verify-hash`) or failed otherwise; lost objects' files are marked
+  unavailable (at most `--max-repair-missing`, default 50); leftover objects of deleted,
+  failed or blocked files are purged through the normal purge path (audited per run as
+  `attachment.reconciled`). It **never** deletes a row, never deletes an object no row
+  names, never touches `size_mismatch`, `hash_mismatch` or `restorable` files: those are
+  decisions ([orphans](#orphaned-attachment-objects),
+  [restores](#attachment-bucket-lost-or-restored)). Run it when a check reports mismatches
+  and storage is healthy; not during an outage (it would only count errors) and not while a
+  bucket restore is running.
+- `pending_scan`: the scanner is down or its jobs died ([File storage](#file-storage),
+  step 3). `size_mismatch` / `hash_mismatch`: the object was changed outside the
+  application; restore it from a bucket version or backup, or mark the file failed by hand
+  (`UPDATE activities_attachment SET state = 'failed', purged_at = now() WHERE id = ...`,
+  **owner**) and tell the note's author.
+- The daily check is off with `ATTACHMENT_RECONCILE_DAILY=false`; it stops after 15
+  minutes (outcome 2). Its last outcome is on the metrics endpoint
+  (`arkray_attachment_reconcile_*`).
+
+## Orphaned attachment objects
+
+An object no row names is never deleted automatically, not even by `--repair`. Rows are
+written before their objects, so an orphan is not an upload in progress: it is a leftover
+of a database restored to an earlier point than the bucket, a failed migration or test
+data, or something written into the bucket by hand.
+
+1. List them: `manage.py reconcile_attachments --show-keys --json` (keys are
+   `YYYY/MM/<random>`: the month is when it was written).
+2. Leave anything younger than 30 days: it may belong to a database restore you are about
+   to redo.
+3. Older ones: check a few against the provider's access log (who wrote them), then delete
+   them with the provider's tools (with versioning, the old versions expire with the
+   bucket's lifecycle rule). Record what you deleted and why in the incident or change log.
+
+## Attachment bucket lost or restored
+
+The database backup is not a backup of the files ([Restore from backup](#restore-from-backup),
+step 6). After restoring either side:
+
+1. Restore the bucket (or volume) to a point no earlier than the database's, then run
+   `manage.py reconcile_attachments` (a check).
+2. `missing` files: their objects aren't in the restored bucket. Look for them in a later
+   bucket version, put them back under their keys, check again. What can't be found:
+   `--repair` marks them unavailable ([Attachment object missing](#attachment-object-missing)).
+3. `orphaned` objects: the database is older than the bucket. Keep them until you are sure
+   the database restore is final, then follow [Orphaned attachment objects](#orphaned-attachment-objects).
+4. `restorable` files (marked unavailable earlier, their object back now): check the object
+   (`--verify-hash` compares its SHA-256 with the row's), then make the file live again by
+   hand (`UPDATE activities_attachment SET state = 'stored', purged_at = NULL WHERE id = ...`,
+   **owner**); reconciliation never does this on its own.
+5. `failed` objects of deleted or erased files that the restore brought back: `--repair`
+   deletes them again, as erasure requires ([privacy.md](privacy.md#erasure)).
 
 ## Security incident
 
@@ -232,8 +371,14 @@ storage failures; `attachment_malware_blocked`; pending scans growing.*
 
 [deployment.md](deployment.md#release-process): migrate as the owner with
 `grant_app_privileges arkray_app`, `check --deploy --database default` with the
-application's credentials, roll out, beat last. Roll back by redeploying the previous image:
-migrations are backward compatible, no down-migration during the release window.
+application's credentials, roll out, beat last. Roll back by redeploying the previous image
+only while it can still write to the new schema (additive migrations since it; not across
+`pipeline.0006` / `identity.0004`): otherwise roll forward with a fix or
+[restore the backup](#restore-from-backup). Down-migrations past the v1.0 release candidate are
+**refused** (`RefuseReverse`: nothing is undone and the message names the way out), so
+`migrate pipeline 0005` fails safely instead of dropping the negotiated-price history: the only
+ways back are the pre-upgrade backup or a forward fix
+([deployment.md](deployment.md#rollback)).
 
 ## Restore from backup
 
@@ -256,9 +401,8 @@ migrations are backward compatible, no down-migration during the release window.
    attachment *metadata*, but the attachment bytes live in object storage. Restore the bucket
    (or the attachments volume) from a point in time compatible with the database's: an
    object without a row is invisible (housekeeping never sees it), a row without an object
-   downloads as 503 `storage_unavailable`. Then list rows whose object is missing (a
-   `HEAD` per `storage_key` of `activities_attachment` rows with `state = 'stored'` and
-   `deleted_at IS NULL`) and tell their notes' authors. Support sessions in the backup end at
+   downloads as 410 `attachment_unavailable`. Then run `manage.py reconcile_attachments`
+   and follow [Attachment bucket lost or restored](#attachment-bucket-lost-or-restored). Support sessions in the backup end at
    once: their browser sessions are gone.
 
 ## Vacuum after a restore or a bulk load

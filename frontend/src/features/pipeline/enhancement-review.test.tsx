@@ -135,7 +135,7 @@ describe("pipeline settings", () => {
 describe("creating an opportunity into a stage", () => {
   const CREATE = "/api/v1/workspaces/me/opportunities";
 
-  it("P1: into a negotiation stage asks for the price, and a pipeline's required field is asked too", async () => {
+  it("P1: into a negotiation stage asks for the agreed price and CPT, and a pipeline's required field is asked too", async () => {
     const withField: PipelineDto = {
       ...PIPELINE,
       custom_fields: [{ id: "f-tender", name: "Tender number", type: "text", required: true, options: [], position: 0 }],
@@ -155,10 +155,12 @@ describe("creating an opportunity into a stage", () => {
     await user.type(within(panel).getByLabelText("Customer name"), "Dr. Iyer");
     await user.type(within(panel).getByLabelText("Installation price (₹)"), "12,50,000");
     await user.click(within(panel).getByRole("button", { name: "Create opportunity" }));
-    expect(await within(panel).findByText("Enter the negotiated price.")).toBeInTheDocument();
+    expect(await within(panel).findByText("Enter the agreed price.")).toBeInTheDocument();
+    expect(within(panel).getByText("Enter the agreed CPT.")).toBeInTheDocument();
     expect(within(panel).getByText("Enter Tender number.")).toBeInTheDocument();
     expect(api.callsTo("POST", CREATE)).toHaveLength(0);
-    await user.type(within(panel).getByLabelText("Negotiated price (₹)"), "11,00,000");
+    await user.type(within(panel).getByLabelText("Agreed price (₹)"), "11,00,000");
+    await user.type(within(panel).getByLabelText("Agreed CPT"), "Rs 18 per test");
     await user.type(within(panel).getByLabelText(/^Tender number/), "GEM/2026/7");
     await user.click(within(panel).getByRole("button", { name: "Create opportunity" }));
     await waitFor(() => expect(api.callsTo("POST", CREATE)).toHaveLength(1));
@@ -167,10 +169,45 @@ describe("creating an opportunity into a stage", () => {
       stage: STAGES.negotiation.id,
       value: "1250000",
       negotiated_price: "1100000",
+      agreed_cpt: "Rs 18 per test",
       custom_fields: { "f-tender": "GEM/2026/7" },
     });
     expect(body).not.toHaveProperty("lead");
     expect(body).not.toHaveProperty("title"); // the server names it (ADR-0028)
+  });
+  it("P3 (review): a stage that became a negotiation stage after the panel opened is explained, and the fields appear", async () => {
+    let retyped = false;
+    const negotiationProposal = { ...STAGES.proposal, type: "negotiation" as const };
+    const api = mockApi({
+      ...OPPORTUNITY_OPTIONS_ROUTE,
+      [`GET ${PIPELINES_URL}`]: () => ({
+        status: 200,
+        body: { results: [retyped ? { ...PIPELINE, stages: PIPELINE.stages.map((s) => (s.id === STAGES.proposal.id ? negotiationProposal : s)) } : PIPELINE] },
+      }),
+      [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) },
+      [`POST ${CREATE}`]: () => {
+        retyped = true; // an administrator retyped Proposal meanwhile
+        return apiError(400, "validation_error", "Some fields are invalid.", {
+          negotiated_price: ["Enter the agreed price."],
+          agreed_cpt: ["Enter the agreed CPT."],
+        });
+      },
+    });
+    renderWithProviders(<PipelineView />, { viewer: salesViewer });
+    const user = userEvent.setup();
+    await user.click((await screen.findAllByRole("button", { name: "New opportunity" }))[0]!);
+    const panel = screen.getByRole("dialog", { name: "New opportunity" });
+    await user.selectOptions(within(panel).getByLabelText("Stage"), STAGES.proposal.id);
+    expect(within(panel).queryByLabelText("Agreed CPT")).not.toBeInTheDocument();
+    await user.type(within(panel).getByLabelText("Customer name"), "Dr. Iyer");
+    await user.type(within(panel).getByLabelText("Installation price (₹)"), "12,50,000");
+    const before = api.callsTo("GET", PIPELINES_URL).length;
+    await user.click(within(panel).getByRole("button", { name: "Create opportunity" }));
+    // Never a silent failure: the pipelines reload and the fields show the server's reasons.
+    await waitFor(() => expect(api.callsTo("GET", PIPELINES_URL).length).toBeGreaterThan(before));
+    expect(await within(panel).findByLabelText("Agreed CPT")).toHaveAttribute("aria-invalid", "true");
+    expect(within(panel).getByText("Enter the agreed CPT.")).toBeInTheDocument();
+    expect(within(panel).getByLabelText("Agreed price (₹)")).toHaveAttribute("aria-invalid", "true");
   });
 });
 
@@ -192,13 +229,23 @@ describe("the opportunity panel and page", () => {
     expect(api.calls.some((c) => c.method === "POST")).toBe(false);
   });
 
-  it("P2: Update price recovers from someone else's change: the retry sends the new version", async () => {
+  it("P2: Update price & CPT recovers from someone else's change: the retry sends the new version and their CPT", async () => {
     nav.pathname = `/pipeline/${OPPORTUNITY_ID}`;
     const ME = `/api/v1/workspaces/me/opportunities/${OPPORTUNITY_ID}`;
     let version = 2;
     const api = mockApi({
       ...PIPELINE_ROUTES,
-      [`GET ${ME}`]: () => ({ status: 200, body: makeOpportunity({ stage: STAGES.negotiation, negotiated_price: "1100000.00", negotiated_at: "2026-09-29T06:00:00Z", version }) }),
+      [`GET ${ME}`]: () => ({
+        status: 200,
+        body: makeOpportunity({
+          stage: STAGES.negotiation,
+          negotiated_price: "1100000.00",
+          // Someone else's revision changed the CPT too.
+          agreed_cpt: version === 2 ? "Rs 20 per test" : "Rs 22 per test",
+          negotiated_at: "2026-09-29T06:00:00Z",
+          version,
+        }),
+      }),
       [`POST ${ME}/negotiated-prices`]: (call: RecordedCall) =>
         (call.body as { version: number }).version === 3
           ? { status: 201, body: makeOpportunity({ stage: STAGES.negotiation, negotiated_price: "1050000.00", version: 4 }) }
@@ -208,14 +255,55 @@ describe("the opportunity panel and page", () => {
     const user = userEvent.setup();
     const deal = await screen.findByRole("region", { name: "Deal" });
     version = 3; // someone else changed it meanwhile
-    await user.click(within(deal).getByRole("button", { name: "Update price" }));
-    const dialog = screen.getByRole("dialog", { name: "Update negotiated price" });
-    await user.type(within(dialog).getByLabelText("Negotiated price (₹)"), "10,50,000");
-    await user.click(within(dialog).getByRole("button", { name: "Save price" }));
+    await user.click(within(deal).getByRole("button", { name: "Update price & CPT" }));
+    const dialog = screen.getByRole("dialog", { name: "Update agreed price and CPT" });
+    await user.type(within(dialog).getByLabelText("Agreed price (₹)"), "10,50,000");
+    expect(within(dialog).getByLabelText("Agreed CPT")).toHaveValue("Rs 20 per test");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
     expect(await within(dialog).findByText(/latest version is loaded/)).toBeInTheDocument();
     await waitFor(() => expect(api.callsTo("GET", ME).length).toBeGreaterThan(1));
-    await user.click(within(dialog).getByRole("button", { name: "Save price" }));
-    expect(await screen.findByText("Negotiated price recorded.")).toBeInTheDocument();
-    expect(api.callsTo("POST", `${ME}/negotiated-prices`).map((c) => (c.body as { version: number }).version)).toEqual([2, 3]);
+    // Review P2: an untouched CPT follows the reloaded deal (never reverts theirs); the
+    // typed price stays.
+    await waitFor(() => expect(within(dialog).getByLabelText("Agreed CPT")).toHaveValue("Rs 22 per test"));
+    expect(within(dialog).getByLabelText("Agreed price (₹)")).toHaveValue("10,50,000");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Agreed price and CPT recorded.")).toBeInTheDocument();
+    expect(api.callsTo("POST", `${ME}/negotiated-prices`).map((c) => c.body)).toEqual([
+      { version: 2, price: "1050000", agreed_cpt: "Rs 20 per test" },
+      { version: 3, price: "1050000", agreed_cpt: "Rs 22 per test" },
+    ]);
+  });
+
+  it("P2: a CPT the user typed is kept when the deal reloads after a conflict", async () => {
+    nav.pathname = `/pipeline/${OPPORTUNITY_ID}`;
+    const ME = `/api/v1/workspaces/me/opportunities/${OPPORTUNITY_ID}`;
+    let version = 2;
+    const api = mockApi({
+      ...PIPELINE_ROUTES,
+      [`GET ${ME}`]: () => ({
+        status: 200,
+        body: makeOpportunity({ stage: STAGES.negotiation, negotiated_price: "1100000.00", agreed_cpt: `Rs ${18 + version}`, version }),
+      }),
+      [`POST ${ME}/negotiated-prices`]: (call: RecordedCall) =>
+        (call.body as { version: number }).version === 3
+          ? { status: 201, body: makeOpportunity({ stage: STAGES.negotiation, negotiated_price: "1050000.00", version: 4 }) }
+          : apiError(409, "conflict", "Changed."),
+    });
+    renderWithProviders(<OpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
+    const user = userEvent.setup();
+    const deal = await screen.findByRole("region", { name: "Deal" });
+    version = 3;
+    await user.click(within(deal).getByRole("button", { name: "Update price & CPT" }));
+    const dialog = screen.getByRole("dialog", { name: "Update agreed price and CPT" });
+    await user.type(within(dialog).getByLabelText("Agreed price (₹)"), "10,50,000");
+    await user.clear(within(dialog).getByLabelText("Agreed CPT"));
+    await user.type(within(dialog).getByLabelText("Agreed CPT"), "Rs 16");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(await within(dialog).findByText(/latest version is loaded/)).toBeInTheDocument();
+    await waitFor(() => expect(api.callsTo("GET", ME).length).toBeGreaterThan(1));
+    expect(within(dialog).getByLabelText("Agreed CPT")).toHaveValue("Rs 16");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Agreed price and CPT recorded.")).toBeInTheDocument();
+    expect((api.callsTo("POST", `${ME}/negotiated-prices`)[1]!.body as { agreed_cpt: string }).agreed_cpt).toBe("Rs 16");
   });
 });

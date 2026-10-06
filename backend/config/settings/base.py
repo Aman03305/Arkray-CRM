@@ -112,6 +112,18 @@ if env.bool("DB_POOL_ENABLED", default=False):
 else:
     _db["CONN_MAX_AGE"] = env.int("DB_CONN_MAX_AGE_S", default=60)
     _db["CONN_HEALTH_CHECKS"] = True
+if env.bool("DB_TRANSACTION_POOLER", default=False):
+    # DATABASE_URL names a transaction-mode pooler (PgBouncer, Supavisor): a server connection
+    # serves one transaction, so nothing that lives on the session may be relied on.
+    # - No startup `options` (the poolers refuse the parameter): the timeouts and jit=off are
+    #   set on the role instead, `ALTER ROLE arkray_app SET statement_timeout = '10s'` and so
+    #   on (docs/deployment.md#database-poolers), which every server connection applies at login.
+    # - No server-side cursors and no automatic server-side prepared statements (both are
+    #   per-session objects another client's transaction would meet).
+    # Transaction-level advisory locks and `SET LOCAL` (all this code uses) are safe.
+    _db_options.pop("options", None)
+    _db_options["prepare_threshold"] = None
+    _db["DISABLE_SERVER_SIDE_CURSORS"] = True
 _db["OPTIONS"] = _db_options
 DATABASES = {"default": _db}
 
@@ -287,6 +299,9 @@ REST_FRAMEWORK = {
         "search": env("API_THROTTLE_SEARCH", default="120/min"),
         # Ask Arkray: each question may call a language model (docs/rag-architecture.md).
         "ask": env("API_THROTTLE_ASK", default="20/min"),
+        # File uploads: each may move 10 MB to object storage. Picking ten files at once
+        # is ten requests; 600/min would let one user push 6 GB a minute.
+        "attachments": env("API_THROTTLE_ATTACHMENTS", default="30/min"),
     },
     "NUM_PROXIES": TRUSTED_PROXY_COUNT,
     "COERCE_DECIMAL_TO_STRING": True,  # money is serialised as strings, never floats
@@ -405,6 +420,13 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": crontab(minute=35),
         "options": {"expires": 30 * 60},
     },
+    "activities-reconcile-check": {
+        "task": "activities.reconcile_check",
+        # attachments: rows against objects, read-only (never repairs); 22:10 UTC is 03:40
+        # in India. The task itself does nothing when ATTACHMENT_RECONCILE_DAILY is off.
+        "schedule": crontab(hour=22, minute=10),
+        "options": {"expires": 60 * 60},
+    },
 }
 
 # --- Transactional outbox ------------------------------------------------------------------
@@ -454,24 +476,86 @@ ATTACHMENT_ALLOWED_EXTENSIONS = env.list(
 ATTACHMENT_SCANNER = env.str("ATTACHMENT_SCANNER", default="")
 ATTACHMENT_STORAGE = env.str("ATTACHMENT_STORAGE", default="filesystem")
 ATTACHMENT_ROOT = env.str("ATTACHMENT_ROOT", default=str(BASE_DIR / "var" / "attachments"))
-if ATTACHMENT_STORAGE == "s3":
-    _ATTACHMENT_BACKEND: dict[str, Any] = {
+# An S3-compatible endpoint that stops answering must cost a request seconds, never the
+# worker: botocore's own defaults (60 s timeouts, up to 5 attempts, 120 s+ per call) outlast
+# gunicorn's 30 s timeout, so a few retrying users would pin every web worker (final audit
+# SRE-1). Measured against a black-holed endpoint: about 7 s for a save, where the defaults
+# took 113 s. `max_attempts` counts attempts in total, the first included.
+ATTACHMENT_S3_CONNECT_TIMEOUT_S = env.int("ATTACHMENT_S3_CONNECT_TIMEOUT_S", default=3)
+ATTACHMENT_S3_READ_TIMEOUT_S = env.int("ATTACHMENT_S3_READ_TIMEOUT_S", default=10)
+ATTACHMENT_S3_MAX_ATTEMPTS = env.int("ATTACHMENT_S3_MAX_ATTEMPTS", default=2)
+# Every storage call, whatever the backend, is also guarded in the web and worker processes
+# (activities.storage, docs/reliability.md#attachment-storage): a request stops waiting
+# after the deadline (a stalled body or a slow drip of bytes would otherwise cost
+# read-timeout x attempts, 20 s+), at most MAX_IN_FLIGHT calls per process run at once, and
+# after BREAKER_FAILURES outage-like failures in a row calls fail at once for a cool-down
+# (doubling, up to 8x, while the outage lasts; checked again in the background).
+ATTACHMENT_STORAGE_DEADLINE_S = env.float("ATTACHMENT_STORAGE_DEADLINE_S", default=12.0)
+ATTACHMENT_STORAGE_MAX_IN_FLIGHT = env.int("ATTACHMENT_STORAGE_MAX_IN_FLIGHT", default=4)
+# Across every process sharing the cache (Redis): keep it well below WEB_CONCURRENCY, so a
+# failing store can never hold most web workers (activities.storage; docs/capacity.md).
+ATTACHMENT_STORAGE_MAX_IN_FLIGHT_SHARED = env.int(
+    "ATTACHMENT_STORAGE_MAX_IN_FLIGHT_SHARED", default=3
+)
+ATTACHMENT_STORAGE_BREAKER_FAILURES = env.int("ATTACHMENT_STORAGE_BREAKER_FAILURES", default=3)
+ATTACHMENT_STORAGE_BREAKER_COOLDOWN_S = env.float(
+    "ATTACHMENT_STORAGE_BREAKER_COOLDOWN_S", default=15.0
+)
+# The daily read-only `reconcile_attachments --check` (activities.reconcile_check): rows
+# against objects, its outcome on the metrics endpoint. It never repairs anything.
+ATTACHMENT_RECONCILE_DAILY = env.bool("ATTACHMENT_RECONCILE_DAILY", default=True)
+
+
+def attachment_s3_backend(
+    *,
+    bucket: str,
+    endpoint_url: str | None = None,
+    region: str | None = None,
+    access_key: str | None = None,
+    secret_key: str | None = None,
+    prefix: str = "attachments",
+    connect_timeout_s: float = ATTACHMENT_S3_CONNECT_TIMEOUT_S,
+    read_timeout_s: float = ATTACHMENT_S3_READ_TIMEOUT_S,
+    max_attempts: int = ATTACHMENT_S3_MAX_ATTEMPTS,
+) -> dict[str, Any]:
+    """STORAGES["attachments"] for private S3-compatible storage. One builder, so the fault
+    tests (tests/integration/test_attachment_storage_faults.py) run the production options
+    against their fake endpoint."""
+    from botocore.config import Config
+
+    return {
         "BACKEND": "storages.backends.s3.S3Storage",
         "OPTIONS": {
-            "bucket_name": env.str("ATTACHMENT_S3_BUCKET"),
-            "endpoint_url": env.str("ATTACHMENT_S3_ENDPOINT_URL", default="") or None,
-            "region_name": env.str("ATTACHMENT_S3_REGION", default="") or None,
-            "access_key": env.str("ATTACHMENT_S3_ACCESS_KEY_ID", default="") or None,
-            "secret_key": env.str("ATTACHMENT_S3_SECRET_ACCESS_KEY", default="") or None,
-            "location": env.str("ATTACHMENT_S3_PREFIX", default="attachments"),
+            "bucket_name": bucket,
+            "endpoint_url": endpoint_url or None,
+            "region_name": region or None,
+            "access_key": access_key or None,
+            "secret_key": secret_key or None,
+            "location": prefix,
             # Private objects, never overwritten, no public URLs: the API streams them.
             "default_acl": "private",
             "file_overwrite": False,
             "querystring_auth": True,
             "querystring_expire": 60,
             "object_parameters": {"ServerSideEncryption": "AES256"},
+            "client_config": Config(
+                connect_timeout=connect_timeout_s,
+                read_timeout=read_timeout_s,
+                retries={"total_max_attempts": max_attempts, "mode": "standard"},
+            ),
         },
     }
+
+
+if ATTACHMENT_STORAGE == "s3":
+    _ATTACHMENT_BACKEND: dict[str, Any] = attachment_s3_backend(
+        bucket=env.str("ATTACHMENT_S3_BUCKET"),
+        endpoint_url=env.str("ATTACHMENT_S3_ENDPOINT_URL", default=""),
+        region=env.str("ATTACHMENT_S3_REGION", default=""),
+        access_key=env.str("ATTACHMENT_S3_ACCESS_KEY_ID", default=""),
+        secret_key=env.str("ATTACHMENT_S3_SECRET_ACCESS_KEY", default=""),
+        prefix=env.str("ATTACHMENT_S3_PREFIX", default="attachments"),
+    )
 else:
     _ATTACHMENT_BACKEND = {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
@@ -585,7 +669,7 @@ LOGGING: dict[str, Any] = {
         # (Phase 9 review).
         **{
             name: {"level": "WARNING", "propagate": True}
-            for name in ("anthropic", "httpx", "httpx2", "httpcore", "urllib3")
+            for name in ("anthropic", "httpx", "httpx2", "httpcore", "httpcore2", "urllib3")
         },
     },
 }

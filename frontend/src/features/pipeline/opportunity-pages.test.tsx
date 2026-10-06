@@ -137,6 +137,9 @@ describe("opportunity detail", () => {
     expect(within(customer).getAllByText("Asha Mehta").map((name) => name.closest("a"))).toEqual([null, expect.any(HTMLAnchorElement)]);
     expect(within(customer).getByText("Lead")).toBeInTheDocument();
     expect(within(customer).getByRole("link", { name: "Asha Mehta" })).toHaveAttribute("href", `/leads/${LEAD_ID}`);
+    // Small links get a taller hit area (WCAG 2.5.8), the padding given back as margin.
+    expect(within(customer).getByRole("link", { name: "Asha Mehta" })).toHaveClass("inline-block", "-my-1", "py-1");
+    expect(screen.getAllByRole("link", { name: "Pipeline" })[0]).toHaveClass("-mt-1", "mb-2", "py-1");
     expect(within(customer).getByRole("link", { name: "asha@apollo.example" })).toHaveAttribute("href", "mailto:asha@apollo.example");
     expect(within(customer).getByRole("link", { name: "+91 98765 43210" })).toHaveAttribute("href", expect.stringMatching(/^tel:/));
     const instrument = screen.getByRole("region", { name: "Instrument" });
@@ -210,7 +213,7 @@ describe("opportunity detail", () => {
     expect(api.callsTo("POST", `${ME}/move`)[0]!.body).toEqual({ stage: STAGES.won.id, version: 2 });
   });
 
-  it("Move lets keyboard users choose any allowed stage, and a negotiation stage asks for the price", async () => {
+  it("Move lets keyboard users choose any allowed stage, and a negotiation stage asks for the agreed price and CPT", async () => {
     const api = mockApi({
       ...CONFIG,
       ...HISTORY,
@@ -230,19 +233,36 @@ describe("opportunity detail", () => {
     ]);
     await user.click(within(dialog).getByRole("radio", { name: /Qualified/ }));
     expect(within(dialog).getByText(/probability becomes 25%/)).toBeInTheDocument();
-    expect(within(dialog).queryByLabelText("Negotiated price (₹)")).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Agreed price (₹)")).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Agreed CPT")).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole("radio", { name: /Negotiation/ }));
     await user.click(within(dialog).getByRole("button", { name: "Move" }));
-    expect(await within(dialog).findByText("Enter the negotiated price.")).toBeInTheDocument();
+    expect(await within(dialog).findByText("Enter the agreed price.")).toBeInTheDocument();
+    expect(within(dialog).getByText("Enter the agreed CPT.")).toBeInTheDocument();
     expect(api.callsTo("POST", `${ME}/move`)).toHaveLength(0);
-    await user.type(within(dialog).getByLabelText("Negotiated price (₹)"), "11,00,000");
+    await user.type(within(dialog).getByLabelText("Agreed price (₹)"), "11,00,000");
+    await user.click(within(dialog).getByRole("button", { name: "Move" }));
+    // The price alone is not enough.
+    expect(within(dialog).getByText("Enter the agreed CPT.")).toBeInTheDocument();
+    expect(api.callsTo("POST", `${ME}/move`)).toHaveLength(0);
+    await user.type(within(dialog).getByLabelText("Agreed CPT"), "  Rs 18   per test ");
     await user.click(within(dialog).getByRole("button", { name: "Move" }));
     expect(await screen.findByText("Moved to Negotiation.")).toBeInTheDocument();
-    expect(api.callsTo("POST", `${ME}/move`)[0]!.body).toEqual({ stage: STAGES.negotiation.id, version: 2, negotiated_price: "1100000" });
+    expect(api.callsTo("POST", `${ME}/move`)[0]!.body).toEqual({
+      stage: STAGES.negotiation.id,
+      version: 2,
+      negotiated_price: "1100000",
+      agreed_cpt: "Rs 18 per test",
+    });
   });
 
-  it("in negotiation, Update price appends a negotiated price with the version shown", async () => {
-    const negotiating = makeOpportunity({ stage: STAGES.negotiation, negotiated_price: "1100000.00", negotiated_at: "2026-09-29T06:00:00Z" });
+  it("in negotiation, Update price & CPT appends agreed terms with the version shown", async () => {
+    const negotiating = makeOpportunity({
+      stage: STAGES.negotiation,
+      negotiated_price: "1100000.00",
+      agreed_cpt: "Rs 20 per test",
+      negotiated_at: "2026-09-29T06:00:00Z",
+    });
     const api = mockApi({
       ...CONFIG,
       ...HISTORY,
@@ -253,12 +273,71 @@ describe("opportunity detail", () => {
     const user = userEvent.setup();
     const deal = await screen.findByRole("region", { name: "Deal" });
     expect(within(deal).getByText("₹11,00,000")).toBeInTheDocument();
-    await user.click(within(deal).getByRole("button", { name: "Update price" }));
-    const dialog = screen.getByRole("dialog", { name: "Update negotiated price" });
-    await user.type(within(dialog).getByLabelText("Negotiated price (₹)"), "10,50,000");
-    await user.click(within(dialog).getByRole("button", { name: "Save price" }));
-    expect(await screen.findByText("Negotiated price recorded.")).toBeInTheDocument();
-    expect(api.callsTo("POST", `${ME}/negotiated-prices`)[0]!.body).toEqual({ version: 2, price: "1050000" });
+    expect(within(deal).getByText("Agreed price")).toBeInTheDocument();
+    expect(within(deal).getByText("Agreed CPT").nextElementSibling).toHaveTextContent("Rs 20 per test");
+    await user.click(within(deal).getByRole("button", { name: "Update price & CPT" }));
+    const dialog = screen.getByRole("dialog", { name: "Update agreed price and CPT" });
+    // The CPT on record is kept unless changed; the price is typed afresh.
+    expect(within(dialog).getByLabelText("Agreed CPT")).toHaveValue("Rs 20 per test");
+    expect(within(dialog).getByLabelText("Agreed price (₹)")).toHaveValue("");
+    await user.type(within(dialog).getByLabelText("Agreed price (₹)"), "10,50,000");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Agreed price and CPT recorded.")).toBeInTheDocument();
+    expect(api.callsTo("POST", `${ME}/negotiated-prices`)[0]!.body).toEqual({ version: 2, price: "1050000", agreed_cpt: "Rs 20 per test" });
+  });
+
+  it("Update price & CPT asks for a CPT a deal negotiated before had none of", async () => {
+    const negotiating = makeOpportunity({ stage: STAGES.negotiation, negotiated_price: "1100000.00", negotiated_at: "2026-09-29T06:00:00Z" });
+    const api = mockApi({ ...CONFIG, ...HISTORY, [`GET ${ME}`]: { status: 200, body: negotiating } });
+    renderWithProviders(<OpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
+    const user = userEvent.setup();
+    const deal = await screen.findByRole("region", { name: "Deal" });
+    // No CPT on record: the row says nothing rather than inventing one.
+    expect(within(deal).getByText("Agreed CPT").nextElementSibling).toHaveTextContent("—");
+    await user.click(within(deal).getByRole("button", { name: "Update price & CPT" }));
+    const dialog = screen.getByRole("dialog", { name: "Update agreed price and CPT" });
+    await user.type(within(dialog).getByLabelText("Agreed price (₹)"), "10,50,000");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(within(dialog).getByText("Enter the agreed CPT.")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Agreed CPT")).toHaveAttribute("aria-invalid", "true");
+    expect(api.callsTo("POST", `${ME}/negotiated-prices`)).toHaveLength(0);
+  });
+
+  it("the agreed price history shows each price with its CPT", async () => {
+    const negotiating = makeOpportunity({ stage: STAGES.negotiation, negotiated_price: "1050000.00", agreed_cpt: "Rs 18", negotiated_at: "2026-09-29T06:00:00Z" });
+    const row = (id: string, price: string, cpt: string, at: string) => ({
+      id,
+      price,
+      agreed_cpt: cpt,
+      currency: "INR",
+      stage_id: STAGES.negotiation.id,
+      stage_name: "Negotiation",
+      source: "revision",
+      actor: { id: negotiating.owner.id, full_name: "Rahul Sharma", is_active: true },
+      occurred_at: at,
+    });
+    mockApi({
+      ...CONFIG,
+      ...HISTORY,
+      [`GET ${ME}`]: { status: 200, body: negotiating },
+      [`GET ${ME}/negotiated-prices`]: {
+        status: 200,
+        body: {
+          results: [row("p2", "1050000.00", "Rs 18", "2026-09-29T06:00:00Z"), row("p1", "1100000.00", "", "2026-09-28T06:00:00Z")],
+          next: null,
+          previous: null,
+        },
+      },
+    });
+    renderWithProviders(<OpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("tab", { name: "History" }));
+    const history = await screen.findByRole("region", { name: "Agreed prices" });
+    const items = within(history).getAllByRole("listitem");
+    expect(items[0]).toHaveTextContent("₹10,50,000 CPT: Rs 18");
+    // A price recorded before the CPT was asked for shows no CPT.
+    expect(items[1]).toHaveTextContent("₹11,00,000");
+    expect(items[1]).not.toHaveTextContent("CPT");
   });
 
   it("a guessed or someone else's opportunity looks like a missing page", async () => {
@@ -468,9 +547,11 @@ describe("creating an opportunity", () => {
     await user.click(await within(drawer).findByRole("radio", { name: "Adams 8380 V-lite" }));
     await user.type(within(drawer).getByLabelText("Installation price (₹)"), "12,50,000.50");
     await user.type(within(drawer).getByLabelText("Expected CPT (optional)"), "45");
-    expect(within(drawer).queryByLabelText("Negotiated price (₹)")).not.toBeInTheDocument();
+    expect(within(drawer).queryByLabelText("Agreed price (₹)")).not.toBeInTheDocument();
+    expect(within(drawer).queryByLabelText("Agreed CPT")).not.toBeInTheDocument();
     await user.selectOptions(within(drawer).getByRole("combobox", { name: "Stage" }), STAGES.negotiation.id);
-    await user.type(within(drawer).getByLabelText("Negotiated price (₹)"), "11,00,000");
+    await user.type(within(drawer).getByLabelText("Agreed price (₹)"), "11,00,000");
+    await user.type(within(drawer).getByLabelText("Agreed CPT"), "Rs 18 per test");
     await user.click(within(drawer).getByRole("button", { name: "Create opportunity" }));
     expect(await within(drawer).findByText(/temporarily unavailable|Try again/i)).toBeInTheDocument();
     await user.click(within(drawer).getByRole("button", { name: "Create opportunity" }));
@@ -485,6 +566,7 @@ describe("creating an opportunity", () => {
       pipeline: PIPELINE_ID,
       stage: STAGES.negotiation.id,
       negotiated_price: "1100000",
+      agreed_cpt: "Rs 18 per test",
     });
     expect(first!.headers["Idempotency-Key"]).toBe(second!.headers["Idempotency-Key"]);
   });

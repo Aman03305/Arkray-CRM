@@ -9,8 +9,10 @@ by composite foreign keys; lock order), [ADR-0019](adr/0019-lead-conversion.md) 
 "Converted" means), [ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.md)
 (user pipelines, negotiation, custom fields), [ADR-0027](adr/0027-leads-removed-from-the-ui.md)
 (Leads removed from the UI: a new opportunity brings its own customer record; "Change owner")
-and [ADR-0028](adr/0028-opportunity-creates-its-lead.md) (a new opportunity creates its lead;
-derived names; the instrument list; Expected CPT; the read-only lead page).
+[ADR-0028](adr/0028-opportunity-creates-its-lead.md) (a new opportunity creates its lead;
+derived names; the instrument list; Expected CPT; the read-only lead page) and
+[ADR-0029](adr/0029-agreed-price-and-cpt-on-negotiation.md) (entering negotiation asks for the
+agreed price and the agreed CPT).
 
 The canonical domain term is **opportunity** everywhere: models, API, services, events,
 audit and UI. ("Deal" appears only in sample titles.)
@@ -112,25 +114,36 @@ likewise; custom values are never validated against definitions being changed.
 ## Negotiation
 
 A stage of type **negotiation** (an open stage, `is_negotiation`; its name is free:
-"Commercial discussion" works the same) asks for the **negotiated price**:
+"Commercial discussion" works the same) asks for the **agreed price** and the **agreed CPT**
+(ADR-0029). The agreed price is the negotiated price of ADR-0026: the API field is still
+`negotiated_price`, the UI says *Agreed price*.
 
 - **entering** one (a move, a reopen, a creation or conversion directly into it) requires
-  `negotiated_price` (INR, an exact decimal like `value`; 400 otherwise); no other target takes
-  one (400). The rule is in `services.move_opportunity` / `_insert`: drag and drop, the Move
-  menu, the deal page, the API and an administrator's workspace all go through it. A refused
-  move changes nothing (no version, history or audit);
-- **re-entering** after leaving negotiation asks again;
-- while negotiating, `POST …/opportunities/{id}/negotiated-prices {version, price}` records a
-  revision (the same price as the latest is a harmless retry; 422 outside negotiation);
-- every price is **appended** to `pipeline_negotiation_price` (append-only: ORM guard and a
-  PostgreSQL trigger): price, currency, the stage and its name then, source (`stage_entry`,
-  `revision`, `creation`), the opportunity's version, actor, subject (the owner when the
-  actor is someone else) and support session. Nothing is overwritten; `GET
-  …/negotiated-prices` lists it newest first. The opportunity keeps a copy of the latest
-  (`negotiated_price`, `negotiated_at`) for cards and Ask Arkray;
+  both: `negotiated_price` (INR, an exact decimal like `value`) and `agreed_cpt` (one line of
+  free text, ≤ 100, kept like [Expected CPT](#expected-cpt): no unit is invented; blank counts
+  as not given). Whatever is missing is reported at once (400 `negotiated_price` /
+  `agreed_cpt`); no other target takes either (400). The rule is in
+  `services._terms_for` (used by `move_opportunity` and `_insert`): drag and drop, the Move
+  menu, the deal page, the New Opportunity panel, the API and an administrator's workspace
+  all go through it. A refused move changes nothing (no version, history or audit);
+- **re-entering** after leaving negotiation asks for both again;
+- while negotiating, `POST …/opportunities/{id}/negotiated-prices {version, price,
+  agreed_cpt}` records a revision; both are required and either may change (the same price
+  and CPT as the latest row in this stage is a harmless retry; 422 outside negotiation);
+- every price is **appended** with its CPT to `pipeline_negotiation_price` (append-only: ORM
+  guard and a PostgreSQL trigger): price, agreed CPT, currency, the stage and its name then,
+  source (`stage_entry`, `revision`, `creation`), the opportunity's version, actor, subject
+  (the owner when the actor is someone else) and support session. Nothing is overwritten;
+  `GET …/negotiated-prices` lists it newest first. The opportunity keeps a copy of the latest
+  price (`negotiated_price`, `negotiated_at`) for cards and Ask Arkray; its `agreed_cpt` is
+  not copied but read from the newest history row (`selectors.LATEST_AGREED_CPT`, in the
+  same query: detail, board cards and list rows), so it always goes with that price, also
+  one the previous release recorded during a rolling deploy. An open card shows it as
+  *Agreed CPT* just below *Agreed* (left out when blank). Prices recorded before ADR-0029 have an empty CPT (nothing is guessed); the next
+  revision or re-entry asks for one;
 - audit: `opportunity.negotiated_price_recorded` for revisions and
-  `negotiated_price_recorded: true` on the stage change; amounts stay in the history, never
-  in audit metadata;
+  `negotiated_price_recorded: true, agreed_cpt_recorded: true` on the stage change; amounts
+  and CPTs stay in the history, never in audit metadata;
 - `value` (shown as **Installation price**) stays the amount pipeline value and weighted
   pipeline use: a negotiated price never silently rewrites it (a product decision; the deal
   page shows both).
@@ -201,7 +214,7 @@ pipeline, checked at commit so a reorder can swap positions in one transaction),
 | `work_load` | optional, ≤ 100, free text such as "300 tests/day": the product has no workload unit semantics, so none is invented |
 | `expected_cpt` | optional, one line, ≤ 100, free text ([Expected CPT](#expected-cpt)) |
 | `custom_fields` | the pipeline's custom field values ([Custom fields](#custom-fields)) |
-| `negotiated_price`, `negotiated_at` | read-only: the latest negotiated price ([Negotiation](#negotiation)) |
+| `negotiated_price`, `agreed_cpt`, `negotiated_at` | read-only: the latest agreed (negotiated) price and the agreed CPT recorded with it (the CPT read from the newest history row; [Negotiation](#negotiation)) |
 | `probability` | `NUMERIC(5,2)`, 0-100; see [Probability](#probability) |
 | `probability_overridden` | read-only flag: set manually rather than the stage's default |
 | `weighted_value` | computed by PostgreSQL on every read (never stored, never computed in the browser) |
@@ -257,6 +270,40 @@ API, the opportunity page, the edit panel, the update audit (by field name, neve
 and Ask Arkray's record details; not in search or the semantic index. *Open question for the
 business:* what CPT means and in which unit; once confirmed it can become a typed field.
 
+**CPT business meaning/unit requires product-owner confirmation** (risk R104). Until then,
+both CPTs (this one and the [agreed CPT](#negotiation)) follow one rule,
+`validation.clean_cpt` (bound `CPT_MAX_LENGTH` = 100), in every write path (create, edit,
+move, revision, conversion, the services themselves):
+
+| Input | Result |
+|---|---|
+| a string | NFC; whitespace runs (tabs, newlines) collapsed to one space; trimmed; at most 100 code points after that (multi-byte and emoji count one each); blank = not given |
+| control characters (NUL, ESC…), bidi embeddings/overrides/isolates, zero-width spaces, BOM, line separators, tag characters, lone surrogates | 400 `Remove the invisible or control characters from this text.` (never silently removed; the zero-width joiner Indic spelling needs is allowed) |
+| a JSON number, boolean, list or object | 400 `Enter the CPT as text, for example "Rs 18 per test".` A number is not re-spelled as text (`18.50` would arrive as `"18.5"`) |
+| markup, SQL or spreadsheet-formula text (`<script>`, `'; DROP …`, `=cmd…`) | stored exactly as typed; every UI path renders it as text (React escaping, no `dangerouslySetInnerHTML`); there is no CSV/spreadsheet export |
+
+It is never parsed, converted, summed or compared as a number: not in totals, the dashboard,
+search (`SEARCH_TEXT` is title, account and customer) or the semantic index (title,
+description, lost reason). Audit metadata names the changed field (`fields:
+["expected_cpt"]`, `agreed_cpt_recorded: true`), never the text. Ask Arkray may repeat a
+recorded CPT as written (a grounded label, never a computed figure). Erasure blanks both
+(`privacy.services`). Tested: `pipeline/tests/test_cpt_text.py` (every rule above, through
+all five write paths, mutation-checked).
+
+**Ready for a typed CPT later, without breaking clients** (no schema change now): once the
+product owner defines the meaning and unit,
+
+1. *expand*: add new nullable columns beside the text (for example `expected_cpt_amount`
+   `NUMERIC` + `expected_cpt_unit`, and the same on `pipeline_negotiation_price`), written
+   by the services from new optional API fields; `expected_cpt`/`agreed_cpt` stay as they
+   are, still accepted and returned;
+2. *backfill*: a data migration fills the typed columns only from text that parses
+   unambiguously under the confirmed unit; everything else stays text only (never guessed),
+   listed for the business to review;
+3. *contract*: only after every client sends the typed fields, the text may become derived
+   or read-only (a deprecation in the API description first). The append-only price history
+   keeps its recorded text either way.
+
 ### The lead a new opportunity creates
 
 `POST …/opportunities` without `lead` (the form never sends one) creates, in **one
@@ -264,9 +311,34 @@ transaction**, a lead through `leads.services.create_lead` (its own audit `lead.
 `LeadCreated` event and owner rules) and then the opportunity linked to it; if anything fails
 both are rolled back (tested by failing the opportunity's history insert after the lead
 exists, and with a refused stage). One successful creation is exactly one new lead and one
-new opportunity; the Lead table is what counts leads ([dashboard.md](dashboard.md)). Retries
-and double submits with the form's Idempotency-Key replay the first creation (also when
-concurrent: tested with three threads), so they never make a second pair.
+new opportunity; the Lead table is what counts leads ([dashboard.md](dashboard.md)).
+
+**The request needs an `Idempotency-Key`** (since the final audit, R103;
+[api-conventions.md](api-conventions.md#idempotency)): without one, or with one that isn't a
+UUID, it is a 400 and nothing is written. Retries and double submits with the same key
+replay the first creation (`Idempotent-Replayed: true`), so they never make a second pair:
+duplicates arriving together wait on an advisory lock on (actor, operation, key), taken
+first in the transaction, and replay the first without inserting anything of their own
+(lock order step 0 below). Tested for real with 2, 20 and 100 identical requests at once,
+a retry while the first is still writing, a retry after the answer was lost, a refused
+request retried corrected (the key isn't used up), the key with any other request (422,
+nothing written), another user's identical key (their own), a new key for identical
+details (a second, separate pair: duplicates are legitimate and never merged) and a key
+past its 24 hours (forgotten: creates anew); every table one create writes (leads,
+opportunities, idempotency records, audit, outbox, timeline, stage history, prices) and
+the sequences are counted after each
+([`test_opportunity_idempotency.py`](../backend/tests/integration/test_opportunity_idempotency.py),
+mutation-checked: without the lock 2 to 25 creates started per burst).
+
+The New Opportunity panel keeps one key per logical submission: the same key while the
+request is unchanged (a double click, a retry after a timeout, a network error, 429 or 5xx),
+a new key as soon as any field or the workspace changes, none after a successful create (the
+panel then takes no further submit), and a new key in every new panel: another opening, a
+reload, Back/Forward or a second tab are new submissions (a reload after a lost answer shows
+the board, where a first creation that went through is visible). Keys come from
+`crypto.randomUUID`/`getRandomValues` only (`lib/random.ts`: no `Math.random` fallback; it
+throws instead), and the API client refuses to send an opportunity create without a valid
+key.
 
 | Opportunity | Lead |
 |---|---|
@@ -491,6 +563,10 @@ cycle (the concurrency tests contain interleavings that deadlock if any operatio
 locked an opportunity before its lead; a deliberate mutation of `_lock` produced
 `deadlock detected` in them):
 
+0. **the request key** (creates and conversions sent with an `Idempotency-Key`): a
+   transaction-scoped advisory lock on (actor, operation, key), `core.idempotency.claim`,
+   the first lock of the transaction; nothing takes it while holding a row lock, so it can't
+   be part of a cycle;
 1. **the lead**: `FOR NO KEY UPDATE` (create, move, edit, archive, restore: the lead's
    owner then can't change until commit), or `FOR UPDATE` from the start when the
    operation changes the lead itself (conversion; reassignment in `leads`), never upgraded;
@@ -526,6 +602,7 @@ bumps the versions of the opportunities it moves.
 | a storm of 12 mixed writers × 4 rounds on one lead | no deadlock; invariants hold after every round |
 | different users moving cards in opposite directions (New ↔ Qualified, Won ↔ Negotiation), 3 × 8 at once and with both holding their locks | all succeed (before the review fix: 59 of 80 deadlocked) |
 | the same conversion submitted twice with one key while the first is in flight | one conversion; the duplicate replays it |
+| the same create 2, 20, 100 times at once with one key; a retry while the first is writing | one lead and one opportunity; the duplicates wait on the key and replay it, starting no create of their own |
 
 ## The board
 
@@ -569,7 +646,9 @@ bumps the versions of the opportunities it moves.
 - **Phones and narrow tablets**: stage tabs (with counts; arrow keys move between them)
   and one stage's paginated list; the board is requested with `cards_per_stage=0`.
 - **Moving**: drag and drop on the board, or the card's **Move** menu (keyboard and
-  touch), both calling the one move API. Open → open moves are optimistic: the card moves
+  touch), both calling the one move API. Entering a negotiation stage first asks for the
+  agreed price and agreed CPT in the confirmation dialog (nothing moves until both are
+  given; cancelling leaves the card where it was). Open → open moves are optimistic: the card moves
   at once (counts adjust; money totals don't), and if the server refuses (409, 404, 422,
   500, network) the board is put back exactly as it was, the reason is shown, and the
   board reloads. The rollback goes to the board the move was made on, even if the filters
@@ -591,13 +670,15 @@ bumps the versions of the opportunities it moves.
 - **Deal page**: a header (status, stage, account, owner; *Won*, *Lost*, *Move* or
   *Reopen*, *Edit*, and *Change owner* (open deals, `crm.assign_any`) and *Delete (archive)* /
   *Restore* in the actions menu) and three tabs:
-  **Overview** (Deal: installation price, negotiated price with *Update price* while
-  negotiating, probability, weighted value, dates; Customer (phone and email as safe `tel:`
+  **Overview** (Deal: installation price, agreed price and agreed CPT with *Update price &
+  CPT* while negotiating (the dialog starts from the CPT on record, which it follows until
+  the user types one, and an empty price),
+  probability, weighted value, dates; Customer (phone and email as safe `tel:`
   and `mailto:` links, and **Lead**: a link to its lead page, or "In another workspace");
   Instrument (instrument, work load, Expected CPT); More details: the custom fields;
   Description; open work and record details, owner included), **Notes** (deal notes with files,
-  [activities.md](activities.md#attachments)) and **History** (negotiated prices, stage
-  history, the timeline). *Change owner* is a dialog (the new owner; what else moves); a
+  [activities.md](activities.md#attachments)) and **History** (agreed prices, each with its
+  CPT, stage history, the timeline). *Change owner* is a dialog (the new owner; what else moves); a
   deal handed out of the user's workspace being viewed returns to that workspace's Pipeline
   with the notice.
 - **New and edit opportunity**: a right-side panel over the board or the deal (bounded width
@@ -606,7 +687,7 @@ bumps the versions of the opportunities it moves.
   name, contact, email, address; the "Possible existing lead" notice), **Instrument** (the
   instrument picker, work load, installation price, Expected CPT), **Timeline** (opportunity
   date, expected closing date), **Pipeline** (the owner organisation-wide only, pipeline,
-  stage; the negotiated price for a negotiation stage, the lost reason for a lost one; when
+  stage; the agreed price and agreed CPT for a negotiation stage, the lost reason for a lost one; when
   editing, the read-only pipeline and stage and the own probability) and **Additional** (the
   pipeline's custom fields; the description when editing). A new opportunity needs the
   customer or the account name and takes its stage's probability. The **instrument picker**

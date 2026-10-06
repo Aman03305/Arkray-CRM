@@ -66,12 +66,14 @@ def create(owner, stage_key="new"):
         stage_id=default_stage(stage_key).pk,
         # the seeded Negotiation is a negotiation stage (pipeline.0006)
         negotiated_price=Decimal("1000") if stage_key == "negotiation" else None,
+        agreed_cpt="Rs 18" if stage_key == "negotiation" else None,
     ).opportunity
 
 
 def move(actor, opportunity, stage_key, version=1, **kwargs):
     if stage_key == "negotiation":
         kwargs.setdefault("negotiated_price", Decimal("1000"))
+        kwargs.setdefault("agreed_cpt", "Rs 18")
     return services.move_opportunity(
         actor=actor,
         scope=OWN(actor.pk),

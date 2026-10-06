@@ -37,7 +37,7 @@ from tests.factories import (
     UserFactory,
     default_stage,
 )
-from tests.helpers import run_concurrently, signed_in
+from tests.helpers import key_header, run_concurrently, signed_in
 
 pytestmark = [
     pytest.mark.django_db(transaction=True),
@@ -171,7 +171,7 @@ def test_deactivation_first_the_write_waits_then_is_refused_with_nothing_written
 
     def write_now():
         assert locked.wait(10)
-        response = anita.post(path, body, format="json")
+        response = anita.post(path, body, format="json", headers=key_header())
         finished["write"] = time.monotonic()
         return response
 
@@ -198,7 +198,7 @@ def test_write_first_the_deactivation_waits_for_it(write):
 
     def write_now():
         with subscribed(event, slow):
-            return anita.post(path, body, format="json")
+            return anita.post(path, body, format="json", headers=key_header())
 
     def deactivate():
         assert locked.wait(10)
@@ -223,7 +223,7 @@ def test_a_burst_of_every_write_around_a_deactivation(seed):
 
         def call():
             time.sleep(rng.random() * 0.05)
-            return name, signed_in(w["anita"]).post(path, body, format="json")
+            return name, signed_in(w["anita"]).post(path, body, format="json", headers=key_header())
 
         return call
 

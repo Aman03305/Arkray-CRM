@@ -481,7 +481,8 @@ export interface paths {
         /**
          * @description Attach a file to a note. The body is the file itself (Content-Type:
          *     application/octet-stream) and the X-Filename header its name, percent-encoded. At most
-         *     ATTACHMENT_MAX_BYTES; allowed types only, recognised by their content.
+         *     ATTACHMENT_MAX_BYTES; allowed types only, recognised by their content. Uploads have
+         *     their own rate limit (API_THROTTLE_ATTACHMENTS) besides the per-user one.
          */
         readonly post: operations["activities_attachments_upload"];
         readonly delete?: never;
@@ -997,14 +998,14 @@ export interface paths {
             readonly cookie?: never;
         };
         /**
-         * @description The negotiated price history (newest first, append-only), and recording a new price
-         *     while the opportunity is in a negotiation stage.
+         * @description The agreed price history (newest first, append-only; each price with its agreed CPT),
+         *     and recording new agreed terms while the opportunity is in a negotiation stage.
          */
         readonly get: operations["opportunities_negotiated_prices"];
         readonly put?: never;
         /**
-         * @description The negotiated price history (newest first, append-only), and recording a new price
-         *     while the opportunity is in a negotiation stage.
+         * @description The agreed price history (newest first, append-only; each price with its agreed CPT),
+         *     and recording new agreed terms while the opportunity is in a negotiation stage.
          */
         readonly post: operations["opportunities_record_negotiated_price"];
         readonly delete?: never;
@@ -1825,7 +1826,7 @@ export interface components {
             /** @description One of the instruments listed by /config/opportunity-options (or blank). */
             readonly instrument_name?: string;
             readonly work_load?: string;
-            /** @description Expected CPT as the salesperson states it (free text; no unit is implied). */
+            /** @description Expected CPT as the salesperson states it (no unit is implied). Free text kept as written; CPT's business meaning and unit await product-owner confirmation. */
             readonly expected_cpt?: string;
             /** @description Custom field id -> value (null clears it). Numbers and amounts as strings. */
             readonly custom_fields?: {
@@ -1838,8 +1839,10 @@ export interface components {
             /** Format: date */
             readonly expected_close_date?: string | null;
             readonly description?: string;
-            /** @description Required when the stage is a negotiation stage; refused otherwise. */
+            /** @description The agreed price: required when the stage is a negotiation stage; refused otherwise. */
             readonly negotiated_price?: (string | number) | null;
+            /** @description The agreed CPT: required when the stage is a negotiation stage; refused otherwise. Blank counts as not given. Free text kept as written; CPT's business meaning and unit await product-owner confirmation. */
+            readonly agreed_cpt?: string;
             /** @description The lead's current version. */
             readonly version: number;
             /** Format: uuid */
@@ -1976,14 +1979,18 @@ export interface components {
         readonly MatchedOnEnum: "email" | "phone";
         readonly NegotiatedPriceInputRequest: {
             readonly version: number;
-            /** @description The negotiated price (INR), e.g. "1050000.00". */
+            /** @description The agreed (negotiated) price (INR), e.g. "1050000.00". */
             readonly price: string | number;
+            /** @description The agreed CPT with this price. Free text kept as written; CPT's business meaning and unit await product-owner confirmation. */
+            readonly agreed_cpt: string;
         };
         readonly NegotiationPrice: {
             /** @example 3f9a1c0b7d2e4a6c8e10 */
             readonly id: string;
             /** Format: decimal */
             readonly price: string;
+            /** @description The agreed CPT recorded with this price (blank on prices recorded before it was asked for). */
+            readonly agreed_cpt: string;
             readonly currency: string;
             /** Format: uuid */
             readonly stage_id: string;
@@ -2053,9 +2060,11 @@ export interface components {
             readonly expected_close_date: string | null;
             /**
              * Format: decimal
-             * @description The latest negotiated price, if any.
+             * @description The latest agreed (negotiated) price, if any.
              */
             readonly negotiated_price: string | null;
+            /** @description The agreed CPT recorded with the latest agreed price, from the price history (free text; blank when that price has none). */
+            readonly agreed_cpt: string;
             /** Format: date-time */
             readonly closed_at: string | null;
             /** Format: date-time */
@@ -2116,6 +2125,8 @@ export interface components {
             readonly expected_close_date: string | null;
             /** Format: decimal */
             readonly negotiated_price: string | null;
+            /** @description The agreed CPT recorded with the latest agreed price (free text; blank when that price has none). */
+            readonly agreed_cpt: string;
             /** Format: date-time */
             readonly closed_at: string | null;
             /** Format: date-time */
@@ -2142,7 +2153,7 @@ export interface components {
             /** @description One of the instruments listed by /config/opportunity-options (or blank). */
             readonly instrument_name?: string;
             readonly work_load?: string;
-            /** @description Expected CPT as the salesperson states it (free text; no unit is implied). */
+            /** @description Expected CPT as the salesperson states it (no unit is implied). Free text kept as written; CPT's business meaning and unit await product-owner confirmation. */
             readonly expected_cpt?: string;
             /** @description Custom field id -> value (null clears it). Numbers and amounts as strings. */
             readonly custom_fields?: {
@@ -2155,8 +2166,10 @@ export interface components {
             /** Format: date */
             readonly expected_close_date?: string | null;
             readonly description?: string;
-            /** @description Required when the stage is a negotiation stage; refused otherwise. */
+            /** @description The agreed price: required when the stage is a negotiation stage; refused otherwise. */
             readonly negotiated_price?: (string | number) | null;
+            /** @description The agreed CPT: required when the stage is a negotiation stage; refused otherwise. Blank counts as not given. Free text kept as written; CPT's business meaning and unit await product-owner confirmation. */
+            readonly agreed_cpt?: string;
             /**
              * Format: uuid
              * @description The lead (in this workspace) the opportunity is for. Omitted (the UI, ADR-0027): a new hidden customer record is made from the customer details, which then need the customer or account name.
@@ -2188,8 +2201,10 @@ export interface components {
             readonly version: number;
             /** @description Optional, only when moving to a lost stage. */
             readonly lost_reason?: string;
-            /** @description Required when moving into a negotiation stage; refused otherwise. */
+            /** @description The agreed price: required when moving into a negotiation stage; refused otherwise. */
             readonly negotiated_price?: (string | number) | null;
+            /** @description The agreed CPT: required when moving into a negotiation stage; refused otherwise. Blank counts as not given. Free text kept as written; CPT's business meaning and unit await product-owner confirmation. */
+            readonly agreed_cpt?: string;
         };
         /** @description The choices an opportunity form offers (pipeline.instruments: the one list). */
         readonly OpportunityOptions: {
@@ -2302,7 +2317,7 @@ export interface components {
             /** @description One of the instruments listed by /config/opportunity-options (or blank). */
             readonly instrument_name?: string;
             readonly work_load?: string;
-            /** @description Expected CPT as the salesperson states it (free text; no unit is implied). */
+            /** @description Expected CPT as the salesperson states it (no unit is implied). Free text kept as written; CPT's business meaning and unit await product-owner confirmation. */
             readonly expected_cpt?: string;
             /** @description Custom field id -> value (null clears it). Numbers and amounts as strings. */
             readonly custom_fields?: {
@@ -3633,6 +3648,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description File storage is unavailable (storage_unavailable); Retry-After says when to try again. */
+            readonly 503: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     readonly activities_cancel: {
@@ -4031,6 +4053,20 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description The file's stored object is gone (attachment_unavailable): an administrator needs to look at it. */
+            readonly 410: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description File storage is unavailable (storage_unavailable); Retry-After says when to try again. */
+            readonly 503: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     readonly attachments_preview: {
@@ -4055,6 +4091,20 @@ export interface operations {
             };
             /** @description Not found, or outside this workspace. */
             readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The file's stored object is gone (attachment_unavailable): an administrator needs to look at it. */
+            readonly 410: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description File storage is unavailable (storage_unavailable); Retry-After says when to try again. */
+            readonly 503: {
                 headers: {
                     readonly [name: string]: unknown;
                 };
@@ -4538,9 +4588,9 @@ export interface operations {
     readonly opportunities_create: {
         readonly parameters: {
             readonly query?: never;
-            readonly header?: {
-                /** @description A UUID chosen by the client. Repeating the same request with the same key within 24 hours returns the lead created the first time instead of a duplicate. */
-                readonly "Idempotency-Key"?: string;
+            readonly header: {
+                /** @description Required. A new UUID for each new opportunity, the same one when retrying it: repeating the request with the key within 24 hours returns the opportunity created the first time (header Idempotent-Replayed: true) instead of a second one; the key with a different request is a 422. Missing or not a UUID: 400, nothing is created. */
+                readonly "Idempotency-Key": string;
             };
             readonly path: {
                 readonly workspace: string;
@@ -5286,6 +5336,20 @@ export interface operations {
             };
             /** @description Not found, or outside this workspace. */
             readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Too many searches; see Retry-After. */
+            readonly 429: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description search_busy: the search took too long; try again (Retry-After). */
+            readonly 503: {
                 headers: {
                     readonly [name: string]: unknown;
                 };

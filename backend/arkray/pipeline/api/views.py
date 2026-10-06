@@ -13,7 +13,8 @@ from typing import Any
 from uuid import UUID
 
 from django.conf import settings
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status as http
 from rest_framework.permissions import SAFE_METHODS
 from rest_framework.request import Request
@@ -21,7 +22,13 @@ from rest_framework.response import Response
 from rest_framework.utils.urls import replace_query_param
 
 from arkray.core.access import AccessScope
-from arkray.core.api import ApiView, idempotency_key, validated
+from arkray.core.api import (
+    IDEMPOTENCY_HEADER,
+    ApiView,
+    idempotency_key,
+    required_idempotency_key,
+    validated,
+)
 from arkray.core.errors import InvalidInputError, PermissionDeniedError
 from arkray.core.keyset import CursorBinding, KeysetPaginator, page_links
 from arkray.identity.models import User
@@ -34,7 +41,23 @@ from .. import configuration, instruments, selectors, services
 from ..selectors import OpportunityFilters
 from . import serializers as s
 
-CREATE_IDEMPOTENCY = IDEMPOTENCY_PARAMETER
+CONVERT_IDEMPOTENCY = IDEMPOTENCY_PARAMETER
+# Required: one create makes a lead and an opportunity, and a retry without a key would make
+# a second pair (final audit, R103). docs/api-conventions.md#idempotency lists such creates.
+CREATE_KEY_REQUIRED = (
+    f"Send an {IDEMPOTENCY_HEADER} header: a new UUID for each new opportunity, "
+    "the same one when retrying it."
+)
+CREATE_IDEMPOTENCY = OpenApiParameter(
+    IDEMPOTENCY_HEADER,
+    OpenApiTypes.UUID,
+    location=OpenApiParameter.HEADER,
+    required=True,
+    description="Required. A new UUID for each new opportunity, the same one when retrying "
+    "it: repeating the request with the key within 24 hours returns the opportunity created "
+    "the first time (header Idempotent-Replayed: true) instead of a second one; the key with "
+    "a different request is a 422. Missing or not a UUID: 400, nothing is created.",
+)
 
 
 def _scope(request: Request, workspace: str) -> tuple[User, AccessScope]:
@@ -409,12 +432,14 @@ class OpportunityListView(ApiView):
     )
     def post(self, request: Request, workspace: str) -> Response:
         actor, scope = _scope(request, workspace)
+        key = required_idempotency_key(request, CREATE_KEY_REQUIRED)
         data = validated(s.OpportunityCreateSerializer, request.data)
         lead_id = data.pop("lead", None)
         owner_id = data.pop("owner", None)
         pipeline_id = data.pop("pipeline", None)
         stage_id = data.pop("stage", None)
         negotiated_price = data.pop("negotiated_price", None)
+        agreed_cpt = data.pop("agreed_cpt", None)
         result = services.create_opportunity(
             actor=actor,
             scope=scope,
@@ -424,7 +449,8 @@ class OpportunityListView(ApiView):
             pipeline_id=pipeline_id,
             stage_id=stage_id,
             negotiated_price=negotiated_price,
-            idempotency_key=idempotency_key(request),
+            agreed_cpt=agreed_cpt,
+            idempotency_key=key,
         )
         response = Response(_opportunity(result.opportunity, scope), status=http.HTTP_201_CREATED)
         response["Location"] = _location(scope, result.opportunity.pk)
@@ -481,13 +507,14 @@ class OpportunityMoveView(ApiView):
             stage_id=data["stage"],
             lost_reason=data.get("lost_reason", ""),
             negotiated_price=data.get("negotiated_price"),
+            agreed_cpt=data.get("agreed_cpt"),
         )
         return Response(_opportunity(opportunity, scope))
 
 
 class OpportunityNegotiatedPricesView(ApiView):
-    """The negotiated price history (newest first, append-only), and recording a new price
-    while the opportunity is in a negotiation stage."""
+    """The agreed price history (newest first, append-only; each price with its agreed CPT),
+    and recording new agreed terms while the opportunity is in a negotiation stage."""
 
     permission_classes = [IsActiveUser]
     query_param_methods = frozenset({"GET"})
@@ -534,6 +561,7 @@ class OpportunityNegotiatedPricesView(ApiView):
             opportunity_id=opportunity_id,
             version=data["version"],
             price=data["price"],
+            agreed_cpt=data["agreed_cpt"],
         )
         return Response(_opportunity(opportunity, scope))
 
@@ -642,7 +670,7 @@ class LeadConvertView(ApiView):
     @extend_schema(
         operation_id="leads_convert",
         request=s.LeadConvertSerializer,
-        parameters=[CREATE_IDEMPOTENCY],
+        parameters=[CONVERT_IDEMPOTENCY],
         responses={201: s.ConversionSerializer, 404: NOT_FOUND},
     )
     def post(self, request: Request, workspace: str, lead_id: UUID) -> Response:
@@ -652,6 +680,7 @@ class LeadConvertView(ApiView):
         pipeline_id = data.pop("pipeline", None)
         stage_id = data.pop("stage", None)
         negotiated_price = data.pop("negotiated_price", None)
+        agreed_cpt = data.pop("agreed_cpt", None)
         result = services.convert_lead(
             actor=actor,
             scope=scope,
@@ -661,6 +690,7 @@ class LeadConvertView(ApiView):
             pipeline_id=pipeline_id,
             stage_id=stage_id,
             negotiated_price=negotiated_price,
+            agreed_cpt=agreed_cpt,
             idempotency_key=idempotency_key(request),
         )
         body = s.ConversionSerializer(

@@ -11,6 +11,7 @@ import { NotFoundView } from "@/components/ui/NotFoundView";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { PersonName } from "@/components/ui/PersonName";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { ROW_LINK } from "@/components/ui/targets";
 import { CustomerName, When } from "@/features/activities/ActivityBits";
 import { summaryFilters } from "@/features/activities/api";
 import { presetActivityList } from "@/features/activities/list-state";
@@ -223,6 +224,8 @@ const NONE = "py-6 text-center text-sm text-slate-500";
 // Names wrap rather than being cut off: the lists are short, and a truncated row could hide
 // whose work it is, or that they are deactivated (review).
 const WRAP = "[overflow-wrap:anywhere]";
+// Rows open their record from anywhere on them (ROW_LINK): the name alone was 20 px tall on
+// a phone (final audit UI-8).
 
 /** Today's newest leads: who, for which instrument, (organisation-wide) whose, and when.
  * Each opens its lead, which links to its opportunity. */
@@ -247,11 +250,11 @@ function NewLeads({ dashboard, workspace, go }: { dashboard: Dashboard; workspac
       ) : (
         <ul className="divide-y divide-slate-100">
           {rows.map((lead) => (
-            <li key={lead.id} className="flex items-start justify-between gap-3 py-3">
+            <li key={lead.id} className="relative flex items-start justify-between gap-3 py-3">
               <div className="min-w-0">
                 <Link
                   href={leadHref(workspace, lead.id)}
-                  className={`block text-sm font-medium text-slate-900 hover:text-brand-700 hover:underline ${WRAP}`}
+                  className={`block text-sm font-medium text-slate-900 hover:text-brand-700 hover:underline ${ROW_LINK} ${WRAP}`}
                 >
                   {lead.display_name}
                 </Link>
@@ -288,11 +291,11 @@ function ActivityRows({
   return (
     <ul className="divide-y divide-slate-100">
       {rows.map((activity) => (
-        <li key={activity.id} className="py-3">
+        <li key={activity.id} className="relative py-3">
           <div className="flex items-start justify-between gap-3">
             <Link
               href={activityHref(workspace, activity.id)}
-              className={`min-w-0 text-sm font-medium text-slate-900 hover:text-brand-700 hover:underline ${WRAP}`}
+              className={`min-w-0 text-sm font-medium text-slate-900 hover:text-brand-700 hover:underline ${ROW_LINK} ${WRAP}`}
             >
               {activity.title}
             </Link>

@@ -21,6 +21,7 @@ export function describeError(error: unknown): DisplayError {
       requestId: error.requestId,
     };
   }
+  if (error.status === 429) return { message: rateLimited(error), requestId: error.requestId };
   if (error.status >= 500) {
     return {
       message: "Something went wrong on our side. Please try again in a moment.",
@@ -37,6 +38,17 @@ export function describeError(error: unknown): DisplayError {
     return { message: "Choose a new password to continue.", requestId: error.requestId };
   }
   return { message: error.message || GENERIC, requestId: error.requestId };
+}
+
+/** A 429 says when to try again when the server sent Retry-After, unless its message already
+ * does ("Try again in 1 minute.", the throttle's "Expected available in 30 seconds."). */
+function rateLimited(error: ApiError): string {
+  const message = error.message || "Too many requests.";
+  const wait = error.retryAfterSeconds;
+  if (!wait || /try again in|available in/i.test(message)) return message;
+  const when = `Try again in ${wait === 1 ? "1 second" : `${wait} seconds`}.`;
+  const later = /Please try again later\.$/;
+  return later.test(message) ? message.replace(later, when) : `${message} ${when}`;
 }
 
 /** Field -> messages from a validation (400) or uniqueness (409) error; {} otherwise. */

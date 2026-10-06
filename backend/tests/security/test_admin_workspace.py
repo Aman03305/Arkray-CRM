@@ -46,7 +46,7 @@ from tests.factories import (
     TaskFactory,
     default_stage,
 )
-from tests.helpers import signed_in
+from tests.helpers import key_header, signed_in
 
 pytestmark = pytest.mark.django_db
 
@@ -399,6 +399,7 @@ def test_linking_new_work_in_rahuls_workspace_to_priyas_records_is_refused(world
             f"{API}/{rahul}/opportunities",
             {"lead": str(priya_lead.pk), "value": "1"},
             format="json",
+            headers=key_header(),
         ),
         client.post(
             f"{API}/{rahul}/activities",
@@ -434,6 +435,7 @@ def test_every_change_in_rahuls_workspace_is_anitas_and_none_is_rahuls(world):
         f"{base}/opportunities",
         {"lead": lead["id"], "value": "111111.00"},
         format="json",
+        headers=key_header(),
     ).json()
     assert opportunity["owner"]["id"] == ws(rahul)
     assert opportunity["created_by"]["id"] == str(anita.pk)
@@ -443,6 +445,7 @@ def test_every_change_in_rahuls_workspace_is_anitas_and_none_is_rahuls(world):
             "stage": str(default_stage("negotiation").pk),
             "version": opportunity["version"],
             "negotiated_price": "100000",
+            "agreed_cpt": "Rs 18",
         },
         format="json",
     )
@@ -644,6 +647,7 @@ def test_a_deactivated_users_history_stays_readable_and_receives_no_new_work(wor
             f"{base}/opportunities",
             {"lead": str(lead.pk), "value": "1"},
             format="json",
+            headers=key_header(),
         ),
         "task": client.post(
             f"{base}/activities",

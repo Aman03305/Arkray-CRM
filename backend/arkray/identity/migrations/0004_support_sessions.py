@@ -6,6 +6,8 @@ import uuid
 from django.conf import settings
 from django.db import migrations, models
 
+from arkray.core.migrations._reverse_guard import RefuseReverse
+
 
 class Migration(migrations.Migration):
 
@@ -42,5 +44,10 @@ class Migration(migrations.Migration):
                 'indexes': [models.Index(condition=models.Q(('ended_at__isnull', True)), fields=['expires_at'], name='identity_support_live_idx'), models.Index(fields=['target', '-started_at'], name='identity_support_target_idx')],
                 'constraints': [models.CheckConstraint(condition=models.Q(('admin', models.F('target')), _negated=True), name='identity_support_not_self'), models.CheckConstraint(condition=models.Q(('expires_at__gt', models.F('started_at'))), name='identity_support_expires_after_start'), models.CheckConstraint(condition=models.Q(models.Q(('end_reason', ''), ('ended_at__isnull', True)), models.Q(('ended_at__isnull', False), ('end_reason__in', ['exited', 'expired', 'signed_out', 'not_allowed', 'session_changed'])), _connector='OR'), name='identity_support_end_complete'), models.CheckConstraint(condition=models.Q(('session_digest__regex', '^[0-9a-f]{64}$')), name='identity_support_digest_format'), models.UniqueConstraint(condition=models.Q(('ended_at__isnull', True)), fields=('admin',), name='identity_support_one_live_per_admin')],
             },
+        ),
+        # Last, so it runs first when reversing (docs/deployment.md#rollback).
+        RefuseReverse(
+            'identity.0004_support_sessions',
+            "the support sessions and the users' password-change state",
         ),
     ]

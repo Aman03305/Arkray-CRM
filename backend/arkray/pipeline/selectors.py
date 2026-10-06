@@ -18,7 +18,8 @@ from typing import Any
 from uuid import UUID
 
 from django.db import connection, transaction
-from django.db.models import Count, F, Prefetch, Q, QuerySet, Subquery
+from django.db.models import CharField, Count, F, OuterRef, Prefetch, Q, QuerySet, Subquery, Value
+from django.db.models.functions import Coalesce
 
 from arkray.core.access import AccessScope
 from arkray.core.errors import InvalidInputError, NotFoundError
@@ -283,13 +284,28 @@ def _filtered(scope: AccessScope, filters: OpportunityFilters) -> QuerySet[Oppor
     return queryset
 
 
+# The agreed CPT that goes with the latest agreed price: the newest history row's, through
+# pipeline_negotiation_opp_idx (one index probe per row). Never a copy kept on the
+# opportunity, which the previous release would leave beside a newer price (ADR-0029, review
+# P2); "" when the newest price has none (recorded before it was asked for) or there is none.
+LATEST_AGREED_CPT = Coalesce(
+    Subquery(
+        NegotiationPrice.objects.filter(opportunity_id=OuterRef("pk"))
+        .order_by("-occurred_at", "-id")
+        .values("agreed_cpt")[:1]
+    ),
+    Value(""),
+    output_field=CharField(),
+)
+
+
 def _cards(queryset: QuerySet[Opportunity]) -> QuerySet[Opportunity]:
     """The columns a card or list row needs (lead and owner joined), with the weighted
-    value computed by PostgreSQL."""
+    value and the latest agreed CPT computed by PostgreSQL."""
     return (
         queryset.select_related("lead", "owner")
         .only(*_CARD_FIELDS)
-        .annotate(weighted_value=metrics.WEIGHTED_VALUE)
+        .annotate(weighted_value=metrics.WEIGHTED_VALUE, agreed_cpt=LATEST_AGREED_CPT)
     )
 
 
@@ -377,7 +393,7 @@ def _with_relations(queryset: QuerySet[Opportunity]) -> QuerySet[Opportunity]:
             "lead__archived_at",
             *(f"created_by__{f}" for f in _PERSON),
         )
-        .annotate(weighted_value=metrics.WEIGHTED_VALUE)
+        .annotate(weighted_value=metrics.WEIGHTED_VALUE, agreed_cpt=LATEST_AGREED_CPT)
     )
 
 
@@ -522,6 +538,22 @@ def stage_breakdown(scope: AccessScope, pipeline: Pipeline) -> list[StageTotal]:
     ]
 
 
+def pipelines_by_open_value(scope: AccessScope) -> list[UUID]:
+    """Ids of the pipelines holding non-archived opportunities in `scope`, the largest open
+    pipeline value first (then the most opportunities). One grouped query, whatever the
+    number of pipelines: Ask Arkray's organisation-wide stage breakdown lists only the top
+    few (a breakdown per pipeline grew with the pipeline count until it overflowed the tool
+    budget and failed the whole question: final audit DBPERF-1)."""
+    rows = (
+        _filtered(scope, OpportunityFilters())
+        .values("pipeline_id")
+        .order_by()
+        .annotate(open_value=metrics.value_sum(metrics.OPEN), held=Count("id"))
+        .order_by("-open_value", "-held", "pipeline_id")
+    )
+    return [row["pipeline_id"] for row in rows]
+
+
 @dataclass(frozen=True, slots=True)
 class OwnerPipeline:
     owner_id: UUID
@@ -633,6 +665,7 @@ def negotiation_history(scope: AccessScope, opportunity_id: UUID) -> QuerySet[Ne
             "id",
             "opportunity_id",
             "price",
+            "agreed_cpt",
             "currency",
             "stage_id",
             "stage_name",

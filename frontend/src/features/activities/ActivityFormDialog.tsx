@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { Dialog, DialogActions } from "@/components/ui/Dialog";
 import { SelectField, TextAreaField, TextField } from "@/components/ui/Field";
 import { useFocusFirstInvalid } from "@/components/ui/useFocusFirstInvalid";
+import { useSingleFlight } from "@/components/ui/useSingleFlight";
 import { DealPicker } from "@/features/pipeline/DealPicker";
 import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
 import type { Activity, ActivityCreateRequest } from "@/lib/api/types";
@@ -143,6 +144,7 @@ export function ActivityFormDialog({
     focusLater("[data-autofocus]");
   };
 
+  const once = useSingleFlight();
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (save.isPending) return;
@@ -157,7 +159,9 @@ export function ActivityFormDialog({
       onClose();
       return;
     }
-    save.mutate(undefined, { onSuccess: onSaved });
+    // Guarded synchronously (`save.isPending` is seen a tick late): a second edit would carry
+    // the same version and show a conflict with this one; a second create, the same reply.
+    once(() => save.mutateAsync(undefined, { onSuccess: onSaved }));
   };
 
   const applyMine = () => {

@@ -101,9 +101,10 @@ def move(actor, scope, opportunity_id, stage_key, version=1):
         opportunity_id=opportunity_id,
         version=version,
         stage_id=stage.pk,
-        # Entering negotiation needs the price (product enhancement phase); without it the
-        # move was refused or conflicted depending on which thread ran first.
+        # Entering negotiation needs the price and CPT (ADR-0026, ADR-0029); without them
+        # the move was refused or conflicted depending on which thread ran first.
         negotiated_price=Decimal("1000") if stage.is_negotiation else None,
+        agreed_cpt="Rs 18" if stage.is_negotiation else None,
     )
 
 
@@ -324,8 +325,9 @@ def test_a_double_submitted_create_with_one_key_creates_one_opportunity():
 
 def test_a_double_submitted_create_without_a_lead_makes_one_lead_and_one_opportunity():
     """The UI's create (ADR-0027/0028): no lead given, the customer record is made in the same
-    transaction. The key serialises the duplicates: the losers' whole transactions (their new
-    lead included) roll back and they replay the winner, so no orphan lead is left behind."""
+    transaction. The key serialises the duplicates (an advisory lock on it, first in the
+    transaction): they wait for the first and replay it, so no orphan lead is left behind
+    (tests/integration/test_opportunity_idempotency.py counts every table and sequence)."""
     owner = UserFactory()
     key = "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"
     results = run_concurrently(

@@ -104,9 +104,17 @@ export function useModalFocus(
       document.removeEventListener("focusin", onFocusIn);
       restoreInert();
       if (opener?.isConnected) opener.focus();
-      else focusPageHeading();
+      else if (focusIsLost()) focusPageHeading();
     };
   }, [open, container, boundary]);
+}
+
+/** Focus is "lost" when nothing holds it: on the document (the focused element was removed).
+ * A confirmation closing together with the drawer that opened it must not pull focus off the
+ * control the drawer has just returned it to. */
+function focusIsLost(): boolean {
+  const active = document.activeElement;
+  return !active || active === document.body || !active.isConnected;
 }
 
 /**

@@ -6,6 +6,8 @@ import uuid
 from django.conf import settings
 from django.db import migrations, models
 
+from arkray.core.migrations._reverse_guard import RefuseReverse
+
 
 class Migration(migrations.Migration):
 
@@ -50,5 +52,10 @@ class Migration(migrations.Migration):
                 'indexes': [models.Index(models.F('note'), models.F('created_at'), condition=models.Q(('deleted_at__isnull', True)), name='activities_attachment_note_idx'), models.Index(models.F('created_at'), condition=models.Q(('state', 'uploading'), ('scan_status', 'pending'), models.Q(('purged_at__isnull', True), models.Q(('deleted_at__isnull', False), ('state', 'failed'), ('scan_status', 'rejected'), _connector='OR')), _connector='OR'), name='activities_attachment_open_idx')],
                 'constraints': [models.CheckConstraint(condition=models.Q(('state__in', ['uploading', 'stored', 'failed'])), name='activities_attachment_state'), models.CheckConstraint(condition=models.Q(('scan_status__in', ['not_scanned', 'pending', 'clean', 'rejected'])), name='activities_attachment_scan_status'), models.CheckConstraint(condition=models.Q(('size__gt', 0), ('size__lte', 104857600)), name='activities_attachment_size'), models.CheckConstraint(condition=models.Q(('sha256__regex', '^[0-9a-f]{64}$')), name='activities_attachment_sha256'), models.CheckConstraint(condition=models.Q(models.Q(('original_name', ''), _negated=True), ('extension__regex', '^[a-z0-9]{1,8}$')), name='activities_attachment_name'), models.CheckConstraint(condition=models.Q(('stored_at__isnull', True), models.Q(('state', 'uploading'), _negated=True), _connector='OR'), name='activities_attachment_stored_at'), models.CheckConstraint(condition=models.Q(models.Q(('deleted_at__isnull', True), ('deleted_by__isnull', True)), ('deleted_at__isnull', False), _connector='OR'), name='activities_attachment_deleted'), models.CheckConstraint(condition=models.Q(('purged_at__isnull', True), ('deleted_at__isnull', False), ('state', 'failed'), ('scan_status', 'rejected'), _connector='OR'), name='activities_attachment_purged_only_when_gone')],
             },
+        ),
+        # Last, so it runs first when reversing (docs/deployment.md#rollback).
+        RefuseReverse(
+            'activities.0010_note_edits_and_attachments',
+            "the notes' attachments (and the stored files' only record) and edit stamps",
         ),
     ]

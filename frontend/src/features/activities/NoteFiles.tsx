@@ -51,7 +51,18 @@ export function RelativeTime({ iso }: { iso: string }) {
  * A real file input (keyboard and screen readers reach it) shown as a pill button. The
  * value is cleared after each pick, so the same file can be picked again.
  */
-export function FilePicker({ label, onPick, disabled = false }: { label: string; onPick: (files: File[]) => void; disabled?: boolean }) {
+export function FilePicker({
+  label,
+  context,
+  onPick,
+  disabled = false,
+}: {
+  label: string;
+  /** Read out after the label where the picker repeats down a list ("to note: Budget…"). */
+  context?: string;
+  onPick: (files: File[]) => void;
+  disabled?: boolean;
+}) {
   const id = useId();
   return (
     <span className="relative inline-flex">
@@ -74,6 +85,7 @@ export function FilePicker({ label, onPick, disabled = false }: { label: string;
       >
         <Paperclip aria-hidden="true" className="size-4" />
         {label}
+        {context ? <span className="sr-only"> {context}</span> : null}
       </label>
     </span>
   );

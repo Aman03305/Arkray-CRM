@@ -272,8 +272,13 @@ class TestNoAdministratorTakeover:
         demoted = admin_client.patch(
             f"{USERS}/{other.pk}", {"version": other.version, "role": "sales_user"}, format="json"
         )
-        assert demoted.status_code == 200, demoted.content
+        # Since R100 the first step is refused already (tests/security/test_admin_takeover.py).
+        assert demoted.status_code == 422, demoted.content
         other.refresh_from_db()
+        assert other.role == "admin"
+        # The promotion guard still stands on its own: a user whose password an
+        # administrator set can't be promoted until they have chosen their own.
+        other = UserFactory()
         assert (
             admin_client.post(
                 f"{USERS}/{other.pk}/set-password",
