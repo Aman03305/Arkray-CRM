@@ -5,3 +5,14 @@ coverage
 next-env.d.ts
 .env
 .env.*
+# Key material never enters the build context, even a stray file (secret-exposure audit).
+*.pem
+*.key
+*.p12
+*.pfx
+# Tests and their helpers: not part of the build, never in the image.
+**/*.test.ts
+**/*.test.tsx
+src/test
+vitest.config.mts
+vitest.setup.ts

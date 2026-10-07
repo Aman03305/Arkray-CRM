@@ -71,7 +71,10 @@ The WSGI entry point defaults to production settings, so a deployment that forge
   `client_request_id`.
 - Production settings refuse to disable secure cookies, the HTTPS redirect or HSTS, or to
   use a non-HTTPS `APP_BASE_URL`, unless `DJANGO_ALLOW_INSECURE_LOCAL_HTTP=true` is set.
-  Only the local Compose stack sets it.
+  Only the local Compose stack sets it, and it is refused unless every
+  `DJANGO_ALLOWED_HOSTS` entry is local (localhost, a loopback address or a single-label
+  container name). An email backend that doesn't deliver (console, file, memory) is
+  refused even with it.
 - **Don't log the paths `/activate/*` and `/reset-password/*`** at the proxy (or redact
   their last segment). They carry one-time secrets until used. The pages themselves send
   `Referrer-Policy: no-referrer` and `Cache-Control: no-store`, and Django never sees
@@ -259,7 +262,7 @@ is a failed deploy, not a weakened service.
 | `APP_BASE_URL` | **yes** | the public web URL for emailed links, `https://crm.example.com`; startup fails if unset or not `https://` |
 | `DJANGO_SECURE_COOKIES`, `DJANGO_SECURE_SSL_REDIRECT` | no | `true`; turning either off needs `DJANGO_ALLOW_INSECURE_LOCAL_HTTP` |
 | `DJANGO_HSTS_SECONDS`, `DJANGO_HSTS_INCLUDE_SUBDOMAINS` | no | one year, `false` (the edge proxy also sends HSTS, [below](#reverse-proxy)) |
-| `DJANGO_ALLOW_INSECURE_LOCAL_HTTP` | no | **never in a real deployment**: the local development stack's opt-in for plain HTTP, Redis without a password and the like |
+| `DJANGO_ALLOW_INSECURE_LOCAL_HTTP` | no | **never in a real deployment**: the local development stack's opt-in for plain HTTP, Redis without a password and the like; refused when any allowed host is a public name |
 | `TRUSTED_PROXY_COUNT` | **yes** | proxies appending `X-Forwarded-For` (1 behind [the reference proxy](#reverse-proxy)); startup fails if unset |
 | `FORWARDED_ALLOW_IPS` | yes | gunicorn's trusted proxy addresses |
 | `TRUST_INCOMING_REQUEST_ID` | no | `false`; `true` only when the edge proxy sets or overwrites `X-Request-ID` |
@@ -350,7 +353,7 @@ refuses anything else at startup (DRF would otherwise fail on the first request)
 | `AI_ENABLED` | `false` | `false`: Ask Arkray hidden and nothing indexed; also the kill switch |
 | `AI_INDEXING_ENABLED` | `AI_ENABLED` | index notes without offering questions yet (a backfill before launch) |
 | `AI_LLM_PROVIDER` | `none` | `none`: routed answers and matching records, no CRM text leaves the deployment; `anthropic`: a model writes the answers (R68); anything else fails startup |
-| `ANTHROPIC_API_KEY` | empty | **the ai worker only** (`AI_LLM_KEY_HOLDER=true`); a key holder without a key fails startup |
+| `ANTHROPIC_API_KEY` | empty | **the ai worker only** (`AI_LLM_KEY_HOLDER=true`); a key holder without a key fails startup, and so does a key in a process that isn't the holder |
 | `AI_LLM_KEY_HOLDER` | `true` | `false` for the web tier and the other workers, which get no key |
 | `AI_LLM_BASE_URL` | `https://api.anthropic.com` | where model calls go: an https gateway if one is used; production refuses plain http; logged once per process (host only) |
 | `ANTHROPIC_LOG`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS` | — | **never**: production refuses to start with any of them (whole requests in logs; calls and the key sent elsewhere) |

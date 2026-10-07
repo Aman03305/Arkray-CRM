@@ -2,6 +2,7 @@
 # Create a local .env from .env.example with a freshly generated DJANGO_SECRET_KEY.
 # Refuses to overwrite an existing .env. Usage: scripts/init-env.sh
 set -euo pipefail
+umask 077  # .env holds the secret key and database password: owner-only
 
 cd "$(dirname "$0")/.."
 

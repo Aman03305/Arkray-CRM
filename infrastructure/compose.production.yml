@@ -81,7 +81,9 @@ services:
       APP_PASSWORD: ${ARKRAY_APP_PASSWORD:?set ARKRAY_APP_PASSWORD}
     volumes:
       - ./infrastructure/postgres:/deploy:ro
-    command: ["sh", "-c", "psql -h postgres -U arkray -d postgres -v database=arkray -v owner_password=\"$$OWNER_PASSWORD\" -v app_password=\"$$APP_PASSWORD\" -f /deploy/roles.sql"]
+    # The passwords stay in the environment (roles.sql reads them with \getenv), off the
+    # command line.
+    command: ["psql", "-h", "postgres", "-U", "arkray", "-d", "postgres", "-v", "database=arkray", "-f", "/deploy/roles.sql"]
     depends_on:
       postgres:
         condition: service_healthy

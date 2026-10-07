@@ -23,6 +23,14 @@ BASE_ENV = {
 }
 
 
+# The local Compose stack's opt-in: plain HTTP is accepted only for names that can't be
+# public (localhost, a loopback address, a container name).
+LOCAL_OPT_IN = {
+    "DJANGO_ALLOW_INSECURE_LOCAL_HTTP": "true",
+    "DJANGO_ALLOWED_HOSTS": "localhost,127.0.0.1,backend",
+}
+
+
 DEFAULT_PRINT = (
     "settings.DEBUG, settings.SESSION_COOKIE_SECURE, settings.CSRF_COOKIE_SECURE,"
     " settings.SECURE_SSL_REDIRECT, settings.SECURE_HSTS_SECONDS"
@@ -106,8 +114,6 @@ def test_app_base_url_must_be_stated_explicitly():
         {"DJANGO_SECURE_SSL_REDIRECT": "false"},
         {"DJANGO_HSTS_SECONDS": "0"},
         {"APP_BASE_URL": "http://crm.example.com"},  # account links over plain HTTP
-        {"EMAIL_URL": "consolemail://"},  # account links printed to the logs
-        {"EMAIL_URL": "filemail:///tmp/mail"},  # account links written to disk
         {"REDIS_CACHE_URL": "redis://redis.internal:6379/1"},  # Phase 9: no AUTH
         {"CELERY_BROKER_URL": "redis://redis.internal:6379/0"},  # Phase 9: no AUTH
     ],
@@ -116,8 +122,29 @@ def test_weakening_https_requires_an_explicit_local_opt_in(weakening):
     refused = load_production_settings(**weakening)
     assert refused.returncode != 0
     assert "DJANGO_ALLOW_INSECURE_LOCAL_HTTP" in refused.stderr
-    allowed = load_production_settings(**weakening, DJANGO_ALLOW_INSECURE_LOCAL_HTTP="true")
+    allowed = load_production_settings(**weakening, **LOCAL_OPT_IN)
     assert allowed.returncode == 0, allowed.stderr
+
+
+@pytest.mark.parametrize("hosts", ["crm.example.com", "localhost,crm.example.com", "10.0.0.5"])
+def test_the_insecure_opt_in_is_refused_for_a_public_host(hosts):
+    """Secret-exposure audit: the opt-in waives Redis AUTH, the role check and HTTPS links at
+    once, so a deployment that serves a real name must never carry it."""
+    result = load_production_settings(
+        DJANGO_ALLOW_INSECURE_LOCAL_HTTP="true", DJANGO_ALLOWED_HOSTS=hosts
+    )
+    assert result.returncode != 0
+    assert "DJANGO_ALLOW_INSECURE_LOCAL_HTTP" in result.stderr
+
+
+@pytest.mark.parametrize("email_url", ["consolemail://", "filemail:///tmp/mail", "memorymail://"])
+@pytest.mark.parametrize("opt_in", [{}, LOCAL_OPT_IN])
+def test_a_non_delivering_email_backend_is_refused_even_locally(email_url, opt_in):
+    """Account links printed to the logs, written to disk or dropped: refused with or without
+    the local opt-in (the local stack delivers to Mailpit)."""
+    result = load_production_settings(EMAIL_URL=email_url, **opt_in)
+    assert result.returncode != 0
+    assert "EMAIL_URL" in result.stderr
 
 
 COOKIES = (
@@ -146,9 +173,7 @@ def test_https_cookies_carry_host_and_secure_prefixes():
 def test_a_plain_http_local_stack_keeps_unprefixed_cookie_names():
     """Browsers reject prefixed cookies without Secure: the opted-in local stack would
     otherwise lose its session and CSRF cookies."""
-    result = load_production_settings(
-        COOKIES, DJANGO_SECURE_COOKIES="false", DJANGO_ALLOW_INSECURE_LOCAL_HTTP="true"
-    )
+    result = load_production_settings(COOKIES, DJANGO_SECURE_COOKIES="false", **LOCAL_OPT_IN)
     assert result.returncode == 0, result.stderr
     assert result.stdout.split()[:3] == [
         "arkray_session",
@@ -259,6 +284,13 @@ def test_only_the_process_calling_the_provider_needs_its_key():
     assert "ANTHROPIC_API_KEY" in refused.stderr
     web = load_production_settings(**anthropic, AI_LLM_KEY_HOLDER="false")
     assert web.returncode == 0, web.stderr
+    # Secret-exposure audit: and a process that doesn't call the provider refuses the key.
+    leaked = load_production_settings(
+        **{**anthropic, "ANTHROPIC_API_KEY": "sk-ant-test-not-a-real-key"},
+        AI_LLM_KEY_HOLDER="false",
+    )
+    assert leaked.returncode != 0
+    assert "AI_LLM_KEY_HOLDER" in leaked.stderr
 
 
 def test_the_cache_never_unpickles():
@@ -282,7 +314,7 @@ def test_switching_the_role_check_off_needs_the_insecure_opt_in():
     local = load_production_settings(
         "settings.DB_REQUIRE_RESTRICTED_ROLE",
         DB_REQUIRE_RESTRICTED_ROLE="false",
-        DJANGO_ALLOW_INSECURE_LOCAL_HTTP="true",
+        **LOCAL_OPT_IN,
     )
     assert local.returncode == 0, local.stderr
     assert local.stdout.strip() == "False"

@@ -238,6 +238,10 @@ or new), its hash, or a reset or invitation link's secret:
   is rotated without it. Every secret's procedure: [runbooks.md](runbooks.md#rotate-a-secret).
 - `config/settings/production.py` refuses to start with a missing, short or `dev-`/`test-`
   secret key, or without `DJANGO_ALLOWED_HOSTS` (covered by tests).
+- CI scans every commit of the history with Gitleaks (reviewed test values are listed by
+  fingerprint in `.gitleaksignore`) and both images' layers with Trivy's secret scanner; a
+  finding fails the build. A secret that ever reached a commit is rotated, not just
+  deleted: the history keeps it.
 
 ## Database privileges
 

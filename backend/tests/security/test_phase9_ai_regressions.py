@@ -114,6 +114,11 @@ class TestQuietLoggers:
         "httpcore2",  # the SDK 1.x transport: its DEBUG lines carried hosts and headers
         "httpcore2.http11",
         "urllib3",
+        # Attachment storage: request headers and signatures at DEBUG (secret-exposure audit).
+        "botocore",
+        "botocore.endpoint",
+        "boto3",
+        "s3transfer",
     )
 
     def test_http_and_sdk_loggers_never_log_requests(self):

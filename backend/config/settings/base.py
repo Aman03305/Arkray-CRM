@@ -666,10 +666,21 @@ LOGGING: dict[str, Any] = {
         "celery.app.trace": {"level": "WARNING", "propagate": True},
         # HTTP clients and the AI SDK log whole request bodies at DEBUG: a question, earlier
         # turns, notes and tool results. Never below WARNING, whatever LOG_LEVEL says
-        # (Phase 9 review).
+        # (Phase 9 review). The S3 clients log request headers and signatures at DEBUG
+        # (secret-exposure audit).
         **{
             name: {"level": "WARNING", "propagate": True}
-            for name in ("anthropic", "httpx", "httpx2", "httpcore", "httpcore2", "urllib3")
+            for name in (
+                "anthropic",
+                "httpx",
+                "httpx2",
+                "httpcore",
+                "httpcore2",
+                "urllib3",
+                "botocore",
+                "boto3",
+                "s3transfer",
+            )
         },
     },
 }

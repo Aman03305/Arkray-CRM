@@ -63,6 +63,13 @@ if AI_ENABLED and AI_LLM_PROVIDER == "anthropic" and AI_LLM_KEY_HOLDER and not A
     raise ImproperlyConfigured(
         "AI_LLM_PROVIDER=anthropic needs ANTHROPIC_API_KEY (or set AI_LLM_PROVIDER=none)."
     )
+if ANTHROPIC_API_KEY and not AI_LLM_KEY_HOLDER:  # noqa: F405
+    # Only the ai worker calls the provider; a key anywhere else is one more place for it to
+    # leak (crash dumps, a web-tier compromise). Secret-exposure audit.
+    raise ImproperlyConfigured(
+        "ANTHROPIC_API_KEY is set in a process with AI_LLM_KEY_HOLDER=false; give the key "
+        "to the ai worker only."
+    )
 if AI_CHAT_EFFORT not in {"low", "medium", "high", "xhigh", "max"}:  # noqa: F405
     raise ImproperlyConfigured("AI_CHAT_EFFORT must be low, medium, high, xhigh or max.")
 if (AI_ENABLED or AI_INDEXING_ENABLED) and AI_EMBEDDING_PROVIDER != "local":  # noqa: F405
@@ -109,6 +116,25 @@ SECURE_HSTS_INCLUDE_SUBDOMAINS = env.bool("DJANGO_HSTS_INCLUDE_SUBDOMAINS", defa
 SECURE_HSTS_PRELOAD = False
 
 _NON_DELIVERING_EMAIL = {"console", "filebased", "locmem", "dummy"}
+if EMAIL_BACKEND.rsplit(".", 2)[-2] in _NON_DELIVERING_EMAIL:  # noqa: F405
+    # Console/file/in-memory backends would put one-time account links in logs or on disk,
+    # or silently drop them. Refused even with the local opt-in below: the local stack
+    # delivers to Mailpit (secret-exposure audit).
+    raise ImproperlyConfigured(
+        "EMAIL_URL must name a delivering backend (smtp://, smtp+tls://, ...) in production."
+    )
+
+
+def _is_local_host(host: str) -> bool:
+    """A name only this machine or a private container network resolves: localhost, a
+    loopback address, or a single-label name such as a Compose service (`backend`)."""
+    host = host.strip().lower()
+    return (
+        host in {"localhost", "127.0.0.1", "::1", "[::1]"}
+        or host.endswith(".localhost")
+        or (host != "" and "." not in host and ":" not in host)
+    )
+
 
 # Turning off HTTPS protections is only allowed with an explicit, greppable opt-in (used by
 # the local docker-compose stack, which serves plain HTTP on localhost).
@@ -120,9 +146,6 @@ _insecure = [
         ("DJANGO_HSTS_SECONDS", SECURE_HSTS_SECONDS == 0),
         # Account links must not travel over plain HTTP.
         ("APP_BASE_URL", not APP_BASE_URL.startswith("https://")),  # noqa: F405
-        # Console/file/in-memory backends would put one-time account links in logs or on
-        # disk, or silently drop them.
-        ("EMAIL_URL", EMAIL_BACKEND.rsplit(".", 2)[-2] in _NON_DELIVERING_EMAIL),  # noqa: F405
         # Redis holds the broker's tasks and the cache: never open to anyone who can reach
         # it (Phase 9 review). A password (AUTH/ACL) is required; use rediss:// across hosts.
         ("REDIS_CACHE_URL", not urlsplit(REDIS_CACHE_URL).password),  # noqa: F405
@@ -134,10 +157,20 @@ _insecure = [
     ]
     if weakened
 ]
-if _insecure and not env.bool("DJANGO_ALLOW_INSECURE_LOCAL_HTTP", default=False):
+_insecure_opt_in = env.bool("DJANGO_ALLOW_INSECURE_LOCAL_HTTP", default=False)
+if _insecure and not _insecure_opt_in:
     raise ImproperlyConfigured(
         f"{', '.join(_insecure)} weaken HTTPS protections; set "
         "DJANGO_ALLOW_INSECURE_LOCAL_HTTP=true only for local, non-public deployments."
+    )
+if _insecure_opt_in and not all(_is_local_host(host) for host in ALLOWED_HOSTS):  # noqa: F405
+    # The opt-in waives every check above at once (Redis without a password, the role
+    # check, plain-HTTP links): a deployment that serves a public name must never carry it,
+    # whatever else it sets (secret-exposure audit).
+    raise ImproperlyConfigured(
+        "DJANGO_ALLOW_INSECURE_LOCAL_HTTP=true is for local stacks only: every "
+        "DJANGO_ALLOWED_HOSTS entry must be localhost, a loopback address or a single-label "
+        "container name."
     )
 
 # Cookie prefixes (Phase 9). Over HTTPS the session and CSRF cookies are `__Host-` cookies:

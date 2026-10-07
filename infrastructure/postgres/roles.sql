@@ -2,15 +2,39 @@
 -- docs/security.md#database-privileges). Run once, as a superuser or the managed service's
 -- administrator; safe to run again:
 --
---   psql "$ADMIN_DATABASE_URL" -v database=arkray \
---        -v owner_password="$OWNER_PASSWORD" -v app_password="$APP_PASSWORD" \
---        -f infrastructure/postgres/roles.sql
+--   OWNER_PASSWORD=... APP_PASSWORD=... \
+--     psql "$ADMIN_DATABASE_URL" -v database=arkray -f infrastructure/postgres/roles.sql
+--
+-- The passwords come from the environment (psql 15 or newer: \getenv), never from psql's
+-- command line, where any local user could read them in the process list (secret-exposure
+-- audit).
 --
 -- arkray_owner owns the schema and runs `migrate` (then `grant_app_privileges arkray_app`).
 -- arkray_app runs the web servers and workers: no superuser, owns nothing, so the
 -- append-only trigger binds it and it can never TRUNCATE the audit trail (R74); the web
 -- server and workers refuse to start as anything more privileged.
 \set ON_ERROR_STOP on
+
+\getenv owner_password OWNER_PASSWORD
+\getenv app_password APP_PASSWORD
+\if :{?owner_password}
+\else
+DO $$ BEGIN RAISE EXCEPTION 'set OWNER_PASSWORD (the arkray_owner role''s password)'; END $$;
+\endif
+\if :{?app_password}
+\else
+DO $$ BEGIN RAISE EXCEPTION 'set APP_PASSWORD (the arkray_app role''s password)'; END $$;
+\endif
+
+-- CREATE ROLE ... PASSWORD carries the password in the statement's text: keep this session's
+-- statements out of the server log even where log_statement is ddl or all. A managed
+-- service's administrator may not be allowed to change it: then say so and go on.
+DO $$
+BEGIN
+    PERFORM set_config('log_statement', 'none', false);
+EXCEPTION WHEN insufficient_privilege THEN
+    RAISE WARNING 'could not set log_statement = none: make sure the server does not log DDL while this runs';
+END $$;
 
 SELECT format('CREATE ROLE arkray_owner LOGIN PASSWORD %L', :'owner_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'arkray_owner') \gexec

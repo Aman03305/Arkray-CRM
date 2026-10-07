@@ -417,8 +417,23 @@ restore.sh` does it; otherwise: `VACUUM (ANALYZE);` (minutes at a million leads)
   `DJANGO_SECRET_KEY_FALLBACKS` for at least a day (the 12-hour session lifetime): sessions,
   sealed page links and trusted-browser cookies keep working; then remove it. A leaked key is
   rotated without the fallback: everyone signs in again.
-- **Database passwords**: `ALTER ROLE arkray_app PASSWORD '...'` (as an administrator),
-  update `DATABASE_URL` in the secret manager, roll the pods.
+- **Database passwords**: as an administrator, in `psql`, `\password arkray_app` (it prompts
+  and sends only the hash: an `ALTER ROLE ... PASSWORD '...'` statement would land in
+  `~/.psql_history` and, where `log_statement` is `ddl`, in the server log). Update
+  `DATABASE_URL` in the secret manager, roll the pods.
+- **The owner role (`arkray_owner`)**: `\password arkray_owner` the same way; update the
+  migration job's `DATABASE_URL` (and `ARKRAY_OWNER_PASSWORD` where the deployment keeps it).
+  Nothing long-running uses it, so nothing needs rolling.
+- **The database superuser / administrator**: through the managed service's console (or
+  `\password` on self-hosted PostgreSQL); update `POSTGRES_PASSWORD`/the administrator
+  secret. The application never uses it.
+- **SMTP (`EMAIL_URL`)**: create a new credential at the mail provider, update `EMAIL_URL`,
+  roll the web tier and the `email` worker, check an invitation arrives, then revoke the old
+  credential.
+- **Attachment storage (S3)**: preferably an IAM role (nothing to rotate). With static keys
+  (`ATTACHMENT_S3_ACCESS_KEY_ID`/`ATTACHMENT_S3_SECRET_ACCESS_KEY`): create a second access
+  key, update both values, roll the web tier and the workers, check an upload and a
+  download, then deactivate and delete the old key.
 - **Redis password**: Redis supports two passwords during a change (ACL users); update
   `CELERY_BROKER_URL` and `REDIS_CACHE_URL`, roll everything, remove the old password.
 - **`ANTHROPIC_API_KEY`**: create a new key, update the ai worker's secret, roll it, revoke

@@ -16,6 +16,28 @@ concurrency:
 # a moved tag can't change what runs here (Phase 11). Move them deliberately.
 
 jobs:
+  # Secrets in the repository: every commit, not just the latest tree, since a secret
+  # removed later is still in the history (secret-exposure audit). Reviewed test values are
+  # listed in .gitleaksignore. The binary is pinned by version and checksum.
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan the history for secrets
+        run: |
+          set -euo pipefail
+          version=8.30.1
+          sha256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          curl -fsSL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz"
+          echo "${sha256}  /tmp/gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks git --redact --no-banner --exit-code 1 .
+
   backend:
     runs-on: ubuntu-latest
     # The full suite takes about 8 minutes on a fast workstation; hosted runners are slower.
@@ -104,7 +126,9 @@ jobs:
       # `pnpm audit`). A HIGH or CRITICAL finding with a fix available fails the build; one the
       # distribution has not fixed yet (no fixed version) is listed, not blocking, and judged
       # for reachability in docs/risk-register.md. The scanner image is pinned by digest.
-      - name: Scan the images for known vulnerabilities
+      # Secrets in any layer (a key copied in, an ENV or build argument) also fail the build:
+      # an image keeps every layer (secret-exposure audit).
+      - name: Scan the images for known vulnerabilities and secrets
         run: |
           set -euo pipefail
           trivy=aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e
@@ -116,6 +140,9 @@ jobs:
             docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$trivy" image \
               --skip-version-check --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
               --exit-code 1 "$image"
+            echo "== $image: secrets, any severity (blocking)"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$trivy" image \
+              --skip-version-check --scanners secret --exit-code 1 "$image"
           done
       - name: Smoke-test the images
         run: |

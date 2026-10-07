@@ -1,0 +1,23 @@
+# Gitleaks findings reviewed and accepted (secret-exposure audit, 2026-10-07). Each line is
+# commit:file:rule:line, so it silences that one occurrence only: a new match anywhere,
+# even in the same file, still fails CI. All are test values: Idempotency-Key UUIDs, the
+# RAG canary strings the cross-tenant leak tests look for, and synthetic test passwords.
+# Add a line only after checking the value is not a credential.
+3afea3cf66c8fd6ae337b381a375f42208df2ff7:backend/arkray/leads/tests/test_api.py:generic-api-key:149
+3afea3cf66c8fd6ae337b381a375f42208df2ff7:backend/arkray/leads/tests/test_concurrency.py:generic-api-key:193
+3afea3cf66c8fd6ae337b381a375f42208df2ff7:backend/arkray/pipeline/tests/test_api.py:generic-api-key:181
+3afea3cf66c8fd6ae337b381a375f42208df2ff7:backend/arkray/pipeline/tests/test_concurrency.py:generic-api-key:265
+3afea3cf66c8fd6ae337b381a375f42208df2ff7:backend/arkray/pipeline/tests/test_concurrency.py:generic-api-key:292
+989830b1b0670066cf7c4ee22f715536bab3679d:backend/arkray/pipeline/tests/test_concurrency.py:generic-api-key:330
+3afea3cf66c8fd6ae337b381a375f42208df2ff7:backend/arkray/pipeline/tests/test_conversion.py:generic-api-key:31
+5b051777088995082541771f5eced14fb0e62ee7:backend/arkray/pipeline/tests/test_customer_record.py:generic-api-key:182
+a4a9b310133e8a624644bc9b6c285120db65877d:backend/arkray/pipeline/tests/test_negotiation.py:generic-api-key:430
+989830b1b0670066cf7c4ee22f715536bab3679d:backend/arkray/pipeline/tests/test_opportunity_lead_flow.py:generic-api-key:345
+3afea3cf66c8fd6ae337b381a375f42208df2ff7:backend/arkray/pipeline/tests/test_services.py:generic-api-key:248
+64bb641305f97eb9cb5f4eda2757131f198fd17e:backend/tests/ai_fixtures.py:generic-api-key:29
+64bb641305f97eb9cb5f4eda2757131f198fd17e:backend/tests/ai_fixtures.py:generic-api-key:30
+3afea3cf66c8fd6ae337b381a375f42208df2ff7:backend/tests/security/test_phase2_review_regressions.py:generic-api-key:322
+3afea3cf66c8fd6ae337b381a375f42208df2ff7:backend/tests/security/test_phase3_review_regressions.py:generic-api-key:52
+3afea3cf66c8fd6ae337b381a375f42208df2ff7:backend/tests/security/test_secret_hygiene.py:generic-api-key:27
+3afea3cf66c8fd6ae337b381a375f42208df2ff7:backend/tests/security/test_secret_hygiene.py:generic-api-key:30
+a4a9b310133e8a624644bc9b6c285120db65877d:frontend/src/lib/api/client.test.ts:generic-api-key:51
