@@ -11,6 +11,8 @@ if _env_file.exists():
 from .base import *  # noqa: E402, F403
 
 DEBUG = True
+# A developer's own data on their own screen: full exception messages help (core.logging).
+LOG_EXCEPTION_MESSAGES = True
 ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
 SESSION_COOKIE_SECURE = False
 CSRF_COOKIE_SECURE = False

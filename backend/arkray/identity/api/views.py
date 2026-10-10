@@ -92,6 +92,10 @@ class LogoutView(ApiView):
 
     @extend_schema(request=None, responses={204: None})
     def post(self, request: Request) -> Response:
+        # The login-device cookie stays (reviewed in the privacy remediation, P2-12): it holds
+        # keyed hashes only (nothing readable without the server's key), and it is what keeps
+        # an attacker's failed guesses from locking this browser's owner out after signing
+        # out (docs/authorization.md#login-throttling).
         authentication.sign_out(request._request)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -371,7 +375,7 @@ class SecurityEventListView(ApiView):
             allowed = selectors.SECURITY_ACTIONS.get(event.action, ())
             details = {
                 key: str(value)
-                for key, value in (event.metadata or {}).items()
+                for key, value in selectors.event_details(event).items()
                 if key in allowed and value not in (None, "")
             }
             try:

@@ -2,9 +2,10 @@
 
 - /health/live  — the process can serve requests. No dependency checks (a DB outage must
   not cause the orchestrator to restart healthy web processes in a loop).
-- /health/ready — the instance should receive traffic. PostgreSQL is required; Redis is
-  optional (the CRM degrades gracefully without it), so a Redis failure reports
-  "degraded" but stays ready.
+- /health/ready — the instance should receive traffic. PostgreSQL is required, and the
+  database must match the erasure ledger (core.ledger_gate: never serve a restored backup
+  before its erasures are re-applied); Redis is optional (the CRM degrades gracefully
+  without it), so a Redis failure reports "degraded" but stays ready.
 
 Responses deliberately contain no hostnames, versions or error messages.
 """
@@ -19,6 +20,7 @@ from django.http import HttpRequest, JsonResponse
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET
 
+from . import ledger_gate
 from .metrics import bounded
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,8 @@ def _cache_ok() -> bool:
 @require_GET
 def ready(request: HttpRequest) -> JsonResponse:
     if not _database_ok():
+        return JsonResponse({"status": "unavailable"}, status=503)
+    if not ledger_gate.is_open():
         return JsonResponse({"status": "unavailable"}, status=503)
     if not _cache_ok():
         logger.warning("readiness_degraded", extra={"dependency": "cache"})

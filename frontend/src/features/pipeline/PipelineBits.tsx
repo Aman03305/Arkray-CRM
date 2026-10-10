@@ -56,6 +56,20 @@ export function CustomerName({ lead }: { lead: OpportunityLeadRef }) {
   return <>{lead.display_name}</>;
 }
 
+/** Why a deal shows no customer details (the API's `customer_restricted`). */
+export const RESTRICTED_CUSTOMER_NOTE =
+  "Customer details hidden: this customer was reassigned to someone else after the deal closed.";
+
+/**
+ * In place of a deal's customer details when the viewer may no longer see them: a closed deal
+ * whose customer moved to someone else keeps its commercial history here, but not the
+ * customer's name, contacts, address or free-text details (docs/authorization.md#historical-deals).
+ * Said once, plainly, rather than as a row of empty fields.
+ */
+export function RestrictedCustomerNote({ className = "" }: { className?: string }) {
+  return <p className={`rounded-md bg-slate-50 px-3 py-2 text-sm text-slate-600 ${className}`}>{RESTRICTED_CUSTOMER_NOTE}</p>;
+}
+
 /** An expected close date; "Overdue" (in words) when an open opportunity's date has passed. */
 export function CloseDate({ date, open, today = businessToday() }: { date: string | null; open: boolean; today?: string }) {
   if (!date) return <span className="text-slate-500">No close date</span>;

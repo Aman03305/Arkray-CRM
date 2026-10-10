@@ -13,13 +13,15 @@ BACKEND = Path(__file__).resolve().parents[2]
 STRONG_KEY = "k" * 64
 BASE_ENV = {
     "DATABASE_URL": "postgres://u:p@localhost:5432/db",
-    "CELERY_BROKER_URL": "rediss://:broker-secret@redis.internal:6380/0",
-    "REDIS_CACHE_URL": "rediss://:cache-secret@redis.internal:6380/1",
+    "CELERY_BROKER_URL": "rediss://:broker-secret@redis.internal:6380/0?ssl_cert_reqs=required",
+    "REDIS_CACHE_URL": "rediss://:cache-secret@redis.internal:6380/1?ssl_cert_reqs=required",
     "DJANGO_ALLOWED_HOSTS": "crm.example.com",
     "DJANGO_SECRET_KEY": STRONG_KEY,
     "TRUSTED_PROXY_COUNT": "1",
     "APP_BASE_URL": "https://crm.example.com",
     "EMAIL_URL": "smtp+tls://mailer:secret@smtp.example.com:587",
+    "ERASURE_LEDGER_URL": "s3://arkray-erasure-ledger/production",
+    "ERASURE_LEDGER_KEY": "l" * 48,
 }
 
 

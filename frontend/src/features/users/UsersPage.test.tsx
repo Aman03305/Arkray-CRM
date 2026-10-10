@@ -191,9 +191,9 @@ describe("UsersPage: creating a user", () => {
     await user.type(within(dialog).getByLabelText(/Last name/), "Verma");
     await user.type(within(dialog).getByLabelText("Email"), email);
     if (password === null) {
-      await user.click(within(dialog).getByRole("button", { name: "Email an invitation instead" }));
       await user.click(within(dialog).getByRole("button", { name: "Create and invite" }));
     } else {
+      await user.click(within(dialog).getByRole("button", { name: "Set a password instead" }));
       await user.type(within(dialog).getByLabelText("Initial password"), password);
       await user.click(within(dialog).getByRole("button", { name: "Create user" }));
     }
@@ -208,6 +208,7 @@ describe("UsersPage: creating a user", () => {
     const dialog = screen.getByRole("dialog", { name: "New user" });
     await user.type(within(dialog).getByLabelText("First name"), "Neha");
     await user.type(within(dialog).getByLabelText("Email"), "new@example.test");
+    await user.click(within(dialog).getByRole("button", { name: "Set a password instead" }));
     expect(within(dialog).getByLabelText("Initial password")).toBeInTheDocument();
     await user.selectOptions(within(dialog).getByLabelText("Role"), "admin");
     expect(within(dialog).queryByLabelText("Initial password")).not.toBeInTheDocument();
@@ -233,17 +234,33 @@ describe("UsersPage: creating a user", () => {
       password: PASSWORD,
     });
     expect(document.body.innerHTML).not.toContain(PASSWORD);
-    // Nothing of it survives into the next user's form either.
+    // Nothing of it survives into the next user's form either (which offers an invitation again).
     await user.click(screen.getByRole("button", { name: "New user" }));
-    expect(within(screen.getByRole("dialog")).getByLabelText("Initial password")).toHaveValue("");
+    const next = screen.getByRole("dialog");
+    expect(within(next).queryByLabelText("Initial password")).not.toBeInTheDocument();
+    await user.click(within(next).getByRole("button", { name: "Set a password instead" }));
+    expect(within(next).getByLabelText("Initial password")).toHaveValue("");
   });
 
-  it("asks for an initial password by default, hidden unless shown, and can generate a strong one", async () => {
+  it("emails an invitation by default; an initial password is the alternative", async () => {
     mockApi({ [LIST]: page([]) });
     renderPage();
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "New user" }));
     const dialog = screen.getByRole("dialog", { name: "New user" });
+    expect(within(dialog).queryByLabelText("Initial password")).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/email them a link to set their own password/)).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Create and invite" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Set a password instead" })).toBeInTheDocument();
+  });
+
+  it("an initial password, when chosen, is hidden unless shown and can be generated", async () => {
+    mockApi({ [LIST]: page([]) });
+    renderPage();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "New user" }));
+    const dialog = screen.getByRole("dialog", { name: "New user" });
+    await user.click(within(dialog).getByRole("button", { name: "Set a password instead" }));
     const field = within(dialog).getByLabelText("Initial password");
     expect(field).toHaveAttribute("type", "password");
     expect(field).toHaveAttribute("autocomplete", "off");
@@ -300,12 +317,13 @@ describe("UsersPage: creating a user", () => {
     await waitFor(() => expect(api.callsTo("GET", "/api/v1/admin/users").length).toBeGreaterThan(1));
   });
 
-  it("switching to an invitation drops a typed password, and back again asks for one", async () => {
+  it("switching back to an invitation drops a typed password, and to a password again asks for one", async () => {
     mockApi({ [LIST]: page([]) });
     renderPage();
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "New user" }));
     const dialog = screen.getByRole("dialog", { name: "New user" });
+    await user.click(within(dialog).getByRole("button", { name: "Set a password instead" }));
     await user.type(within(dialog).getByLabelText("Initial password"), PASSWORD);
     const toggle = within(dialog).getByRole("button", { name: "Email an invitation instead" });
     await user.click(toggle);
@@ -480,6 +498,10 @@ describe("UsersPage: user details", () => {
     const { user, drawer } = await openDetails();
     await user.click(within(drawer).getByRole("button", { name: "Access as user" }));
     const dialog = screen.getByRole("dialog", { name: "Access Rahul Sharma's CRM?" });
+    // The reason is a reference, kept for 90 days: the field says what (not) to write.
+    expect(within(dialog).getByLabelText(/Reason/)).toHaveAccessibleDescription(
+      expect.stringContaining("A ticket number or a short reason. Don't include customer names or health details; reasons are kept for 90 days."),
+    );
     await user.type(within(dialog).getByLabelText(/Reason/), "Fixing a lead");
     await user.click(within(dialog).getByRole("button", { name: "Start support session" }));
     await waitFor(() => expect(nav.push).toHaveBeenCalledWith(`/admin/users/${rahul.id}/dashboard`));

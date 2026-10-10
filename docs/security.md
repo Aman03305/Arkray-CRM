@@ -243,6 +243,33 @@ or new), its hash, or a reset or invitation link's secret:
   finding fails the build. A secret that ever reached a commit is rotated, not just
   deleted: the history keeps it.
 
+## Backend TLS
+
+Every connection the backend makes that leaves the machine uses verified TLS, and production
+refuses to start otherwise (`arkray.core.transport`, ADR-0032; tested with real handshakes
+against a throwaway CA in `tests/security/test_backend_tls.py`):
+
+| Hop | Required | Refused (tested) |
+|---|---|---|
+| PostgreSQL | `sslmode=verify-full` and `sslrootcert=<CA file>` (or `system` for a publicly trusted certificate) in `DATABASE_URL`; the URL's parameters reach libpq (they were silently dropped before) | no or weaker `sslmode`, a missing CA file at start; a server that declines TLS (downgrade), an untrusted certificate, a host-name mismatch, a missing CA at connect |
+| Redis (broker and cache) | `rediss://...?ssl_cert_reqs=required` (`ssl_ca_certs=<CA file>` for a private CA); the broker also gets an explicit `broker_use_ssl` | `redis://`, `ssl_cert_reqs=none/optional`, `ssl_check_hostname=false`; an untrusted or mismatched certificate, a plain-text server |
+| SMTP | `smtp+tls://` or `smtps://` (both STARTTLS), or `smtp+ssl://` (implicit TLS, port 465); the system CA store or `EMAIL_TLS_CA_FILE`; TLS 1.2+ | plain `smtp://` to a remote relay; a server not offering STARTTLS; an untrusted or mismatched certificate; a missing CA file |
+| Object storage | an `https://` endpoint (or none: AWS's own are https); certificates always verified (`ATTACHMENT_S3_CA_BUNDLE` for a private CA) | an `http://` endpoint; an untrusted certificate |
+| ClamAV | loopback or a listed private container name (clamd has no TLS) | any other host |
+| Erasure ledger (S3) | an `https://` endpoint | an `http://` one |
+
+The only exceptions are explicit: loopback (a local TLS proxy or sidecar), the single-label
+container names listed in `BACKEND_TLS_PRIVATE_HOSTS` (a dotted name or an IP address is
+refused there), and the local development stack's `DJANGO_ALLOW_INSECURE_LOCAL_HTTP`, which
+production refuses for any public host name. The production-shaped stack runs every hop over
+TLS against a private CA (`infrastructure/compose.production.yml`).
+
+Managed PostgreSQL: Supabase and similar services publish a CA certificate: put it in the
+image or a mounted secret and point `sslrootcert` at it (their poolers, Supavisor or PgBouncer
+in transaction mode, take TLS the same way; `DB_TRANSACTION_POOLER=true` keeps working).
+Render's and others' certificate chains were not verified here: use `verify-full` with the CA
+they publish, or `system` if it is publicly trusted.
+
 ## Database privileges
 
 Two roles in production:
@@ -275,8 +302,10 @@ The development stack still runs as one superuser and opts out explicitly.
   [privacy.md](privacy.md). Erasure is `manage.py erase_lead` (Phase 11): the lead's
   personal fields, its activities' and opportunities' text, the lost reasons in the stage
   history, the derived index chunks and stored answers, in one audited transaction.
-- Logs contain identifiers, not personal data (no emails, phone numbers, names or search
-  terms). Lead audit events record field **names** and status keys, never values; a lead's
+- Logs are written by allowlist (ADR-0032): known identifier, code and count fields only,
+  exceptions by type and frame without their messages, third-party messages sanitised, the
+  client address on the access line only ([observability.md](observability.md#what-a-log-line-may-hold));
+  container logs rotate. Lead audit events record field **names** and status keys, never values; a lead's
   `str()` is its id (tested with a lead full of contact data through create, search,
   duplicate check and a failed edit). Opportunity audit events and domain events carry
   ids, stage keys and statuses only: no titles, amounts, descriptions or lost reasons;
@@ -298,8 +327,15 @@ The development stack still runs as one superuser and opts out explicitly.
   Notes leave the database only as a 240-character preview around the match, with no
   author. The query does travel in the request URL (as the Leads search's): the reference
   proxy logs paths without query strings (R61; verified: a search term reaches no log).
-- Data sent to AI providers is minimised ([rag-architecture.md](rag-architecture.md#privacy-and-data-minimisation));
-  AI can be disabled entirely.
+- Data sent to AI providers is minimised and masked before it is sent, history and question
+  included ([rag-architecture.md](rag-architecture.md#privacy-and-data-minimisation)); AI can
+  be disabled entirely and the language model is off by default.
+- The audit trail's personal details (client addresses of security events, old/new emails,
+  reset requesters' addresses, support reasons) expire after 90 days in `audit_event_detail`;
+  exports, correction, staff pseudonymisation, legal holds and the restore-safe erasure
+  ledger are described in [privacy.md](privacy.md).
+- A closed deal's previous owner sees it without the customer's identity and contact
+  details ([authorization.md](authorization.md#historical-deals)).
 
 ## Security testing
 

@@ -6,6 +6,8 @@ from urllib.parse import urlsplit
 
 from django.core.exceptions import ImproperlyConfigured
 
+from arkray.core import transport
+
 from .base import *  # noqa: F403
 from .base import env
 
@@ -104,6 +106,22 @@ for _scope, _rate in REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"].items():  # noqa: 
         raise ImproperlyConfigured(
             f"API_THROTTLE_{_scope.upper()} must look like 600/min, 20/s or 1000/h (got {_rate!r})."
         )
+# The erasure ledger (core.ledger): without it a restored backup would serve the erased.
+if not ERASURE_LEDGER_URL:  # noqa: F405
+    raise ImproperlyConfigured(
+        "ERASURE_LEDGER_URL must be set in production (file:///<own volume> or"
+        " s3://<own bucket>/<prefix>): docs/privacy.md#restore-safe-erasure."
+    )
+if not ERASURE_LEDGER_URL.startswith(("file:///", "s3://")):  # noqa: F405
+    raise ImproperlyConfigured("ERASURE_LEDGER_URL must be file:///... or s3://bucket/prefix.")
+if len(ERASURE_LEDGER_KEY) < 32 or ERASURE_LEDGER_KEY == SECRET_KEY:  # noqa: F405
+    raise ImproperlyConfigured(
+        "ERASURE_LEDGER_KEY must be at least 32 characters and differ from DJANGO_SECRET_KEY."
+    )
+_ledger_dev_key = ERASURE_LEDGER_KEY.startswith(("dev-", "test-"))  # noqa: F405
+if LOG_EXCEPTION_MESSAGES:  # noqa: F405
+    # Exception messages quote row values and request input (privacy remediation P2-2).
+    raise ImproperlyConfigured("LOG_EXCEPTION_MESSAGES must not be set in production.")
 if METRICS_TOKEN and len(METRICS_TOKEN) < 32:  # noqa: F405
     raise ImproperlyConfigured("METRICS_TOKEN must be at least 32 characters (or unset).")
 
@@ -136,6 +154,32 @@ def _is_local_host(host: str) -> bool:
     )
 
 
+# Backend connections (privacy remediation P2-1, docs/security.md#backend-tls): verified TLS
+# to anything that isn't loopback or an explicitly listed private container name.
+if _private_host_problems := transport.private_host_problems(BACKEND_TLS_PRIVATE_HOSTS):  # noqa: F405
+    raise ImproperlyConfigured(" ".join(_private_host_problems))
+_transport_problems = [
+    problem
+    for problem in (
+        transport.database_problem(DATABASES["default"], BACKEND_TLS_PRIVATE_HOSTS),  # noqa: F405
+        transport.redis_problem("CELERY_BROKER_URL", CELERY_BROKER_URL, BACKEND_TLS_PRIVATE_HOSTS),  # noqa: F405
+        transport.redis_problem("REDIS_CACHE_URL", REDIS_CACHE_URL, BACKEND_TLS_PRIVATE_HOSTS),  # noqa: F405
+        transport.smtp_problem(
+            EMAIL_HOST,  # noqa: F405
+            use_tls=EMAIL_USE_TLS,  # noqa: F405
+            use_ssl=EMAIL_USE_SSL,  # noqa: F405
+            private_hosts=BACKEND_TLS_PRIVATE_HOSTS,  # noqa: F405
+        ),
+        transport.s3_problem(
+            os.environ.get("ATTACHMENT_S3_ENDPOINT_URL", "") if ATTACHMENT_STORAGE == "s3" else "",  # noqa: F405
+            BACKEND_TLS_PRIVATE_HOSTS,  # noqa: F405
+        ),
+        transport.scanner_problem(ATTACHMENT_SCANNER, BACKEND_TLS_PRIVATE_HOSTS),  # noqa: F405
+        transport.s3_problem(ERASURE_LEDGER_S3_ENDPOINT_URL, BACKEND_TLS_PRIVATE_HOSTS),  # noqa: F405
+    )
+    if problem
+]
+
 # Turning off HTTPS protections is only allowed with an explicit, greppable opt-in (used by
 # the local docker-compose stack, which serves plain HTTP on localhost).
 _insecure = [
@@ -154,6 +198,8 @@ _insecure = [
         ("AI_LLM_BASE_URL", not AI_LLM_BASE_URL.startswith("https://")),  # noqa: F405
         # A runtime role that could rewrite the audit trail (R74).
         ("DB_REQUIRE_RESTRICTED_ROLE", not DB_REQUIRE_RESTRICTED_ROLE),
+        # The local stack's published ledger key (privacy remediation P2-8).
+        ("ERASURE_LEDGER_KEY", _ledger_dev_key),
     ]
     if weakened
 ]
@@ -162,6 +208,13 @@ if _insecure and not _insecure_opt_in:
     raise ImproperlyConfigured(
         f"{', '.join(_insecure)} weaken HTTPS protections; set "
         "DJANGO_ALLOW_INSECURE_LOCAL_HTTP=true only for local, non-public deployments."
+    )
+if _transport_problems and not _insecure_opt_in:
+    # Fail closed: no silent plain-text or unverified hop (the opt-in below is for local
+    # stacks only, and is itself refused for any public host name).
+    raise ImproperlyConfigured(
+        " ".join(_transport_problems)
+        + " See docs/security.md#backend-tls (BACKEND_TLS_PRIVATE_HOSTS for container names)."
     )
 if _insecure_opt_in and not all(_is_local_host(host) for host in ALLOWED_HOSTS):  # noqa: F405
     # The opt-in waives every check above at once (Redis without a password, the role

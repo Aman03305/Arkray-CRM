@@ -13,7 +13,8 @@
 
 **Built in Phase 2.** Code: [`backend/arkray/leads/`](../backend/arkray/leads/) and
 [`frontend/src/features/leads/`](../frontend/src/features/leads/) (since ADR-0028 only the
-read-only lead page, its API client and the duplicate notice). Decisions:
+lead page, with ADR-0032's correction and export actions, its API client and the duplicate
+notice). Decisions:
 [ADR-0015](adr/0015-leads-domain-model.md) (model, configurable statuses and sources),
 [ADR-0016](adr/0016-composite-keyset-pagination.md) (pagination),
 [ADR-0017](adr/0017-in-transaction-domain-events.md) (domain events).
@@ -299,9 +300,12 @@ analytics and automation subscribe later and enqueue outbox work from their subs
 ## Frontend
 
 **Now (ADR-0028):** `/leads/{id}` (own, or organisation-wide for administrators) and
-`/admin/users/{id}/leads/{leadId}` (that user's) are the **read-only lead page**: name,
+`/admin/users/{id}/leads/{leadId}` (that user's) are the **lead page**: name,
 organisation, owner, creation time, contact details and the lead's opportunities in the
-workspace, each opening the deal ([pipeline.md](pipeline.md#frontend)). Another workspace's
+workspace, each opening the deal ([pipeline.md](pipeline.md#frontend)). Since ADR-0032 it has
+one action, **Correct details** (the customer's identity and contact fields, synchronised to
+the deals still holding the old values: [privacy.md](privacy.md#correction)), and, for an
+administrator, **Export data** ([privacy.md](privacy.md#access-requests)). Another workspace's
 lead is "not found". `/leads`, `/leads/new` and `/leads/{id}/edit` (and the same under a
 user's workspace) redirect to that workspace's Pipeline. The rest of this section describes
 the Phase 2 Leads module, removed by ADR-0027.

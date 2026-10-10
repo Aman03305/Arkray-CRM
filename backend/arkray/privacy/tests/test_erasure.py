@@ -437,3 +437,28 @@ def test_free_text_columns_of_the_deal_and_its_agreed_cpt_are_erased_too(user_a)
     # The table is append-only again afterwards.
     with pytest.raises(DatabaseError), transaction.atomic(), connection.cursor() as cursor:
         cursor.execute("UPDATE pipeline_negotiation_price SET agreed_cpt = 'x'")
+
+
+def test_a_free_text_instrument_is_blanked_a_listed_one_kept(user_a, admin):
+    """Privacy remediation: an instrument typed before the list (ADR-0028) may name anyone."""
+    from arkray.pipeline import instruments
+
+    lead = LeadFactory(owner=user_a, first_name="Typed", last_name="Instrument")
+    typed = OpportunityFactory(lead=lead, instrument_name="Analyser for Dr Mehta's lab")
+    listed = OpportunityFactory(lead=lead, instrument_name=instruments.INSTRUMENTS[0])
+    services.erase(lead.pk, operator_id=admin.pk)
+    assert Opportunity.objects.get(pk=typed.pk).instrument_name == ""
+    assert Opportunity.objects.get(pk=listed.pk).instrument_name == instruments.INSTRUMENTS[0]
+
+
+def test_a_legal_hold_refuses_the_erasure(user_a, admin):
+    from arkray.core.holds import UnderLegalHold
+    from arkray.core.models import HoldSubject, LegalHold
+
+    lead = LeadFactory(owner=user_a)
+    LegalHold.objects.create(
+        subject_type=HoldSubject.LEAD, subject_id=lead.pk, reference="CASE-3", placed_by=admin.pk
+    )
+    with pytest.raises(UnderLegalHold):
+        services.erase(lead.pk, operator_id=admin.pk)
+    assert Lead.objects.get(pk=lead.pk).first_name == lead.first_name

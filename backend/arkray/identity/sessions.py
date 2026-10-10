@@ -2,8 +2,11 @@
 
 - **Sign-in** always issues a brand-new session key (no fixation, even when the same user
   signs in again on an existing session) and a new CSRF token.
-- **Absolute lifetime** (SESSION_COOKIE_AGE): the session's expiry is pinned to a fixed
-  moment at sign-in, so activity never extends it; the middleware re-checks it too.
+- **Absolute lifetime** (SESSION_COOKIE_AGE): enforced by the middleware from the sign-in
+  time stored in the session (AUTH_AT), so activity never extends it. The cookie itself is a
+  browser-session cookie (identity.session_store): closing the browser ends it, so a shared
+  computer doesn't hand the next person an open session (privacy remediation P2-12). The
+  row in the database keeps its pinned expiry and is purged after it.
 - **Idle timeout** (SESSION_IDLE_TIMEOUT_S): last activity is recorded in the session at
   most every SESSION_ACTIVITY_REFRESH_S.
 - **Revocation** is Django's per-request session-hash check: the hash covers the password
@@ -46,6 +49,8 @@ def start_session(request: HttpRequest, user: User) -> None:
     now = _epoch()
     request.session[AUTH_AT] = now
     request.session[SEEN_AT] = now
+    # The row's expiry, pinned (activity never extends it); the cookie itself is a
+    # browser-session cookie (identity.session_store).
     request.session.set_expiry(timezone.now() + timedelta(seconds=settings.SESSION_COOKIE_AGE))
 
 

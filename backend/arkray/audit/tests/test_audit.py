@@ -26,7 +26,8 @@ class TestRecord:
         finally:
             reset_context(token)
         assert event.request_id == "req-audit-123"
-        assert event.ip_address == "203.0.113.7"
+        assert event.ip_address is None  # in the expiring detail instead (P2-4)
+        assert event.detail.ip_address == "203.0.113.7"
         assert event.actor_type == ActorType.USER
 
     def test_system_actor(self):

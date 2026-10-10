@@ -16,6 +16,8 @@ from uuid import UUID
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 
+from arkray.core.holds import UnderLegalHold
+from arkray.core.ledger import LedgerError
 from arkray.identity.models import User, normalize_email
 from arkray.identity.policy import Capability, has_capability
 from arkray.leads.models import Lead
@@ -51,8 +53,10 @@ class Command(BaseCommand):
             return
         try:
             done = services.erase(lead_id, operator_id=operator.pk)
-        except (services.OwnerRequired, services.AlreadyErased) as exc:
+        except (services.OwnerRequired, services.AlreadyErased, UnderLegalHold) as exc:
             raise CommandError(str(exc)) from None
+        except LedgerError as exc:
+            raise CommandError(f"Nothing was erased: the erasure ledger failed ({exc}).") from None
         self.stdout.write(
             f"Erased lead {lead_id}: {done.activities} activities, {done.opportunities}"
             f" opportunities, {done.history_rows} history rows, {done.chunks} chunks deleted,"

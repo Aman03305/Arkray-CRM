@@ -146,7 +146,9 @@ class TestResetLinks:
         )
         drain_outbox()
         event = AuditEvent.objects.get(action=services.AUDIT_PASSWORD_RESET_ISSUED)
-        assert event.metadata == {"requested_from": "203.0.113.9"}
+        # Kept for the audit detail's retention, not in the append-only row (privacy P2-4).
+        assert event.metadata == {}
+        assert event.detail.values == {"requested_from": "203.0.113.9"}
 
     def test_suppressed_resets_are_audited(self, user_a):
         for _ in range(settings.PASSWORD_RESET_ACCOUNT_LIMIT_PER_HOUR + 1):

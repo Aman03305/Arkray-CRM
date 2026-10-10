@@ -48,6 +48,7 @@ export function ActivateAccountForm({ token }: { token: string }) {
   const form = useRef<HTMLFormElement>(null);
   const accept = useMutation({
     mutationFn: (password: string) => authApi.acceptInvitation(token, password),
+    gcTime: 0, // its variable is the new password: not kept once the form is gone
     onSuccess: () => hardNavigate("/login?reason=activated"),
   });
   useFocusFirstInvalid(form, clientErrors ?? accept.error);

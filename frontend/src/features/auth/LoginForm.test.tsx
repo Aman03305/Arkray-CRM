@@ -148,4 +148,21 @@ describe("LoginForm", () => {
     expect(screen.getByLabelText("Email")).toHaveAttribute("autocomplete", "username");
     expect(screen.getByLabelText("Password")).toHaveAttribute("type", "password");
   });
+
+  it("doesn't leave the password in the mutation cache once the form is gone", async () => {
+    mockApi({
+      "GET /api/v1/auth/me": NOT_SIGNED_IN,
+      "POST /api/v1/auth/login": apiError(400, "invalid_credentials", "Invalid email or password."),
+    });
+    const { client, unmount } = renderWithProviders(<LoginForm />);
+    await fillAndSubmit("rahul@example.test", "a secret passphrase");
+    await screen.findByRole("alert");
+    const cached = () => JSON.stringify(client.getMutationCache().getAll().map((mutation) => mutation.state.variables));
+    // While the form shows the refusal its mutation is still there (as a retry would need)...
+    expect(cached()).toContain("a secret passphrase");
+    unmount();
+    // ...and once the form is gone, so is the mutation (gcTime 0; the default keeps it 5 minutes).
+    await waitFor(() => expect(client.getMutationCache().getAll()).toHaveLength(0));
+    expect(cached()).not.toContain("a secret passphrase");
+  });
 });

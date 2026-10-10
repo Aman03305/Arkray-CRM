@@ -282,7 +282,8 @@ value on the server alone made the API and the screens disagree (whole-software 
 
 | Variable | Required | Default and notes |
 |---|---|---|
-| `DATABASE_URL` | yes | the **application role** (`arkray_app`) for web and workers, the owner (`arkray_owner`) for the migrate job ([Database](#database)); PgBouncer's address when it's in place |
+| `DATABASE_URL` | yes | the **application role** (`arkray_app`) for web and workers, the owner (`arkray_owner`) for the migrate job ([Database](#database)); PgBouncer's address when it's in place. **Verified TLS** for any remote host: `...?sslmode=verify-full&sslrootcert=/path/ca.crt` (or `sslrootcert=system`); startup fails otherwise ([security.md](security.md#backend-tls)) |
+| `BACKEND_TLS_PRIVATE_HOSTS` | no | empty. Single-label container/service names (`postgres,redis`) reached without TLS on a private network; a dotted name or an IP address is refused. Loopback is always allowed |
 | `DB_REQUIRE_RESTRICTED_ROLE` | no | `true` in production: the web server and workers refuse to start as a superuser or as a role that could rewrite the audit trail (R74) |
 | `DB_CONNECT_TIMEOUT_S` | no | 5 |
 | `DB_STATEMENT_TIMEOUT_MS` | no | 10,000 (web); set 60,000 for workers |
@@ -295,10 +296,11 @@ value on the server alone made the API and the screens disagree (whole-software 
 
 | Variable | Required | Default and notes |
 |---|---|---|
-| `CELERY_BROKER_URL` | yes | the broker Redis, with a password (`rediss://:password@host:6380/0`); startup fails without one |
-| `REDIS_CACHE_URL` | yes | the cache Redis (a separate instance in production), with a password |
+| `CELERY_BROKER_URL` | yes | the broker Redis, with a password and verified TLS: `rediss://:password@host:6380/0?ssl_cert_reqs=required` (`&ssl_ca_certs=/path/ca.crt` for a private CA); startup fails without them |
+| `REDIS_CACHE_URL` | yes | the cache Redis, **a separate instance with no persistence** (`--save '' --appendonly no`: its rate-limit keys hold client addresses), with a password and the same TLS parameters |
 | `OUTBOX_DONE_RETENTION_DAYS` | no | 7: finished background work kept for investigation, then purged hourly |
-| `EMAIL_URL` | **yes** | `smtp+tls://user:pass@smtp.example.com:587`; startup fails if unset or a console, file, in-memory or dummy backend (they would put one-time account links in logs or on disk, or drop them) |
+| `EMAIL_URL` | **yes** | `smtp+tls://user:pass@smtp.example.com:587` (STARTTLS; `smtps://` means the same) or `smtp+ssl://...:465` (implicit TLS); startup fails if unset, a console, file, in-memory or dummy backend (they would put one-time account links in logs or on disk, or drop them), or plain `smtp://` to a remote relay |
+| `EMAIL_TLS_CA_FILE` | no | a private CA (PEM) for the relay's certificate; otherwise the system store. Certificates and host names are always verified, TLS 1.2+ |
 | `DEFAULT_FROM_EMAIL` | **yes** | the sender, on a domain with SPF, DKIM and DMARC ([Email](#email)) |
 | `EMAIL_TIMEOUT_S` | no | 10 |
 
@@ -312,7 +314,9 @@ PostgreSQL: a database backup is not a backup of the files ([below](#attachments
 | `ATTACHMENT_STORAGE` | **yes** in production | `filesystem` (a private directory, development) or `s3` (private S3-compatible object storage) |
 | `ATTACHMENT_ROOT` | with `filesystem` | `backend/var/attachments`; a private volume never served by a web server |
 | `ATTACHMENT_S3_BUCKET` | with `s3` | a **private** bucket (block all public access); objects are written `private`, server-side encrypted, never overwritten |
-| `ATTACHMENT_S3_ENDPOINT_URL`, `ATTACHMENT_S3_REGION` | no | for S3-compatible stores (MinIO, R2, ...) |
+| `ATTACHMENT_S3_ENDPOINT_URL`, `ATTACHMENT_S3_REGION` | no | for S3-compatible stores (MinIO, R2, ...); the endpoint must be `https://` (startup fails otherwise) |
+| `ATTACHMENT_S3_CA_BUNDLE` | no | a private CA bundle for a self-hosted store; certificates are always verified |
+| `ATTACHMENT_S3_PURGE_VERSIONS` | no | `false`. `true` with a versioned bucket: purging a deleted file removes every earlier version and delete marker too (needs `s3:ListBucketVersions`, `s3:DeleteObjectVersion`); otherwise the bucket's lifecycle rule (expire noncurrent versions after 30 days) must ([privacy.md](privacy.md#attachments)) |
 | `ATTACHMENT_S3_ACCESS_KEY_ID`, `ATTACHMENT_S3_SECRET_ACCESS_KEY` | no | prefer an instance/workload role; keys, if used, may only read, write and delete in the bucket's prefix |
 | `ATTACHMENT_S3_PREFIX` | no | `attachments` |
 | `ATTACHMENT_S3_CONNECT_TIMEOUT_S`, `ATTACHMENT_S3_READ_TIMEOUT_S`, `ATTACHMENT_S3_MAX_ATTEMPTS` | no | `3`, `10`, `2` (attempts in total): a dead endpoint costs a request about 7 to 12 s, inside the 30 s worker timeout (botocore's defaults took 113 s against a black hole and could pin every web worker: final audit SRE-1) |
@@ -323,7 +327,7 @@ PostgreSQL: a database backup is not a backup of the files ([below](#attachments
 | `ATTACHMENT_MAX_BYTES` | no | 10 MB per file; the proxy's body limit on the upload route must be a little above it ([below](#reverse-proxy)) |
 | `ATTACHMENT_MAX_PER_NOTE` | no | 10 |
 | `ATTACHMENT_ALLOWED_EXTENSIONS` | no | `pdf,png,jpg,jpeg,webp,docx,xlsx,csv,txt`; only from the catalog the server can recognise by content (adds: `gif`, `pptx`); anything else fails startup |
-| `ATTACHMENT_SCANNER` | **recommended** | empty (no scanning: files are "not scanned" and downloadable) or `clamd://host:3310` (a ClamAV daemon: files stay "being checked" until clean; infected ones are blocked and deleted) |
+| `ATTACHMENT_SCANNER` | **recommended** | empty (no scanning: files are "not scanned" and downloadable) or `clamd://host:3310` (a ClamAV daemon: files stay "being checked" until clean; infected ones are blocked and deleted). clamd has no TLS: its host must be loopback or listed in `BACKEND_TLS_PRIVATE_HOSTS` (a sidecar or a container on the private network); startup fails otherwise |
 
 **Rate limits** (per user, or per client address for anonymous and sign-in requests)
 
@@ -374,6 +378,21 @@ refuses anything else at startup (DRF would otherwise fail on the first request)
 |---|---|
 | `API_ORIGIN` | where Next.js proxies `/api` when the edge proxy doesn't route it (development and the local stack); in production the proxy routes `/api` to Django directly |
 
+**Privacy (ADR-0032; [privacy.md](privacy.md))**
+
+| Variable | Required | Default and notes |
+|---|---|---|
+| `ERASURE_LEDGER_URL` | **yes** | where erasures are recorded outside the database: `file:///var/lib/arkray/ledger` (a volume of its own, never in a database backup) or `s3://bucket/prefix` (a bucket of its own, versioned, Object Lock in compliance mode). Startup fails without it |
+| `ERASURE_LEDGER_KEY` | **yes** | the ledger's HMAC key: at least 32 characters, not the Django secret, not a `dev-`/`test-` key. Keep it with the ledger's own secrets; changing it needs a new, empty ledger |
+| `ERASURE_LEDGER_S3_ENDPOINT_URL`, `ERASURE_LEDGER_S3_REGION`, `ERASURE_LEDGER_S3_CA_BUNDLE` | no | an S3 ledger's endpoint (https only), region and private CA bundle |
+| `ERASURE_LEDGER_CHECK_INTERVAL_S`, `ERASURE_LEDGER_MAX_STALE_S` | no | 60 s: how often each process compares the database with the ledger; 1 h: how long it stays open through a ledger outage after a verified state |
+| `AUDIT_DETAIL_RETENTION_DAYS` | no | 90: how long audit events' personal details (security events' client addresses, old/new emails, reset requesters' addresses, support reasons) are kept; a policy the organisation sets |
+| `EXPORT_ROOT` | no | `var/exports`: the private directory for data-subject export files (filesystem storage); a volume of its own |
+| `EXPORT_S3_PREFIX` | no | `exports`: their prefix in the attachments bucket with `ATTACHMENT_STORAGE=s3` (outside the attachments' prefix, which reconciliation walks) |
+| `EXPORT_TTL_HOURS`, `EXPORT_MAX_BYTES` | no | 24 h; 100 MB (attachments beyond it are listed, not included) |
+| `EXPORT_MAX_PENDING_PER_ADMIN`, `EXPORT_MAX_PER_HOUR` | no | 3; 20 per administrator |
+| `LOG_EXCEPTION_MESSAGES` | no | `false`; exception messages in log tracebacks, for local development only: production refuses it |
+
 ## Database
 
 - Managed PostgreSQL 16 with the `vector`, `pg_trgm` and `btree_gin` extensions available,
@@ -388,6 +407,9 @@ refuses anything else at startup (DRF would otherwise fail on the first request)
   web server and a worker refuse to run.
 - PgBouncer in transaction mode once replicas × workers approaches the connection budget;
   set `DB_TRANSACTION_POOLER=true` when it is in place ([Database poolers](#database-poolers)).
+- **TLS, verified**: `sslmode=verify-full` with the provider's CA (`sslrootcert`), the pooler
+  included ([security.md](security.md#backend-tls)); the production-shaped stack runs it
+  against a private CA.
 
 **PostgreSQL settings** (parameter group or `postgresql.conf`):
 
@@ -435,11 +457,19 @@ statement timeout with `SET LOCAL`). Platform notes: [hosting-compatibility.md](
 
 - **Primary backup: point-in-time recovery** on the managed service (RPO: minutes).
   **Secondary: a logical dump** (`scripts/backup.sh`: `pg_dump` custom format, checked to
-  read back, with a SHA-256 next to it; sessions left out; created owner-only, the password
-  passed through the environment rather than the command line), daily to an encrypted bucket
-  in another region, kept 30 days ([privacy.md](privacy.md#retention)).
+  read back, **encrypted** to the backup public key (`BACKUP_GPG_RECIPIENT_FILE`; the private
+  key offline, [runbooks.md](runbooks.md#backup-encryption-keys)), with a SHA-256 of the
+  encrypted file next to it; sessions left out; created owner-only, the password passed
+  through the environment rather than the command line), daily to a bucket in another
+  region, kept 30 days (`--prune`, honouring a `LEGAL_HOLD` file; [privacy.md](privacy.md#retention)).
+- **The erasure ledger is not in the backups**, by design: after **any** restore (dump or
+  point-in-time), the API stays closed until `manage.py replay_erasures --by <admin> --report
+  <file>` (the owner's credentials) has re-applied every erasure made since
+  ([privacy.md](privacy.md#restore-safe-erasure)); keep its report with the restore's record.
 - **Restore** (`scripts/restore.sh`): into an **empty** database only (it refuses one with
-  tables), as the owner; verifies the checksum, restores in parallel, gives the index
+  tables), as the owner; verifies the checksum, decrypts an encrypted dump with the keyring in
+  `BACKUP_GNUPGHOME` (into a private temporary directory removed afterwards), restores in
+  parallel, gives the index
   builds more memory, then runs `VACUUM (ANALYZE)`, because a restored database has an empty
   visibility map and no statistics, and the dashboards' index-only figures run about three
   times slower until it is vacuumed (R55). Then `grant_app_privileges` and the release
@@ -482,6 +512,16 @@ statement timeout with `SET LOCAL`). Platform notes: [hosting-compatibility.md](
   timestamps had the same checksum as before, each had its account and customer names and
   opportunity date, no constraint was unvalidated and no index invalid, and
   `grant_app_privileges`, `manage.py check` and `migrate --check` were clean.
+- **Verified 2026-10-10** (privacy remediation restore drill, `tests/drills/restore_drill.py`
+  against the local PostgreSQL): an encrypted `backup.sh` dump of a seeded database, then a
+  lead erased, a file deleted, a custom field's values deleted and a former user
+  pseudonymised (5 ledger entries), `restore.sh` into an empty database (checksum ok,
+  decrypted ok); the restored database brought the erased back and the API answered 503
+  (behind), and 503 again with the ledger unavailable; `replay_erasures` re-applied 5 of 5
+  (the lead erased, its index chunks gone, the file purged and its name removed, the custom
+  values deleted, the user pseudonymised, a bystander untouched) and the API reopened; a
+  second replay found all 5 already applied. A dump without encryption was refused unless
+  `BACKUP_ALLOW_UNENCRYPTED=1`.
 - **Targets: RPO ≤ 5 minutes** (point-in-time recovery), **RTO ≤ 1 hour**: a restore at this
   size takes about 7 minutes of database time, leaving the rest for provisioning, DNS and
   the release check. Confirm both with the business, and drill quarterly

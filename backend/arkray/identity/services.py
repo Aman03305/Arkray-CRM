@@ -193,6 +193,24 @@ def _audit_user(action: str, actor_id: UUID | None, user: User, **metadata: obje
     )
 
 
+def _audit_user_sensitive(
+    action: str,
+    actor_id: UUID | None,
+    user: User,
+    sensitive: dict[str, object] | None,
+    **metadata: object,
+) -> None:
+    """With personal details kept only for the audit detail's retention (audit.services)."""
+    audit.record(
+        action,
+        actor_id=actor_id,
+        target_type="user",
+        target_id=user.pk,
+        metadata=metadata,
+        sensitive=sensitive,
+    )
+
+
 # --- user administration --------------------------------------------------------------------
 def _clean_name(value: str, field: str) -> str:
     """A person's name, under the same text rules as every CRM field (Phase 9 review: names
@@ -393,11 +411,12 @@ def change_user_email(
                     TOPIC_EMAIL_CHANGED,
                     {"user_id": str(user.pk), "previous_email": previous_email},
                 )
-            _audit_user(
+            _audit_user_sensitive(
                 AUDIT_EMAIL_CHANGED,
                 actor.pk,
                 user,
-                **{"from": previous_email, "to": new_email},
+                # The addresses expire with the event's detail (audit.retention).
+                {"from": previous_email, "to": new_email},
                 revoked_links=revoked_links + (1 if invitation else 0),
             )
             if invitation is not None:
@@ -710,10 +729,20 @@ def issue_password_reset(email: str, requested_from: str | None = None) -> None:
         ).count()
         if issued_last_hour >= settings.PASSWORD_RESET_ACCOUNT_LIMIT_PER_HOUR:
             logger.warning("password_reset_suppressed", extra={"target_user_id": str(user.pk)})
-            _audit_user(AUDIT_PASSWORD_RESET_SUPPRESSED, None, user, requested_from=requested_from)
+            _audit_user_sensitive(
+                AUDIT_PASSWORD_RESET_SUPPRESSED,
+                None,
+                user,
+                {"requested_from": requested_from} if requested_from else None,
+            )
             return
         _issue_token(user, TokenPurpose.PASSWORD_RESET, created_by=None, now=now)
-        _audit_user(AUDIT_PASSWORD_RESET_ISSUED, None, user, requested_from=requested_from)
+        _audit_user_sensitive(
+            AUDIT_PASSWORD_RESET_ISSUED,
+            None,
+            user,
+            {"requested_from": requested_from} if requested_from else None,
+        )
 
 
 def confirm_password_reset(secret: str, new_password: str) -> None:

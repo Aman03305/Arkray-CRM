@@ -17,6 +17,14 @@ class AuditEvent(AppendOnlyModel):
 
     `subject_user_id` records whose CRM workspace the action concerned when it differs from
     the actor (e.g. an admin viewing or editing a sales user's records).
+
+    Personal details that only matter for a while (the client address of a security event,
+    an old and new sign-in email, a password-reset requester's address, a support session's
+    reason) are not stored here but in its AuditDetail, which expires (privacy remediation
+    P2-4, docs/privacy.md#audit-trail). `detail_digest` seals them: the SHA-256 of the
+    detail's values and a random salt kept with them, so a detail altered while it exists no
+    longer matches, and once it has expired (salt and values gone together) the digest
+    can't be matched against guessed values.
     """
 
     id = models.BigAutoField(primary_key=True)
@@ -32,8 +40,12 @@ class AuditEvent(AppendOnlyModel):
     # metadata (whose keys mentioning a session are redacted).
     support_session_id = models.UUIDField(null=True, blank=True)
     request_id = models.CharField(max_length=64, blank=True, default="")
+    # Legacy: events written before AuditDetail held the client address here (moved by the
+    # owner's `audit_minimise_legacy`). New events never set it.
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
+    # db_default: the previous release (which never names the column) can still insert.
+    detail_digest = models.CharField(max_length=64, blank=True, default="", db_default="")
 
     class Meta:
         db_table = "audit_event"
@@ -62,3 +74,26 @@ class AuditEvent(AppendOnlyModel):
 
     def __str__(self) -> str:
         return f"{self.occurred_at:%Y-%m-%d %H:%M:%S} {self.action} by {self.actor_id or 'system'}"
+
+
+class AuditDetail(models.Model):
+    """An audit event's expiring personal details (AuditEvent docstring): kept for
+    AUDIT_DETAIL_RETENTION_DAYS (90 by default, a starting policy, not a legal duration),
+    then deleted by the daily `audit.housekeeping`, except while a legal hold covers the
+    event's actor, subject or target. The event itself (who, what, when, which record)
+    stays."""
+
+    event = models.OneToOneField(
+        AuditEvent, primary_key=True, on_delete=models.CASCADE, related_name="detail"
+    )
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    values = models.JSONField(default=dict, blank=True)
+    salt = models.CharField(max_length=32)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "audit_event_detail"
+        indexes = [models.Index(fields=["expires_at"], name="audit_detail_expires_idx")]
+
+    def __str__(self) -> str:
+        return f"AuditDetail({self.event_id})"  # never the values: this can reach logs

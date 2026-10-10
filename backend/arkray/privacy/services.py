@@ -25,11 +25,15 @@ administrator runs `manage.py erase_lead`, which in one transaction:
   the redacted text (an indexing job that read the old text concurrently is overwritten);
 - records `lead.erased` in the audit trail: the operator, the lead's id and counts, never
   any of the erased values;
-- last, redacts the free text kept in the append-only tables, when there is any: the lost
+- redacts the free text kept in the append-only tables, when there is any: the lost
   reasons of the stage history and the agreed CPT of every negotiated price. The trigger is
   disabled for each single statement, inside the transaction, which needs the schema owner's
   credentials; the lock this takes holds stage moves and price entries for the moment
-  between it and the commit.
+  between it and the commit;
+- last, appends `lead_erased` to the erasure ledger (core.ledger), outside the database:
+  a backup restored later can't bring the person back unnoticed (privacy remediation P2-8).
+  A ledger that can't be written stops the erasure (nothing is half-done). A legal hold on
+  the lead refuses it.
 
 What stays: ids, dates, statuses, stage names, the instrument (one of a fixed list),
 amounts and the audit trail, none of which identifies the person once the text is gone.
@@ -52,9 +56,12 @@ from arkray.ai import indexing
 from arkray.ai import service as ai_service
 from arkray.ai.models import Conversation, KnowledgeChunk
 from arkray.audit import services as audit
+from arkray.core import holds, ledger
 from arkray.core.domain_events import publish
+from arkray.core.models import HoldSubject
 from arkray.leads.events import LeadArchived
 from arkray.leads.models import PHONE_FIELDS, Lead
+from arkray.pipeline import instruments
 from arkray.pipeline.models import Opportunity
 
 ERASED = "[erased]"
@@ -233,7 +240,10 @@ def preview(lead_id: UUID) -> Erasure:
 
 
 @transaction.atomic
-def erase(lead_id: UUID, *, operator_id: UUID) -> Erasure:
+def erase(lead_id: UUID, *, operator_id: UUID, replay: bool = False) -> Erasure:
+    """`replay`: re-applying a ledger entry after a restore (privacy.replay): authorised and
+    checked when it first happened, so a legal hold restored with the backup doesn't stop it,
+    and nothing new is appended to the ledger."""
     with connection.cursor() as cursor:
         cursor.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
     # First, before any lock a CRM writer could be waiting behind: answers being stored
@@ -242,6 +252,8 @@ def erase(lead_id: UUID, *, operator_id: UUID) -> Erasure:
     lead = Lead.objects.select_for_update().get(pk=lead_id)
     if _already_erased(lead):
         raise AlreadyErased(lead_id)
+    if not replay and holds.is_held(HoldSubject.LEAD, lead_id):
+        raise holds.UnderLegalHold("lead", lead_id)
     opportunity_ids = list(
         Opportunity.objects.select_for_update().filter(lead_id=lead_id).values_list("pk", flat=True)
     )
@@ -293,6 +305,11 @@ def erase(lead_id: UUID, *, operator_id: UUID) -> Erasure:
         custom_fields={},
         **bump,
     )
+    # A free-text instrument from before the list (ADR-0028) may name anything: blanked; one
+    # of the fixed list identifies nobody and stays.
+    Opportunity.objects.filter(pk__in=opportunity_ids).exclude(
+        instrument_name__in=instruments.INSTRUMENTS
+    ).exclude(instrument_name="").update(instrument_name="")
     note_ids = list(
         Activity.objects.filter(pk__in=activity_ids, type=ActivityType.NOTE).values_list(
             "pk", flat=True
@@ -328,9 +345,23 @@ def erase(lead_id: UUID, *, operator_id: UUID) -> Erasure:
         attachments=files,
     )
     counts = {key: value for key, value in asdict(result).items() if key != "lead_id"}
+    from .exports import withdraw_for  # exports reads this module
+
+    # Their exports, queued or ready, end with them (backend review P2).
+    withdrawn = withdraw_for("lead", lead_id)
     audit.record(
-        "lead.erased", actor_id=operator_id, target_type="lead", target_id=lead_id, metadata=counts
+        "lead.erased",
+        actor_id=operator_id,
+        target_type="lead",
+        target_id=lead_id,
+        metadata={
+            **counts,
+            **({"exports_withdrawn": withdrawn} if withdrawn else {}),
+            **({"replay": True} if replay else {}),
+        },
     )
-    if history_rows:  # last: the lock it takes is held only until the commit
+    if history_rows:  # the lock it takes is held only until the commit
         _redact_history(opportunity_ids)
+    if not replay:
+        ledger.append("lead_erased", lead_id, at=now)  # last: everything above succeeded
     return result

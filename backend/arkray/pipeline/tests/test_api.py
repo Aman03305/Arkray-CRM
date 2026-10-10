@@ -433,6 +433,7 @@ class TestBoard:
             "version",
             "created_at",
             "updated_at",
+            "customer_restricted",
         }
         assert "description" not in card
         assert body["totals"] == {

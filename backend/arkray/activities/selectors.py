@@ -108,6 +108,11 @@ _LIST_FIELDS = (
     "opportunity__title",
     "opportunity__owner_id",
     "opportunity__status",
+    # A closed deal's name without its customer, for a viewer who no longer sees the lead
+    # (pipeline.customer).
+    "opportunity__account_name",
+    "opportunity__customer_name",
+    "opportunity__instrument_name",
     *(f"owner__{f}" for f in _PERSON),
     *(f"created_by__{f}" for f in _PERSON),
 )
@@ -458,6 +463,11 @@ _TIMELINE_FIELDS = (
     "opportunity__status",
     "opportunity__owner_id",
     "opportunity__archived_at",
+    "opportunity__account_name",
+    "opportunity__customer_name",
+    "opportunity__instrument_name",
+    "opportunity__lead__id",
+    "opportunity__lead__owner_id",
 )
 
 
@@ -469,7 +479,7 @@ def _activity_visible(scope: AccessScope) -> Q:
 
 def _entries(queryset: QuerySet[TimelineEntry]) -> QuerySet[TimelineEntry]:
     return (
-        queryset.select_related("actor", "activity", "opportunity")
+        queryset.select_related("actor", "activity", "opportunity__lead")
         .only(*_TIMELINE_FIELDS)
         .annotate(text_preview=Substr("activity__description", 1, PREVIEW_LENGTH + 1))
     )

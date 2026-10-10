@@ -18,6 +18,7 @@ from __future__ import annotations
 import unicodedata
 from datetime import date
 from typing import Any
+from uuid import UUID
 
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
@@ -26,6 +27,7 @@ from arkray.core.access import AccessScope
 from arkray.core.api import AwareDateTimeField, OpaqueIdField, StrictInputSerializer
 from arkray.leads.api.serializers import UserRefSerializer
 from arkray.leads.models import Lead
+from arkray.pipeline import customer
 from arkray.pipeline.models import Opportunity, StageCategory
 
 from .. import attachments, storage
@@ -62,14 +64,18 @@ def lead_ref(lead: Lead, scope: AccessScope) -> dict[str, Any]:
     }
 
 
-def opportunity_ref(opportunity: Opportunity | None, scope: AccessScope) -> dict[str, Any] | None:
+def opportunity_ref(
+    opportunity: Opportunity | None, scope: AccessScope, lead_owner_id: UUID
+) -> dict[str, Any] | None:
+    """A linked deal, if visible; named without its customer when the viewer no longer
+    sees the deal's lead (pipeline.customer)."""
     if opportunity is None:
         return None
     if not scope.permits_owner(opportunity.owner_id):
         return {"id": None, "restricted": True}
     return {
         "id": opportunity.pk,
-        "title": opportunity.title,
+        "title": customer.title_for(opportunity, scope, lead_owner_id),
         "status": opportunity.status,
         "restricted": False,
     }
@@ -147,7 +153,8 @@ class _ActivityBase(serializers.ModelSerializer[m.Activity]):
 
     @extend_schema_field(ActivityOpportunityRefSerializer(allow_null=True))
     def get_opportunity(self, activity: m.Activity) -> dict[str, Any] | None:
-        return opportunity_ref(activity.opportunity, self.context["scope"])
+        # An activity's lead is its opportunity's lead (database-enforced).
+        return opportunity_ref(activity.opportunity, self.context["scope"], activity.lead.owner_id)
 
     def get_is_overdue(self, activity: m.Activity) -> bool:
         return activity.is_overdue(self.context["now"])
@@ -360,7 +367,10 @@ class TimelineEntrySerializer(serializers.Serializer[Any]):
 
     @extend_schema_field(ActivityOpportunityRefSerializer(allow_null=True))
     def get_opportunity(self, entry: m.TimelineEntry) -> dict[str, Any] | None:
-        return opportunity_ref(entry.opportunity, self.context["scope"])
+        opportunity = entry.opportunity
+        if opportunity is None:
+            return None
+        return opportunity_ref(opportunity, self.context["scope"], opportunity.lead.owner_id)
 
 
 class TimelinePageSerializer(serializers.Serializer[Any]):

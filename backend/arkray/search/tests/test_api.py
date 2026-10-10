@@ -83,6 +83,7 @@ class TestShape:
             "customer_name",
             "lead",
             "owner",
+            "customer_restricted",
         }
         assert set(body["tasks"]["results"][0]) == {
             "id",
@@ -275,7 +276,15 @@ class TestRestrictedLeads:
     @pytest.fixture
     def kept(self, user_a, user_b, admin):
         lead = LeadFactory(owner=user_a, first_name="Moved", last_name="Away")
-        deal = OpportunityFactory(lead=lead, title="Kept deal", stage_key="won")
+        # Its customer is no longer the owner's to see (pipeline.customer): the deal is found
+        # by its organisation and instrument only, and shown without its customer.
+        deal = OpportunityFactory(
+            lead=lead,
+            title="Moved Away",
+            account_name="Kept Labs",
+            customer_name="Moved Away",
+            stage_key="won",
+        )
         task = TaskFactory(lead=lead, title="Kept task", status=ActivityStatus.COMPLETED)
         lead_services.reassign_lead(
             actor=admin,
@@ -293,6 +302,8 @@ class TestRestrictedLeads:
         assert ids(body, "tasks") == [str(task.pk)]
         restricted = {"id": None, "restricted": True}
         assert body["opportunities"]["results"][0]["lead"] == restricted
+        assert body["opportunities"]["results"][0]["customer_restricted"] is True
+        assert body["opportunities"]["results"][0]["title"] == "Kept Labs"
         assert body["tasks"]["results"][0]["lead"] == restricted
         assert "Moved" not in str(body)
 

@@ -16,6 +16,8 @@ from django.db.migrations.state import StateApps
 
 # The leaf nodes of the supported previous release, v1.0 RC (64bb641:
 # `git ls-tree -r 64bb641 --name-only | grep migrations/0`), for every app with migrations.
+# Apps that had no migration at the release: privacy's first (privacy.0001) came with ADR-0032.
+NEW_SINCE_RELEASE = frozenset({"privacy"})
 RELEASE_CANDIDATE = (
     ("activities", "0009_activities_autovacuum"),
     ("ai", "0003_question_finished_index"),

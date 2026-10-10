@@ -51,6 +51,7 @@ function dealFor(q: string): SearchResults {
           customer_name: `${q} Customer`,
           lead: { id: "cccccccc-cccc-4ccc-8ccc-000000000003", display_name: `${q} Customer`, organization_name: "", restricted: false },
           owner: { id: RAHUL_ID, full_name: "Rahul Sharma", is_active: true },
+          customer_restricted: false,
         },
       ],
     },

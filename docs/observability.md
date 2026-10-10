@@ -4,12 +4,11 @@
 
 Every line the application writes is a single ASCII-escaped JSON object on stdout (so
 U+2028, U+2029 and other line separators can't split an event)
-([`core/logging.py`](../backend/arkray/core/logging.py)). Not quite every line in the
-containers: gunicorn's own error lines (`WORKER TIMEOUT`, a killed worker), Celery's start
-banner and onnxruntime's warnings are plain text (R89; the whole-software audit counted 11
-of 73 backend lines). A database error is logged by type, `db_sqlstate` and
-`db_constraint`, never its message: PostgreSQL's quotes the failing row (whole-software
-audit, R63):
+([`core/logging.py`](../backend/arkray/core/logging.py)). Since the privacy remediation
+(ADR-0032) gunicorn's error log goes through the same formatter too; Celery's start banner and
+onnxruntime's warnings are still plain text (R89). A database error is logged by type,
+`db_sqlstate` and `db_constraint`, never its message: PostgreSQL's quotes the failing row
+(whole-software audit, R63):
 
 ```json
 {"ts": "2026-09-30T02:38:20.798+00:00", "level": "INFO", "logger": "arkray.access",
@@ -29,6 +28,33 @@ audit, R63):
 | `task_id`, `task_name` | Celery signals bind them for every task |
 | `outbox_event_id`, `topic`, `attempt` | outbox processing |
 | `exc_type`, `exc` | exceptions (the traceback is one escaped JSON string) |
+
+### What a log line may hold
+
+Enforced by the formatter, not only by convention (privacy remediation P2-2, tested in
+`tests/security/test_log_redaction.py` with planted names, emails, phones, note text, file
+names, support reasons and AI tool arguments through failing pipeline, note, admin,
+attachment, AI and Celery paths):
+
+- **Fields by allowlist.** Extra fields are written only if their name is in
+  `core.logging.SAFE_FIELDS` (identifiers, codes, counts, timings, flags); values must be
+  scalars or small lists/dicts of them (strings cut at 500 characters). Any other field,
+  Celery's `data` (traceback, task arguments) and Django's `request` included, is dropped and
+  its *name* listed under `withheld`. A test fails when the code logs a field that isn't
+  allowlisted: adding one is a deliberate decision.
+- **Exceptions by type and place.** Tracebacks keep every frame and every exception type in
+  the chain, never a message (`[message withheld]`); database errors add SQLSTATE and
+  constraint. `LOG_EXCEPTION_MESSAGES=true` shows messages for local development and is
+  refused in production.
+- **Other libraries' messages** are rendered with their arguments sanitised: Celery's
+  task-failure line keeps the task name, id and its own wording, never the exception's text;
+  gunicorn's lines lose query strings; free-text arguments become `[withheld]`.
+- **The client address** is on the access line (`http_request`) only.
+- **Retention**: container logs rotate on the host at 5 x 10 MB per container (Compose
+  `logging`); at the log platform, 30 days is the recommended setting (an operations
+  decision recorded in [privacy.md](privacy.md#retention)). The edge's access log keeps the
+  address, path (no query string, one-time links redacted case-insensitively), status and
+  timings; no user agent, referrer or cookie.
 
 Conventions:
 - Event names are stable snake_case keys (`http_request`, `outbox_event_dead`,
@@ -61,7 +87,8 @@ Conventions:
   (the hand-off breaker is open), `ai_provider_failed` (`kind`), `ai_provider_rejected`
   (`status`: 4xx other than 429), `ai_provider_configured` (once per process: the provider's
   host and the model, never the key), `ai_breaker_opened` (ERROR),
-  `ai_grounding_failed` (`unsupported_numbers`: a count), `ai_tool_failed` (`tool`),
+  `ai_grounding_failed` (`unsupported_numbers`: a count), `ai_tool_failed` (`tool`,
+  `exc_type`: the type only, never a traceback),
   `ai_retrieval_unavailable`, `ai_reconciliation_finished`, `embedding_model_loaded`. Audit:
   `ai.question` per answered question (actor, workspace, subject when delegated; metadata:
   question id, mode, tool names, record count, outcome).
@@ -102,6 +129,18 @@ Conventions:
   `database_logs_failed_statements` (R63: PostgreSQL would log statements' values);
   `ai_provider_configured` (the provider's host). Audit: `lead.erased` (the operator, the
   lead's id, counts).
+- Privacy remediation (ADR-0032; ids and counts only): `audit_housekeeping`
+  (`details_expired`, `held`), `privacy_housekeeping` and `export_ready` / `export_failed` /
+  `export_expiry_failed` / `export_file_delete_failed` (`export_id`),
+  `erasure_ledger_gate_closed` (ERROR, `status`: behind, ahead, diverged, tampered or
+  unavailable), `erasure_ledger_gate_opened`, and `background_task_deferred` (WARNING, a
+  worker skipping a task while the gate is closed; the task name is in the context).
+  Audit: `audit.details_expired`, `audit.legacy_minimised`, `lead.corrected`,
+  `opportunity.customer_corrected`, `user.pseudonymised`, `privacy.export_requested`,
+  `privacy.export_downloaded`, `privacy.export_expired`, `privacy.legal_hold_placed`,
+  `privacy.legal_hold_released`, `privacy.erasures_replayed`,
+  `pipeline.field_values_deletion_requested`, `pipeline.field_values_deleted`,
+  `attachment.metadata_removed`.
 - `LOG_FORMAT=console` gives a human-readable variant for local development.
 
 ## Correlation end to end (built)

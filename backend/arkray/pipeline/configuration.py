@@ -50,8 +50,8 @@ from arkray.identity.policy import Capability, has_capability
 from arkray.identity.selectors import lock_assignable_user
 from arkray.identity.workspaces import authorize_write
 
+from . import field_values, selectors, validation
 from . import models as m
-from . import selectors, validation
 
 AUDIT_CREATED = "pipeline.created"
 AUDIT_RENAMED = "pipeline.renamed"
@@ -500,11 +500,13 @@ def replace_fields(
     pipeline_id: UUID,
     version: int,
     fields: Sequence[Mapping[str, Any]],
+    delete_removed_values: bool = False,
 ) -> m.Pipeline:
     """Make the pipeline's active custom fields exactly `fields`, in that order. Existing
     fields (by id) keep their type; their name, required flag and choices may change
     (existing choices by id, new ones added). Fields left out are archived: their values stay
-    on the opportunities, hidden. Never changes the database schema."""
+    on the opportunities, hidden, unless `delete_removed_values` (then they are deleted by a
+    job: pipeline.field_values). Never changes the database schema."""
     specs = validation.clean_field_specs(fields)
     with transaction.atomic():
         # FOR NO KEY UPDATE conflicts with the FOR SHARE writers of custom values take: no
@@ -570,4 +572,7 @@ def replace_fields(
             changed=changed,
             archived=[str(field.pk) for field in removed],
         )
+        if delete_removed_values:  # the job records it in the erasure ledger
+            for field in removed:
+                field_values.request_for(actor.pk, field, scope)
     return selectors.visible_pipeline(scope, pipeline_id)

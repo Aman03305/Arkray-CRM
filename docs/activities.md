@@ -156,6 +156,11 @@ Files on notes ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.
 - **Delete** (`DELETE …/attachments/{id}`): hidden at once (`deleted_at`, `deleted_by`,
   `attachment.deleted`), the object removed by a job and, failing that, the hourly
   housekeeping (`activities.housekeeping`); idempotent (a missing object counts as removed).
+  Once the object is gone the file's **name and content hash go too** (the name becomes
+  "removed"; type, size and who/when stay as evidence), likewise for a blocked file and an
+  upload that never finished, and the purge is recorded in the erasure ledger. A legal hold
+  on the lead defers the purge; `ATTACHMENT_S3_PURGE_VERSIONS` removes a versioned bucket's
+  earlier versions too (privacy remediation; [privacy.md](privacy.md#attachments)).
 - **Not indexed** for search or Ask Arkray: file contents never reach a language model.
 - **Erasure** (`erase_lead`): the files of the lead's notes are deleted, names and content
   hashes blanked, objects queued for removal. An upload still being written when the lead is

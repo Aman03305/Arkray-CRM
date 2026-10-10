@@ -29,6 +29,9 @@ class Capability(StrEnum):
     # Start a time-limited, audited support session in one user's CRM (never with their
     # password; docs/admin-user-workspace.md#support-sessions).
     SUPPORT_ACCESS = "support.access"
+    # Privacy requests: export a person's data, pseudonymise a former staff member
+    # (docs/privacy.md; audited, never inside a support session).
+    PRIVACY_MANAGE = "privacy.manage"
 
 
 ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = {
@@ -44,6 +47,7 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = {
             Capability.AUDIT_VIEW,
             Capability.AI_QUERY,
             Capability.SUPPORT_ACCESS,
+            Capability.PRIVACY_MANAGE,
         }
     ),
     Role.SALES_USER: frozenset({Capability.CRM_ACCESS_OWN, Capability.AI_QUERY}),

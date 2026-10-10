@@ -113,6 +113,18 @@ describe("SecurityActivity", () => {
     expect(screen.queryByRole("region", { name: "Security activity" })).not.toBeInTheDocument();
     expect(api.callsTo("GET", "/api/v1/admin/security-events")).toHaveLength(0);
   });
+
+  it("leads administrators who handle privacy requests to their data requests", async () => {
+    mockApi({ [EVENTS]: page([]) });
+    const { unmount } = renderWithProviders(<AdminHome />, { viewer: adminViewer });
+    const privacy = screen.getByRole("region", { name: "Privacy" });
+    expect(within(privacy).getByRole("link", { name: "Data requests" })).toHaveAttribute("href", "/admin/data-requests");
+    unmount();
+
+    mockApi({ [EVENTS]: page([]) });
+    renderWithProviders(<AdminHome />, { viewer: makeViewer({ capabilities: ["crm.access_own", "crm.view_all"] }) });
+    expect(screen.queryByRole("region", { name: "Privacy" })).not.toBeInTheDocument();
+  });
 });
 
 describe("generatePassword", () => {

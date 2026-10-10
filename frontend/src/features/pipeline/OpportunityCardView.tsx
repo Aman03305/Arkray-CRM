@@ -65,7 +65,8 @@ export function OpportunityCardView({ card, workspace, stages, showOwner, canWri
             </Link>
           </h3>
           <p className="mt-0.5 truncate text-xs text-slate-600" title={card.account_name}>
-            {card.account_name || <CustomerName lead={card.lead} />}
+            {card.account_name ||
+              (card.customer_restricted ? <span className="italic text-slate-500">Customer details hidden</span> : <CustomerName lead={card.lead} />)}
           </p>
         </div>
         {actions.length ? (

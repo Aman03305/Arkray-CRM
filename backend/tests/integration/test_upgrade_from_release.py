@@ -29,6 +29,7 @@ from tests.integration.migration_states import (
     ADR_0027,
     ADR_0028,
     ENHANCEMENTS,
+    NEW_SINCE_RELEASE,
     RELEASE_CANDIDATE,
     build,
     executor,
@@ -474,7 +475,7 @@ def test_the_pinned_release_is_a_state_the_migrations_can_be_in():
     """Each app at the pinned migration needs no later migration of any app."""
     graph = executor().loader.graph
     pinned = dict(RELEASE_CANDIDATE)
-    assert set(pinned) == {app for app, _ in graph.leaf_nodes()}
+    assert set(pinned) | NEW_SINCE_RELEASE == {app for app, _ in graph.leaf_nodes()}
     for state in (RELEASE_CANDIDATE, ENHANCEMENTS, ADR_0027, ADR_0028):
         needed = {node for target in state for node in graph.forwards_plan(target)}
         for app, name in state:

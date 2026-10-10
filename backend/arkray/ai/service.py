@@ -37,6 +37,7 @@ from django.utils import timezone
 
 from arkray.activities import selectors as activity_selectors
 from arkray.audit import services as audit
+from arkray.core import holds
 from arkray.core.access import AccessScope, ScopeKind
 from arkray.core.business_time import business_date
 from arkray.core.context import current_correlation_id
@@ -58,7 +59,7 @@ from arkray.leads import selectors as lead_selectors
 from arkray.pipeline import selectors as pipeline_selectors
 
 from . import answers, breaker, prompts, router, tools
-from .formatting import day
+from .formatting import day, user_text
 from .llm import Completion, ProviderError, get_provider
 from .models import QUESTION_MAX_LENGTH, Conversation, Question, QuestionStatus, WorkspaceKind
 from .sources import live_documents
@@ -719,9 +720,9 @@ def _history(question: Question, scope: AccessScope) -> str:
             continue  # it used records the asker can no longer see: never replayed
         if changed_citations(turn.answer, scope, current=current):
             continue  # it quoted text its record no longer holds: never replayed
-        reply = answers.plain_text(turn.answer)
+        reply = answers.plain_text(turn.answer)  # masked
         if reply:
-            turns.append(f"Question: {turn.text}\nAnswer: {reply}")
+            turns.append(f"Question: {user_text(turn.text)}\nAnswer: {reply}")
     return EARLIER_TURNS.format(turns="\n\n".join(turns)) if turns else ""
 
 
@@ -757,7 +758,9 @@ def answer_with_model(
             "content": [
                 {"type": "text", "text": context},
                 *([{"type": "text", "text": history}] if history else []),
-                {"type": "text", "text": question.text},
+                # The question as typed is kept for the asker; the model gets it without
+                # links, email addresses or phone numbers (privacy remediation P2-3).
+                {"type": "text", "text": user_text(question.text)},
             ],
         },
     ]
@@ -1062,13 +1065,28 @@ def status() -> dict[str, Any]:
 
 
 def housekeeping(now: datetime | None = None) -> dict[str, int]:
-    """Hourly: fail questions stuck past their deadline; delete conversations idle longer
-    than the retention period (with their questions and answers)."""
+    """Hourly: fail questions stuck past their deadline; delete every question (and its
+    answer) finished longer ago than the retention period, even in a conversation still in
+    use, so no answer outlives AI_CONVERSATION_RETENTION_DAYS (privacy remediation: a
+    conversation's latest question used to keep all its earlier ones); and delete
+    conversations idle that long (with what is left in them)."""
     now = now or timezone.now()
     expired = Question.objects.filter(status=QuestionStatus.PENDING, expires_at__lte=now).update(
         status=QuestionStatus.FAILED, error_code="timeout", finished_at=now
     )
     cutoff = now - timedelta(days=settings.AI_CONVERSATION_RETENTION_DAYS)
-    _, per_model = Conversation.objects.filter(updated_at__lt=cutoff).delete()
+    # A user under a legal hold keeps their conversations until it is released (backend
+    # review P3; core.holds).
+    held = list(holds.held_users())
+    old_questions, _ = (
+        Question.objects.filter(finished_at__lt=cutoff).exclude(actor_id__in=held).delete()
+    )
+    _, per_model = (
+        Conversation.objects.filter(updated_at__lt=cutoff).exclude(actor_id__in=held).delete()
+    )
     deleted = per_model.get(Conversation._meta.label, 0)
-    return {"expired_questions": expired, "deleted_conversations": deleted}
+    return {
+        "expired_questions": expired,
+        "deleted_questions": old_questions,
+        "deleted_conversations": deleted,
+    }

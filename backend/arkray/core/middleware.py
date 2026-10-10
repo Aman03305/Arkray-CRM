@@ -13,7 +13,7 @@ from django.conf import settings
 from django.http import HttpRequest, HttpResponse
 from django.utils.functional import SimpleLazyObject, empty
 
-from .context import ExecutionContext, bind_context, reset_context
+from .context import ExecutionContext, bind_context, get_context, reset_context
 
 logger = logging.getLogger("arkray.access")
 
@@ -116,6 +116,8 @@ class RequestContextMiddleware:
             "status": status,
             "duration_ms": round((time.perf_counter() - started) * 1000, 1),
             "user_id": cls._user_id(request),
+            # The one line per request that carries the client address (core.logging).
+            "client_ip": context.client_ip if (context := get_context()) else None,
         }
         client_request_id = getattr(request, "client_request_id", None)
         if client_request_id:

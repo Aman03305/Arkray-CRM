@@ -11,6 +11,7 @@ const ADMIN_CAPABILITIES: Capability[] = [
   "crm.assign_any",
   "crm.manage_any",
   "crm.view_all",
+  "privacy.manage",
   "support.access",
   "users.manage",
   "workspace.view_any",

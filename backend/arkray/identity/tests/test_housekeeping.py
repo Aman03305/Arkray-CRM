@@ -28,6 +28,7 @@ def test_purges_old_throttle_evidence_and_expired_sessions():
         "redacted": 0,
         "access_windows": 0,
         "support_sessions_expired": 0,
+        "redacted_reasons": 0,
     }
     assert AuthThrottleEvent.objects.count() == 1
     assert list(Session.objects.values_list("session_key", flat=True)) == [live.session_key]

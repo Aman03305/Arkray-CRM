@@ -73,6 +73,7 @@ function results(mark: string, overrides: Partial<SearchResults> = {}): SearchRe
           customer_name: `${mark} Customer`,
           lead: leadRef(`${mark} Clinic`),
           owner: person("Rahul Sharma"),
+          customer_restricted: false,
         },
       ],
       has_more: false,

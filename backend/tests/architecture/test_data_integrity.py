@@ -37,6 +37,8 @@ def test_business_entities_use_uuid_primary_keys():
         "TimelineEntry",
         "KnowledgeChunk",  # derived index rows, never addressed by id (Phase 8)
         "WorkspaceAccessWindow",  # audit bookkeeping, never addressed by id (Phase 9)
+        "AuditDetail",  # keyed by its audit event (privacy remediation)
+        "LedgerState",  # one row: how far the database applied the erasure ledger
         # append-only price history; the API shows it through an opaque id
         "NegotiationPrice",
     }

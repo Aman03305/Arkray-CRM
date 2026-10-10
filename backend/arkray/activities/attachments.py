@@ -38,7 +38,7 @@ from django.db.models import Q, QuerySet
 from django.utils import timezone
 
 from arkray.audit import services as audit
-from arkray.core import outbox
+from arkray.core import holds, ledger, outbox
 from arkray.core.access import AccessScope
 from arkray.core.errors import (
     BusinessRuleViolation,
@@ -82,6 +82,11 @@ GONE = "This file is no longer available. Ask an administrator."
 # How long an upload may stay unfinished before housekeeping gives up on it.
 ABANDONED_AFTER = timedelta(hours=1)
 ERASED_SHA256 = "0" * 64
+# What a file removed for good is called afterwards (privacy remediation P2-9): its name
+# and its content's fingerprint go with its object; the row keeps what isn't personal (type,
+# size bucket's size, who uploaded and deleted it, when) as the audit trail's evidence.
+REMOVED_NAME = "removed"
+AUDIT_METADATA_REMOVED = "attachment.metadata_removed"
 # Files stored while no scanner was configured, queued for scanning per housekeeping run once
 # one is (until then they are not downloadable: only clean files are, with a scanner).
 SCAN_BACKLOG_BATCH = 500
@@ -436,9 +441,31 @@ def delete(*, actor: User, scope: AccessScope, attachment_id: UUID) -> None:
 
 
 # --- background work (outbox handlers, housekeeping, erasure) ----------------------------------
-def purge(attachment_id: UUID) -> bool:
+def removed_for_good() -> Q:
+    """Files whose name and fingerprint go with their object: deleted (by a person or an
+    erasure), blocked by the scan, or an upload that never finished. Not a stored file that
+    reconciliation found missing (state failed, but it had been stored): its hash is how a
+    bucket restore proves the object it brings back (docs/runbooks.md#attachment-object-missing)."""
+    return (
+        Q(deleted_at__isnull=False)
+        | Q(scan_status=ScanStatus.REJECTED)
+        | Q(state=AttachmentState.FAILED, stored_at__isnull=True)
+    )
+
+
+def _held_notes() -> Q | None:
+    """Notes whose lead is under a legal hold: their files are never removed meanwhile."""
+    leads = holds.held_leads()
+    return Q(note__lead_id__in=leads) if leads else None  # every activity has its lead
+
+
+def purge(attachment_id: UUID, *, replaying: bool = False) -> bool:
     """Remove the object of a deleted, failed or rejected file from storage (idempotent:
-    a missing object counts as removed). StorageUnavailable propagates: the job retries."""
+    a missing object counts as removed), then its name and content hash (REMOVED_NAME):
+    nothing left identifies it. Deferred while a legal hold covers the note's lead.
+    StorageUnavailable propagates: the job retries, and nothing is forgotten before the
+    object is really gone. `replaying`: the erasure ledger re-applied after a restore
+    (privacy.replay): already decided, so neither deferred nor recorded again."""
     attachment = Attachment.objects.filter(pk=attachment_id, purged_at__isnull=True).first()
     if attachment is None:
         return False
@@ -451,11 +478,49 @@ def purge(attachment_id: UUID) -> bool:
         # An upload still being written: its object may not exist yet. _finish (or
         # housekeeping, giving up on it) queues the purge again once it does.
         return False
+    held = None if replaying else _held_notes()
+    if held is not None and Attachment.objects.filter(held, pk=attachment.pk).exists():
+        return False  # kept, object and all, until the hold is released (housekeeping)
     storage.delete(attachment.storage_key)
-    Attachment.objects.filter(pk=attachment.pk, purged_at__isnull=True).update(
-        purged_at=timezone.now()
-    )
+    if settings.ATTACHMENT_S3_PURGE_VERSIONS:
+        storage.delete_versions(attachment.storage_key)
+    forget = Attachment.objects.filter(removed_for_good(), pk=attachment.pk).exists()
+    with transaction.atomic():
+        updated = Attachment.objects.filter(pk=attachment.pk, purged_at__isnull=True).update(
+            purged_at=timezone.now(),
+            **({"original_name": REMOVED_NAME, "sha256": ERASED_SHA256} if forget else {}),
+        )
+        if updated and attachment.deleted_at is not None and not replaying:
+            # A file someone deleted (or an erasure did): a restored backup must not show it
+            # again, name and all (core.ledger; privacy.replay deletes it again).
+            ledger.append("attachment_deleted", attachment.pk)
     return True
+
+
+def forget_purged(*, actor_id: UUID | None, dry_run: bool = True) -> int:
+    """Files removed for good before names and hashes went with their objects (`manage.py
+    forget_attachment_names`): their name and hash removed now, except under a legal hold.
+    Audited (a count; never a name). Idempotent."""
+    rows = (
+        Attachment.objects.filter(purged_at__isnull=False)
+        .filter(removed_for_good())
+        .exclude(sha256=ERASED_SHA256)
+    )
+    held = _held_notes()
+    if held is not None:
+        rows = rows.exclude(held)
+    if dry_run:
+        return rows.count()
+    with transaction.atomic():
+        count = rows.update(original_name=REMOVED_NAME, sha256=ERASED_SHA256)
+        if count:
+            audit.record(
+                AUDIT_METADATA_REMOVED,
+                actor_id=actor_id,
+                target_type="attachment",
+                metadata={"count": count},
+            )
+    return count
 
 
 def scan(attachment_id: UUID) -> str | None:
@@ -507,6 +572,9 @@ def housekeeping(now: datetime) -> dict[str, int]:
         | Q(state=AttachmentState.FAILED)
         | Q(scan_status=ScanStatus.REJECTED)
     )
+    held = _held_notes()
+    if held is not None:
+        leftovers = leftovers.exclude(held)
     for attachment_id in leftovers.order_by("created_at").values_list("pk", flat=True)[:1000]:
         try:
             purged += purge(attachment_id)

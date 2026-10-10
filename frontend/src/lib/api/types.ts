@@ -20,6 +20,10 @@ export type UserRef = Schemas["UserRef"];
 // The canonical customer record. No Leads module (ADR-0027): a read-only lead page, reached
 // from the dashboard, search and its opportunity (ADR-0028).
 export type Lead = Schemas["Lead"];
+// Correcting a customer's details on request: the lead and every deal copy still showing the
+// old value (pipeline.corrections); amounts, prices and history never change.
+export type CustomerCorrectionRequest = Schemas["CustomerCorrectionRequest"];
+export type CustomerCorrectionResult = Schemas["CustomerCorrectionResult"];
 export type LeadDuplicate = Schemas["LeadDuplicate"];
 export type LeadDuplicateList = Schemas["LeadDuplicateList"];
 export type Assignee = Schemas["Assignee"];
@@ -68,6 +72,7 @@ export type StagesReplaceRequest = Schemas["StagesReplaceRequest"];
 export type FieldInput = Schemas["FieldInputRequest"];
 export type FieldOptionInput = Schemas["FieldOptionInputRequest"];
 export type FieldsReplaceRequest = Schemas["FieldsReplaceRequest"];
+export type FieldValuesDeleteRequest = Schemas["FieldValuesDeleteRequest"];
 export type NegotiationPriceEntry = Schemas["NegotiationPrice"];
 export type NegotiationPricePage = Schemas["NegotiationPricePage"];
 export type NegotiatedPriceRequest = Schemas["NegotiatedPriceInputRequest"];
@@ -118,3 +123,12 @@ export type AskConversation = Schemas["Conversation"];
 export type AskConversationSummary = Schemas["ConversationSummary"];
 export type AskRecordKind = Schemas["AskRecordKindEnum"];
 export type AskRequest = Schemas["AskInputRequest"];
+
+// --- Privacy requests (administrators, privacy.manage) ------------------------------------------
+export type DataExport = Schemas["DataExport"];
+export type DataExportList = Schemas["DataExportList"];
+export type DataExportStatus = Schemas["DataExportStatusEnum"];
+export type DataSubjectType = Schemas["SubjectTypeEnum"];
+export type ExportRequest = Schemas["ExportRequestRequest"];
+export type PseudonymiseRequest = Schemas["PseudonymiseRequest"];
+export type PseudonymiseResult = Schemas["PseudonymiseResult"];

@@ -36,7 +36,7 @@ import { pipelineApi, pipelineKeys } from "./api";
 import { formatCustomValue } from "./CustomFields";
 import { isNegotiation, pipelinePermissions, useOpportunityWriteSync, usePipeline } from "./hooks";
 import { OpportunityDrawer } from "./OpportunityDrawer";
-import { Amount, CloseDate, OutcomeBadge, StageName } from "./PipelineBits";
+import { Amount, CloseDate, OutcomeBadge, RestrictedCustomerNote, StageName } from "./PipelineBits";
 import { TransitionDialog } from "./TransitionDialog";
 import { moveErrorMessage, type MoveProblem, useMoveOpportunity } from "./useMoveOpportunity";
 
@@ -190,6 +190,8 @@ export function OpportunityDetailView({
   const inNegotiation = open && isNegotiation(opportunity.stage);
   const fields = pipeline.data?.custom_fields ?? [];
   const stored = (opportunity.custom_fields ?? {}) as Record<string, unknown>;
+  // A closed deal whose customer moved to someone else: its customer's details aren't sent.
+  const restricted = opportunity.customer_restricted;
 
   const confirmMove = (target: Stage, lostReason: string, terms?: AgreedTerms) => {
     setMoveError(null);
@@ -340,10 +342,11 @@ export function OpportunityDetailView({
                 />
               </Section>
               <Section title="Customer">
+                {restricted ? <RestrictedCustomerNote className="mb-3" /> : null}
                 <Fields
                   items={[
                     ["Account", opportunity.account_name],
-                    ["Customer", opportunity.customer_name],
+                    ...(restricted ? [] : ([["Customer", opportunity.customer_name]] as [string, ReactNode][])),
                     // Its lead (the customer record made with it): read-only, one click away.
                     // Not linked when it has moved to someone else's workspace.
                     [
@@ -356,23 +359,28 @@ export function OpportunityDetailView({
                         </Link>
                       ),
                     ],
-                    [
-                      "Phone",
-                      opportunity.contact_phone ? (
-                        <a key="t" href={telHref(opportunity.contact_phone)} className="text-brand-700 hover:underline">
-                          {opportunity.contact_phone}
-                        </a>
-                      ) : null,
-                    ],
-                    [
-                      "Email",
-                      opportunity.contact_email ? (
-                        <a key="e" href={mailtoHref(opportunity.contact_email)} className="break-all text-brand-700 hover:underline">
-                          {opportunity.contact_email}
-                        </a>
-                      ) : null,
-                    ],
-                    ["Address", opportunity.address ? <span key="a" className="whitespace-pre-line">{opportunity.address}</span> : null],
+                    // Hidden from this viewer, not missing: the note above says so once.
+                    ...(restricted
+                      ? []
+                      : ([
+                          [
+                            "Phone",
+                            opportunity.contact_phone ? (
+                              <a key="t" href={telHref(opportunity.contact_phone)} className="text-brand-700 hover:underline">
+                                {opportunity.contact_phone}
+                              </a>
+                            ) : null,
+                          ],
+                          [
+                            "Email",
+                            opportunity.contact_email ? (
+                              <a key="e" href={mailtoHref(opportunity.contact_email)} className="break-all text-brand-700 hover:underline">
+                                {opportunity.contact_email}
+                              </a>
+                            ) : null,
+                          ],
+                          ["Address", opportunity.address ? <span key="a" className="whitespace-pre-line">{opportunity.address}</span> : null],
+                        ] as [string, ReactNode][])),
                   ]}
                 />
               </Section>
@@ -387,7 +395,22 @@ export function OpportunityDetailView({
               </Section>
               {fields.length ? (
                 <Section title="More details">
-                  <Fields items={fields.map((field) => [field.name, formatCustomValue(field, stored[field.id])] as [string, ReactNode])} />
+                  <Fields
+                    items={fields.map(
+                      (field) =>
+                        [
+                          field.name,
+                          // Free-text values may describe the customer: not sent with a restricted deal.
+                          restricted && (field.type === "text" || field.type === "long_text") ? (
+                            <span key={field.id} className="italic text-slate-500">
+                              Hidden
+                            </span>
+                          ) : (
+                            formatCustomValue(field, stored[field.id])
+                          ),
+                        ] as [string, ReactNode],
+                    )}
+                  />
                 </Section>
               ) : null}
               {opportunity.description ? (

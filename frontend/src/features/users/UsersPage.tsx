@@ -8,6 +8,8 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { ExportDataDialog } from "@/features/privacy/ExportDataDialog";
+import { PseudonymiseDialog } from "@/features/privacy/PseudonymiseDialog";
 import { workspaceKeys } from "@/features/workspace/api";
 import { describeError, isApiError } from "@/lib/api/errors";
 import type { AdminUser } from "@/lib/api/types";
@@ -41,6 +43,7 @@ type OpenDialog =
   | { kind: "change-email"; user: AdminUser }
   | { kind: "deactivate" | "activate" | "resend"; user: AdminUser }
   | { kind: "set-password" | "support"; user: AdminUser }
+  | { kind: "export" | "pseudonymise"; user: AdminUser }
   | null;
 
 function useDebounced<T>(value: T, delayMs: number): T {
@@ -271,6 +274,10 @@ export function UsersPage() {
         <SetPasswordDialog user={dialog.user} onClose={() => setDialog(null)} onDone={onPasswordSet} />
       ) : null}
       {dialog?.kind === "support" ? <AccessAsUserDialog user={dialog.user} onClose={() => setDialog(null)} /> : null}
+      {dialog?.kind === "export" ? (
+        <ExportDataDialog subject={{ type: "user", id: dialog.user.id, name: dialog.user.full_name }} onClose={() => setDialog(null)} />
+      ) : null}
+      {dialog?.kind === "pseudonymise" ? <PseudonymiseDialog user={dialog.user} onClose={() => setDialog(null)} /> : null}
       {details && dialog === null ? (
         <UserDetailsDrawer
           user={details}
@@ -286,6 +293,14 @@ export function UsersPage() {
           onAccess={(user) => {
             setDetailsNotice(null);
             setDialog({ kind: "support", user });
+          }}
+          onExport={(user) => {
+            setDetailsNotice(null);
+            setDialog({ kind: "export", user });
+          }}
+          onPseudonymise={(user) => {
+            setDetailsNotice(null);
+            setDialog({ kind: "pseudonymise", user });
           }}
         />
       ) : null}

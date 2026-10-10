@@ -29,7 +29,7 @@ from django.db.migrations.loader import MigrationLoader
 from arkray.core.migrations._reverse_guard import RefuseReverse
 from tests.integration.migration_states import RELEASE_CANDIDATE
 
-OURS = {"core", "identity", "audit", "leads", "pipeline", "activities", "ai"}
+OURS = {"core", "identity", "audit", "leads", "pipeline", "activities", "ai", "privacy"}
 
 TABLE_WIDE = [
     "activities.0003_backfill_timeline",
@@ -58,21 +58,21 @@ REFUSE_REVERSE = {
     "activities.0010_note_edits_and_attachments",
     "audit.0003_support_sessions",
     "audit.0004_support_session_index",
+    "audit.0005_audit_details",  # privacy remediation
+    "core.0006_privacy_remediation",  # privacy remediation
     "identity.0004_support_sessions",
     "pipeline.0006_ownership_negotiation_fields",
     "pipeline.0007_search_customer_names",
     "pipeline.0008_opportunity_expected_cpt",
     "pipeline.0009_agreed_cpt",
+    "privacy.0001_data_exports",  # privacy remediation
 }
 # Released migrations whose reverse deletes data and that a backwards plan reaches without a
 # refusal first: the data is derived or short-lived. ai.0001 (`migrate ai zero`): the notes'
 # search index, rebuilt by `ai_reindex`, and Ask Arkray conversations, deleted after 30 days
-# anyway. core.0003/0004 (`migrate core 0002`/`0003`): the outbox's claim tokens and the
-# idempotency records, which expire within a day.
+# anyway. (core.0003/0004 were reachable until core.0006, which refuses first.)
 REACHABLE_WITHOUT_REFUSAL = {
     "ai.0001_initial",
-    "core.0003_outbox_claim_tokens",
-    "core.0004_idempotency_records",
 }
 DELETES = re.compile(r"\b(DROP\s+(TABLE|COLUMN)|DELETE|TRUNCATE)\b", re.IGNORECASE)
 
@@ -156,7 +156,7 @@ def test_every_concurrent_index_migration_is_held_to_those_rules():
     found = {
         f"{app}.{name}"
         for (app, name), migration in MigrationLoader(None).disk_migrations.items()
-        if app in {"core", "identity", "audit", "leads", "pipeline", "activities", "ai"}
+        if app in OURS
         and any(
             isinstance(operation, AddIndexConcurrently | RemoveIndexConcurrently)
             for operation in migration.operations

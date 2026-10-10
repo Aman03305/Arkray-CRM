@@ -30,6 +30,7 @@ from typing import Any
 
 from arkray.core.text import without_refused
 
+from .formatting import user_text
 from .tools import Citation, Fact, RecordRef, ToolContext
 
 # Case-insensitive: "[[Lead:...]]" is a reference too (shown if visible, else dropped), never
@@ -302,7 +303,11 @@ def to_blocks(
 
 def plain_text(answer: dict[str, Any]) -> str:
     """A stored answer's narrative as plain text, records by their labels (the conversation
-    history sent with the next question: the model's earlier words, never raw records)."""
+    history sent with the next question: the model's earlier words, never raw records).
+
+    Masked like every user-written string that may reach the model (formatting.user_text):
+    a cited label is the record's title as typed ("Call Priya +91 ...", a meeting link with
+    its passcode), stored unmasked for the asker's own screen (privacy remediation P2-3)."""
     labels = {source["ref"]: source["label"] for source in answer.get("sources", [])}
     lines = []
     for block in answer.get("blocks", []):
@@ -311,7 +316,7 @@ def plain_text(answer: dict[str, Any]) -> str:
             for part in block.get("parts", [])
         )
         lines.append(f"- {text}" if block.get("type") == "bullet" else text)
-    return "\n".join(lines)
+    return user_text("\n".join(lines))
 
 
 # --- the answer ----------------------------------------------------------------------------------

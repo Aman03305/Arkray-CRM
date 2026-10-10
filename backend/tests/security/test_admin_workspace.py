@@ -61,6 +61,8 @@ RECORD_PARAMS = (
     "<uuid:conversation_id>",
     "<uuid:pipeline_id>",
     "<uuid:attachment_id>",
+    "<uuid:field_id>",
+    "<uuid:export_id>",
 )
 WORKSPACE_ROUTES = [
     *sorted(
@@ -334,6 +336,7 @@ def substitute(route: str, workspace: str, records: dict[str, Any]) -> str:
     path = path.replace("<uuid:opportunity_id>", str(records["opportunity"].pk))
     path = path.replace("<uuid:pipeline_id>", str(records["pipeline"].pk))
     path = path.replace("<uuid:attachment_id>", str(records["attachment"].pk))
+    path = path.replace("<uuid:field_id>", MISSING_RECORD)
     if "/attachments" in route and "<uuid:activity_id>" in route:
         return "/" + path.replace("<uuid:activity_id>", str(records["note"].pk))
     return "/" + path.replace("<uuid:activity_id>", str(records["task"].pk))

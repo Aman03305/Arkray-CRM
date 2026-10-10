@@ -16,7 +16,8 @@ import { generatePassword } from "./password";
 
 type Mode = { kind: "create" } | { kind: "edit"; user: AdminUser; isSelf: boolean };
 
-/** How a new user gets in: a password the administrator sets now, or an emailed invitation. */
+/** How a new user gets in: an emailed invitation (the default), or a password the
+ * administrator sets now. */
 type Activation = "password" | "invite";
 
 const MIN_PASSWORD_LENGTH = 12;
@@ -46,9 +47,10 @@ const LINK_BUTTON = "rounded-sm text-sm font-medium text-brand-700 hover:underli
 
 /**
  * Create a user, or edit names and role (email changes are a separate, explicit operation).
- * A new user gets an initial password from the administrator (they must replace it when they
- * first sign in) or, if preferred, an emailed invitation to choose their own. The password
- * lives only in this form: it is cleared once the user exists and is never shown again.
+ * A new user gets an emailed invitation to choose their own password (the default: no one
+ * else ever knows it) or, if preferred, an initial password from the administrator (they
+ * must replace it when they first sign in). That password lives only in this form: it is
+ * cleared once the user exists and is never shown again.
  */
 export function UserFormDialog({ mode, onClose, onSaved }: {
   mode: Mode;
@@ -56,7 +58,7 @@ export function UserFormDialog({ mode, onClose, onSaved }: {
   onSaved: (user: AdminUser, message: string) => void;
 }) {
   const [draft, setDraft] = useState<Draft>(() => initialDraft(mode));
-  const [activation, setActivation] = useState<Activation>("password");
+  const [activation, setActivation] = useState<Activation>("invite");
   const [password, setPassword] = useState("");
   const [generated, setGenerated] = useState(false);
   const [clientErrors, setClientErrors] = useState<Record<string, string[]>>({});

@@ -16,6 +16,11 @@ workspace_urlpatterns = [
     path(PIPELINE, views.WorkspacePipelineView.as_view(), name="workspace-pipeline"),
     path(f"{PIPELINE}/stages", views.PipelineStagesView.as_view(), name="pipeline-stages"),
     path(f"{PIPELINE}/fields", views.PipelineFieldsView.as_view(), name="pipeline-fields"),
+    path(
+        f"{PIPELINE}/fields/<uuid:field_id>/delete-values",
+        views.PipelineFieldValuesDeleteView.as_view(),
+        name="pipeline-field-values-delete",
+    ),
     path(f"{PIPELINE}/archive", views.PipelineArchiveView.as_view(), name="pipeline-archive"),
     path(f"{PIPELINE}/restore", views.PipelineRestoreView.as_view(), name="pipeline-restore"),
     path("pipeline-board", views.BoardView.as_view(), name="pipeline-board"),
@@ -39,6 +44,11 @@ workspace_urlpatterns = [
         name="opportunity-negotiated-prices",
     ),
     path("leads/<uuid:lead_id>/convert", views.LeadConvertView.as_view(), name="lead-convert"),
+    path(
+        "leads/<uuid:lead_id>/correction",
+        views.CustomerCorrectionView.as_view(),
+        name="lead-correction",
+    ),
 ]
 
 config_urlpatterns = [

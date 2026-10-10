@@ -4,10 +4,13 @@
 # self-signed certificate here), secure __Host- cookies and HSTS, the two database roles
 # (migrations as the owner, everything else as an application role the web server and
 # workers check at start), Redis with a password, no insecure opt-in, read-only containers,
-# and only the proxy published.
+# and only the proxy published. Every backend hop uses verified TLS (privacy remediation
+# P2-1): PostgreSQL with sslmode=verify-full, the broker and a separate, non-persistent cache
+# over rediss:// with certificate checks, SMTP with STARTTLS, all against a private CA the
+# `backend-tls` job makes (each server reads only its own key; clients get only the CA).
 #
 #   export DJANGO_SECRET_KEY=... POSTGRES_PASSWORD=... ARKRAY_OWNER_PASSWORD=... \
-#          ARKRAY_APP_PASSWORD=... REDIS_PASSWORD=... METRICS_TOKEN=...
+#          ARKRAY_APP_PASSWORD=... REDIS_PASSWORD=... METRICS_TOKEN=... ERASURE_LEDGER_KEY=...
 #   docker compose -p arkray-prod -f docker-compose.yml -f infrastructure/compose.production.yml \
 #       --profile app up -d --build
 #   open https://localhost:8443   (Mailpit's inbox: http://localhost:58125)
@@ -29,9 +32,16 @@ x-production-env: &production-env
   TRUSTED_PROXY_COUNT: "1"
   FORWARDED_ALLOW_IPS: "*"
   TRUST_INCOMING_REQUEST_ID: "true"
-  DATABASE_URL: postgres://arkray_app:${ARKRAY_APP_PASSWORD:?set ARKRAY_APP_PASSWORD}@postgres:5432/arkray
-  CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
-  REDIS_CACHE_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/1
+  DATABASE_URL: "postgres://arkray_app:${ARKRAY_APP_PASSWORD:?set ARKRAY_APP_PASSWORD}@postgres:5432/arkray?sslmode=verify-full&sslrootcert=/tls/ca.crt"
+  CELERY_BROKER_URL: "rediss://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0?ssl_cert_reqs=required&ssl_ca_certs=/tls/ca.crt"
+  # The cache on an instance of its own, never written to disk: rate-limit keys hold client
+  # addresses (privacy remediation P3).
+  REDIS_CACHE_URL: "rediss://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis-cache:6379/0?ssl_cert_reqs=required&ssl_ca_certs=/tls/ca.crt"
+  EMAIL_URL: smtp+tls://mailpit:1025
+  EMAIL_TLS_CA_FILE: /tls/ca.crt
+  ERASURE_LEDGER_URL: file:///var/lib/arkray/ledger
+  ERASURE_LEDGER_KEY: ${ERASURE_LEDGER_KEY:?set ERASURE_LEDGER_KEY (at least 32 characters)}
+  EXPORT_ROOT: /var/lib/arkray/exports
   DB_REQUIRE_RESTRICTED_ROLE: "true"
   # Pinned, not interpolated: Compose reads the repository's .env for this project too, and
   # a developer's AI_ENABLED=false there turned Ask Arkray off on a backend recreated alone
@@ -55,32 +65,102 @@ services:
       # No default superuser password here (Phase 11 review): any container on the network
       # that knew it could connect as the superuser and rewrite the audit trail.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (the superuser's)}
-    command: ["postgres", "-c", "log_min_error_statement=panic", "-c", "log_error_verbosity=terse", "-c", "shared_preload_libraries=pg_stat_statements"]
+    command: ["postgres", "-c", "log_min_error_statement=panic", "-c", "log_error_verbosity=terse", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "ssl=on", "-c", "ssl_cert_file=/tls/server.crt", "-c", "ssl_key_file=/tls/server.key", "-c", "ssl_min_protocol_version=TLSv1.2"]
+    volumes:
+      - tls-postgres:/tls:ro
+    depends_on:
+      backend-tls:
+        condition: service_completed_successfully
     ports: !reset []
 
   redis:
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
-    command: ["sh", "-c", "exec redis-server --appendonly yes --maxmemory-policy noeviction --requirepass \"$$REDIS_PASSWORD\""]
+    # TLS only (no plain port): the broker's messages and the password never cross in clear.
+    command: ["sh", "-c", "exec redis-server --port 0 --tls-port 6379 --tls-cert-file /tls/server.crt --tls-key-file /tls/server.key --tls-ca-cert-file /tls/ca.crt --tls-auth-clients no --appendonly yes --maxmemory-policy noeviction --requirepass \"$$REDIS_PASSWORD\""]
+    volumes:
+      - tls-redis:/tls:ro
+    depends_on:
+      backend-tls:
+        condition: service_completed_successfully
     healthcheck:
       # The password through the environment, not a command line (`ps`).
-      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli --tls --cacert /tls/ca.crt -h redis ping | grep -q PONG"]
     ports: !reset []
 
+  # The cache (rate limits, breakers, counters): its own instance, nothing persisted
+  # (docs/deployment.md#redis), so the client addresses in rate-limit keys never reach disk.
+  redis-cache:
+    image: redis:7.4-alpine
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    command: ["sh", "-c", "exec redis-server --port 0 --tls-port 6379 --tls-cert-file /tls/server.crt --tls-key-file /tls/server.key --tls-ca-cert-file /tls/ca.crt --tls-auth-clients no --save '' --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass \"$$REDIS_PASSWORD\""]
+    volumes:
+      - tls-redis:/tls:ro
+    depends_on:
+      backend-tls:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli --tls --cacert /tls/ca.crt -h redis-cache ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
   mailpit:
+    environment:
+      # STARTTLS required: invitation and reset links never cross in clear.
+      MP_SMTP_TLS_CERT: /tls/server.crt
+      MP_SMTP_TLS_KEY: /tls/server.key
+      MP_SMTP_REQUIRE_STARTTLS: "true"
+    volumes:
+      - tls-mailpit:/tls:ro
+    depends_on:
+      backend-tls:
+        condition: service_completed_successfully
     ports: !override
       - "127.0.0.1:58125:8025"
+
+  # Once: a private CA and a certificate per backend server (names as the clients dial them),
+  # each server's key in its own volume, the CA certificate alone in the clients' (tls-ca).
+  backend-tls:
+    image: alpine:3.20
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - tls-ca:/out/ca
+      - tls-postgres:/out/postgres
+      - tls-redis:/out/redis
+      - tls-mailpit:/out/mailpit
+      - tls-ca-key:/out/ca-key
+    command: ["sh", "-c", "[ -f /out/ca/ca.crt ] || (apk add --no-cache openssl >/dev/null && cd /out && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 -subj '/CN=Arkray local backend CA' -keyout ca-key/ca.key -out ca/ca.crt && for s in postgres:postgres redis:redis,redis-cache mailpit:mailpit; do n=$${s%%:*}; sans=$$(echo $${s#*:} | sed 's/[^,]*/DNS:&/g'); openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=$$n -keyout $$n/server.key -out $$n/server.csr && printf 'subjectAltName=%s' $$sans > $$n/ext.cnf && openssl x509 -req -in $$n/server.csr -CA ca/ca.crt -CAkey ca-key/ca.key -CAcreateserial -days 30 -extfile $$n/ext.cnf -out $$n/server.crt && cp ca/ca.crt $$n/ca.crt && rm $$n/server.csr $$n/ext.cnf; done && chown 999:999 postgres/server.key && chown 999:1000 redis/server.key && chmod 600 postgres/server.key redis/server.key mailpit/server.key ca-key/ca.key)"]
 
   # Once, as the database superuser: the database, both roles, extensions, R63's logging.
   db-roles:
     profiles: ["app"]
     image: pgvector/pgvector:0.8.6-pg16
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       OWNER_PASSWORD: ${ARKRAY_OWNER_PASSWORD:?set ARKRAY_OWNER_PASSWORD}
       APP_PASSWORD: ${ARKRAY_APP_PASSWORD:?set ARKRAY_APP_PASSWORD}
+      PGSSLMODE: verify-full
+      PGSSLROOTCERT: /tls/ca.crt
     volumes:
       - ./infrastructure/postgres:/deploy:ro
+      - tls-ca:/tls:ro
     # The passwords stay in the environment (roles.sql reads them with \getenv), off the
     # command line.
     command: ["psql", "-h", "postgres", "-U", "arkray", "-d", "postgres", "-v", "database=arkray", "-f", "/deploy/roles.sql"]
@@ -91,7 +171,9 @@ services:
   migrate:
     environment:
       <<: *production-env
-      DATABASE_URL: postgres://arkray_owner:${ARKRAY_OWNER_PASSWORD:?set ARKRAY_OWNER_PASSWORD}@postgres:5432/arkray
+      DATABASE_URL: "postgres://arkray_owner:${ARKRAY_OWNER_PASSWORD:?set ARKRAY_OWNER_PASSWORD}@postgres:5432/arkray?sslmode=verify-full&sslrootcert=/tls/ca.crt"
+    volumes:
+      - tls-ca:/tls:ro
     command: ["sh", "-c", "python manage.py migrate --noinput && python manage.py grant_app_privileges arkray_app"]
     depends_on:
       db-roles:
@@ -100,26 +182,36 @@ services:
   backend:
     environment:
       <<: *production-env
+    volumes:
+      - tls-ca:/tls:ro
     ports: !reset []
 
   worker:
     environment:
       <<: *production-env
       DB_STATEMENT_TIMEOUT_MS: "60000"
+    volumes:
+      - tls-ca:/tls:ro
 
   worker-index:
     environment:
       <<: *production-env
       DB_STATEMENT_TIMEOUT_MS: "60000"
+    volumes:
+      - tls-ca:/tls:ro
 
   worker-ai:
     environment:
       <<: *production-env
       DB_STATEMENT_TIMEOUT_MS: "60000"
+    volumes:
+      - tls-ca:/tls:ro
 
   beat:
     environment:
       <<: *production-env
+    volumes:
+      - tls-ca:/tls:ro
 
   frontend:
     ports: !reset []
@@ -127,6 +219,11 @@ services:
   certs:
     profiles: ["app"]
     image: alpine:3.20
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     volumes:
       - certs:/certs
     # The key readable by its owner only (nginx's master reads it as root).
@@ -135,6 +232,12 @@ services:
   nginx:
     profiles: ["app"]
     image: nginx:1.27-alpine
+    # Rotated like every container (docker-compose.yml x-logging).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     # Read-only like the rest; nginx's master switches to its worker user.
     read_only: true
     tmpfs:
@@ -162,3 +265,8 @@ services:
 
 volumes:
   certs:
+  tls-ca:
+  tls-ca-key:
+  tls-postgres:
+  tls-redis:
+  tls-mailpit:

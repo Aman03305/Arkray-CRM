@@ -119,7 +119,13 @@ def test_browsable_api_and_form_parsers_are_disabled():
 def test_session_and_csrf_cookie_hardening():
     assert settings.SESSION_COOKIE_HTTPONLY is True
     assert settings.SESSION_COOKIE_SAMESITE == "Lax"
-    assert settings.SESSION_ENGINE == "django.contrib.sessions.backends.db"
+    # Database sessions (a subclass whose cookie ends with the browser: privacy P2-12).
+    assert settings.SESSION_ENGINE == "arkray.identity.session_store"
+    from django.contrib.sessions.backends.db import SessionStore as DatabaseStore
+
+    from arkray.identity.session_store import SessionStore
+
+    assert issubclass(SessionStore, DatabaseStore)
     assert settings.CSRF_COOKIE_SAMESITE == "Lax"
     assert "django.middleware.csrf.CsrfViewMiddleware" in settings.MIDDLEWARE
 

@@ -89,7 +89,8 @@ describe("a lead's page", () => {
     const [list] = api.callsTo("GET", "/api/v1/workspaces/me/opportunities");
     expect(list!.query.get("lead")).toBe(LEAD_ID);
     expect(screen.getByRole("link", { name: "Dashboard" })).toHaveAttribute("href", "/dashboard");
-    // Read-only: nothing on the page changes the lead.
+    // Read-only but for a correction on the customer's request (correct-details.test.tsx):
+    // nothing else on the page changes the lead.
     expect(screen.queryByRole("button", { name: /edit|archive|delete|convert/i })).not.toBeInTheDocument();
   });
 

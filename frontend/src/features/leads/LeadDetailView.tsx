@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, FileArchive, PencilLine } from "lucide-react";
 import Link from "next/link";
 import { type ReactNode, useId, useState } from "react";
 
@@ -12,25 +12,38 @@ import { NotFoundView } from "@/components/ui/NotFoundView";
 import { PersonName } from "@/components/ui/PersonName";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ROW_LINK } from "@/components/ui/targets";
-import { usePipelines } from "@/features/pipeline/hooks";
+import { pipelinePermissions, usePipelines } from "@/features/pipeline/hooks";
 import { Amount, CloseDate, OutcomeBadge } from "@/features/pipeline/PipelineBits";
+import { ExportDataDialog } from "@/features/privacy/ExportDataDialog";
 import { describeError, isApiError } from "@/lib/api/errors";
 import { cursorOf } from "@/lib/api/pagination";
 import type { Lead } from "@/lib/api/types";
 import { mailtoHref, telHref } from "@/lib/contact-links";
 import { businessToday, formatDateTime } from "@/lib/format";
+import { hasCapability } from "@/lib/viewer";
+import { useViewer } from "@/lib/viewer-context";
 import { opportunityHref, sectionBack, type Workspace, workspaceHref } from "@/lib/workspace";
 
 import { leadKeys, leadsApi } from "./api";
+import { CorrectDetailsDialog } from "./CorrectDetailsDialog";
 
 /*
- * A lead: the canonical customer record an opportunity is for (ADR-0028). Read-only and
- * compact: who the customer is, how to reach them, whose they are, and the opportunity they
- * came with. Everything about the deal lives on the opportunity's own page, one click away;
- * there is no lead form (the customer's details are edited on the deal). The lead and its
- * opportunities are read through this workspace's API, so a lead of another user's workspace
- * is "not found" here, like any record.
+ * A lead: the canonical customer record an opportunity is for (ADR-0028). Compact: who the
+ * customer is, how to reach them, whose they are, and the opportunity they came with.
+ * Everything about the deal lives on the opportunity's own page, one click away. There is no
+ * lead form; the one change made here is a correction of the customer's details on their
+ * request ("Correct details": the lead and every deal still showing the old value, never
+ * the deal's commercial details or history), offered to whoever may write in this workspace,
+ * except for a customer whose details were erased. Administrators who handle privacy
+ * requests can also export the customer's data. The lead and its opportunities are read
+ * through this workspace's API, so a lead of another user's workspace is "not found" here,
+ * like any record.
  */
+
+/** What an erased customer's name fields hold (privacy.services.ERASED). */
+const ERASED = "[erased]";
+
+type LeadDialog = "correct" | "export" | null;
 
 function Section({ title, children }: { title: ReactNode; children: ReactNode }) {
   const id = useId();
@@ -117,6 +130,9 @@ function LeadOpportunities({ workspace, leadId }: { workspace: Workspace; leadId
 }
 
 export function LeadDetailView({ workspace, leadId }: { workspace: Workspace; leadId: string }) {
+  const viewer = useViewer();
+  const [dialog, setDialog] = useState<LeadDialog>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const detail = useQuery({
     queryKey: leadKeys.detail(workspace, leadId),
     queryFn: () => leadsApi.get(workspace, leadId),
@@ -163,26 +179,63 @@ export function LeadDetailView({ workspace, leadId }: { workspace: Workspace; le
     );
   }
   const organisation = lead.organization_name && lead.organization_name !== lead.display_name ? lead.organization_name : "";
+  const erased = lead.first_name === ERASED || lead.display_name === ERASED;
+  const corrects = pipelinePermissions(viewer, workspace).canWrite && !erased;
+  // Refused inside a support session: not offered there.
+  const exports = hasCapability(viewer, "privacy.manage") && !viewer?.supportSession;
   return (
     <>
       {back}
-      <header className="mb-4 min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <h1 className="min-w-0 break-words text-xl font-semibold tracking-tight text-slate-900">{lead.display_name}</h1>
-          <Badge tone="blue">Lead</Badge>
-          {lead.archived_at ? <Badge tone="neutral">Archived</Badge> : null}
+      <header className="mb-4 flex min-w-0 flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="min-w-0 break-words text-xl font-semibold tracking-tight text-slate-900">{lead.display_name}</h1>
+            <Badge tone="blue">Lead</Badge>
+            {lead.archived_at ? <Badge tone="neutral">Archived</Badge> : null}
+          </div>
+          <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-600">
+            {organisation ? <span className="min-w-0 [overflow-wrap:anywhere]">{organisation}</span> : null}
+            <span>
+              <span className="sr-only">Owner: </span>
+              <PersonName person={lead.owner} />
+            </span>
+            <span>
+              Created <time dateTime={lead.created_at}>{formatDateTime(lead.created_at)}</time>
+            </span>
+          </p>
         </div>
-        <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-600">
-          {organisation ? <span className="min-w-0 [overflow-wrap:anywhere]">{organisation}</span> : null}
-          <span>
-            <span className="sr-only">Owner: </span>
-            <PersonName person={lead.owner} />
-          </span>
-          <span>
-            Created <time dateTime={lead.created_at}>{formatDateTime(lead.created_at)}</time>
-          </span>
-        </p>
+        {corrects || exports ? (
+          <div className="flex flex-wrap gap-2">
+            {corrects ? (
+              <Button
+                variant="secondary"
+                icon={<PencilLine aria-hidden="true" className="size-4" />}
+                onClick={() => {
+                  setNotice(null);
+                  setDialog("correct");
+                }}
+              >
+                Correct details
+              </Button>
+            ) : null}
+            {exports ? (
+              <Button
+                variant="secondary"
+                icon={<FileArchive aria-hidden="true" className="size-4" />}
+                onClick={() => {
+                  setNotice(null);
+                  setDialog("export");
+                }}
+              >
+                Export data
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
       </header>
+      <div aria-live="polite" className="mb-4 empty:hidden">
+        {notice ? <Alert tone="success">{notice}</Alert> : null}
+      </div>
       <div className="grid gap-4 lg:grid-cols-2">
         <LeadOpportunities workspace={workspace} leadId={lead.id} />
         <Section title="Contact">
@@ -209,6 +262,20 @@ export function LeadDetailView({ workspace, leadId }: { workspace: Workspace; le
           />
         </Section>
       </div>
+      {dialog === "correct" ? (
+        <CorrectDetailsDialog
+          workspace={workspace}
+          lead={lead}
+          onClose={() => setDialog(null)}
+          onDone={(message) => {
+            setDialog(null);
+            setNotice(message);
+          }}
+        />
+      ) : null}
+      {dialog === "export" ? (
+        <ExportDataDialog subject={{ type: "lead", id: lead.id, name: lead.display_name }} onClose={() => setDialog(null)} />
+      ) : null}
     </>
   );
 }

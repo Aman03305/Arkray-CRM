@@ -28,6 +28,7 @@ from arkray.core.ranking import SearchQuery
 from arkray.core.text import SEARCH_MAX_LENGTH, SEARCH_MIN_LENGTH
 from arkray.leads.api.serializers import StatusRefSerializer, UserRefSerializer
 from arkray.leads.models import Lead
+from arkray.pipeline import customer
 from arkray.pipeline.api.serializers import LeadRefSerializer
 from arkray.pipeline.api.serializers import lead_ref as opportunity_lead_ref
 from arkray.pipeline.models import Opportunity, Stage
@@ -73,6 +74,10 @@ class SearchOpportunitySerializer(serializers.ModelSerializer[Opportunity]):
     stage = SearchStageSerializer(read_only=True)
     lead = serializers.SerializerMethodField()
     owner = UserRefSerializer(read_only=True)
+    customer_restricted = serializers.SerializerMethodField(
+        help_text="A closed deal whose customer the viewer no longer sees: named by its "
+        "organisation and instrument only, customer name blank (pipeline.customer)."
+    )
 
     class Meta:
         model = Opportunity
@@ -87,12 +92,22 @@ class SearchOpportunitySerializer(serializers.ModelSerializer[Opportunity]):
             "customer_name",
             "lead",
             "owner",
+            "customer_restricted",
         ]
         read_only_fields = fields
 
     @extend_schema_field(LeadRefSerializer)
     def get_lead(self, opportunity: Opportunity) -> dict[str, Any]:
         return opportunity_lead_ref(opportunity, self.context["scope"])
+
+    def get_customer_restricted(self, opportunity: Opportunity) -> bool:
+        return not customer.visible(self.context["scope"], opportunity.lead.owner_id)
+
+    def to_representation(self, instance: Opportunity) -> dict[str, Any]:
+        data: dict[str, Any] = super().to_representation(instance)
+        if data["customer_restricted"]:
+            customer.restrict(data, instance)
+        return data
 
 
 class _SearchActivity(serializers.ModelSerializer[Activity]):

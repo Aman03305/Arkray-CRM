@@ -7,3 +7,6 @@ class PrivacyConfig(AppConfig):
     name = "arkray.privacy"
     label = "privacy"
     verbose_name = "Privacy"
+
+    def ready(self) -> None:
+        from . import exports  # noqa: F401 — registers the export job

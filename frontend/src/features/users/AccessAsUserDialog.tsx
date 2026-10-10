@@ -77,7 +77,13 @@ export function AccessAsUserDialog({ user, onClose }: { user: AdminUser; onClose
           value={reason}
           onChange={(e) => setReason(e.target.value)}
           errors={reasonErrors}
-          hint={`${reason.length}/${REASON_MAX}`}
+          // The reason is kept in the security log for 90 days: a reference, never a case history.
+          hint={
+            <>
+              A ticket number or a short reason. Don&apos;t include customer names or health details; reasons are kept for
+              90 days. <span className="tabular-nums">{`${reason.length}/${REASON_MAX}`}</span>
+            </>
+          }
         />
         <DialogActions>
           <Button variant="secondary" onClick={onClose} disabled={start.isPending}>

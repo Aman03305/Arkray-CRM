@@ -7,4 +7,4 @@ class PipelineConfig(AppConfig):
     verbose_name = "Pipeline"
 
     def ready(self) -> None:
-        from . import subscribers  # noqa: F401 — subscribes to the lead domain events
+        from . import field_values, subscribers  # noqa: F401 — outbox handler, lead events

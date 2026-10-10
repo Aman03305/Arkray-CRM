@@ -82,7 +82,8 @@ function customerName(lead: { restricted: boolean; display_name?: string }): str
  * from ("<name> — <instrument>", or the name alone) isn't repeated; any other is shown. */
 function dealCustomer(deal: SearchResults["opportunities"]["results"][number]): string[] {
   const names = [deal.account_name, deal.customer_name].filter((name, i, all) => name && all.indexOf(name) === i);
-  if (!names.length) return [customerName(deal.lead)];
+  // A closed deal whose customer moved to someone else is named without them.
+  if (!names.length) return [deal.customer_restricted ? "Customer details hidden" : customerName(deal.lead)];
   return names.filter((name) => deal.title !== name && !deal.title.startsWith(`${name} — `));
 }
 

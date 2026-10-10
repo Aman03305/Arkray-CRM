@@ -16,6 +16,28 @@ max_requests_jitter = 200
 # Access logging is done by RequestContextMiddleware (structured, with request IDs).
 accesslog = None
 errorlog = "-"
+# gunicorn's own error log as the application's JSON lines (arkray.core.logging): no query
+# strings (gunicorn writes the request URI into "Error handling request ..."), exceptions by
+# type and frame, never their messages (privacy remediation P2-2).
+logconfig_dict = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {"json": {"()": "arkray.core.logging.JsonFormatter"}},
+    "filters": {"gunicorn": {"()": "arkray.core.logging.GunicornErrorFilter"}},
+    "handlers": {
+        "error_console": {
+            "class": "logging.StreamHandler",
+            "formatter": "json",
+            "filters": ["gunicorn"],
+            "stream": "ext://sys.stderr",
+        }
+    },
+    "root": {"level": "INFO", "handlers": []},
+    "loggers": {
+        "gunicorn.error": {"level": "INFO", "handlers": ["error_console"], "propagate": False},
+        "gunicorn.access": {"level": "INFO", "handlers": [], "propagate": False},
+    },
+}
 forwarded_allow_ips = os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1")
 # Gunicorn 26's control socket isn't used (no runtime administration), and the image's root
 # filesystem is read-only: it logged an error at every start (Phase 11). Off.

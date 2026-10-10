@@ -84,7 +84,13 @@ concurrent active users used 8 web connections plus the Celery workers' (about 1
    apply them with the platform's console if `log_min_error_statement` is not changeable).
 5. Backups: the platform's PITR/daily backups replace `scripts/backup.sh`; take a logical dump
    (`pg_dump`) before every release as [deployment.md](deployment.md#rollback)
-   requires.
+   requires. After restoring any of them, run `manage.py replay_erasures` before traffic
+   ([privacy.md](privacy.md#restore-safe-erasure)).
+6. **TLS** (privacy remediation): download the project's CA certificate from Supabase's
+   database settings, ship it with the deployment (a mounted secret), and set
+   `DATABASE_URL=...?sslmode=verify-full&sslrootcert=/path/supabase-ca.crt`, for the direct
+   connection (migrations) and the Supavisor pooler alike; production refuses anything weaker.
+   Not verified against a live Supabase project here.
 
 ## Render checklist (services)
 
@@ -99,7 +105,7 @@ nothing needs a persistent local disk:
 | Index / AI workers | Background Worker | `--queues ai_index` / `--queues ai` | load the embedding model (about 0.5 GB each): only when Ask Arkray is enabled |
 | Beat | Background Worker | `celery -A config beat` | **exactly one** instance |
 | Migrations | pre-deploy command | `python manage.py migrate --noinput && python manage.py grant_app_privileges arkray_app` | as the owner role, on a direct connection |
-| Redis | Key Value | two instances (broker with `noeviction` and AOF, cache with an eviction policy) | `rediss://` with a password; production refuses Redis without one |
+| Redis | Key Value | two instances (broker with `noeviction` and AOF, cache with an eviction policy and no persistence) | `rediss://...?ssl_cert_reqs=required` with a password; production refuses Redis without them. Render's internal Key Value URLs may be plain `redis://` on its private network: that is refused unless the host is a single-label name listed in `BACKEND_TLS_PRIVATE_HOSTS`; prefer the TLS URL (not verified against Render here) |
 | Files | external S3-compatible bucket | `ATTACHMENT_STORAGE=s3` + `ATTACHMENT_S3_*` | Render has no object storage; `ATTACHMENT_STORAGE=filesystem` needs a persistent disk and a single instance, so it is for rehearsals only |
 
 - **Proxy count.** Render's edge appends the client address: set `TRUSTED_PROXY_COUNT` to the
@@ -109,8 +115,11 @@ nothing needs a persistent local disk:
 - `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS` and `APP_BASE_URL` name the public host
   names; cookies are `__Host-` cookies, so the pages and `/api` must share one origin.
 - Health checks: `/health/live` for liveness (no dependencies), `/health/ready` for readiness
-  (PostgreSQL required; Redis degraded; attachment storage is **never** part of readiness: see
-  [observability.md](observability.md)).
+  (PostgreSQL required, and the database matching the erasure ledger; Redis degraded;
+  attachment storage is **never** part of readiness: see [observability.md](observability.md)).
+- **The erasure ledger** needs a store outside the database: an S3 bucket
+  (`ERASURE_LEDGER_URL=s3://...`, versioned, Object Lock) since Render's disks are per
+  instance ([privacy.md](privacy.md#restore-safe-erasure)).
 
 ## Low-cost pilot sizing
 

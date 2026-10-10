@@ -19,6 +19,7 @@ export const CAPABILITIES = [
   "audit.view",
   "ai.query",
   "support.access",
+  "privacy.manage",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

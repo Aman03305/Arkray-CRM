@@ -224,10 +224,30 @@ bounded by attacker sources × limits.
 
 `id bigint`, `occurred_at`, `actor_type (user|system)`, `actor_id uuid NULL`, `action`,
 `target_type`, `target_id`, `subject_user_id uuid NULL` (whose workspace was involved),
-`request_id`, `ip_address inet`, `metadata jsonb` (sanitised; secrets redacted; ≤ 4 KB),
+`request_id`, `ip_address inet` (legacy: events before the privacy remediation; new events
+leave it NULL), `metadata jsonb` (sanitised; secrets redacted; ≤ 4 KB),
 `support_session_id uuid NULL` (product enhancement phase: the support session a change was
 made in; its partial index `audit_support_idx (support_session_id, occurred_at) WHERE
-support_session_id IS NOT NULL` was built CONCURRENTLY by `audit.0004`).
+support_session_id IS NOT NULL` was built CONCURRENTLY by `audit.0004`), `detail_digest`
+(privacy remediation: the salted SHA-256 sealing its expiring detail; `DEFAULT ''` in the
+database so the previous release can still insert).
+
+### `audit_event_detail` (privacy remediation)
+
+`event_id` (primary key and foreign key to `audit_event`), `ip_address inet NULL`, `values
+jsonb` (an old/new email, a reset requester's address, a support reason), `salt`,
+`expires_at` (indexed). Not append-only: the hourly `audit.housekeeping` deletes expired rows
+in batches of 5,000 unless a legal hold covers the event ([privacy.md](privacy.md#audit-trail)).
+
+### `core_legal_hold`, `core_erasure_ledger_state`, `privacy_data_export` (privacy remediation)
+
+- `core_legal_hold`: `subject_type (lead|user)`, `subject_id`, `reference`, `placed_by`,
+  `placed_at`, `released_by`, `released_at`; one active hold per subject (partial unique).
+- `core_erasure_ledger_state`: one row (`id = 1`), `applied_seq`, `applied_mac`: how far this
+  database has applied the erasure ledger.
+- `privacy_data_export`: who requested whose export, its status, file key, size, SHA-256,
+  expiry and download count; `(requested_by, created_at DESC)` and a partial
+  `(expires_at) WHERE status = 'ready'` index.
 
 - CHECKs: valid actor type; a user actor must have an id.
 - Indexes: `(occurred_at DESC)`, `(actor_id, occurred_at DESC)`,

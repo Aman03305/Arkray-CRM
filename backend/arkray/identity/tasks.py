@@ -32,12 +32,14 @@ def housekeeping() -> dict[str, int]:
     )
     windows = workspaces.purge_access_windows(now)
     expired_support = support.sweep_expired(now)
+    forgotten_reasons = support.forget_reasons(now)
     result = {
         "throttle_events": purged_events,
         "sessions": purged_sessions,
         "redacted": redacted,
         "access_windows": windows,
         "support_sessions_expired": expired_support,
+        "redacted_reasons": forgotten_reasons,
     }
     if any(result.values()):
         logger.info("identity_housekeeping", extra=result)

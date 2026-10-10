@@ -4,6 +4,77 @@
  */
 
 export interface paths {
+    readonly "/api/v1/admin/privacy/exports": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** @description Exports you requested (the newest 50), and requesting one (202: a job builds it). */
+        readonly get: operations["privacy_exports_list"];
+        readonly put?: never;
+        /** @description Exports you requested (the newest 50), and requesting one (202: a job builds it). */
+        readonly post: operations["privacy_exports_request"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/privacy/exports/{export_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get: operations["privacy_exports_retrieve"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/privacy/exports/{export_id}/download": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** @description The export's ZIP, for the administrator who requested it, until it expires. */
+        readonly get: operations["privacy_exports_download"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/privacy/users/{user_id}/pseudonymise": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Pseudonymise a deactivated user (privacy.staff), confirming them by their current
+         *     email. Irreversible.
+         */
+        readonly post: operations["privacy_pseudonymise_user"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/admin/security-events": {
         readonly parameters: {
             readonly query?: never;
@@ -810,6 +881,27 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/workspaces/{workspace}/leads/{lead_id}/correction": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Correct a customer's details on request (pipeline.corrections): the lead's identity
+         *     and contact fields, and every deal's copy that still holds the old value. Audited by
+         *     field names; 409 if the lead changed since `version`.
+         */
+        readonly post: operations["leads_correct_customer"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/workspaces/{workspace}/leads/{lead_id}/restore": {
         readonly parameters: {
             readonly query?: never;
@@ -1178,6 +1270,26 @@ export interface paths {
         /** @description Replace the pipeline's custom opportunity fields. */
         readonly put: operations["workspace_pipelines_fields"];
         readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/pipelines/{pipeline_id}/fields/{field_id}/delete-values": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Delete the stored values of a removed custom field, for good (pipeline.field_values):
+         *     202, a job removes them.
+         */
+        readonly post: operations["workspace_pipelines_field_values_delete"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -1645,6 +1757,35 @@ export interface components {
             readonly options: readonly components["schemas"]["FieldOption"][];
             readonly position: number;
         };
+        /**
+         * @description The customer's details to correct (pipeline.corrections.CORRECTABLE), and the lead's
+         *     version as last seen. Only what is sent changes; blank clears a field. The lead's own
+         *     length limits; its cleaning rules apply in the service.
+         */
+        readonly CustomerCorrectionRequest: {
+            readonly version: number;
+            readonly first_name?: string;
+            readonly last_name?: string;
+            readonly organization_name?: string;
+            readonly job_title?: string;
+            readonly email?: string;
+            readonly phone?: string;
+            readonly mobile?: string;
+            readonly alternate_phone?: string;
+            readonly address_line_1?: string;
+            readonly address_line_2?: string;
+            readonly city?: string;
+            readonly state?: string;
+            readonly postal_code?: string;
+            readonly country?: string;
+        };
+        readonly CustomerCorrectionResult: {
+            readonly lead: components["schemas"]["Lead"];
+            /** @description The lead fields that changed. */
+            readonly corrected: readonly string[];
+            /** @description How many of the customer's deals had their copy of these details corrected. */
+            readonly opportunities: number;
+        };
         /** @description The workspace's figures and its short lists, all read at the same moment. */
         readonly Dashboard: {
             readonly currency: string;
@@ -1702,6 +1843,38 @@ export interface components {
             readonly title: string;
             readonly instrument_name: string;
         };
+        readonly DataExport: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly subject_type: components["schemas"]["SubjectTypeEnum"];
+            /** Format: uuid */
+            readonly subject_id: string;
+            readonly reference: string;
+            readonly status: components["schemas"]["DataExportStatusEnum"];
+            /** Format: date-time */
+            readonly created_at: string;
+            /** Format: date-time */
+            readonly ready_at: string | null;
+            /** Format: date-time */
+            readonly expires_at: string | null;
+            readonly size: number | null;
+            readonly sha256: string;
+            readonly files_included: number;
+            readonly files_omitted: number;
+            readonly error_code: string;
+            readonly downloads: number;
+        };
+        readonly DataExportList: {
+            readonly results: readonly components["schemas"]["DataExport"][];
+        };
+        /**
+         * @description * `queued` - Queued
+         *     * `ready` - Ready to download
+         *     * `failed` - Failed
+         *     * `expired` - Expired
+         * @enum {string}
+         */
+        readonly DataExportStatusEnum: "queued" | "ready" | "failed" | "expired";
         readonly Detail: {
             readonly detail: string;
         };
@@ -1710,6 +1883,15 @@ export interface components {
             readonly email: string;
             readonly version: number;
             readonly current_password?: string;
+        };
+        readonly ExportRequestRequest: {
+            readonly subject_type: components["schemas"]["SubjectTypeEnum"];
+            /** Format: uuid */
+            readonly subject_id: string;
+            /** @description The request's ticket or case reference (letters, digits and . _ / # -): evidence of the identity check, never a description of the person. */
+            readonly reference: string;
+            /** @description Must be true: you have verified that the requester is the person (or acts for them) before exporting their data. */
+            readonly identity_verified: boolean;
         };
         readonly FieldInputRequest: {
             /**
@@ -1744,9 +1926,18 @@ export interface components {
          * @enum {string}
          */
         readonly FieldTypeEnum: "text" | "long_text" | "number" | "currency" | "date" | "boolean" | "single_select" | "multi_select";
+        readonly FieldValuesDeleteRequest: {
+            /** @description The removed field's name, to confirm. */
+            readonly confirm_name: string;
+        };
         readonly FieldsReplaceRequest: {
             readonly version: number;
             readonly custom_fields: readonly components["schemas"]["FieldInputRequest"][];
+            /**
+             * @description Delete the stored values of the fields left out, for good (otherwise they are kept, hidden). Deals under a legal hold keep theirs.
+             * @default false
+             */
+            readonly delete_removed_values: boolean;
         };
         readonly Instrument: {
             /** @description Stored on the opportunity as `instrument_name`. */
@@ -2074,6 +2265,8 @@ export interface components {
             readonly created_at: string;
             /** Format: date-time */
             readonly updated_at: string;
+            /** @description True when the viewer can't see the deal's customer (its lead was reassigned and this is a closed deal they worked): the customer's name, phone, email and address are blank, the title and account show only the organisation and instrument, and free-text custom values are left out (docs/authorization.md#historical-deals). */
+            readonly customer_restricted: boolean;
             readonly pipeline: components["schemas"]["PipelineRef"];
             readonly stage: components["schemas"]["Stage"];
             /** Format: date */
@@ -2136,6 +2329,8 @@ export interface components {
             readonly created_at: string;
             /** Format: date-time */
             readonly updated_at: string;
+            /** @description True when the viewer can't see the deal's customer (its lead was reassigned and this is a closed deal they worked): the customer's name, phone, email and address are blank, the title and account show only the organisation and instrument, and free-text custom values are left out (docs/authorization.md#historical-deals). */
+            readonly customer_restricted: boolean;
         };
         /**
          * @description The opportunity's customer, instrument and custom details (all optional here; the
@@ -2406,6 +2601,20 @@ export interface components {
          * @enum {string}
          */
         readonly PriorityEnum: "low" | "normal" | "high";
+        readonly PseudonymiseRequest: {
+            /** @description The account's current email address, to confirm. */
+            readonly confirm_email: string;
+        };
+        readonly PseudonymiseResult: {
+            readonly conversations: number;
+            readonly audit_details: number;
+            readonly support_reasons: number;
+            readonly tokens_revoked: number;
+            readonly support_sessions_ended: number;
+            readonly throttle_events: number;
+            readonly queued_payloads: number;
+            readonly access_windows: number;
+        };
         readonly Question: {
             /** Format: uuid */
             readonly id: string;
@@ -2518,6 +2727,8 @@ export interface components {
             readonly customer_name: string;
             readonly lead: components["schemas"]["LeadRef"];
             readonly owner: components["schemas"]["UserRef"];
+            /** @description A closed deal whose customer the viewer no longer sees: named by its organisation and instrument only, customer name blank (pipeline.customer). */
+            readonly customer_restricted: boolean;
         };
         readonly SearchOpportunityGroup: {
             readonly results: readonly components["schemas"]["SearchOpportunity"][];
@@ -2684,6 +2895,12 @@ export interface components {
             readonly category: components["schemas"]["CategoryEnum"];
         };
         /**
+         * @description * `lead` - Customer (lead)
+         *     * `user` - Staff member (user)
+         * @enum {string}
+         */
+        readonly SubjectTypeEnum: "lead" | "user";
+        /**
          * @description * `available` - available
          *     * `unavailable` - unavailable
          *     * `none` - none
@@ -2839,6 +3056,115 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    readonly privacy_exports_list: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["DataExportList"];
+                };
+            };
+        };
+    };
+    readonly privacy_exports_request: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ExportRequestRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["DataExport"];
+                };
+            };
+        };
+    };
+    readonly privacy_exports_retrieve: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly export_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["DataExport"];
+                };
+            };
+        };
+    };
+    readonly privacy_exports_download: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly export_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/zip": string;
+                };
+            };
+        };
+    };
+    readonly privacy_pseudonymise_user: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly user_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["PseudonymiseRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["PseudonymiseResult"];
+                };
+            };
+        };
+    };
     readonly admin_security_events: {
         readonly parameters: {
             readonly query?: {
@@ -4395,6 +4721,39 @@ export interface operations {
             };
         };
     };
+    readonly leads_correct_customer: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly lead_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["CustomerCorrectionRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CustomerCorrectionResult"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     readonly leads_restore: {
         readonly parameters: {
             readonly query?: never;
@@ -5236,6 +5595,39 @@ export interface operations {
                 content: {
                     readonly "application/json": components["schemas"]["Pipeline"];
                 };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly workspace_pipelines_field_values_delete: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly field_id: string;
+                readonly pipeline_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["FieldValuesDeleteRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description No response body */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Not found, or outside this workspace. */
             readonly 404: {

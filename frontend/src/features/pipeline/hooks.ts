@@ -107,6 +107,7 @@ function asCard(opportunity: Opportunity, previous: OpportunityCard): Opportunit
     archived_at: opportunity.archived_at,
     version: opportunity.version,
     updated_at: opportunity.updated_at,
+    customer_restricted: opportunity.customer_restricted,
   };
 }
 

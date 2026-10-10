@@ -51,7 +51,7 @@ import {
   usePipelines,
 } from "./hooks";
 import { InstrumentPicker } from "./InstrumentPicker";
-import { StageName } from "./PipelineBits";
+import { RestrictedCustomerNote, StageName } from "./PipelineBits";
 
 const FORM_ID = "opportunity-drawer-form";
 const NO_FIELDS: readonly CustomField[] = [];
@@ -126,6 +126,11 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
   const closed = stage ? stage.category !== "open" : false;
   const lost = stage?.category === "lost";
   const fields = pipeline?.custom_fields ?? NO_FIELDS;
+  // A closed deal whose customer moved to someone else: the customer's details (and free-text
+  // custom values) aren't sent to this viewer, so they aren't offered for editing either;
+  // left alone, they are never part of the update (only changed fields are sent).
+  const restricted = editing && opportunity.customer_restricted;
+  const editableFields = restricted ? fields.filter((f) => f.type !== "text" && f.type !== "long_text") : fields;
 
   const [customBase, setCustomBase] = useState<Record<string, CustomValue>>({});
   const [custom, setCustom] = useState<Record<string, CustomValue>>({});
@@ -233,8 +238,12 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
     }
     const problems: Problems = {
       ...validateDraft(manualDraft(), { requireOwner: !editing && choosesOwner, owner, creating: !editing }),
-      ...validateCustom(fields, custom, !editing),
+      ...validateCustom(editableFields, custom, !editing),
     };
+    if (restricted) {
+      delete problems.account_name;
+      delete problems.customer_name;
+    }
     // Never created into a pipeline nobody chose: the list must have loaded (review).
     if (!editing && !pipeline) {
       problems.pipeline = [pipelines.isError ? "Pipelines couldn't be loaded. Try again." : "Pipelines are still loading."];
@@ -389,30 +398,36 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
         ) : null}
 
         <Group title="Customer">
-          <TextField
-            label={FIELD_LABELS.account_name}
-            name="account_name"
-            maxLength={200}
-            value={draft.account_name}
-            onChange={(e) => set("account_name")(e.target.value)}
-            errors={errors.account_name}
-            autoComplete="off"
-            data-autofocus={!editing || undefined}
-          />
-          <TextField
-            label={FIELD_LABELS.customer_name}
-            name="customer_name"
-            maxLength={200}
-            value={draft.customer_name}
-            onChange={(e) => set("customer_name")(e.target.value)}
-            errors={errors.customer_name}
-            autoComplete="off"
-            data-autofocus={editing || undefined}
-          />
-          {text("contact_phone", 40, { optional: true, type: "tel", placeholder: "Phone number" })}
-          {text("contact_email", 254, { optional: true, type: "email" })}
-          {editing ? null : <DuplicateNotice workspace={workspace} email={draft.contact_email} phones={[draft.contact_phone]} />}
-          <TextAreaField className="sm:col-span-2" label={FIELD_LABELS.address} name="address" optional rows={2} maxLength={1000} value={draft.address} onChange={(e) => set("address")(e.target.value)} errors={errors.address} />
+          {restricted ? (
+            <RestrictedCustomerNote className="sm:col-span-2" />
+          ) : (
+            <>
+              <TextField
+                label={FIELD_LABELS.account_name}
+                name="account_name"
+                maxLength={200}
+                value={draft.account_name}
+                onChange={(e) => set("account_name")(e.target.value)}
+                errors={errors.account_name}
+                autoComplete="off"
+                data-autofocus={!editing || undefined}
+              />
+              <TextField
+                label={FIELD_LABELS.customer_name}
+                name="customer_name"
+                maxLength={200}
+                value={draft.customer_name}
+                onChange={(e) => set("customer_name")(e.target.value)}
+                errors={errors.customer_name}
+                autoComplete="off"
+                data-autofocus={editing || undefined}
+              />
+              {text("contact_phone", 40, { optional: true, type: "tel", placeholder: "Phone number" })}
+              {text("contact_email", 254, { optional: true, type: "email" })}
+              {editing ? null : <DuplicateNotice workspace={workspace} email={draft.contact_email} phones={[draft.contact_phone]} />}
+              <TextAreaField className="sm:col-span-2" label={FIELD_LABELS.address} name="address" optional rows={2} maxLength={1000} value={draft.address} onChange={(e) => set("address")(e.target.value)} errors={errors.address} />
+            </>
+          )}
         </Group>
 
         <Group title="Instrument">
@@ -534,7 +549,7 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
 
         {fields.length || editing ? (
           <Group title="Additional">
-            <CustomFieldInputs fields={fields} values={custom} onChange={(id, value) => setCustom((c) => ({ ...c, [id]: value }))} errors={errors} />
+            <CustomFieldInputs fields={editableFields} values={custom} onChange={(id, value) => setCustom((c) => ({ ...c, [id]: value }))} errors={errors} />
             {editing ? (
               <TextAreaField className="sm:col-span-2" label="Description" name="description" optional rows={3} maxLength={5000} value={draft.description} onChange={(e) => set("description")(e.target.value)} errors={errors.description} />
             ) : null}

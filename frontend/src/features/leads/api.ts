@@ -1,12 +1,13 @@
 /**
  * The lead (the canonical customer record) as the UI reads it: one lead, its opportunities,
- * and the advisory duplicate check. There is no Leads module (ADR-0027): a lead is made with
- * its opportunity and shown read-only (ADR-0028). Every call is scoped to a workspace and
+ * and the advisory duplicate check; and the one change its page makes, a correction of the
+ * customer's details on request. There is no Leads module (ADR-0027): a lead is made with
+ * its opportunity and otherwise shown read-only (ADR-0028). Every call is scoped to a workspace and
  * every cache key starts with "leads" and that workspace segment, so one user's lead is never
  * served under another user's workspace.
  */
 import { apiFetch } from "@/lib/api/client";
-import type { Lead, LeadDuplicateList, OpportunityPage } from "@/lib/api/types";
+import type { CustomerCorrectionRequest, CustomerCorrectionResult, Lead, LeadDuplicateList, OpportunityPage } from "@/lib/api/types";
 import { type Workspace, workspaceApiPath, workspaceApiSegment } from "@/lib/workspace";
 
 /** How many of a lead's opportunities its page lists at once (usually it has one). */
@@ -29,6 +30,10 @@ export const leadsApi = {
     if (cursor) params.set("cursor", cursor);
     return apiFetch<OpportunityPage>(`${workspaceApiPath(workspace, "opportunities")}?${params.toString()}`);
   },
+  /** Correct the customer's details (only the fields sent change) and every deal's copy that
+   * still shows the old value; 409 when the lead changed since `version`. */
+  correct: (workspace: Workspace, id: string, body: CustomerCorrectionRequest) =>
+    apiFetch<CustomerCorrectionResult>(workspaceApiPath(workspace, `leads/${encodeURIComponent(id)}/correction`), { method: "POST", body }),
   /** Leads of this workspace with the same email or phone (never outside the workspace). */
   duplicates: (workspace: Workspace, email: string, phones: readonly string[]) => {
     const params = new URLSearchParams();

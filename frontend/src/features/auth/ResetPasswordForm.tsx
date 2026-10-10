@@ -20,6 +20,7 @@ export function ResetPasswordForm({ token }: { token: string }) {
   const form = useRef<HTMLFormElement>(null);
   const reset = useMutation({
     mutationFn: (password: string) => authApi.confirmPasswordReset(token, password),
+    gcTime: 0, // its variable is the new password: not kept once the form is gone
     // Every session was ended by the reset: sign in again with the new password.
     onSuccess: () => hardNavigate("/login?reason=reset"),
   });

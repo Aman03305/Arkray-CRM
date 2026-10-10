@@ -3,6 +3,118 @@ info:
   title: Arkray CRM API
   version: 1.0.0
 paths:
+  /api/v1/admin/privacy/exports:
+    get:
+      operationId: privacy_exports_list
+      description: 'Exports you requested (the newest 50), and requesting one (202:
+        a job builds it).'
+      tags:
+      - admin
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataExportList'
+          description: ''
+    post:
+      operationId: privacy_exports_request
+      description: 'Exports you requested (the newest 50), and requesting one (202:
+        a job builds it).'
+      tags:
+      - admin
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportRequestRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '202':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataExport'
+          description: ''
+  /api/v1/admin/privacy/exports/{export_id}:
+    get:
+      operationId: privacy_exports_retrieve
+      parameters:
+      - in: path
+        name: export_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - admin
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataExport'
+          description: ''
+  /api/v1/admin/privacy/exports/{export_id}/download:
+    get:
+      operationId: privacy_exports_download
+      description: The export's ZIP, for the administrator who requested it, until
+        it expires.
+      parameters:
+      - in: path
+        name: export_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - admin
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+          description: ''
+  /api/v1/admin/privacy/users/{user_id}/pseudonymise:
+    post:
+      operationId: privacy_pseudonymise_user
+      description: |-
+        Pseudonymise a deactivated user (privacy.staff), confirming them by their current
+        email. Irreversible.
+      parameters:
+      - in: path
+        name: user_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - admin
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PseudonymiseRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PseudonymiseResult'
+          description: ''
   /api/v1/admin/security-events:
     get:
       operationId: admin_security_events
@@ -1680,6 +1792,44 @@ paths:
           description: ''
         '404':
           description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/leads/{lead_id}/correction:
+    post:
+      operationId: leads_correct_customer
+      description: |-
+        Correct a customer's details on request (pipeline.corrections): the lead's identity
+        and contact fields, and every deal's copy that still holds the old value. Audited by
+        field names; 409 if the lead changed since `version`.
+      parameters:
+      - in: path
+        name: lead_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomerCorrectionRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerCorrectionResult'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
   /api/v1/workspaces/{workspace}/leads/{lead_id}/restore:
     post:
       operationId: leads_restore
@@ -2755,6 +2905,45 @@ paths:
               schema:
                 $ref: '#/components/schemas/Pipeline'
           description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/pipelines/{pipeline_id}/fields/{field_id}/delete-values:
+    post:
+      operationId: workspace_pipelines_field_values_delete
+      description: |-
+        Delete the stored values of a removed custom field, for good (pipeline.field_values):
+        202, a job removes them.
+      parameters:
+      - in: path
+        name: field_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: pipeline_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FieldValuesDeleteRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '202':
+          description: No response body
         '404':
           description: Not found, or outside this workspace.
   /api/v1/workspaces/{workspace}/pipelines/{pipeline_id}/restore:
@@ -3874,6 +4063,78 @@ components:
       - position
       - required
       - type
+    CustomerCorrectionRequest:
+      type: object
+      description: |-
+        The customer's details to correct (pipeline.corrections.CORRECTABLE), and the lead's
+        version as last seen. Only what is sent changes; blank clears a field. The lead's own
+        length limits; its cleaning rules apply in the service.
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        first_name:
+          type: string
+          maxLength: 100
+        last_name:
+          type: string
+          maxLength: 100
+        organization_name:
+          type: string
+          maxLength: 200
+        job_title:
+          type: string
+          maxLength: 100
+        email:
+          type: string
+          maxLength: 254
+        phone:
+          type: string
+          maxLength: 40
+        mobile:
+          type: string
+          maxLength: 40
+        alternate_phone:
+          type: string
+          maxLength: 40
+        address_line_1:
+          type: string
+          maxLength: 200
+        address_line_2:
+          type: string
+          maxLength: 200
+        city:
+          type: string
+          maxLength: 100
+        state:
+          type: string
+          maxLength: 100
+        postal_code:
+          type: string
+          maxLength: 20
+        country:
+          type: string
+          maxLength: 2
+      required:
+      - version
+    CustomerCorrectionResult:
+      type: object
+      properties:
+        lead:
+          $ref: '#/components/schemas/Lead'
+        corrected:
+          type: array
+          items:
+            type: string
+          description: The lead fields that changed.
+        opportunities:
+          type: integer
+          description: How many of the customer's deals had their copy of these details
+            corrected.
+      required:
+      - corrected
+      - lead
+      - opportunities
     Dashboard:
       type: object
       description: The workspace's figures and its short lists, all read at the same
@@ -4027,6 +4288,97 @@ components:
       - id
       - instrument_name
       - title
+    DataExport:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        subject_type:
+          allOf:
+          - $ref: '#/components/schemas/SubjectTypeEnum'
+          readOnly: true
+        subject_id:
+          type: string
+          format: uuid
+          readOnly: true
+        reference:
+          type: string
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/DataExportStatusEnum'
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        ready_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        size:
+          type: integer
+          readOnly: true
+          nullable: true
+        sha256:
+          type: string
+          readOnly: true
+        files_included:
+          type: integer
+          readOnly: true
+        files_omitted:
+          type: integer
+          readOnly: true
+        error_code:
+          type: string
+          readOnly: true
+        downloads:
+          type: integer
+          readOnly: true
+      required:
+      - created_at
+      - downloads
+      - error_code
+      - expires_at
+      - files_included
+      - files_omitted
+      - id
+      - ready_at
+      - reference
+      - sha256
+      - size
+      - status
+      - subject_id
+      - subject_type
+    DataExportList:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/DataExport'
+      required:
+      - results
+    DataExportStatusEnum:
+      enum:
+      - queued
+      - ready
+      - failed
+      - expired
+      type: string
+      description: |-
+        * `queued` - Queued
+        * `ready` - Ready to download
+        * `failed` - Failed
+        * `expired` - Expired
     Detail:
       type: object
       properties:
@@ -4052,6 +4404,31 @@ components:
       required:
       - email
       - version
+    ExportRequestRequest:
+      type: object
+      properties:
+        subject_type:
+          $ref: '#/components/schemas/SubjectTypeEnum'
+        subject_id:
+          type: string
+          format: uuid
+        reference:
+          type: string
+          minLength: 1
+          description: 'The request''s ticket or case reference (letters, digits and
+            . _ / # -): evidence of the identity check, never a description of the
+            person.'
+          maxLength: 64
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._/#-]{0,63}$
+        identity_verified:
+          type: boolean
+          description: 'Must be true: you have verified that the requester is the
+            person (or acts for them) before exporting their data.'
+      required:
+      - identity_verified
+      - reference
+      - subject_id
+      - subject_type
     FieldInputRequest:
       type: object
       properties:
@@ -4120,6 +4497,16 @@ components:
         * `boolean` - Yes / no
         * `single_select` - Single choice
         * `multi_select` - Multiple choice
+    FieldValuesDeleteRequest:
+      type: object
+      properties:
+        confirm_name:
+          type: string
+          minLength: 1
+          description: The removed field's name, to confirm.
+          maxLength: 60
+      required:
+      - confirm_name
     FieldsReplaceRequest:
       type: object
       properties:
@@ -4131,6 +4518,11 @@ components:
           items:
             $ref: '#/components/schemas/FieldInputRequest'
           maxItems: 30
+        delete_removed_values:
+          type: boolean
+          default: false
+          description: Delete the stored values of the fields left out, for good (otherwise
+            they are kept, hidden). Deals under a legal hold keep theirs.
       required:
       - custom_fields
       - version
@@ -5046,6 +5438,14 @@ components:
           type: string
           format: date-time
           readOnly: true
+        customer_restricted:
+          type: boolean
+          readOnly: true
+          description: 'True when the viewer can''t see the deal''s customer (its
+            lead was reassigned and this is a closed deal they worked): the customer''s
+            name, phone, email and address are blank, the title and account show only
+            the organisation and instrument, and free-text custom values are left
+            out (docs/authorization.md#historical-deals).'
         pipeline:
           allOf:
           - $ref: '#/components/schemas/PipelineRef'
@@ -5112,6 +5512,7 @@ components:
       - created_by
       - custom_fields
       - customer_name
+      - customer_restricted
       - description
       - expected_close_date
       - expected_cpt
@@ -5229,12 +5630,21 @@ components:
           type: string
           format: date-time
           readOnly: true
+        customer_restricted:
+          type: boolean
+          readOnly: true
+          description: 'True when the viewer can''t see the deal''s customer (its
+            lead was reassigned and this is a closed deal they worked): the customer''s
+            name, phone, email and address are blank, the title and account show only
+            the organisation and instrument, and free-text custom values are left
+            out (docs/authorization.md#historical-deals).'
       required:
       - account_name
       - agreed_cpt
       - archived_at
       - closed_at
       - created_at
+      - customer_restricted
       - expected_close_date
       - id
       - lead
@@ -5853,6 +6263,44 @@ components:
         * `low` - Low
         * `normal` - Normal
         * `high` - High
+    PseudonymiseRequest:
+      type: object
+      properties:
+        confirm_email:
+          type: string
+          minLength: 1
+          description: The account's current email address, to confirm.
+          maxLength: 254
+      required:
+      - confirm_email
+    PseudonymiseResult:
+      type: object
+      properties:
+        conversations:
+          type: integer
+        audit_details:
+          type: integer
+        support_reasons:
+          type: integer
+        tokens_revoked:
+          type: integer
+        support_sessions_ended:
+          type: integer
+        throttle_events:
+          type: integer
+        queued_payloads:
+          type: integer
+        access_windows:
+          type: integer
+      required:
+      - access_windows
+      - audit_details
+      - conversations
+      - queued_payloads
+      - support_reasons
+      - support_sessions_ended
+      - throttle_events
+      - tokens_revoked
     Question:
       type: object
       properties:
@@ -6137,9 +6585,15 @@ components:
           allOf:
           - $ref: '#/components/schemas/UserRef'
           readOnly: true
+        customer_restricted:
+          type: boolean
+          readOnly: true
+          description: 'A closed deal whose customer the viewer no longer sees: named
+            by its organisation and instrument only, customer name blank (pipeline.customer).'
       required:
       - account_name
       - customer_name
+      - customer_restricted
       - id
       - lead
       - owner
@@ -6568,6 +7022,14 @@ components:
       - category
       - key
       - name
+    SubjectTypeEnum:
+      enum:
+      - lead
+      - user
+      type: string
+      description: |-
+        * `lead` - Customer (lead)
+        * `user` - Staff member (user)
     SummariesEnum:
       enum:
       - available

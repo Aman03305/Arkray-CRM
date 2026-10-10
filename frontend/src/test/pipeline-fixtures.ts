@@ -76,6 +76,7 @@ export function makeCard(overrides: Partial<OpportunityCard> = {}): OpportunityC
     version: 2,
     created_at: "2026-09-20T04:30:00Z",
     updated_at: "2026-09-21T04:30:00Z",
+    customer_restricted: false,
   };
   return { ...base, ...overrides };
 }

@@ -124,6 +124,36 @@ describe("choosing and configuring pipelines", () => {
     expect(await within(panel).findByText(/has 2 opportunities/)).toBeInTheDocument();
     expect(within(panel).queryByLabelText("Proposal type")).not.toBeInTheDocument(); // still removed in the form
   });
+
+  it.each([
+    ["keeps a removed field's stored values unless asked", false],
+    ["deletes a removed field's stored values when asked (can't be undone)", true],
+  ])("%s", async (_name, deleteValues) => {
+    const FIELDS_URL = `${PIPELINES_URL}/${MINE_ID}/fields`;
+    const api = mockApi({
+      [`GET ${PIPELINES_URL}`]: { status: 200, body: LIST },
+      [`GET ${BOARD}`]: { status: 200, body: makeBoard([], { pipeline: { id: MINE_ID, key: "pmine", name: MINE.name } }) },
+      [`PUT ${FIELDS_URL}`]: { status: 200, body: { ...MINE, version: 5, custom_fields: [MINE.custom_fields[1]!] } },
+    });
+    renderWithProviders(<PipelineView />, { viewer: salesViewer });
+    const user = userEvent.setup();
+    await user.selectOptions(await screen.findByRole("combobox", { name: "Pipeline" }), MINE_ID);
+    await user.click(await screen.findByRole("button", { name: "Pipeline settings" }));
+    const panel = screen.getByRole("dialog", { name: "Pipeline settings" });
+    // Nothing removed yet: nothing to ask.
+    expect(within(panel).queryByRole("checkbox", { name: /stored values/ })).not.toBeInTheDocument();
+    await user.click(within(panel).getByRole("button", { name: "Remove Tender number" }));
+    const purge = within(panel).getByRole("checkbox", { name: "Also delete these fields' stored values (can't be undone)" });
+    expect(purge).not.toBeChecked();
+    expect(purge).toHaveAccessibleDescription(expect.stringContaining("“Tender number”"));
+    if (deleteValues) await user.click(purge);
+    await user.click(within(panel).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api.callsTo("PUT", FIELDS_URL)).toHaveLength(1));
+    const body = api.callsTo("PUT", FIELDS_URL)[0]!.body as { version: number; custom_fields: { id?: string }[]; delete_removed_values: boolean };
+    expect(body.version).toBe(4);
+    expect(body.custom_fields.map((field) => field.id)).toEqual(["f-segment"]);
+    expect(body.delete_removed_values).toBe(deleteValues);
+  });
 });
 
 describe("the new-opportunity panel", () => {

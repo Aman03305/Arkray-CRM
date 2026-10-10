@@ -8,6 +8,7 @@ import { apiFetch } from "@/lib/api/client";
 import type {
   Board,
   FieldInput,
+  FieldsReplaceRequest,
   NegotiationPricePage,
   Opportunity,
   OpportunityCreateRequest,
@@ -130,8 +131,12 @@ export const pipelineApi = {
     apiFetch<PipelineDto>(pipelinePath(workspace, id), { method: "PATCH", body: { version, name } }),
   replaceStages: (workspace: Workspace, id: string, version: number, stages: StageInput[]) =>
     apiFetch<PipelineDto>(pipelinePath(workspace, id, "stages"), { method: "PUT", body: { version, stages } }),
-  replaceFields: (workspace: Workspace, id: string, version: number, fields: FieldInput[]) =>
-    apiFetch<PipelineDto>(pipelinePath(workspace, id, "fields"), { method: "PUT", body: { version, custom_fields: fields } }),
+  /** Fields left out are removed; their stored values are kept (hidden) unless
+   * `deleteRemovedValues`, which deletes them for good (deals under a legal hold keep theirs). */
+  replaceFields: (workspace: Workspace, id: string, version: number, fields: FieldInput[], deleteRemovedValues = false) => {
+    const body: FieldsReplaceRequest = { version, custom_fields: fields, delete_removed_values: deleteRemovedValues };
+    return apiFetch<PipelineDto>(pipelinePath(workspace, id, "fields"), { method: "PUT", body });
+  },
   archivePipeline: (workspace: Workspace, id: string, version: number) =>
     apiFetch<PipelineDto>(pipelinePath(workspace, id, "archive"), { method: "POST", body: { version } }),
   restorePipeline: (workspace: Workspace, id: string, version: number) =>

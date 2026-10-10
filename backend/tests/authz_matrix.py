@@ -35,6 +35,7 @@ ACTIVITY = "api/v1/workspaces/<str:workspace>/activities/<uuid:activity_id>"
 PIPELINE = "api/v1/workspaces/<str:workspace>/pipelines/<uuid:pipeline_id>"
 ASK = "api/v1/workspaces/<str:workspace>/ask"
 AI_QUERY = "capability:ai.query"
+PRIVACY = "capability:privacy.manage"
 
 # Route pattern (as produced by the URL resolver) -> rule.
 AUTHZ_MATRIX: dict[str, RouteRule] = {
@@ -62,6 +63,12 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     "api/v1/admin/security-events": _rule("capability:audit.view", "GET"),
     "api/v1/admin/support-sessions": _rule("capability:support.access", "POST"),
     "api/v1/admin/support-sessions/current": _rule("capability:support.access", "DELETE"),
+    # --- privacy remediation: data-subject exports and staff pseudonymisation (refused in a
+    # support session; only the requesting administrator downloads, privacy.exports) --------
+    "api/v1/admin/privacy/exports": _rule(PRIVACY, "GET", "POST"),
+    "api/v1/admin/privacy/exports/<uuid:export_id>": _rule(PRIVACY, "GET"),
+    "api/v1/admin/privacy/exports/<uuid:export_id>/download": _rule(PRIVACY, "GET"),
+    "api/v1/admin/privacy/users/<uuid:user_id>/pseudonymise": _rule(PRIVACY, "POST"),
     # --- workspaces (Phase 1: describe; CRM resources nest below it from Phase 2) ------------
     "api/v1/workspaces/<str:workspace>": _rule("workspace", "GET"),
     # --- leads (Phase 2). Writes in delegated workspaces additionally need crm.manage_any
@@ -107,9 +114,14 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     f"{PIPELINE}": _rule("workspace", "GET", "PATCH"),
     f"{PIPELINE}/stages": _rule("workspace", "PUT"),
     f"{PIPELINE}/fields": _rule("workspace", "PUT"),
+    # Deleting a removed field's values: whoever may configure the pipeline (the services).
+    f"{PIPELINE}/fields/<uuid:field_id>/delete-values": _rule("workspace", "POST"),
     f"{PIPELINE}/archive": _rule("workspace", "POST"),
     f"{PIPELINE}/restore": _rule("workspace", "POST"),
     "api/v1/workspaces/<str:workspace>/leads/<uuid:lead_id>/convert": _rule("workspace", "POST"),
+    # Correcting a customer's details (privacy remediation): the lead's scope and
+    # authorize_write, as for any lead write (pipeline.corrections).
+    "api/v1/workspaces/<str:workspace>/leads/<uuid:lead_id>/correction": _rule("workspace", "POST"),
     "api/v1/config/pipelines": _rule("authenticated", "GET"),
     "api/v1/config/opportunity-options": _rule("authenticated", "GET"),  # ADR-0028
     # --- activities (Phase 4). Same workspace rules: the scope decides which activities,

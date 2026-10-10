@@ -1,6 +1,6 @@
 # 0028. A new opportunity creates its lead; opportunities are named after their customer and instrument
 
-Status: Accepted
+Status: Accepted; amended by 0032 (a narrow correction of the customer's details, synchronised to deal copies, replaces "read-only lead page")
 Date: 2026-10-05
 
 ## Context

@@ -18,8 +18,21 @@ from typing import Any
 from uuid import UUID
 
 from django.db import connection, transaction
-from django.db.models import CharField, Count, F, OuterRef, Prefetch, Q, QuerySet, Subquery, Value
-from django.db.models.functions import Coalesce
+from django.db.models import (
+    Case,
+    CharField,
+    Count,
+    Exists,
+    F,
+    OuterRef,
+    Prefetch,
+    Q,
+    QuerySet,
+    Subquery,
+    Value,
+    When,
+)
+from django.db.models.functions import Coalesce, Concat, Upper
 
 from arkray.core.access import AccessScope
 from arkray.core.errors import InvalidInputError, NotFoundError
@@ -32,6 +45,7 @@ from arkray.core.keyset import (
 )
 from arkray.core.knowledge import KnowledgeDocument, SourceType, compose
 from arkray.core.ranking import Matches, SearchQuery, top_matches
+from arkray.leads.models import Lead
 
 from . import metrics
 from .models import (
@@ -322,6 +336,20 @@ def opportunity_list(scope: AccessScope, filters: OpportunityFilters) -> QuerySe
 
 # What a global search result shows of an opportunity: title, status, stage, the lead (only
 # if visible in the scope; the serializer decides) and the owner. No amounts.
+# What a restricted viewer's search may match (pipeline.customer.shown_title's words): the
+# account unless it is the person's own name, and the instrument.
+NEUTRAL_TEXT = Upper(
+    Concat(
+        Case(
+            When(account_name__iexact=F("customer_name"), then=Value("")),
+            default=F("account_name"),
+            output_field=CharField(),
+        ),
+        Value(" "),
+        "instrument_name",
+    )
+)
+
 _SEARCH_RESULT_FIELDS = (
     "id",
     "title",
@@ -329,6 +357,7 @@ _SEARCH_RESULT_FIELDS = (
     "created_at",
     "account_name",
     "customer_name",
+    "instrument_name",
     "stage__id",
     "stage__name",
     "lead__id",
@@ -345,10 +374,27 @@ def search(scope: AccessScope, query: SearchQuery, *, limit: int) -> Matches[Opp
     """Global search's opportunities: every search word occurs in the title or the customer
     snapshot (models.SEARCH_TEXT, case-insensitive substring), over the opportunities `scope`
     may list, archived ones left out; open, won and lost alike (closed deals are history
-    people look for). Ranked by core.ranking against the title, newest first among equals."""
+    people look for). Ranked by core.ranking against the title, newest first among equals.
+
+    A closed deal whose customer the viewer no longer sees (its lead was reassigned,
+    pipeline.customer) is matched only by what it shows them, its organisation and
+    instrument (`NEUTRAL_TEXT`), never by its title or customer names, which would say who it
+    was for; it is shown restricted (search.api.serializers)."""
     scoped = scope.apply(Opportunity.objects.filter(archived_at__isnull=True)).annotate(
         search_text=SEARCH_TEXT
     )
+    if not scope.is_organization_wide:
+        # Per row, no join: an open deal's lead is always its owner's (database-enforced), so
+        # only a closed one asks whether its lead is visible, and the passes keep the index
+        # order they were designed for (tests/performance/test_search_query_plans.py).
+        lead_visible = Exists(
+            Lead.objects.filter(pk=OuterRef("lead_id"), owner_id__in=scope.owner_ids)
+        )
+        scoped = scoped.alias(neutral_text=NEUTRAL_TEXT).filter(
+            Q(status=StageCategory.OPEN)
+            | Q(lead_visible)
+            | Q(*(Q(neutral_text__contains=Upper(Value(term))) for term in query.terms))
+        )
     return top_matches(
         scoped,
         text="search_text",
@@ -753,7 +799,13 @@ def knowledge_documents(
     ones have none). Retrieval re-reads every hit through this."""
     if not opportunity_ids:
         return []
-    return _knowledge(scope.apply(Opportunity.objects.filter(pk__in=list(opportunity_ids))))
+    queryset = scope.apply(Opportunity.objects.filter(pk__in=list(opportunity_ids)))
+    if not scope.is_organization_wide:
+        # A closed deal whose lead went to someone else: its title names the customer and
+        # its text was written about them, so retrieval never returns it to this workspace
+        # (pipeline.customer; the index is shared, so the filter is here, on every read).
+        queryset = queryset.filter(lead__owner_id__in=scope.owner_ids)
+    return _knowledge(queryset)
 
 
 def knowledge_documents_for_indexing(

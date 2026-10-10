@@ -34,9 +34,11 @@ RUN apt-get update && apt-get upgrade -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 RUN groupadd --system --gid 10001 arkray \
  && useradd --system --uid 10001 --gid arkray --home-dir /app --shell /usr/sbin/nologin arkray \
- # Note attachments (ATTACHMENT_ROOT): the one writable path, a volume owned by the runtime
- # user (an empty named volume takes this ownership when first mounted). Never served.
- && install -d -o arkray -g arkray -m 0700 /var/lib/arkray/attachments
+ # The writable paths, volumes owned by the runtime user (an empty named volume takes this
+ # ownership when first mounted), never served: note attachments (ATTACHMENT_ROOT),
+ # data-subject exports (EXPORT_ROOT) and the erasure ledger (ERASURE_LEDGER_URL).
+ && install -d -o arkray -g arkray -m 0700 /var/lib/arkray/attachments \
+    /var/lib/arkray/exports /var/lib/arkray/ledger
 COPY --from=build /opt/venv /opt/venv
 # Owned by root, read-only to the runtime user: a file-write bug can't become persistent
 # code execution through a recycled worker importing modified code (Phase 9 review).

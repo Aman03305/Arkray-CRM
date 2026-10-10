@@ -304,10 +304,9 @@ class TestChangeEmail:
         assert not signs_in(old)
         assert signs_in("rahul.new@example.test")
         event = AuditEvent.objects.get(action=AUDIT_EMAIL_CHANGED)
-        assert (event.actor_id, event.metadata) == (
-            admin.pk,
-            {"from": old, "to": "rahul.new@example.test", "revoked_links": 0},
-        )
+        assert (event.actor_id, event.metadata) == (admin.pk, {"revoked_links": 0})
+        # The addresses are kept in the event's expiring detail (privacy remediation P2-4).
+        assert event.detail.values == {"from": old, "to": "rahul.new@example.test"}
 
     def test_notifies_the_previous_address(self, admin_client, user_a):
         old = user_a.email

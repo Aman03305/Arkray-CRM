@@ -43,7 +43,7 @@ from arkray.identity import selectors as identity_selectors
 from arkray.leads import selectors as lead_selectors
 from arkray.leads.models import Lead
 from arkray.leads.selectors import LeadFilters
-from arkray.pipeline import instruments
+from arkray.pipeline import customer, instruments
 from arkray.pipeline import selectors as pipeline_selectors
 from arkray.pipeline.models import Opportunity, Pipeline, Stage
 from arkray.pipeline.selectors import OpportunityFilters
@@ -235,9 +235,13 @@ def _opportunity_row(
     ctx: ToolContext, found: Opportunity, stages: dict[UUID, Stage]
 ) -> dict[str, Any]:
     stage = stages.get(found.stage_id)
+    # A closed deal whose customer this workspace no longer sees: named without them, and
+    # no customer field (pipeline.customer; the same rule as the pipeline's own screens).
+    known = customer.visible(ctx.scope, found.lead.owner_id)
+    title = found.title if known else customer.shown_title(found)
     row: dict[str, Any] = {
-        "ref": ctx.cite("opportunity", found.pk, found.title, stage.name if stage else ""),
-        "title": fmt.label(found.title),
+        "ref": ctx.cite("opportunity", found.pk, title, stage.name if stage else ""),
+        "title": fmt.label(title),
         "stage": stage.name if stage else None,
         "status": found.status,
         "value": fmt.money(found.value),
@@ -247,9 +251,10 @@ def _opportunity_row(
         "expected_close": fmt.day(found.expected_close_date),
         "lead": _lead_link(ctx, found.lead),
     }
-    if found.account_name:
-        row["account"] = fmt.label(found.account_name)
-    if found.customer_name and found.customer_name != found.account_name:
+    account = found.account_name if known else customer.shown_account(found)
+    if account:
+        row["account"] = fmt.label(account)
+    if known and found.customer_name and found.customer_name != found.account_name:
         row["customer"] = fmt.label(found.customer_name)
     if found.instrument_name:
         row["instrument"] = fmt.label(found.instrument_name)
@@ -684,13 +689,15 @@ def find_records(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         ],
         "opportunities": [
             {
+                # A closed deal whose customer this workspace no longer sees is named
+                # without them (pipeline.customer), in the citation too.
                 "ref": ctx.cite(
                     "opportunity",
                     o.pk,
-                    o.title,
+                    customer.title_for(o, ctx.scope, o.lead.owner_id),
                     stages[o.stage_id].name if o.stage_id in stages else "",
                 ),
-                "title": fmt.label(o.title),
+                "title": fmt.label(customer.title_for(o, ctx.scope, o.lead.owner_id)),
                 "status": o.status,
                 "stage": stages[o.stage_id].name if o.stage_id in stages else None,
                 "lead": _lead_link(ctx, o.lead),
@@ -1169,8 +1176,10 @@ def execute(ctx: ToolContext, name: str, arguments: Any) -> ToolOutcome:
         result = tool.run(ctx, arguments)
     except ToolError as exc:
         return ToolOutcome(json.dumps({"error": str(exc)}), True)
-    except Exception:  # a failed tool must not fail the question
-        logger.exception("ai_tool_failed", extra={"tool": name})
+    except Exception as exc:  # noqa: BLE001 — a failed tool must not fail the question
+        # By type only, like ai_answer_failed: the arguments come from the model and an
+        # exception's text can quote them or CRM text (privacy remediation P2-2).
+        logger.error("ai_tool_failed", extra={"tool": name, "exc_type": type(exc).__name__})
         return ToolOutcome(json.dumps({"error": "The tool failed. Try another approach."}), True)
     content = json.dumps(result, ensure_ascii=False, default=str)
     if ctx.result_chars + len(content) > settings.AI_TOOL_RESULTS_MAX_CHARS:

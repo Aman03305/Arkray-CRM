@@ -38,6 +38,7 @@ function ChangePasswordForm() {
   const form = useRef<HTMLFormElement>(null);
   const change = useMutation({
     mutationFn: () => authApi.changePassword(current, value.password),
+    gcTime: 0, // the request held passwords
     onSuccess: () => {
       setCurrent("");
       setValue({ password: "", confirmation: "" });

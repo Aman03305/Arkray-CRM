@@ -13,6 +13,7 @@ from arkray.dashboard.api import urls as dashboard_urls
 from arkray.identity.api import urls as identity_urls
 from arkray.leads.api import urls as leads_urls
 from arkray.pipeline.api import urls as pipeline_urls
+from arkray.privacy.api import urls as privacy_urls
 from arkray.search.api import urls as search_urls
 from config.metrics import metrics_view
 
@@ -20,6 +21,7 @@ from config.metrics import metrics_view
 api_v1_patterns: list[URLPattern | URLResolver] = [
     path("auth/", include(identity_urls.auth_urlpatterns)),
     path("admin/", include(identity_urls.admin_urlpatterns)),
+    path("admin/privacy/", include(privacy_urls.admin_urlpatterns)),
     path("assignees", include(identity_urls.directory_urlpatterns)),
     path("workspaces/", include(identity_urls.workspace_urlpatterns)),
     path("workspaces/<str:workspace>/", include(leads_urls.workspace_urlpatterns)),

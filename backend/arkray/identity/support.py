@@ -34,6 +34,7 @@ from django.http import HttpRequest, HttpResponse
 from django.utils import timezone
 
 from arkray.audit import services as audit
+from arkray.core import holds
 from arkray.core.context import update_context
 from arkray.core.errors import (
     BusinessRuleViolation,
@@ -141,7 +142,10 @@ def start(request: HttpRequest, actor: User, target_id: UUID, reason: str = "") 
                 target_type="user",
                 target_id=target.pk,
                 subject_user_id=target.pk,
-                metadata={"reason": clean_reason, "expires_at": session.expires_at.isoformat()},
+                metadata={"expires_at": session.expires_at.isoformat()},
+                # Free text an administrator typed: expires with the event's detail (and is
+                # blanked on the session row by identity.housekeeping), privacy P2-4.
+                sensitive={"reason": clean_reason} if clean_reason else None,
                 support_session_id=session.pk,
             )
     except IntegrityError:
@@ -218,6 +222,21 @@ def sweep_expired(now: datetime) -> int:
     for session in SupportSession.objects.filter(ended_at__isnull=True, expires_at__lte=now):
         ended += _end(session, SupportEnd.EXPIRED, actor_id=None)
     return ended
+
+
+def forget_reasons(now: datetime) -> int:
+    """Blank the free-text reason of ended sessions started more than
+    AUDIT_DETAIL_RETENTION_DAYS ago (hourly; the audit event's copy expires with its detail),
+    except where a legal hold covers the administrator or the user. The session itself (who,
+    for whom, when, how it ended) stays. Idempotent."""
+    cutoff = now - timedelta(days=settings.AUDIT_DETAIL_RETENTION_DAYS)
+    held = holds.held_users()
+    old = SupportSession.objects.filter(started_at__lt=cutoff, ended_at__isnull=False).exclude(
+        reason=""
+    )
+    if held:
+        old = old.exclude(admin_id__in=held).exclude(target_id__in=held)
+    return old.update(reason="")
 
 
 class SupportSessionMiddleware:

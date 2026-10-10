@@ -37,7 +37,7 @@ from arkray.identity.policy import Capability
 from arkray.identity.workspaces import authorize_write, resolve_workspace, workspace_segment
 from arkray.leads.api.views import IDEMPOTENCY_PARAMETER, NOT_FOUND, OWNER_FILTER_ORG_ONLY
 
-from .. import configuration, instruments, selectors, services
+from .. import configuration, corrections, field_values, instruments, selectors, services
 from ..selectors import OpportunityFilters
 from . import serializers as s
 
@@ -233,8 +233,33 @@ class PipelineFieldsView(ApiView):
             pipeline_id=pipeline_id,
             version=data["version"],
             fields=data["custom_fields"],
+            delete_removed_values=data["delete_removed_values"],
         )
         return Response(_pipeline(pipeline, actor, scope))
+
+
+class PipelineFieldValuesDeleteView(ApiView):
+    """Delete the stored values of a removed custom field, for good (pipeline.field_values):
+    202, a job removes them."""
+
+    permission_classes = [IsActiveUser]
+
+    @extend_schema(
+        operation_id="workspace_pipelines_field_values_delete",
+        request=s.FieldValuesDeleteSerializer,
+        responses={202: None, 404: NOT_FOUND},
+    )
+    def post(self, request: Request, workspace: str, pipeline_id: UUID, field_id: UUID) -> Response:
+        actor, scope = _scope(request, workspace)
+        data = validated(s.FieldValuesDeleteSerializer, request.data)
+        field_values.request(
+            actor=actor,
+            scope=scope,
+            pipeline_id=pipeline_id,
+            field_id=field_id,
+            confirm_name=data["confirm_name"],
+        )
+        return Response(status=http.HTTP_202_ACCEPTED)
 
 
 class PipelineArchiveView(ApiView):
@@ -701,3 +726,33 @@ class LeadConvertView(ApiView):
         if result.replayed:
             response["Idempotent-Replayed"] = "true"
         return response
+
+
+class CustomerCorrectionView(ApiView):
+    """Correct a customer's details on request (pipeline.corrections): the lead's identity
+    and contact fields, and every deal's copy that still holds the old value. Audited by
+    field names; 409 if the lead changed since `version`."""
+
+    permission_classes = [IsActiveUser]
+
+    @extend_schema(
+        operation_id="leads_correct_customer",
+        request=s.CustomerCorrectionSerializer,
+        responses={200: s.CustomerCorrectionResultSerializer, 404: NOT_FOUND},
+    )
+    def post(self, request: Request, workspace: str, lead_id: UUID) -> Response:
+        actor, scope = _scope(request, workspace)
+        data = validated(s.CustomerCorrectionSerializer, request.data)
+        version = data.pop("version")
+        result = corrections.correct_customer(
+            actor=actor, scope=scope, lead_id=lead_id, version=version, changes=data
+        )
+        return Response(
+            s.CustomerCorrectionResultSerializer(
+                {
+                    "lead": result.lead,
+                    "corrected": list(result.fields),
+                    "opportunities": result.opportunities,
+                }
+            ).data
+        )

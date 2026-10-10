@@ -32,6 +32,7 @@ export function ChangeEmailDialog({ user, isSelf, onClose, onSaved }: {
         version: user.version,
         ...(isSelf ? { current_password: currentPassword } : {}),
       }),
+    gcTime: 0, // the request may hold the current password
     onSuccess: (updated) => onSaved(updated, `${updated.full_name} now signs in with ${updated.email}.`),
     onError: (error) => {
       // A stale version, or a refusal (e.g. the user became an administrator meanwhile).

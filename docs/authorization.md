@@ -20,9 +20,9 @@ No bearer token is ever exposed to JavaScript, localStorage or sessionStorage.
 
 | Setting | Value | Why |
 |---|---|---|
-| `arkray_session` cookie | `HttpOnly`, `Secure` (production), `SameSite=Lax` | unreadable by scripts; not sent on cross-site subresource requests |
+| `arkray_session` cookie | `HttpOnly`, `Secure` (production), `SameSite=Lax`, a **browser-session cookie** (no `Expires`/`Max-Age`: closing the browser ends it; privacy remediation, `identity.session_store`) | unreadable by scripts; not sent on cross-site subresource requests; a shared computer doesn't hand the next person an open session |
 | Session storage | PostgreSQL (`django_session`) | a Redis outage never signs anyone out |
-| Absolute lifetime | 12 h (`SESSION_COOKIE_AGE_S`); the expiry is pinned at sign-in, and activity never extends it | bounds the value of a stolen session |
+| Absolute lifetime | 12 h (`SESSION_COOKIE_AGE_S`); the row's expiry is pinned at sign-in, activity never extends it, and the middleware enforces it whatever the browser does | bounds the value of a stolen session |
 | Idle timeout | 2 h (`SESSION_IDLE_TIMEOUT_S`); activity is recorded at most every 5 min | same, without a database write per request |
 | Session key | always new on sign-in, including when the same user signs in again | no session fixation |
 | Revocation | the session auth hash covers the password hash **and** `User.session_epoch`; Django re-checks it, and rejects inactive users, on every request | deactivation, password change and email change end sessions on the very next request, and they stay dead after reactivation |
@@ -59,7 +59,7 @@ working during a Redis outage (tested). DRF's Redis-backed limits (`anon` 60/min
 | Rule | Policy |
 |---|---|
 | Key | keyed HMAC of the *submitted*, normalised email, so unknown emails are throttled exactly like real ones and no email is stored |
-| Per account and browser | 5 failures in 15 min → locked 1 min, doubling with each further failure, **capped at 15 min**. A browser that has signed in to the account before (signed `arkray_login_device` cookie, HttpOnly, `SameSite=Strict`, path `/api/v1/auth/`, 90 days) has its **own** budget, so an attacker can't lock the owner out of their usual browser. Unrecognised browsers share one budget. |
+| Per account and browser | 5 failures in 15 min → locked 1 min, doubling with each further failure, **capped at 15 min**. A browser that has signed in to the account before (signed `arkray_login_device` cookie, HttpOnly, `SameSite=Strict`, path `/api/v1/`, 90 days) has its **own** budget, so an attacker can't lock the owner out of their usual browser. The cookie holds keyed hashes and a random id only (nothing readable without the server's key; tested) and is **kept at sign-out** on purpose: clearing it would let an attacker's guesses lock a signed-out owner out (reviewed in the privacy remediation, ADR-0032). Unrecognised browsers share one budget. |
 | Per source | 50 failures in 15 min → unrecognised browsers from that source are blocked until the window moves (catches password spraying). The source is the trusted-proxy-aware client IP; an IPv6 address counts as its /64 (one subscriber); an unknown address (for example a proxy writing `unknown`) shares one bucket, so it fails closed. **Trusted browsers are exempt**, so a noisy neighbour behind the same office NAT can't lock the owner out. |
 | Refused attempts | refused **before** the password is checked and not recorded: no oracle, bounded storage |
 | Atomic reservations | each attempt first *reserves* a failure in a short transaction that holds advisory locks on the account and the source, checks both budgets and inserts the row; only then is the password checked (outside any transaction), and a correct password deletes the reservation. Parallel bursts can't exceed a budget, and nobody is refused just because another attempt is in flight. |
@@ -280,6 +280,7 @@ Code checks **capabilities**, never role names
 | `audit.view` | read the audit log | ✓ | |
 | `ai.query` | use Ask Arkray within one's own scope | ✓ | ✓ |
 | `support.access` | start a support session in one user's CRM ([admin-user-workspace.md](admin-user-workspace.md#support-sessions)) | ✓ | |
+| `privacy.manage` | data-subject exports, staff pseudonymisation ([privacy.md](privacy.md#requests)); never inside a support session | ✓ | |
 
 - Inactive users, anonymous users and **unknown roles get nothing**.
 - Adding a role (for example a *sales manager* who sees a team) means adding one mapping
@@ -432,9 +433,10 @@ introduced, this rule is relaxed together with the new scope kind, not before.
 
 - A serializer that embeds a related record (for example an activity's lead) renders it
   only if it is visible in the same scope; otherwise it renders `{"id": null, "restricted": true}`.
-  Built in Phase 3 for an opportunity's lead (tested: the previous owner of a reassigned
-  lead sees their won opportunity but not the lead's name) and in Phase 4 for an activity's
-  lead and opportunity and a timeline entry's opportunity.
+  Built in Phase 3 for an opportunity's lead and in Phase 4 for an activity's lead and
+  opportunity and a timeline entry's opportunity. Since ADR-0028 the opportunity itself
+  carries a copy of its customer, so hiding the lead link was no longer enough: see
+  [Historical deals](#historical-deals).
 - **Aggregates are scoped like rows** (Phase 3): every total, count and per-stage value is
   computed from `scope.apply()` first, in the selectors, so a sum can never include a
   record the caller couldn't list.
@@ -453,6 +455,30 @@ introduced, this rule is relaxed together with the new scope kind, not before.
   sees their own figures; `all` (with `crm.view_all`) is the Admin Home; `{uuid}` (with
   `workspace.view_any`) is exactly that user's figures, audited once per window like any
   delegated access ([dashboard.md](dashboard.md#workspaces)).
+
+### Historical deals
+
+When a lead is reassigned, its open deals follow it, but a closed deal stays with the
+salesperson who worked it. The previous owner keeps their sales history, not the customer
+(privacy remediation P2-10, `pipeline.customer`): wherever a deal is shown to a viewer who
+can't see its lead, the customer's name, phone, email and address are blank, the deal is
+named by its organisation and instrument only ("Customer restricted" when the organisation is
+the person's own name), free-text custom values are left out, and `customer_restricted: true`
+says why. This holds on the deal's page, lists, board and archived lists, global search
+(which then matches only the organisation and instrument), activity and timeline links, Ask
+Arkray's tools, and in an administrator's support session (which sees what the user sees).
+The new owner and an administrator organisation-wide see everything. Tested before and after
+the reassignment in `tests/security/test_historical_deal_privacy.py`. Conservative by
+default; whether a previous owner should keep the contact details is a product decision.
+
+### Correcting a customer's details
+
+`POST /api/v1/workspaces/{workspace}/leads/{lead_id}/correction` (ADR-0032, amending 0028):
+whoever may write in a workspace that sees the lead (its owner in their own workspace, an
+administrator) corrects its identity and contact fields; a 404 outside the scope (a closed
+deal's previous owner can't correct a customer they no longer see), a 409 on a stale
+version, a 422 for an erased lead. Deal copies that still hold the old value follow
+([privacy.md](privacy.md#correction)).
 
 ### Global search (Phase 7)
 

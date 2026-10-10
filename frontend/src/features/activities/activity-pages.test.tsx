@@ -369,6 +369,7 @@ const FOUND: SearchOpportunity = {
   customer_name: "Meera Iyer",
   lead: { id: "9b1f7c2a-4d3e-4f5a-8b6c-7d8e9f0a1b2e", display_name: "Meera Iyer", organization_name: "Zeta Labs", restricted: false },
   owner: SALES_REF,
+  customer_restricted: false,
 };
 
 /** The global search's answer: only its opportunities group matters to the picker. */

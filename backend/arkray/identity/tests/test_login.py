@@ -86,7 +86,9 @@ class TestSuccessfulSignIn:
         event = AuditEvent.objects.get(action=AUDIT_LOGIN)
         assert (event.actor_id, event.target_id) == (user_a.pk, str(user_a.pk))
         assert event.request_id
-        assert event.ip_address == "127.0.0.1"
+        # The address is kept in the event's expiring detail (privacy remediation P2-4).
+        assert event.ip_address is None
+        assert event.detail.ip_address == "127.0.0.1"
 
     def test_marks_the_browser_as_trusted_for_this_account(self, api_client, user_a):
         cookie = login(api_client, user_a.email).cookies[DEVICE_COOKIE]

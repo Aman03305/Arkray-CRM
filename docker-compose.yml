@@ -41,10 +41,27 @@ x-backend-env: &backend-env
   # normally uses private S3-compatible storage instead (ATTACHMENT_STORAGE=s3).
   ATTACHMENT_STORAGE: filesystem
   ATTACHMENT_ROOT: /var/lib/arkray/attachments
+  # Data-subject exports (privacy.exports): their own private volume, short-lived files.
+  EXPORT_ROOT: /var/lib/arkray/exports
+  # The erasure ledger (core.ledger): its own volume, never in a database backup. The key
+  # below is for this local stack only; production refuses a dev- key.
+  ERASURE_LEDGER_URL: file:///var/lib/arkray/ledger
+  ERASURE_LEDGER_KEY: ${ERASURE_LEDGER_KEY:-dev-only-erasure-ledger-key-not-for-production-0000}
+
+# Container logs are rotated (privacy remediation P2-2): at most 5 x 10 MB per container on
+# the host, the oldest dropped. Shipping them anywhere keeps the platform's own retention,
+# which docs/privacy.md#retention sets (30 days by default; a decision for the operator).
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
 
 # The application containers run as they must in production (Phase 11): read-only root
 # filesystem (writes go to tmpfs /tmp only), no Linux capabilities, no privilege escalation.
 x-hardened: &hardened
+  <<: *logging
   read_only: true
   tmpfs:
     - /tmp
@@ -54,6 +71,7 @@ x-hardened: &hardened
 
 services:
   postgres:
+    <<: *logging
     image: pgvector/pgvector:0.8.6-pg16
     # Docker's default 64 MB /dev/shm makes parallel maintenance (a manual VACUUM, an index
     # build) and large parallel queries fail ("could not resize shared memory segment"):
@@ -78,6 +96,7 @@ services:
     restart: unless-stopped
 
   redis:
+    <<: *logging
     image: redis:7.4-alpine
     # The broker must never silently drop messages, so eviction is disabled.
     # (Production runs the broker and the cache on separate Redis instances.)
@@ -94,6 +113,7 @@ services:
     restart: unless-stopped
 
   mailpit:
+    <<: *logging
     # Captures all outgoing email in development (invitations, password resets).
     image: axllent/mailpit:v1.31
     ports:
@@ -118,6 +138,8 @@ services:
     environment: *backend-env
     volumes:
       - attachments:/var/lib/arkray/attachments
+      - exports:/var/lib/arkray/exports
+      - ledger:/var/lib/arkray/ledger
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
     depends_on:
@@ -146,6 +168,8 @@ services:
     # Attachment jobs (virus scan, removing deleted files) read and delete objects here.
     volumes:
       - attachments:/var/lib/arkray/attachments
+      - exports:/var/lib/arkray/exports
+      - ledger:/var/lib/arkray/ledger
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -236,3 +260,5 @@ volumes:
   pgdata:
   redisdata:
   attachments:
+  exports:
+  ledger:

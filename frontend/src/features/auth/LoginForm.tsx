@@ -37,6 +37,7 @@ export function LoginForm() {
 
   const login = useMutation({
     mutationFn: authApi.login,
+    gcTime: 0, // its variables are the email and password: not kept once the form is gone
     onSuccess: () => {
       setPassword("");
       // A new identity: drop everything cached, tell other tabs, start afresh.

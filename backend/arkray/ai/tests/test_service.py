@@ -365,5 +365,31 @@ class TestPrivacy:
         Conversation.objects.filter(pk=old.conversation_id).update(
             updated_at=timezone.now() - timedelta(days=31)
         )
-        assert service.housekeeping() == {"expired_questions": 1, "deleted_conversations": 1}
+        assert service.housekeeping() == {
+            "expired_questions": 1,
+            "deleted_questions": 0,  # finished recently: the conversation's age deletes it
+            "deleted_conversations": 1,
+        }
         assert not Question.objects.filter(pk=old.pk).exists()
+
+    def test_housekeeping_keeps_a_held_users_conversations(self, settings, user_a, admin):
+        """Backend review P3: the 30-day deletion ignored legal holds."""
+        from arkray.core.models import HoldSubject, LegalHold
+
+        settings.AI_CONVERSATION_RETENTION_DAYS = 30
+        old = ask(user_a, own(user_a), "pipeline value")
+        Conversation.objects.filter(pk=old.conversation_id).update(
+            updated_at=timezone.now() - timedelta(days=31)
+        )
+        hold = LegalHold.objects.create(
+            subject_type=HoldSubject.USER,
+            subject_id=user_a.pk,
+            reference="HR-9",
+            placed_by=admin.pk,
+        )
+        assert service.housekeeping()["deleted_conversations"] == 0
+        assert Question.objects.filter(pk=old.pk).exists()
+        LegalHold.objects.filter(pk=hold.pk).update(
+            released_at=timezone.now(), released_by=admin.pk
+        )
+        assert service.housekeeping()["deleted_conversations"] == 1

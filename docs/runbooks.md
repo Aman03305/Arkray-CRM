@@ -385,18 +385,33 @@ ways back are the pre-upgrade backup or a forward fix
 1. Prefer point-in-time recovery on the managed service into a **new** instance.
 2. From a dump: prepare the target with `infrastructure/postgres/roles.sql`
    (`-v database=<new name>`, as the administrator: the database, the roles, the
-   extensions), then, as the **owner**:
-   `TARGET_DATABASE_URL=postgres://arkray_owner:...@host/<new name> scripts/restore.sh
-   arkray-<stamp>.dump`. It refuses a dump without its `.sha256` (unless
+   extensions), bring in the backup private key ([Backup encryption keys](#backup-encryption-keys)),
+   then, as the **owner**:
+   `TARGET_DATABASE_URL=postgres://arkray_owner:...@host/<new name>
+   BACKUP_GNUPGHOME=<keyring> scripts/restore.sh arkray-<stamp>.dump.gpg`. It checks the
+   encrypted file's checksum, decrypts into a private temporary directory (removed
+   afterwards), and refuses a dump without its `.sha256` (unless
    `RESTORE_UNVERIFIED=1`) and a database that already has tables, leaves out the
    extensions' own entries (roles.sql made them), restores, vacuums and prints row counts:
    about 7 minutes at a million leads. Verified as `arkray_owner` (Phase 11): every table
    owned by the owner, the grant and the release check clean afterwards.
 3. `manage.py grant_app_privileges arkray_app` (**owner**), then
    `manage.py check --deploy --database default`.
-4. Point the deployment at it; readiness `ok`; sign in; spot-check the dashboard's figures.
-5. Sessions aren't in backups: everyone signs in again.
-6. **The database backup is not a backup of the files** (product enhancement phase, R93): it
+4. **Re-apply the erasures made since the backup, before any traffic** (privacy remediation
+   P2-8): the restored database is behind the erasure ledger, so the API answers 503
+   `erasure_reconciliation_required` and readiness fails until, with the **owner**'s
+   credentials and the same `ERASURE_LEDGER_URL` and `ERASURE_LEDGER_KEY` as production:
+   `manage.py replay_erasures --by <admin email> --report restore-<date>.json --dry-run`
+   (what it would do), then without `--dry-run`. Exit 0: complete, the API reopens within a
+   minute; 1: an entry failed (the report names it; fix and rerun, the API stays closed);
+   2: the ledger can't be read or was tampered with (nothing changed: restore the ledger
+   from its own versioned store, never edit `core_erasure_ledger_state` to match). Keep the
+   report with the restore's record. **If the ledger is lost** the API stays closed: recover
+   it from its bucket's versions or Object Lock copies; reopening without it would serve
+   people who asked to be erased.
+5. Point the deployment at it; readiness `ok`; sign in; spot-check the dashboard's figures.
+6. Sessions aren't in backups: everyone signs in again.
+7. **The database backup is not a backup of the files** (product enhancement phase, R93): it
    holds pipelines, stages, custom field definitions and values, negotiated price history and
    attachment *metadata*, but the attachment bytes live in object storage. Restore the bucket
    (or the attachments volume) from a point in time compatible with the database's: an
@@ -440,11 +455,91 @@ restore.sh` does it; otherwise: `VACUUM (ANALYZE);` (minutes at a million leads)
   the old key.
 - **`METRICS_TOKEN`**: update the scraper and the deployment together.
 
+## Restore drill
+
+Quarterly, and after any change to the backup, restore or ledger code:
+`python tests/drills/restore_drill.py --container <postgres container> --report drill.json`
+(backend directory, against a PostgreSQL whose superuser it may use: it creates and drops
+two throwaway databases). It seeds synthetic people, takes an encrypted `backup.sh` dump
+with a throwaway key, erases a lead, deletes a file and a custom field's values and
+pseudonymises a former user (ledgered), restores with `restore.sh`, checks the API is refused
+while the database is behind and while the ledger is unavailable, replays, checks every
+erasure holds again and a bystander is untouched, and replays once more (all already
+applied). Keep `drill.json` (ids and counts only). Last run: 2026-10-10, PASS.
+
+## Backup encryption keys
+
+`scripts/backup.sh` encrypts every dump to an OpenPGP public key
+(`BACKUP_GPG_RECIPIENT_FILE`); the backup host holds **only** that public key.
+
+- **Create** the key pair offline, on a machine that never runs the CRM:
+  `gpg --quick-generate-key "Arkray backups <ops@example.com>" ed25519 cert never`, then
+  `gpg --quick-add-key <fingerprint> cv25519 encr 2y`; export the public key
+  (`gpg --armor --export`) to the backup host, and the private key
+  (`gpg --armor --export-secret-keys`) to two offline copies held by two named people
+  (e.g. a password manager vault with dual control and a sealed hardware token).
+- **Restore** brings the private key into a temporary keyring (`BACKUP_GNUPGHOME`), used
+  only for the restore and deleted afterwards.
+- **Rotate** yearly (the subkey's expiry): add a new encryption subkey, distribute the new
+  public key, keep the old private key until the last backup encrypted to it has expired
+  (30 days).
+- **Lost private key**: the backups encrypted to it are unrecoverable; take a new backup at
+  once with a new key. **Leaked private key**: rotate, and treat every backup still kept as
+  exposed (an incident).
+- `BACKUP_ALLOW_UNENCRYPTED=1` exists for throwaway drills only.
+
+## Legal holds
+
+When the organisation must preserve a person's data (a dispute, an investigation),
+`manage.py legal_hold place --lead <id>` (or `--user <id>`) `--reference CASE-123 --by <admin>`
+stops their erasure, pseudonymisation, audit-detail expiry, attachment purges and custom-value
+deletion until `manage.py legal_hold release --lead <id> --by <admin>`; `manage.py
+legal_hold list` shows what is held. For backups, create a file named `LEGAL_HOLD` in the
+backup directory: `backup.sh --prune` then deletes nothing. Record the matter outside the
+application; the reference is only its number.
+
 ## Erasure request
 
 [privacy.md](privacy.md#erasure): `manage.py erase_lead <lead id> --by <admin email>` (a
 dry run), then `--yes`; **owner** credentials when the lead's opportunities were lost with
-a reason (the command says so).
+a reason (the command says so). Refused under a legal hold. If it reports that the erasure
+ledger failed, nothing was erased: fix the ledger's store and run it again.
+
+## Access request
+
+Verify the requester's identity outside the application (the request's ticket is the
+reference), then the customer's page or the user's details → **Export data**; Admin →
+**Data requests** shows its progress and the download. Download the ZIP within 24 hours, **review it** (free text staff wrote may name other people), and send it
+through the organisation's secure channel; never by plain email. The export's request,
+download and expiry are audited.
+
+## Staff leaving
+
+Deactivate the user (Users page) at once; reassign their open work. When the organisation no
+longer needs to know who they were (its retention policy), pseudonymise them: `manage.py
+pseudonymise_user <user id> --by <admin email>` (a dry run, then `--yes`) or the user's page
+([privacy.md](privacy.md#staff)).
+
+## Minimise legacy audit details
+
+Once, after upgrading to the release with expiring audit details (ADR-0032), as the
+**owner**, off-peak: `manage.py audit_minimise_legacy --by <admin email>` (what would move),
+then `--yes`. It moves the client addresses, old/new emails, reset requesters' addresses and
+support reasons that older events kept in the append-only row into expiring details (those
+older than the retention period are deleted by the next hourly `audit.housekeeping`), in one
+transaction with the trigger disabled per statement, and records `audit.legacy_minimised`
+with the counts and a SHA-256 of every value moved. Idempotent. The one transaction holds
+the audit table's rows it rewrites, and every audited write (each sign-in, each CRM change)
+waits behind it for up to its 600 s statement timeout: run it in a **maintenance window**
+with the web tier and workers stopped (a large legacy table: time `--dry-run`'s count
+first; a batched variant is a known follow-up, R120).
+
+## Forget names of deleted files
+
+Once, after the same upgrade: `manage.py forget_attachment_names --by <admin email>` (a
+count), then `--yes`: files deleted, blocked or never finished before it keep their names
+and hashes until then. Audited (`attachment.metadata_removed`, a count). Legal holds are
+respected.
 
 ## Purge old audit events
 
@@ -457,11 +552,24 @@ transaction, and repeat until a batch deletes nothing:
 ```sql
 BEGIN;
 ALTER TABLE audit_event DISABLE TRIGGER audit_event_append_only;
-DELETE FROM audit_event WHERE id IN (
-    SELECT id FROM audit_event WHERE occurred_at < now() - interval '2 years' LIMIT 5000);
+CREATE TEMP TABLE purge_batch ON COMMIT DROP AS
+    SELECT e.id FROM audit_event e
+    WHERE e.occurred_at < now() - interval '2 years'
+      -- never an event about someone under a legal hold (by them, about them, or on them)
+      AND NOT EXISTS (
+          SELECT 1 FROM core_legal_hold h
+          WHERE h.released_at IS NULL
+            AND (h.subject_id = e.actor_id OR h.subject_id = e.subject_user_id
+                 OR h.subject_id::text = e.target_id))
+    LIMIT 5000;
+-- An event's expiring detail (normally long gone; kept only under a legal hold) goes first.
+DELETE FROM audit_event_detail WHERE event_id IN (SELECT id FROM purge_batch);
+DELETE FROM audit_event WHERE id IN (SELECT id FROM purge_batch);
 ALTER TABLE audit_event ENABLE TRIGGER audit_event_append_only;
 COMMIT;
 ```
+
+The batch leaves out every event about a held person (`manage.py legal_hold list` shows them).
 
 Record that it was done (who, when, the cut-off) outside the application.
 

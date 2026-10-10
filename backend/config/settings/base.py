@@ -13,6 +13,7 @@ import environ
 from celery.schedules import crontab
 
 from arkray.core.redis import fail_fast_pool_kwargs
+from arkray.core.transport import redis_ssl_options
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 env = environ.Env()
@@ -52,6 +53,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "arkray.core.middleware.RequestContextMiddleware",
+    # No API traffic while the database doesn't match the erasure ledger (a restored backup
+    # whose erasures haven't been re-applied): arkray.core.ledger_gate.
+    "arkray.core.ledger_gate.LedgerGateMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -72,6 +76,9 @@ TEMPLATES: list[dict[str, Any]] = []  # API-only service: no server-rendered HTM
 # worker (and, transitively, exhaust the connection budget). See docs/reliability.md.
 _db = env.db("DATABASE_URL")
 _db_options: dict[str, Any] = {
+    # The URL's own parameters first (sslmode, sslrootcert, ...): they were replaced by the
+    # options below, so `?sslmode=verify-full` was silently dropped (privacy remediation).
+    **_db.get("OPTIONS", {}),
     "connect_timeout": env.int("DB_CONNECT_TIMEOUT_S", default=5),
     # A database that stops answering without closing connections (a partition, a host
     # failing over) must become an error, not a request waiting for ever: keepalives notice
@@ -126,6 +133,10 @@ if env.bool("DB_TRANSACTION_POOLER", default=False):
     _db["DISABLE_SERVER_SIDE_CURSORS"] = True
 _db["OPTIONS"] = _db_options
 DATABASES = {"default": _db}
+# Backend connections without TLS are refused in production unless they stay on the machine
+# (loopback) or go to one of these single-label container/service names on a private network
+# (arkray.core.transport; docs/security.md#backend-tls). Listed explicitly, never implied.
+BACKEND_TLS_PRIVATE_HOSTS: list[str] = env.list("BACKEND_TLS_PRIVATE_HOSTS", default=[])
 
 # --- Cache (Redis) -------------------------------------------------------------------------
 # The cache is an optimisation, never a dependency: Redis errors are swallowed (and logged)
@@ -181,7 +192,8 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # Server-side sessions in PostgreSQL: a Redis outage never logs anyone out, and
 # deactivating a user takes effect on their very next request.
-SESSION_ENGINE = "django.contrib.sessions.backends.db"
+# Database sessions whose cookie ends with the browser (identity.session_store).
+SESSION_ENGINE = "arkray.identity.session_store"
 SESSION_COOKIE_NAME = "arkray_session"
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
@@ -259,6 +271,11 @@ TRUST_INCOMING_REQUEST_ID = env.bool("TRUST_INCOMING_REQUEST_ID", default=False)
 WORKSPACE_ACCESS_AUDIT_WINDOW_S = env.int("WORKSPACE_ACCESS_AUDIT_WINDOW_S", default=15 * 60)
 # Support sessions (identity.support): how long one lasts (no extension; start a new one).
 SUPPORT_SESSION_TTL_S = env.int("SUPPORT_SESSION_TTL_S", default=30 * 60)
+# How long an audit event's personal details are kept (audit.AuditDetail: a security event's
+# client address, an old and new sign-in email, a reset requester's address, a support
+# session's reason; the support session row's reason too). A starting policy the organisation
+# sets, not a legal requirement; legal holds suspend it (docs/privacy.md#retention).
+AUDIT_DETAIL_RETENTION_DAYS = env.int("AUDIT_DETAIL_RETENTION_DAYS", default=90)
 # How long an administrator-chosen password (a new user's initial one, or a reset) can be
 # used to sign in before it must have been changed; after that an administrator sets a new one.
 TEMPORARY_PASSWORD_TTL_S = env.int("TEMPORARY_PASSWORD_TTL_S", default=72 * 60 * 60)
@@ -342,6 +359,12 @@ SPECTACULAR_SETTINGS = {
 # Email is always sent from background jobs (outbox), never inline in a web request.
 _email = env.email_url("EMAIL_URL", default="consolemail://")
 EMAIL_BACKEND = _email["EMAIL_BACKEND"]
+if EMAIL_BACKEND == "django.core.mail.backends.smtp.EmailBackend":
+    # The same, with the certificate checks stated (arkray.core.mail): TLS 1.2+, the system
+    # CA store or EMAIL_TLS_CA_FILE.
+    EMAIL_BACKEND = "arkray.core.mail.VerifiedSMTPBackend"
+# A private CA for the SMTP relay's certificate (PEM), when it isn't publicly trusted.
+EMAIL_TLS_CA_FILE = env("EMAIL_TLS_CA_FILE", default="")
 EMAIL_HOST = _email.get("EMAIL_HOST") or "localhost"
 EMAIL_PORT = _email.get("EMAIL_PORT") or 25
 EMAIL_HOST_USER = _email.get("EMAIL_HOST_USER") or ""
@@ -353,6 +376,9 @@ DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="Arkray CRM <no-reply@ark
 
 # --- Celery (background jobs) --------------------------------------------------------------
 CELERY_BROKER_URL = env("CELERY_BROKER_URL")
+# rediss:// without ssl_* parameters would make kombu skip certificate checks (CERT_NONE):
+# verification is stated here instead (ssl_* parameters in the URL still take precedence).
+CELERY_BROKER_USE_SSL = redis_ssl_options(CELERY_BROKER_URL)
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_BROKER_TRANSPORT_OPTIONS = {
     "visibility_timeout": 3600,
@@ -396,6 +422,16 @@ CELERY_BEAT_SCHEDULE = {
         "task": "core.housekeeping",
         # purge expired idempotency records and old finished outbox events
         "schedule": crontab(minute=5),
+        "options": {"expires": 30 * 60},
+    },
+    "privacy-housekeeping": {
+        "task": "privacy.housekeeping",
+        "schedule": crontab(minute=50),  # delete expired data exports
+        "options": {"expires": 30 * 60},
+    },
+    "audit-housekeeping": {
+        "task": "audit.housekeeping",
+        "schedule": crontab(minute=45),  # expire audit events' personal details (90 days)
         "options": {"expires": 30 * 60},
     },
     "identity-housekeeping": {
@@ -504,6 +540,10 @@ ATTACHMENT_STORAGE_BREAKER_COOLDOWN_S = env.float(
 # The daily read-only `reconcile_attachments --check` (activities.reconcile_check): rows
 # against objects, its outcome on the metrics endpoint. It never repairs anything.
 ATTACHMENT_RECONCILE_DAILY = env.bool("ATTACHMENT_RECONCILE_DAILY", default=True)
+# A versioned bucket keeps a deleted object's earlier versions until its lifecycle rule
+# expires them: with this on, purging a file removes every version too (needs
+# s3:ListBucketVersions and s3:DeleteObjectVersion). See docs/deployment.md#attachments.
+ATTACHMENT_S3_PURGE_VERSIONS = env.bool("ATTACHMENT_S3_PURGE_VERSIONS", default=False)
 
 
 def attachment_s3_backend(
@@ -517,6 +557,7 @@ def attachment_s3_backend(
     connect_timeout_s: float = ATTACHMENT_S3_CONNECT_TIMEOUT_S,
     read_timeout_s: float = ATTACHMENT_S3_READ_TIMEOUT_S,
     max_attempts: int = ATTACHMENT_S3_MAX_ATTEMPTS,
+    ca_bundle: str | None = None,
 ) -> dict[str, Any]:
     """STORAGES["attachments"] for private S3-compatible storage. One builder, so the fault
     tests (tests/integration/test_attachment_storage_faults.py) run the production options
@@ -538,6 +579,9 @@ def attachment_s3_backend(
             "querystring_auth": True,
             "querystring_expire": 60,
             "object_parameters": {"ServerSideEncryption": "AES256"},
+            # Certificates are always verified: the system CA store, or a private CA bundle
+            # (a self-hosted S3-compatible store). Never False.
+            "verify": ca_bundle or None,
             "client_config": Config(
                 connect_timeout=connect_timeout_s,
                 read_timeout=read_timeout_s,
@@ -555,17 +599,44 @@ if ATTACHMENT_STORAGE == "s3":
         access_key=env.str("ATTACHMENT_S3_ACCESS_KEY_ID", default=""),
         secret_key=env.str("ATTACHMENT_S3_SECRET_ACCESS_KEY", default=""),
         prefix=env.str("ATTACHMENT_S3_PREFIX", default="attachments"),
+        ca_bundle=env.str("ATTACHMENT_S3_CA_BUNDLE", default=""),
     )
 else:
     _ATTACHMENT_BACKEND = {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
         "OPTIONS": {"location": ATTACHMENT_ROOT, "base_url": None},
     }
+# Data-subject exports (privacy.exports): private, short-lived ZIPs, never in the attachments'
+# store (its reconciliation would take them for orphans). The same kind of store, its own
+# prefix or directory.
+EXPORT_ROOT = env.str("EXPORT_ROOT", default=str(BASE_DIR / "var" / "exports"))
+if ATTACHMENT_STORAGE == "s3":
+    _EXPORT_BACKEND: dict[str, Any] = attachment_s3_backend(
+        bucket=env.str("ATTACHMENT_S3_BUCKET"),
+        endpoint_url=env.str("ATTACHMENT_S3_ENDPOINT_URL", default=""),
+        region=env.str("ATTACHMENT_S3_REGION", default=""),
+        access_key=env.str("ATTACHMENT_S3_ACCESS_KEY_ID", default=""),
+        secret_key=env.str("ATTACHMENT_S3_SECRET_ACCESS_KEY", default=""),
+        prefix=env.str("EXPORT_S3_PREFIX", default="exports"),
+        ca_bundle=env.str("ATTACHMENT_S3_CA_BUNDLE", default=""),
+    )
+else:
+    _EXPORT_BACKEND = {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+        "OPTIONS": {"location": EXPORT_ROOT, "base_url": None},
+    }
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
     "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
     "attachments": _ATTACHMENT_BACKEND,
+    "exports": _EXPORT_BACKEND,
 }
+# How long a built export can be downloaded, its size cap (attachments beyond it are listed,
+# not included), and how many an administrator may have queued and request per hour.
+EXPORT_TTL_HOURS = env.int("EXPORT_TTL_HOURS", default=24)
+EXPORT_MAX_BYTES = env.int("EXPORT_MAX_BYTES", default=100 * 1024 * 1024)
+EXPORT_MAX_PENDING_PER_ADMIN = env.int("EXPORT_MAX_PENDING_PER_ADMIN", default=3)
+EXPORT_MAX_PER_HOUR = env.int("EXPORT_MAX_PER_HOUR", default=20)
 # Uploads are read from the request stream in chunks and never buffered whole in memory
 # above this (activities.storage.receive spools to a temporary file).
 ATTACHMENT_SPOOL_MEMORY_BYTES = 1024 * 1024
@@ -631,9 +702,29 @@ AI_MAX_PENDING_PER_USER = env.int("AI_MAX_PENDING_PER_USER", default=2)
 AI_MAX_PENDING_TOTAL = env.int("AI_MAX_PENDING_TOTAL", default=40)
 AI_CONVERSATION_RETENTION_DAYS = env.int("AI_CONVERSATION_RETENTION_DAYS", default=30)
 
+# --- Erasure ledger (core.ledger, docs/privacy.md#restore-safe-erasure) ----------------------
+# Where every erasure is recorded outside the database, so a restored backup can't bring the
+# erased back: file:///<a volume of its own> or s3://<bucket of its own>/<prefix> (versioned,
+# Object Lock). Empty: off (development and tests only; production refuses it).
+ERASURE_LEDGER_URL = env("ERASURE_LEDGER_URL", default="")
+# The entries' HMAC key: at least 32 characters, never the Django secret key, kept with the
+# ledger's own secrets (rotation re-signs nothing: a new key needs a new, empty ledger).
+ERASURE_LEDGER_KEY = env("ERASURE_LEDGER_KEY", default="")
+ERASURE_LEDGER_S3_ENDPOINT_URL = env("ERASURE_LEDGER_S3_ENDPOINT_URL", default="")
+ERASURE_LEDGER_S3_REGION = env("ERASURE_LEDGER_S3_REGION", default="")
+ERASURE_LEDGER_S3_CA_BUNDLE = env("ERASURE_LEDGER_S3_CA_BUNDLE", default="")
+# Each process compares the database with the ledger at most this often...
+ERASURE_LEDGER_CHECK_INTERVAL_S = env.int("ERASURE_LEDGER_CHECK_INTERVAL_S", default=60)
+# ...and stays open through a ledger outage this long after its last good comparison.
+ERASURE_LEDGER_MAX_STALE_S = env.int("ERASURE_LEDGER_MAX_STALE_S", default=60 * 60)
+
 # --- Logging -------------------------------------------------------------------------------
 LOG_LEVEL = env("LOG_LEVEL", default="INFO")
 LOG_FORMAT = env("LOG_FORMAT", default="json")
+# Exceptions' messages in log tracebacks (core.logging): withheld (types and frames only),
+# because they can quote row values or anything a caller passed. Local development only;
+# production refuses it.
+LOG_EXCEPTION_MESSAGES = env.bool("LOG_EXCEPTION_MESSAGES", default=False)
 LOGGING: dict[str, Any] = {
     "version": 1,
     "disable_existing_loggers": False,

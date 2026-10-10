@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ArrowUpRight, KeyRound, LifeBuoy } from "lucide-react";
+import { ArrowUpRight, FileArchive, KeyRound, LifeBuoy, UserX } from "lucide-react";
 import Link from "next/link";
 import type { ReactNode } from "react";
 
@@ -49,15 +49,19 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 
 /**
  * A user's details beside the Users list (their name opens it): who they are, their status,
- * and the administrator's sign-in tools for them. Their CRM is a separate, explicit link.
+ * the administrator's sign-in tools for them, and, for those who handle privacy requests,
+ * exporting their data or (once deactivated) pseudonymising them. Their CRM is a separate,
+ * explicit link.
  */
-export function UserDetailsDrawer({ user: listed, notice, onClose, onSetPassword, onAccess }: {
+export function UserDetailsDrawer({ user: listed, notice, onClose, onSetPassword, onAccess, onExport, onPseudonymise }: {
   /** As listed; the latest copy is loaded while the panel is open. */
   user: AdminUser;
   notice: string | null;
   onClose: () => void;
   onSetPassword: (user: AdminUser) => void;
   onAccess: (user: AdminUser) => void;
+  onExport: (user: AdminUser) => void;
+  onPseudonymise: (user: AdminUser) => void;
 }) {
   const viewer = useViewer();
   const detail = useQuery({
@@ -69,6 +73,9 @@ export function UserDetailsDrawer({ user: listed, notice, onClose, onSetPassword
   const manages = hasCapability(viewer, "users.manage");
   const supports = hasCapability(viewer, "support.access");
   const opensCrm = hasCapability(viewer, "workspace.view_any");
+  // Privacy requests are refused inside a support session (and the Users page isn't offered there).
+  const privacy = hasCapability(viewer, "privacy.manage") && !viewer?.supportSession;
+  const pseudonymisable = user.status === "deactivated" && user.id !== viewer?.id;
   const blocked = supportBlockedReason(user, user.id === viewer?.id);
   const loadError = detail.isError ? describeError(detail.error) : null;
 
@@ -139,6 +146,24 @@ export function UserDetailsDrawer({ user: listed, notice, onClose, onSetPassword
                   </Button>
                 ) : null}
               </div>
+            )}
+          </div>
+        ) : null}
+        {privacy ? (
+          <div className="border-t border-slate-200 pt-4">
+            <h3 className="mb-2 text-sm font-semibold text-slate-900">Privacy</h3>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="secondary" icon={<FileArchive aria-hidden="true" className="size-4" />} onClick={() => onExport(user)}>
+                Export data
+              </Button>
+              {pseudonymisable ? (
+                <Button variant="secondary" icon={<UserX aria-hidden="true" className="size-4" />} onClick={() => onPseudonymise(user)}>
+                  Pseudonymise…
+                </Button>
+              ) : null}
+            </div>
+            {pseudonymisable ? null : (
+              <p className="mt-2 text-xs text-slate-500">Only a deactivated user can be pseudonymised.</p>
             )}
           </div>
         ) : null}

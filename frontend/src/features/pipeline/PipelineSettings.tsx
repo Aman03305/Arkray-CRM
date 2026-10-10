@@ -10,7 +10,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Drawer } from "@/components/ui/Drawer";
 import { TextField } from "@/components/ui/Field";
 import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
-import type { FieldInput, FieldType, PipelineDto, StageInput, StageType } from "@/lib/api/types";
+import type { CustomField, FieldInput, FieldType, PipelineDto, StageInput, StageType } from "@/lib/api/types";
 import { parsePercentInput } from "@/lib/money";
 import type { Workspace } from "@/lib/workspace";
 
@@ -114,6 +114,11 @@ function fieldInput(rows: FieldRow[]): FieldInput[] {
   });
 }
 
+/** The saved pipeline's fields that the edited list leaves out (removed when saved). */
+function removedFields(pipeline: PipelineDto, rows: FieldRow[]): CustomField[] {
+  return pipeline.custom_fields.filter((field) => !rows.some((row) => row.id === field.id));
+}
+
 /** What can be checked before sending (the server checks everything again). */
 function validateConfiguration(name: string, stages: StageRow[], fields: FieldRow[]): Record<string, string[]> {
   const problems: Record<string, string[]> = {};
@@ -156,9 +161,13 @@ export function PipelineSettings({
   const [stages, setStages] = useState<StageRow[]>(() => (pipeline ? rowsOf(pipeline) : TEMPLATE.map((r) => ({ ...r, key: nextKey() }))));
   const [fields, setFields] = useState<FieldRow[]>(() => (pipeline ? fieldsOf(pipeline) : []));
   const [confirmArchive, setConfirmArchive] = useState(false);
+  // Removing a field keeps its stored values (hidden) unless this is ticked (privacy: a
+  // field that held personal data can be emptied for good). Off by default, every time.
+  const [deleteRemovedValues, setDeleteRemovedValues] = useState(false);
   const [live, setLive] = useState("");
   const [clientErrors, setClientErrors] = useState<Record<string, string[]>>({});
   const listRef = useRef<HTMLOListElement>(null);
+  const removedHintId = useId();
   // The pipeline as last saved: a save is up to three requests (rename, stages, fields), so
   // after a partial failure the retry continues from what was saved, at its version, never
   // repeating a step (enhancement review: the retry renamed again with a stale version).
@@ -180,7 +189,8 @@ export function PipelineSettings({
         setStages(rowsOf(current));
       }
       if (JSON.stringify(fieldInput(fields)) !== JSON.stringify(fieldInput(fieldsOf(current)))) {
-        current = saved.current = await pipelineApi.replaceFields(workspace, current.id, current.version, fieldInput(fields));
+        const removing = removedFields(current, fields).length > 0;
+        current = saved.current = await pipelineApi.replaceFields(workspace, current.id, current.version, fieldInput(fields), removing && deleteRemovedValues);
         setFields(fieldsOf(current));
       }
       return current;
@@ -207,6 +217,7 @@ export function PipelineSettings({
   });
 
   const server: Record<string, string[]> = { ...fieldErrors(save.error), ...clientErrors };
+  const removed = pipeline ? removedFields(pipeline, fields) : [];
   const banner = save.isError
     ? isApiError(save.error, 409)
       ? "Someone else changed this pipeline meanwhile. Close and open the settings again to see the latest."
@@ -344,6 +355,23 @@ export function PipelineSettings({
               />
             ))}
           </ul>
+          {removed.length ? (
+            <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5">
+              <label className="flex items-start gap-2 text-sm text-slate-800">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 size-4 shrink-0 accent-brand-600"
+                  checked={deleteRemovedValues}
+                  onChange={(e) => setDeleteRemovedValues(e.target.checked)}
+                  aria-describedby={removedHintId}
+                />
+                Also delete these fields&apos; stored values (can&apos;t be undone)
+              </label>
+              <p id={removedHintId} className="mt-1 pl-6 text-xs text-slate-500">
+                Removing {removed.map((f) => `“${f.name}”`).join(", ")}. Otherwise their values stay stored, hidden from deals.
+              </p>
+            </div>
+          ) : null}
         </section>
       </form>
       {pipeline ? (

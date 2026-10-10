@@ -744,6 +744,34 @@ def delete(key: str) -> None:
         return
 
 
+def delete_versions(key: str) -> int:
+    """S3 with versioning: remove every earlier version (and delete marker) of the object
+    as well, so a deleted file doesn't live on until the bucket's lifecycle rule expires it
+    (ATTACHMENT_S3_PURGE_VERSIONS; the credentials then need s3:ListBucketVersions and
+    s3:DeleteObjectVersion). Returns how many versions were removed. Nothing to do for the
+    filesystem store."""
+    store = _store()
+    if backend_name(store) != "s3":
+        return 0
+    client = store.connection.meta.client  # type: ignore[attr-defined]
+    bucket = store.bucket_name  # type: ignore[attr-defined]
+    full_key = store._normalize_name(key)  # type: ignore[attr-defined]  # the prefix added
+
+    def remove(_cancel: Any) -> int:
+        listing = client.list_object_versions(Bucket=bucket, Prefix=full_key)
+        versions = [
+            {"Key": item["Key"], "VersionId": item["VersionId"]}
+            for kind in ("Versions", "DeleteMarkers")
+            for item in listing.get(kind, [])
+            if item["Key"] == full_key
+        ]
+        if versions:
+            client.delete_objects(Bucket=bucket, Delete={"Objects": versions, "Quiet": True})
+        return len(versions)
+
+    return int(_call("delete", remove))  # a delete, as the metrics count it
+
+
 def size(key: str) -> int:
     """The object's size as the store reports it (ObjectMissing if there is none)."""
     return int(_call("size", lambda _cancel: _store().size(key)))

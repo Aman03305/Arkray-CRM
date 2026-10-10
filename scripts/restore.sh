@@ -3,7 +3,8 @@
 # (docs/runbooks.md#restore-from-backup).
 #
 #   TARGET_DATABASE_URL=postgres://arkray_owner:pass@host:5432/arkray_restored \
-#     scripts/restore.sh path/to/arkray-<stamp>.dump
+#   BACKUP_GNUPGHOME=/secure/restore-keyring \
+#     scripts/restore.sh path/to/arkray-<stamp>.dump.gpg
 #
 # The target is prepared by infrastructure/postgres/roles.sql (the database, both roles, the
 # extensions); run this as the schema owner (arkray_owner), then
@@ -18,6 +19,15 @@
 #      and the dashboard's index-only figures run about 3x slower until it is vacuumed
 #      (Phase 10, R55);
 #   5. print row counts to compare with the source.
+# An encrypted backup (.dump.gpg) is decrypted first, into a private temporary directory
+# removed afterwards, with the keyring in BACKUP_GNUPGHOME (the backup private key: kept
+# offline, brought in for the restore only; docs/runbooks.md#backup-encryption-keys). The
+# checksum is checked on the encrypted file.
+#
+# BEFORE ANY TRAFFIC: the restored database is behind the erasure ledger (everyone erased
+# since the backup is back). The application keeps its API closed until, with the owner's
+# credentials, `manage.py replay_erasures --by <admin> --report <file>` has re-applied every
+# erasure (docs/runbooks.md#restore-from-backup); keep its report as the restore's evidence.
 # The Ask Arkray index is part of the dump; if it was left out or is suspect, rebuild it
 # with `manage.py ai_reindex` (docs/operations.md#rebuild-the-rag-index).
 set -euo pipefail
@@ -54,6 +64,17 @@ else
   exit 1
 fi
 
+work="$(mktemp -d)"
+cleanup() { rm -rf "$work"; }
+trap cleanup EXIT
+if [[ "$dump" == *.gpg ]]; then
+  : "${BACKUP_GNUPGHOME:?set BACKUP_GNUPGHOME (the keyring holding the backup private key)}"
+  decrypted="$work/$(basename "${dump%.gpg}")"
+  GNUPGHOME="$BACKUP_GNUPGHOME" gpg --batch --quiet --output "$decrypted" --decrypt "$dump"
+  echo "decrypted: ok"
+  dump="$decrypted"
+fi
+
 tables=$(psql "$TARGET_DATABASE_URL" -tAc \
   "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")
 if [[ "$tables" != "0" ]]; then
@@ -62,8 +83,7 @@ if [[ "$tables" != "0" ]]; then
 fi
 
 # Every entry but the extensions and the comments on them (roles.sql made them).
-list="$(mktemp)"
-trap 'rm -f "$list"' EXIT
+list="$work/restore.list"
 pg_restore --list "$dump" | grep -vE '^[0-9]+; [0-9]+ [0-9]+ (EXTENSION|COMMENT) - EXTENSION ' \
   | grep -vE '^[0-9]+; [0-9]+ [0-9]+ EXTENSION - ' > "$list"
 
@@ -86,3 +106,5 @@ psql "$TARGET_DATABASE_URL" -tA -F ' ' -c "
   UNION ALL SELECT 'audit_events', count(*) FROM audit_event
   UNION ALL SELECT 'knowledge_chunks', count(*) FROM ai_knowledge_chunk
   UNION ALL SELECT 'migrations', count(*) FROM django_migrations"
+echo "NEXT, before any traffic: manage.py replay_erasures --by <admin email> --report <file>"
+echo "(the API stays closed until it has re-applied every erasure made since this backup)"

@@ -130,18 +130,33 @@ SECURITY_ACTIONS: dict[str, tuple[str, ...]] = {
 
 
 def security_events() -> QuerySet[AuditEvent]:
-    """Recent account and security events, newest first (paginated by the caller)."""
-    return AuditEvent.objects.filter(action__in=list(SECURITY_ACTIONS)).only(
-        "id",
-        "occurred_at",
-        "action",
-        "actor_id",
-        "target_type",
-        "target_id",
-        "subject_user_id",
-        "metadata",
-        "support_session_id",
+    """Recent account and security events, newest first (paginated by the caller). With
+    each its expiring detail while it is kept (a support session's reason)."""
+    return (
+        AuditEvent.objects.filter(action__in=list(SECURITY_ACTIONS))
+        .select_related("detail")
+        .only(
+            "id",
+            "occurred_at",
+            "action",
+            "actor_id",
+            "target_type",
+            "target_id",
+            "subject_user_id",
+            "metadata",
+            "support_session_id",
+            "detail__values",
+        )
     )
+
+
+def event_details(event: AuditEvent) -> dict[str, object]:
+    """An event's metadata and, while kept, its detail's values (the detail's wins)."""
+    try:
+        values = event.detail.values
+    except AuditEvent.detail.RelatedObjectDoesNotExist:
+        values = {}
+    return {**(event.metadata or {}), **(values or {})}
 
 
 def people_by_id(user_ids: Collection[UUID]) -> dict[UUID, User]:

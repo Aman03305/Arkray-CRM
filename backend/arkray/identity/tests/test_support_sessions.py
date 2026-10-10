@@ -67,7 +67,9 @@ class TestStarting:
             user_a.pk,
             row.pk,
         )
-        assert event.metadata["reason"] == "Customer asked for help with a deal"
+        # Free text: in the event's expiring detail, not the append-only row (P2-4).
+        assert "reason" not in event.metadata
+        assert event.detail.values["reason"] == "Customer asked for help with a deal"
 
     @pytest.mark.parametrize(
         "target",

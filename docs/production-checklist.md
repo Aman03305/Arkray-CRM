@@ -18,8 +18,22 @@ the system can't verify them.
       `log_min_duration_statement=-1`, memory and planner settings, `max_connections` from the
       connection budget ([deployment.md](deployment.md#database),
       [reliability.md](reliability.md#connection-budget)).
-- [ ] Two Redis instances with passwords (and TLS across hosts): the broker `noeviction`
-      with AOF, the cache `allkeys-lru` ([deployment.md](deployment.md#production-topology)).
+- [ ] Two Redis instances with passwords and verified TLS (`rediss://...?ssl_cert_reqs=required`):
+      the broker `noeviction` with AOF, the cache `allkeys-lru` **without persistence**
+      (`--save '' --appendonly no`) ([deployment.md](deployment.md#production-topology)).
+- [ ] Every backend hop over verified TLS: `DATABASE_URL` with `sslmode=verify-full` and the
+      provider's CA, `smtp+tls://` (STARTTLS) or `smtp+ssl://` (implicit TLS), an https S3 endpoint; ClamAV on the private
+      network only; `BACKEND_TLS_PRIVATE_HOSTS` only for single-label container names
+      ([security.md](security.md#backend-tls)). Production refuses to start otherwise.
+- [ ] The erasure ledger's own store: a bucket (versioning, Object Lock in compliance mode,
+      replication) or a volume with its own backups, **never** in the database backups;
+      `ERASURE_LEDGER_URL` and `ERASURE_LEDGER_KEY` (≥ 32 characters, its own secret)
+      ([privacy.md](privacy.md#restore-safe-erasure)).
+- [ ] The backup encryption key pair made offline; only the public key
+      (`BACKUP_GPG_RECIPIENT_FILE`) on the backup host; the private key with two named people
+      ([runbooks.md](runbooks.md#backup-encryption-keys)).
+- [ ] Data-subject exports' private storage (`EXPORT_ROOT` volume, or the bucket's
+      `EXPORT_S3_PREFIX`).
 - [ ] An edge proxy equivalent to `infrastructure/nginx/arkray.conf`: TLS, HSTS, `/api` to
       Django, `X-Forwarded-For`/`-Proto` overwritten, `X-Request-ID` minted, no query
       strings or one-time links in its logs, its error log at `crit`, a 1 MB body limit
@@ -63,7 +77,8 @@ the system can't verify them.
 
 **Observability** ([observability.md](observability.md))
 
-- [ ] JSON logs shipped to the log platform with a retention period **(org)**; the
+- [ ] Container log rotation in place (the Compose files: 5 x 10 MB); JSON logs shipped to
+      the log platform with a retention period (30 days recommended) **(org)**; the
       log-based alerts of [observability.md](observability.md#alerts-phase-10) (5xx rate,
       latency, sign-in failures, security events) configured there.
 - [ ] `/health/metrics` scraped from each pod with the bearer token (`METRICS_TOKEN`), and
@@ -73,10 +88,17 @@ the system can't verify them.
 **People and policy (org)**
 
 - [ ] The first administrator created (`manage.py createsuperuser`); everyone else invited.
-- [ ] Retention periods agreed: audit trail, backups (30 days), logs
-      ([privacy.md](privacy.md#retention)).
+- [ ] Retention periods agreed: audit trail, audit details (90 days default), backups
+      (30 days), logs, Ask Arkray (30 days), customer records
+      ([privacy.md](privacy.md#decisions-that-arent-the-systems)).
+- [ ] The historical-deal policy confirmed by the product owner (a previous owner sees a
+      closed deal without its customer's contact details: R118).
+- [ ] The access-request procedure: who verifies identity, who reviews an export before
+      release, the secure channel used ([runbooks.md](runbooks.md#access-request)).
+- [ ] After upgrading from a release before ADR-0032: `audit_minimise_legacy` (owner) and
+      `forget_attachment_names`, once ([runbooks.md](runbooks.md#minimise-legacy-audit-details)).
 - [ ] RPO ≤ 5 min and RTO ≤ 1 h confirmed with the business, and a quarterly restore drill
-      scheduled ([runbooks.md](runbooks.md#restore-from-backup)).
+      scheduled, including `replay_erasures` ([runbooks.md](runbooks.md#restore-drill)).
 - [ ] The team knows the runbooks ([runbooks.md](runbooks.md)).
 
 ## Every release

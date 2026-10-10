@@ -182,3 +182,70 @@ class IdempotencyRecord(models.Model):
 
     def __str__(self) -> str:
         return f"IdempotencyRecord({self.operation}, {self.key})"
+
+
+class HoldSubject(models.TextChoices):
+    LEAD = "lead", "Lead (customer)"
+    USER = "user", "User (staff)"
+
+
+class LegalHold(UUIDPrimaryKeyModel):
+    """A legal hold on one person's records (docs/privacy.md#legal-holds): while it is
+    active, nothing about that lead or user is erased, pseudonymised, purged or expired by
+    any retention job (audit details, attachment purges, custom-value removal, staff
+    pseudonymisation, lead erasure). Placed and released by an administrator with a
+    reference to the matter (a ticket or case number, never a description), both audited.
+    Holds are rare: every job reads the active ones in one query."""
+
+    subject_type = models.CharField(max_length=8, choices=HoldSubject.choices)
+    subject_id = models.UUIDField()
+    reference = models.CharField(max_length=64)
+    placed_by = models.UUIDField()
+    placed_at = models.DateTimeField(default=timezone.now)
+    released_by = models.UUIDField(null=True, blank=True)
+    released_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "core_legal_hold"
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(subject_type__in=HoldSubject.values), name="core_legal_hold_subject"
+            ),
+            models.CheckConstraint(
+                condition=~Q(reference=""), name="core_legal_hold_reference_present"
+            ),
+            models.CheckConstraint(
+                condition=Q(released_at__isnull=True, released_by__isnull=True)
+                | Q(released_at__isnull=False, released_by__isnull=False),
+                name="core_legal_hold_release_complete",
+            ),
+            models.UniqueConstraint(
+                fields=["subject_type", "subject_id"],
+                condition=Q(released_at__isnull=True),
+                name="core_legal_hold_one_active",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"LegalHold({self.subject_type}, {self.subject_id})"
+
+
+class LedgerState(models.Model):
+    """How far this database has applied the erasure ledger (arkray.core.ledger): one row.
+    Restored from a backup, it is behind the ledger, and the API stays closed until
+    `replay_erasures` has re-applied the rest (arkray.core.ledger_gate)."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1)
+    applied_seq = models.BigIntegerField(default=0)
+    applied_mac = models.CharField(max_length=64, blank=True, default="")
+    updated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "core_erasure_ledger_state"
+        constraints = [
+            models.CheckConstraint(condition=Q(id=1), name="core_ledger_state_single_row"),
+            models.CheckConstraint(condition=Q(applied_seq__gte=0), name="core_ledger_state_seq"),
+        ]
+
+    def __str__(self) -> str:
+        return f"LedgerState({self.applied_seq})"

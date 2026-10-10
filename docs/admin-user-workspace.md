@@ -74,10 +74,14 @@ anyone learning, using or resetting the user's password and without impersonatio
   session is worthless), or conditions failing (the user deactivated or made an administrator,
   the administrator losing the capability) — checked on every request, so nothing outlives
   its conditions. An hourly sweep closes expired sessions nobody used again.
-- **Audit**: `support_session.started` (administrator, user, reason, expiry) and
-  `support_session.ended` (how: exited, expired, signed_out, not_allowed, session_changed;
-  the system is the actor when it ended it), both carrying the session id; they appear in the
-  security events feed.
+- **Audit**: `support_session.started` (administrator, user, expiry; the reason in the
+  event's expiring detail) and `support_session.ended` (how: exited, expired, signed_out,
+  not_allowed, session_changed; the system is the actor when it ended it), both carrying the
+  session id; they appear in the security events feed (the reason while it is kept).
+- **The reason** is free text an administrator types: the form asks for a ticket number or a
+  short reason without customer names or health details. It is kept 90 days
+  (`AUDIT_DETAIL_RETENTION_DAYS`) in the audit detail and on the session row, then blanked
+  (privacy remediation; [privacy.md](privacy.md#audit-trail)).
 - **Attack tests** (`backend/arkray/identity/tests/test_support_sessions.py`): every identity
   route is enumerated from the URLconf, and all but a short, reasoned allowlist (sign-in and
   sign-out, who am I, exit, the public link flows, the target's workspace description and

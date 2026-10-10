@@ -10,7 +10,8 @@ by composite foreign keys; lock order), [ADR-0019](adr/0019-lead-conversion.md) 
 (user pipelines, negotiation, custom fields), [ADR-0027](adr/0027-leads-removed-from-the-ui.md)
 (Leads removed from the UI: a new opportunity brings its own customer record; "Change owner")
 [ADR-0028](adr/0028-opportunity-creates-its-lead.md) (a new opportunity creates its lead;
-derived names; the instrument list; Expected CPT; the read-only lead page) and
+derived names; the instrument list; Expected CPT; the lead page, read-only except for
+ADR-0032's narrow correction) and
 [ADR-0029](adr/0029-agreed-price-and-cpt-on-negotiation.md) (entering negotiation asks for the
 agreed price and the agreed CPT).
 
@@ -164,8 +165,16 @@ option ids), validated against the pipeline's active definitions on every write
 bounded (500 / 5,000) and refuses markup; numbers and money are exact strings (a JSON float is
 refused); dates 1900-2199; required fields must be given at creation and can't be cleared;
 the whole object is at most 32 KB. Edits merge (only the given fields change; null clears).
-A removed field is archived: its values stay on the deals, hidden. Audit records the ids of
-changed fields, never values. Defining a field never changes the database schema.
+A removed field is archived: its values stay on the deals, hidden, unless they are deleted on
+purpose (privacy remediation, [privacy.md](privacy.md#custom-fields)): `delete_removed_values`
+with the `PUT …/fields` that removes them, or `POST …/pipelines/{id}/fields/{field id}/delete-values`
+with `{"confirm_name": "<the field's name>"}` for an already removed field (202). The request
+is audited and recorded in the erasure ledger; a job removes the key from every deal of the
+pipeline in batches of 1,000 with one atomic `custom_fields - key` per row (`FOR UPDATE SKIP
+LOCKED`, so a concurrent edit of the deal's other values is kept and a row another transaction
+holds is taken in a later batch), skips deals whose lead is under a legal hold, and audits the
+counts. Audit records the ids of changed fields, never values. Defining a field never changes
+the database schema.
 
 ### Stages
 

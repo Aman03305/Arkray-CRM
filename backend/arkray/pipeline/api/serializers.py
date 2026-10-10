@@ -4,7 +4,8 @@ Output: explicit fields. Money and probabilities are decimal strings with two pl
 ("1250000.00", "75.00"), never JSON numbers. People are {id, full_name, is_active}. An
 opportunity's lead is shown only if the lead is visible in the same workspace; otherwise
 (a closed opportunity whose lead has since been reassigned) it is
-{"id": null, "restricted": true} (docs/authorization.md#related-records-and-timelines).
+{"id": null, "restricted": true} (docs/authorization.md#related-records-and-timelines), and
+the deal is shown without its customer (pipeline.customer: `customer_restricted`).
 
 Input: strict (undeclared keys are a 400). Nobody sends a status, closed_at, created_by or
 archive state, nor an owner in an edit: ownership follows the lead (named only for a new
@@ -23,9 +24,11 @@ from rest_framework import serializers
 
 from arkray.core.access import AccessScope
 from arkray.core.api import ExactDecimalField, OpaqueIdField, StrictInputSerializer
+from arkray.leads import models as lead_models
 from arkray.leads.api.serializers import LeadSerializer, UserRefSerializer
+from arkray.leads.phones import PHONE_MAX_LENGTH
 
-from .. import configuration, validation
+from .. import configuration, customer, validation
 from .. import models as m
 from ..selectors import BOARD_CARDS_DEFAULT, BOARD_CARDS_MAX, DEFAULT_ORDERING, ORDERINGS
 
@@ -172,6 +175,23 @@ class _ScopedLead(serializers.Serializer[Any]):
     def get_lead(self, opportunity: m.Opportunity) -> dict[str, Any]:
         return lead_ref(opportunity, self.context["scope"])
 
+    def get_customer_restricted(self, opportunity: m.Opportunity) -> bool:
+        return not customer.visible(self.context["scope"], opportunity.lead.owner_id)
+
+    def to_representation(self, instance: m.Opportunity) -> dict[str, Any]:
+        data: dict[str, Any] = super().to_representation(instance)
+        if data.get("customer_restricted"):
+            free_text = None
+            if "custom_fields" in data:
+                free_text = {
+                    str(pk)
+                    for pk in m.CustomField.objects.filter(
+                        pipeline_id=instance.pipeline_id, field_type__in=customer.FREE_TEXT_TYPES
+                    ).values_list("pk", flat=True)
+                }
+            customer.restrict(data, instance, free_text)
+        return data
+
 
 CARD_FIELDS = [
     "id",
@@ -193,13 +213,23 @@ CARD_FIELDS = [
     "version",
     "created_at",
     "updated_at",
+    "customer_restricted",
 ]
+
+
+_RESTRICTED_HELP = (
+    "True when the viewer can't see the deal's customer (its lead was reassigned and this is "
+    "a closed deal they worked): the customer's name, phone, email and address are blank, the "
+    "title and account show only the organisation and instrument, and free-text custom values "
+    "are left out (docs/authorization.md#historical-deals)."
+)
 
 
 class OpportunityCardSerializer(_ScopedLead, serializers.ModelSerializer[m.Opportunity]):
     """A board card and a list row."""
 
     lead = serializers.SerializerMethodField()
+    customer_restricted = serializers.SerializerMethodField(help_text=_RESTRICTED_HELP)
     owner = UserRefSerializer(read_only=True)
     stage_id = serializers.UUIDField(read_only=True)
     value = money()
@@ -220,6 +250,7 @@ class OpportunityCardSerializer(_ScopedLead, serializers.ModelSerializer[m.Oppor
 
 class OpportunitySerializer(_ScopedLead, serializers.ModelSerializer[m.Opportunity]):
     lead = serializers.SerializerMethodField()
+    customer_restricted = serializers.SerializerMethodField(help_text=_RESTRICTED_HELP)
     owner = UserRefSerializer(read_only=True)
     created_by = UserRefSerializer(read_only=True)
     pipeline = PipelineRefSerializer(read_only=True)
@@ -594,6 +625,18 @@ class StagesReplaceSerializer(StrictInputSerializer):
 class FieldsReplaceSerializer(StrictInputSerializer):
     version = serializers.IntegerField(min_value=1)
     custom_fields = _fields(allow_empty=True)
+    delete_removed_values = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text="Delete the stored values of the fields left out, for good (otherwise they "
+        "are kept, hidden). Deals under a legal hold keep theirs.",
+    )
+
+
+class FieldValuesDeleteSerializer(StrictInputSerializer):
+    confirm_name = serializers.CharField(
+        max_length=m.FIELD_NAME_MAX_LENGTH, help_text="The removed field's name, to confirm."
+    )
 
 
 class PipelineListQuerySerializer(StrictInputSerializer):
@@ -677,3 +720,39 @@ class OpportunityListQuerySerializer(_FilterSerializer):
 class HistoryQuerySerializer(StrictInputSerializer):
     cursor = serializers.CharField(max_length=1000, required=False)
     page_size = serializers.IntegerField(min_value=1, max_value=100, required=False, default=50)
+
+
+def _correctable(max_length: int) -> serializers.CharField:
+    return serializers.CharField(max_length=max_length, required=False, allow_blank=True)
+
+
+class CustomerCorrectionSerializer(StrictInputSerializer):
+    """The customer's details to correct (pipeline.corrections.CORRECTABLE), and the lead's
+    version as last seen. Only what is sent changes; blank clears a field. The lead's own
+    length limits; its cleaning rules apply in the service."""
+
+    version = serializers.IntegerField(min_value=1)
+    first_name = _correctable(lead_models.NAME_MAX_LENGTH)
+    last_name = _correctable(lead_models.NAME_MAX_LENGTH)
+    organization_name = _correctable(lead_models.ORGANIZATION_MAX_LENGTH)
+    job_title = _correctable(lead_models.JOB_TITLE_MAX_LENGTH)
+    email = _correctable(lead_models.EMAIL_MAX_LENGTH)
+    phone = _correctable(PHONE_MAX_LENGTH)
+    mobile = _correctable(PHONE_MAX_LENGTH)
+    alternate_phone = _correctable(PHONE_MAX_LENGTH)
+    address_line_1 = _correctable(lead_models.ADDRESS_LINE_MAX_LENGTH)
+    address_line_2 = _correctable(lead_models.ADDRESS_LINE_MAX_LENGTH)
+    city = _correctable(lead_models.LOCALITY_MAX_LENGTH)
+    state = _correctable(lead_models.LOCALITY_MAX_LENGTH)
+    postal_code = _correctable(lead_models.POSTAL_CODE_MAX_LENGTH)
+    country = _correctable(2)
+
+
+class CustomerCorrectionResultSerializer(serializers.Serializer[Any]):
+    lead = LeadSerializer()
+    corrected = serializers.ListField(
+        child=serializers.CharField(), help_text="The lead fields that changed."
+    )
+    opportunities = serializers.IntegerField(
+        help_text="How many of the customer's deals had their copy of these details corrected."
+    )

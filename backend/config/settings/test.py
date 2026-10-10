@@ -34,3 +34,8 @@ STORAGES["attachments"] = {  # noqa: F405
     "BACKEND": "django.core.files.storage.FileSystemStorage",
     "OPTIONS": {"location": ATTACHMENT_ROOT, "base_url": None},
 }
+EXPORT_ROOT = tempfile.mkdtemp(prefix="arkray-exports-")
+STORAGES["exports"] = {  # noqa: F405
+    "BACKEND": "django.core.files.storage.FileSystemStorage",
+    "OPTIONS": {"location": EXPORT_ROOT, "base_url": None},
+}
