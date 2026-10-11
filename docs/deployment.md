@@ -33,12 +33,37 @@ flowchart TB
 |---|---|---|---|
 | api | backend image, default `gunicorn` CMD | horizontal; stateless | live: TCP on the port (an HTTP probe shares the request workers, which a stalled database pins: [reliability.md](reliability.md#failure-and-degradation-matrix)), or `/health/live` with more than 35 s of tolerance; ready `/health/ready` |
 | web | frontend image, `node server.js` | horizontal; stateless | HTTP GET `/login` |
-| worker-outbox | `celery -A config worker -Q outbox --concurrency 1` | 1-2 replicas; tiny | process liveness |
-| worker-default-email | `celery -A config worker -Q default,email` | horizontal | process liveness |
-| worker-index | `celery -A config worker -Q ai_index --concurrency 1` (Ask Arkray's indexing: CPU-bound embedding, loads the model) | 1 replica normally; scale out temporarily for a large backfill | process liveness |
-| worker-ai | `celery -A config worker -Q ai --concurrency 2` (Ask Arkray's questions only; loads the embedding model, ~0.5 GB RAM per process) | horizontal, sized to question volume and the provider's rate limits | process liveness |
-| beat | `celery -A config beat` | **exactly one** replica (duplicates cause duplicate relay ticks, harmless but wasteful) | process liveness |
+| worker-outbox | `celery -A config worker -Q outbox --concurrency 1 --hostname outbox@%h` | 1-2 replicas; tiny | `python manage.py ledger_status --ping-worker outbox` ([below](#worker-and-beat-health)) |
+| worker-default-email | `celery -A config worker -Q default,email --hostname celery@%h` | horizontal | `... --ping-worker celery` |
+| worker-index | `celery -A config worker -Q ai_index --concurrency 1 --hostname index@%h` (Ask Arkray's indexing: CPU-bound embedding, loads the model) | 1 replica normally; scale out temporarily for a large backfill | `... --ping-worker index` |
+| worker-ai | `celery -A config worker -Q ai --concurrency 2 --hostname ai@%h` (Ask Arkray's questions only; loads the embedding model, ~0.5 GB RAM per process) | horizontal, sized to question volume and the provider's rate limits | `... --ping-worker ai` |
+| beat | `celery -A config beat --schedule /tmp/celerybeat-schedule` (a writable path: the image's `/app` isn't writable by the app user, and beat dies at start without it, `Errno 13`) | **exactly one** replica, never autoscaled: duplicates cause duplicate relay ticks and housekeeping runs (harmless but wasteful) | `python manage.py ledger_status` |
 | migrate | `python manage.py migrate --noinput` | one-off job per release | exit code |
+
+Every process from the backend image (api, every worker, beat, migrate and one-off
+management commands such as `replay_erasures`) needs the **same erasure ledger**: the same
+`ERASURE_LEDGER_URL` and `ERASURE_LEDGER_KEY`, and for a `file:///` ledger the same volume
+mounted at that path, read-write, owned by the app user (uid 10001, mode 0700) and never by
+the web or proxy containers. A worker that sees another (or an empty) directory reads the
+ledger as rolled back and refuses every task (final audit ARCH-1, where the AI workers and
+beat had the URL without the volume). Across hosts or instances use an S3 ledger: a disk
+attached to one instance is not shared.
+
+### Worker and beat health
+
+Beat's schedule file only records when each entry last ran: in tmpfs it is lost on a
+restart, which costs nothing (the relay ticks every 5 s; the slower entries are crontabs and
+fire at their time whatever happened before). `manage.py ledger_status` prints this
+process's view of the erasure ledger gate and exits 1 unless it is open; with
+`--ping-worker <name>` the worker started with `--hostname <name>@%h` on the same host must
+also answer a ping through the broker within 5 s. It is a short Django process (it reads and
+verifies the ledger and queries the database once), so probe every 60 s with a 30 s timeout,
+not every few seconds; both Compose files do (`start_period` 120 s). Unhealthy means the
+worker refuses or can't take work: its gate is closed (it logs `background_task_skipped`,
+`background_task_deferred` or `background_task_dropped` at ERROR, [reliability.md](reliability.md#failure-and-degradation-matrix)),
+the worker is hung or dead, or the broker is down (every worker at once). Docker only reports
+it; an orchestrator's liveness probe restarts the container, which helps a hung worker but
+not a closed gate: alert on it instead (`erasure_ledger_gate_closed`).
 
 The WSGI entry point defaults to production settings, so a deployment that forgets
 `DJANGO_SETTINGS_MODULE` never serves with `DEBUG=True`.
@@ -224,10 +249,19 @@ password, read-only containers, no insecure opt-in, only the proxy published:
 
 ```
 export DJANGO_SECRET_KEY=... POSTGRES_PASSWORD=... ARKRAY_OWNER_PASSWORD=... \
-       ARKRAY_APP_PASSWORD=... REDIS_PASSWORD=... METRICS_TOKEN=...
+       ARKRAY_APP_PASSWORD=... REDIS_PASSWORD=... METRICS_TOKEN=... ERASURE_LEDGER_KEY=...
 docker compose -p arkray-prod -f docker-compose.yml -f infrastructure/compose.production.yml \
     --profile app up -d --build
 ```
+
+Every container of the backend image mounts the one `ledger` volume (`x-ledger-volume`;
+`tests/architecture/test_compose_ledger.py` fails on a service with `ERASURE_LEDGER_URL` and
+no volume), and the workers and beat report `healthy` only while their ledger gate is open
+([Worker and beat health](#worker-and-beat-health)). After a restore, replay through migrate
+(it has the owner's credentials and the volume; the report goes to a directory writable by
+uid 10001, the root filesystem being read-only):
+`docker compose ... run --rm -v ./restore-reports:/reports migrate python manage.py
+replay_erasures --by <admin> --report /reports/<date>.json`.
 
 What it doesn't reproduce (whole-software audit): one Redis serves as both broker and
 cache (production: two instances, the cache evicting), and one worker consumes `outbox`,
@@ -383,12 +417,14 @@ refuses anything else at startup (DRF would otherwise fail on the first request)
 | Variable | Required | Default and notes |
 |---|---|---|
 | `ERASURE_LEDGER_URL` | **yes** | where erasures are recorded outside the database: `file:///var/lib/arkray/ledger` (a volume of its own, never in a database backup) or `s3://bucket/prefix` (a bucket of its own, versioned, Object Lock in compliance mode). Startup fails without it |
-| `ERASURE_LEDGER_KEY` | **yes** | the ledger's HMAC key: at least 32 characters, not the Django secret, not a `dev-`/`test-` key. Keep it with the ledger's own secrets; changing it needs a new, empty ledger |
+| `ERASURE_LEDGER_KEY` | **yes** | the ledger's HMAC key: at least 32 characters, not the Django secret, not a `dev-`/`test-` key. Keep it with the ledger's own secrets, the same in every process. Rotate it with `ERASURE_LEDGER_VERIFY_KEYS` (old entries keep verifying under the old key; [runbooks.md](runbooks.md#rotate-the-erasure-ledger-key)), never by swapping the key alone |
 | `ERASURE_LEDGER_S3_ENDPOINT_URL`, `ERASURE_LEDGER_S3_REGION`, `ERASURE_LEDGER_S3_CA_BUNDLE` | no | an S3 ledger's endpoint (https only), region and private CA bundle |
 | `ERASURE_LEDGER_CHECK_INTERVAL_S`, `ERASURE_LEDGER_MAX_STALE_S` | no | 60 s: how often each process compares the database with the ledger; 1 h: how long it stays open through a ledger outage after a verified state |
+| `ERASURE_LEDGER_VERIFY_KEYS` | no | empty. Comma-separated earlier or next ledger keys, accepted when verifying entries and never used to write, during a key rotation only ([runbooks.md](runbooks.md#rotate-the-erasure-ledger-key)) |
+| `ERASURE_LEDGER_AUTO_RECONCILE_MAX` | no | 10: a database behind the ledger by at most this many entries (an erasure whose commit failed after its entry was written) is reconciled automatically; more (a restore) waits for `replay_erasures`; 0: always the operator |
 | `AUDIT_DETAIL_RETENTION_DAYS` | no | 90: how long audit events' personal details (security events' client addresses, old/new emails, reset requesters' addresses, support reasons) are kept; a policy the organisation sets |
 | `EXPORT_ROOT` | no | `var/exports`: the private directory for data-subject export files (filesystem storage); a volume of its own |
-| `EXPORT_S3_PREFIX` | no | `exports`: their prefix in the attachments bucket with `ATTACHMENT_STORAGE=s3` (outside the attachments' prefix, which reconciliation walks) |
+| `EXPORT_S3_PREFIX` | no | `exports`: their prefix in the attachments bucket with `ATTACHMENT_STORAGE=s3` (outside the attachments' prefix, which reconciliation walks). The application's S3 credentials need `s3:ListBucketVersions` and `s3:DeleteObjectVersion` on this prefix **in every case** (not only with `ATTACHMENT_S3_PURGE_VERSIONS`): an expired or erased subject's export is removed with every version. A bucket-wide default Object Lock retention must not cover this prefix (it would keep exports past their expiry) |
 | `EXPORT_TTL_HOURS`, `EXPORT_MAX_BYTES` | no | 24 h; 100 MB (attachments beyond it are listed, not included) |
 | `EXPORT_MAX_PENDING_PER_ADMIN`, `EXPORT_MAX_PER_HOUR` | no | 3; 20 per administrator |
 | `LOG_EXCEPTION_MESSAGES` | no | `false`; exception messages in log tracebacks, for local development only: production refuses it |
@@ -594,6 +630,9 @@ The kill switch is `AI_ENABLED=false` (it also stops queued questions).
 - Base images are pinned **by digest** in the Dockerfiles (the tag names the series). Move a
   digest deliberately (Dependabot or a reviewed edit) and rebuild; OS packages are upgraded
   at build time, so a rebuild also picks up security updates published since the base.
+  The Compose files' third-party images (PostgreSQL, Redis, Mailpit, nginx, alpine) are
+  pinned **by tag only** (a rehearsal stack; a re-pull can bring a newer build of the same
+  tag): a real deployment's manifests pin every image by digest, its own by commit SHA.
 - The application code is owned by root and read-only to the runtime user (uid 10001); only
   Next.js's `.next/cache` is writable. Run every container with a **read-only root
   filesystem** (a tmpfs `/tmp`, and `/app/.next/cache` for the web image), **no Linux

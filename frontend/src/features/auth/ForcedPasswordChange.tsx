@@ -52,7 +52,7 @@ export function ForcedPasswordChange({ viewer }: { viewer: Viewer }) {
   const server = fieldErrors(change.error);
   useFocusFirstInvalid(form, Object.keys(clientErrors).length ? clientErrors : change.error);
   const errors = { current: server.current_password, password: server.new_password, ...clientErrors };
-  const banner = change.isError && !server.current_password && !server.new_password ? describeError(change.error) : null;
+  const banner = change.isError && !server.current_password && !server.new_password ? describeError(change.error, { tooMany: "password change attempts" }) : null;
   const signOutError = signOut.isError ? describeError(signOut.error) : null;
 
   return (

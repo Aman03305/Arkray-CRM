@@ -374,6 +374,10 @@ def assemble(
         # the narrative may be based on, re-checked against the reader's scope when the
         # answer is read again (service.visible_answer).
         "basis": sorted(ctx.records),
+        # The deals of the basis named without their customer (internal too): a deal the
+        # answer named *with* its customer is hidden from a reader who no longer sees that
+        # customer, while one it never named stays (privacy audit PRIV-1).
+        "masked": sorted(ref for ref, record in ctx.records.items() if record.restricted),
         "blocks": blocks,
         "facts": facts,
         "sources": sources,

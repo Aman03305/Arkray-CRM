@@ -23,6 +23,18 @@ or invited account, and for the operator themselves. A dry run (`preview`) shows
 Idempotent: an account already pseudonymised is reported, never changed again. Audited
 (`user.pseudonymised`, no values) and recorded in the erasure ledger (core.ledger), so a
 restored backup is pseudonymised again before it is served.
+
+An administrator's account (its *role* is administrator, whatever its status: a deactivated
+former administrator too) is changed only by that administrator (ADR-0030), and nobody
+pseudonymises themselves, so no administrator pseudonymises another through the API: 403,
+nothing changed (audit SEC-2: it replaced the other's email and password). The one way is
+the higher-trust operator path, `manage.py pseudonymise_user --allow-administrator` (shell
+and database access), audited with `administrator_target`. The rule is checked here, not
+only in the view, after taking the user-administration lock and the target's row lock, on
+the locked row: a promotion committed a moment earlier is seen, one that waits sees the
+account changed. The operator is re-read there too (privacy.manage). A replay
+(privacy.replay) re-applies a pseudonymisation that was authorised when it happened, so it
+is never refused for the role.
 """
 
 from __future__ import annotations
@@ -30,7 +42,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from uuid import UUID
 
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -39,7 +51,7 @@ from arkray.ai.models import Conversation
 from arkray.audit import services as audit
 from arkray.audit.models import AuditDetail
 from arkray.core import holds, ledger
-from arkray.core.errors import BusinessRuleViolation, NotFoundError
+from arkray.core.errors import BusinessRuleViolation, NotFoundError, PermissionDeniedError
 from arkray.core.models import HoldSubject, OutboxEvent, OutboxStatus
 from arkray.identity import throttling
 from arkray.identity.models import (
@@ -52,6 +64,8 @@ from arkray.identity.models import (
     UserStatus,
     WorkspaceAccessWindow,
 )
+from arkray.identity.policy import Capability, has_capability
+from arkray.identity.services import is_administrator, serialise_user_administration
 from arkray.leads.models import Lead
 from arkray.pipeline.models import Opportunity, StageCategory
 
@@ -63,6 +77,10 @@ OWNS_WORK = (
     "{work} open tasks or scheduled meetings. Reassign them first."
 )
 NOT_YOURSELF = "You can't pseudonymise your own account."
+ADMINISTRATOR_REFUSED = (
+    "An administrator's account can't be pseudonymised by another administrator. If it must"
+    " be, an operator does it on the server (manage.py pseudonymise_user --allow-administrator)."
+)
 
 
 class AlreadyPseudonymised(Exception):
@@ -112,25 +130,38 @@ def _queued_payloads(user: User) -> Q:
     return Q(payload__user_id=str(user.pk)) | Q(payload__email=user.email)
 
 
-def _check(user: User, operator_id: UUID) -> None:
+def _require_operator(operator_id: UUID) -> None:
+    """The operator, re-read (under the lock when pseudonymising): one who lost privacy.manage
+    a moment ago, or a sales user calling the service, is refused."""
+    operator = User.objects.filter(pk=operator_id).first()
+    if operator is None or not has_capability(operator, Capability.PRIVACY_MANAGE):
+        raise PermissionDeniedError()
+
+
+def _check(user: User, operator_id: UUID, *, allow_administrator: bool) -> None:
+    if user.pk == operator_id:
+        raise BusinessRuleViolation(NOT_YOURSELF)  # even with allow_administrator
+    if is_administrator(user) and not allow_administrator:
+        raise PermissionDeniedError(ADMINISTRATOR_REFUSED)
     if pseudonymised(user):
         raise AlreadyPseudonymised(user.pk)
-    if user.pk == operator_id:
-        raise BusinessRuleViolation(NOT_YOURSELF)
     if user.status != UserStatus.DEACTIVATED:
         raise BusinessRuleViolation(NOT_DEACTIVATED)
-    if holds.is_held(HoldSubject.USER, user.pk):
+    if connection.in_atomic_block:  # pseudonymise: serialised with placing a hold
+        holds.refuse_if_held(HoldSubject.USER, user.pk)
+    elif holds.is_held(HoldSubject.USER, user.pk):  # preview: a read, nothing to serialise
         raise holds.UnderLegalHold("user", user.pk)
     leads, deals, work = _owned_work(user)
     if leads or deals or work:
         raise BusinessRuleViolation(OWNS_WORK.format(leads=leads, deals=deals, work=work))
 
 
-def preview(user_id: UUID, *, operator_id: UUID) -> StaffErasure:
+def preview(user_id: UUID, *, operator_id: UUID, allow_administrator: bool = False) -> StaffErasure:
+    _require_operator(operator_id)
     user = User.objects.filter(pk=user_id).first()
     if user is None:
         raise NotFoundError()
-    _check(user, operator_id)
+    _check(user, operator_id, allow_administrator=allow_administrator)
     sessions = SupportSession.objects.filter(Q(admin=user) | Q(target=user))
     return StaffErasure(
         user_id=user.pk,
@@ -148,18 +179,36 @@ def preview(user_id: UUID, *, operator_id: UUID) -> StaffErasure:
 
 
 @transaction.atomic
-def pseudonymise(user_id: UUID, *, operator_id: UUID, replay: bool = False) -> StaffErasure:
+def pseudonymise(
+    user_id: UUID,
+    *,
+    operator_id: UUID | None,
+    replay: bool = False,
+    allow_administrator: bool = False,
+) -> StaffErasure:
     """`replay`: re-applying a ledger entry after a restore (privacy.replay). The erasure was
-    authorised and checked when it first happened, so only "already done" stops it; an
-    account the backup has active again is deactivated with it."""
+    authorised and checked when it first happened, so only "already done" stops it (an
+    administrator's too); an account the backup has active again is deactivated with it.
+    `operator_id` None is the system (the automatic ledger reconciliation): only with
+    `replay`, audited with no actor.
+    `allow_administrator`: only the operator's command passes it (never the API), to
+    pseudonymise an administrator's account (ADR-0030, SEC-2)."""
+    if operator_id is None and not replay:
+        raise ValueError("Only a replay is made without an operator.")
+    # The user-administration lock, then the account's row (identity's order): a promotion or
+    # demotion is either committed before the check reads the role, or waits for this one.
+    serialise_user_administration()
     user = User.objects.select_for_update().filter(pk=user_id).first()
     if user is None:
         raise NotFoundError()
+    administrator = is_administrator(user)
     if replay:
         if pseudonymised(user):
             raise AlreadyPseudonymised(user.pk)
     else:
-        _check(user, operator_id)
+        assert operator_id is not None  # noqa: S101 — refused above
+        _require_operator(operator_id)
+        _check(user, operator_id, allow_administrator=allow_administrator)
     now = timezone.now()
     original_email = user.email
     # What only identifies them, first (their email still finds it).
@@ -229,6 +278,7 @@ def pseudonymise(user_id: UUID, *, operator_id: UUID, replay: bool = False) -> S
         metadata={
             **counts,
             **({"exports_withdrawn": withdrawn} if withdrawn else {}),
+            **({"administrator_target": True} if administrator else {}),
             **({"replay": True} if replay else {}),
         },
     )

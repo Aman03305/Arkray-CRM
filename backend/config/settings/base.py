@@ -407,6 +407,8 @@ CELERY_TASK_ROUTES = {
     "ai.reconcile_index": {"queue": "ai_index"},
 }
 CELERY_WORKER_HIJACK_ROOT_LOGGER = False
+# Task modules outside `<app>.tasks` (autodiscovery finds only those).
+CELERY_IMPORTS = ("arkray.privacy.reconcile",)
 # Wall-clock schedules for everything slower than the relay: beat keeps its schedule file
 # in tmpfs (read-only containers), so every restart (every release) reset interval timers,
 # and a daily job could be pushed back indefinitely (Phase 11 review). A crontab fires at
@@ -417,6 +419,14 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": 5.0,
         # A relay tick that cannot run within 10s is dropped rather than piling up.
         "options": {"expires": 10},
+    },
+    "privacy-reconcile-ledger": {
+        "task": "privacy.reconcile_ledger",
+        # reopens the API after an erasure whose commit failed (privacy.reconcile); runs
+        # while the ledger gate is closed, unlike every other task. Every minute, on the
+        # wall clock like every slow entry (beat's schedule file is in tmpfs).
+        "schedule": crontab(minute="*"),
+        "options": {"expires": 50},
     },
     "core-housekeeping": {
         "task": "core.housekeeping",
@@ -708,8 +718,11 @@ AI_CONVERSATION_RETENTION_DAYS = env.int("AI_CONVERSATION_RETENTION_DAYS", defau
 # Object Lock). Empty: off (development and tests only; production refuses it).
 ERASURE_LEDGER_URL = env("ERASURE_LEDGER_URL", default="")
 # The entries' HMAC key: at least 32 characters, never the Django secret key, kept with the
-# ledger's own secrets (rotation re-signs nothing: a new key needs a new, empty ledger).
+# ledger's own secrets. Rotation re-signs nothing (docs/runbooks.md#rotate-the-erasure-ledger-
+# key): the keys listed here are accepted when verifying, never used to write; the old key
+# while it is retired, or the next one before it becomes ERASURE_LEDGER_KEY everywhere.
 ERASURE_LEDGER_KEY = env("ERASURE_LEDGER_KEY", default="")
+ERASURE_LEDGER_VERIFY_KEYS = env.list("ERASURE_LEDGER_VERIFY_KEYS", default=[])
 ERASURE_LEDGER_S3_ENDPOINT_URL = env("ERASURE_LEDGER_S3_ENDPOINT_URL", default="")
 ERASURE_LEDGER_S3_REGION = env("ERASURE_LEDGER_S3_REGION", default="")
 ERASURE_LEDGER_S3_CA_BUNDLE = env("ERASURE_LEDGER_S3_CA_BUNDLE", default="")
@@ -717,6 +730,10 @@ ERASURE_LEDGER_S3_CA_BUNDLE = env("ERASURE_LEDGER_S3_CA_BUNDLE", default="")
 ERASURE_LEDGER_CHECK_INTERVAL_S = env.int("ERASURE_LEDGER_CHECK_INTERVAL_S", default=60)
 # ...and stays open through a ledger outage this long after its last good comparison.
 ERASURE_LEDGER_MAX_STALE_S = env.int("ERASURE_LEDGER_MAX_STALE_S", default=60 * 60)
+# A database behind the ledger by at most this many entries (an erasure whose commit failed
+# after its entry was written) is reconciled automatically (privacy.reconcile); more (a
+# restore) waits for `manage.py replay_erasures`. 0: always the operator.
+ERASURE_LEDGER_AUTO_RECONCILE_MAX = env.int("ERASURE_LEDGER_AUTO_RECONCILE_MAX", default=10)
 
 # --- Logging -------------------------------------------------------------------------------
 LOG_LEVEL = env("LOG_LEVEL", default="INFO")

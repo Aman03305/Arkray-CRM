@@ -14,9 +14,23 @@ Entries hold identifiers only, never personal data:
     {"seq": 7, "kind": "lead_erased", "subject": "<uuid>", "at": "<iso time>",
      "prev": "<mac of entry 6>", "mac": "<HMAC-SHA256 of the rest>"}
 
+  (`custom_values_deleted` may add `"owner": "<uuid>"`: only that user's deals; a
+  `key_rotated` entry adds `"anchor"`, below. Both are left out when empty, so older
+  entries keep their MACs.)
+
 - **Tamper-evident**: each entry's MAC (ERASURE_LEDGER_KEY, a key of its own, never the
   Django secret) covers its content and the previous entry's MAC, so an entry changed,
   removed or reordered breaks the chain, and `verify()` refuses the whole ledger.
+- **Key rotation** (final production audit ARCH-5; docs/runbooks.md#rotate-the-erasure-
+  ledger-key): ERASURE_LEDGER_VERIFY_KEYS lists keys accepted besides ERASURE_LEDGER_KEY
+  when verifying (never for writing). `rotate_key()` then appends a `key_rotated` entry,
+  signed with the current key and naming it by its key id (an HMAC of a fixed label: the
+  key itself is never written), whose `anchor` is a SHA-256 digest of every entry before
+  it. From there an entry signed with any key used before the checkpoint is refused (a
+  retired key that leaked can't add entries), and the entries before it stay verifiable
+  through the anchor once their key is removed from the configuration. Nothing is
+  re-signed or lost; an interrupted rotation leaves either no checkpoint (run it again) or
+  a checkpoint not yet applied (reconciled like any entry).
 - **Write-once**: entry N is a file written to a temporary name, synced, then hard-linked to
   its name (which fails if it exists: never a partial entry under an entry's name), or an S3
   object written with `If-None-Match: *`; an existing entry is never overwritten. Appends
@@ -53,12 +67,15 @@ from django.utils import timezone
 
 from .errors import ServiceUnavailableError
 
+KEY_ROTATED = "key_rotated"
 KINDS = frozenset(
     {"lead_erased", "user_pseudonymised", "custom_values_deleted", "attachment_deleted"}
+    | {KEY_ROTATED}
 )
 # Advisory lock serialising appends.
 _LOCK = (0x41524B37, 1)  # "ARK7": its own namespace
 _APPEND_ATTEMPTS = 5
+_KEY_ID_LABEL = b"arkray-erasure-ledger-key-id"
 
 
 class LedgerError(ServiceUnavailableError):
@@ -85,24 +102,52 @@ class Entry:
     at: str
     prev: str
     mac: str
+    owner: str = ""
+    anchor: str = ""
 
     def content(self) -> dict[str, Any]:
+        optional = {"owner": self.owner, "anchor": self.anchor}
         return {
             "seq": self.seq,
             "kind": self.kind,
             "subject": self.subject,
             "at": self.at,
             "prev": self.prev,
+            **{name: value for name, value in optional.items() if value},
         }
 
     def as_json(self) -> bytes:
         return json.dumps({**self.content(), "mac": self.mac}, sort_keys=True).encode()
 
 
-def _mac(content: dict[str, Any]) -> str:
-    key = settings.ERASURE_LEDGER_KEY.encode()
-    canonical = json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
-    return hmac.new(key, canonical, hashlib.sha256).hexdigest()
+def _canonical(content: dict[str, Any]) -> bytes:
+    return json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _mac(content: dict[str, Any], key: str | None = None) -> str:
+    secret = (settings.ERASURE_LEDGER_KEY if key is None else key).encode()
+    return hmac.new(secret, _canonical(content), hashlib.sha256).hexdigest()
+
+
+def key_id(key: str) -> str:
+    """A key's public name (in `key_rotated` entries): reveals nothing about the key."""
+    return hmac.new(key.encode(), _KEY_ID_LABEL, hashlib.sha256).hexdigest()[:16]
+
+
+def _keys() -> list[str]:
+    """The keys an entry may be signed with: the current one first, then those still
+    accepted for verification during a rotation."""
+    keys = [settings.ERASURE_LEDGER_KEY, *getattr(settings, "ERASURE_LEDGER_VERIFY_KEYS", ())]
+    return list(dict.fromkeys(key for key in keys if key))
+
+
+def _signer(entry: Entry) -> str | None:
+    """The id of the configured key whose MAC the entry carries, or None."""
+    content = entry.content()
+    for key in _keys():
+        if hmac.compare_digest(entry.mac, _mac(content, key)):
+            return key_id(key)
+    return None
 
 
 def _entry(data: dict[str, Any]) -> Entry:
@@ -114,6 +159,8 @@ def _entry(data: dict[str, Any]) -> Entry:
             at=str(data["at"]),
             prev=str(data["prev"]),
             mac=str(data["mac"]),
+            owner=str(data.get("owner") or ""),
+            anchor=str(data.get("anchor") or ""),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise LedgerTampered("A ledger entry is malformed.") from exc
@@ -320,38 +367,115 @@ def enabled() -> bool:
 
 
 # --- reading -------------------------------------------------------------------------------------
-def verify(
-    entries: list[dict[str, Any]] | None = None, *, after: tuple[int, str] | None = None
-) -> list[Entry]:
-    """Every entry, checked: numbered 1, 2, 3, ..., each MAC right and each linked to the one
-    before. LedgerTampered otherwise; LedgerUnavailable if it can't be read.
+@dataclass(frozen=True, slots=True)
+class Checked:
+    """How far a chain has been verified: enough to check what is appended after it
+    without reading it again (the store is write-once, so a verified prefix stays so)."""
 
-    `after=(seq, mac)`: only the entries after one already verified, checked to continue
-    its chain (the gate's incremental check: the store is write-once, so a verified prefix
-    stays verified; replay always checks the whole chain)."""
-    found = store()
-    if found is None:
-        return []
-    start, previous = after if after is not None else (0, "")
-    raw = entries if entries is not None else found.read(start)
+    seq: int = 0
+    mac: str = ""
+    # SHA-256 over every entry so far (what a `key_rotated` entry anchors).
+    digest: str = ""
+    # Keys (by id) that signed entries before the last rotation: refused from there on.
+    retired: frozenset[str] = frozenset()
+    # Keys that signed entries since the last rotation.
+    signers: frozenset[str] = frozenset()
+    # The key the last rotation introduced ("" before any).
+    key: str = ""
+
+
+def _digest(previous: str, entry: Entry) -> str:
+    body = _canonical({**entry.content(), "mac": entry.mac})
+    return hashlib.sha256(previous.encode() + body).hexdigest()
+
+
+def check(
+    entries: list[dict[str, Any]], start: Checked | None = None
+) -> tuple[list[Entry], Checked]:
+    """`entries`, continuing the chain verified up to `start`: numbered on, each linked to
+    the one before, of a known kind, and signed with a configured key, or anchored by a
+    later `key_rotated` entry (a retired key no longer configured). Returns them with the
+    state reached. LedgerTampered otherwise."""
+    state = start or Checked()
     checked: list[Entry] = []
-    for expected, data in enumerate(raw, start=start + 1):
+    unanchored: list[int] = []  # signed with no configured key: a later anchor must cover them
+    for expected, data in enumerate(entries, start=state.seq + 1):
         entry = _entry(data)
         if entry.seq != expected:
             raise LedgerTampered(f"Ledger entry {expected} is missing or out of order.")
-        if entry.prev != previous:
+        if entry.prev != state.mac:
             raise LedgerTampered(f"Ledger entry {entry.seq} isn't linked to the one before.")
-        if not hmac.compare_digest(entry.mac, _mac(entry.content())):
-            raise LedgerTampered(f"Ledger entry {entry.seq} has been altered.")
         if entry.kind not in KINDS:
             raise LedgerTampered(f"Ledger entry {entry.seq} has an unknown kind.")
+        signer = _signer(entry)
+        retired, signers = state.retired, state.signers
+        if entry.kind == KEY_ROTATED:
+            # A retired key never comes back, not even through a rotation signed with it
+            # (a leaked old key still configured during the transition; review P2).
+            if entry.subject in retired or (signer is not None and signer in retired):
+                raise LedgerTampered(f"Ledger entry {entry.seq} brings back a retired key.")
+            # Its key retired since (a later rotation): a later anchor must cover it.
+            if signer is None:
+                unanchored.append(entry.seq)
+            elif signer != entry.subject:
+                raise LedgerTampered(
+                    f"Ledger entry {entry.seq} isn't signed with the key it introduces."
+                )
+            if not hmac.compare_digest(entry.anchor, state.digest):
+                raise LedgerTampered(
+                    f"Ledger entry {entry.seq} doesn't match the entries before it."
+                )
+            if signer is not None:  # trusted: it vouches for everything before it
+                unanchored.clear()
+            new_key = entry.subject
+            retired, signers = (retired | signers) - {new_key}, frozenset({new_key})
+        elif signer is None:
+            unanchored.append(entry.seq)
+        elif signer in retired:
+            raise LedgerTampered(f"Ledger entry {entry.seq} is signed with a retired key.")
+        else:
+            signers = signers | {signer}
         checked.append(entry)
-        previous = entry.mac
-    return checked
+        state = Checked(
+            seq=entry.seq,
+            mac=entry.mac,
+            digest=_digest(state.digest, entry),
+            retired=retired,
+            signers=signers,
+            key=entry.subject if entry.kind == KEY_ROTATED else state.key,
+        )
+    if unanchored:
+        raise LedgerTampered(
+            f"Ledger entry {unanchored[0]} has been altered, or its key isn't configured."
+        )
+    return checked, state
+
+
+def verify(
+    entries: list[dict[str, Any]] | None = None, *, after: Checked | None = None
+) -> list[Entry]:
+    """Every entry, checked (`check`): numbered 1, 2, 3, ..., each MAC right and each linked
+    to the one before. LedgerTampered otherwise; LedgerUnavailable if it can't be read.
+
+    `after`: only the entries after a prefix already verified, checked to continue its
+    chain (the gate's incremental check; replay always checks the whole chain first)."""
+    return verified(entries, after=after)[0]
+
+
+def verified(
+    entries: list[dict[str, Any]] | None = None, *, after: Checked | None = None
+) -> tuple[list[Entry], Checked]:
+    """`verify`, with the state reached (to continue from later)."""
+    found = store()
+    if found is None:
+        return [], after or Checked()
+    raw = entries if entries is not None else found.read(after.seq if after else 0)
+    return check(raw, after)
 
 
 def head() -> Entry | None:
-    """The last entry (its MAC checked), or None for an empty ledger."""
+    """The last entry (its MAC checked against the configured keys), or None for an empty
+    ledger."""
     found = store()
     if found is None:
         return None
@@ -359,9 +483,18 @@ def head() -> Entry | None:
     if data is None:
         return None
     entry = _entry(data)
-    if not hmac.compare_digest(entry.mac, _mac(entry.content())):
+    if _signer(entry) is None:
         raise LedgerTampered(f"Ledger entry {entry.seq} has been altered.")
     return entry
+
+
+def entry_at(seq: int) -> Entry | None:
+    """Entry `seq` as stored (not verified on its own), or None."""
+    found = store()
+    if found is None or seq < 1:
+        return None
+    rows = found.read(seq - 1)
+    return _entry(rows[0]) if rows and int(rows[0].get("seq", 0)) == seq else None
 
 
 def applied() -> tuple[int, str]:
@@ -403,11 +536,49 @@ def mark_applied(entry: Entry | None) -> None:
 
 
 # --- writing -------------------------------------------------------------------------------------
-def append(kind: str, subject: UUID | str, *, at: datetime | None = None) -> Entry | None:
+def append(
+    kind: str,
+    subject: UUID | str,
+    *,
+    owner: UUID | str | None = None,
+    at: datetime | None = None,
+) -> Entry | None:
     """Record an erasure, inside the transaction that performs it (module docstring). None
     when the ledger is off. LedgerUnavailable propagates: the erasure doesn't happen."""
-    if kind not in KINDS:
+    if kind not in KINDS or kind == KEY_ROTATED:
         raise ValueError(f"Unknown ledger kind {kind!r}.")
+    return _append(kind, str(subject), owner="" if owner is None else str(owner), at=at)
+
+
+def rotate_key() -> Entry | None:
+    """Anchor the ledger to the current ERASURE_LEDGER_KEY (module docstring): a
+    `key_rotated` entry, unless the last rotation already named this key (None). Run once
+    every process signs with the new key and still accepts the old one
+    (ERASURE_LEDGER_VERIFY_KEYS). Checks the whole chain first: an entry it can't verify
+    stops the rotation (LedgerTampered), so nothing unverified is ever anchored."""
+    if store() is None:
+        raise LedgerError("No erasure ledger is configured (ERASURE_LEDGER_URL).")
+    current = key_id(settings.ERASURE_LEDGER_KEY)
+    with transaction.atomic():
+        lock()
+        _, state = verified()
+        if state.key == current and state.signers == frozenset({current}):
+            return None  # already anchored to this key, which alone signed since
+        last = head()
+        if (last.seq if last else 0) != state.seq:
+            raise LedgerUnavailable("The ledger changed during the rotation; run it again.")
+        return _append(KEY_ROTATED, current, anchor=state.digest, attempts=1)
+
+
+def _append(
+    kind: str,
+    subject: str,
+    *,
+    owner: str = "",
+    anchor: str = "",
+    at: datetime | None = None,
+    attempts: int = _APPEND_ATTEMPTS,
+) -> Entry | None:
     found = store()
     if found is None:
         return None
@@ -415,15 +586,18 @@ def append(kind: str, subject: UUID | str, *, at: datetime | None = None) -> Ent
         raise RuntimeError("Ledger entries are appended inside the erasing transaction.")
     lock()
     moment = (at or timezone.now()).isoformat()
-    for _ in range(_APPEND_ATTEMPTS):
+    # An anchored entry is written once: on a moved head its anchor would be stale.
+    for _ in range(attempts):
         last = head()
         draft = Entry(
             seq=(last.seq if last else 0) + 1,
             kind=kind,
-            subject=str(subject),
+            subject=subject,
             at=moment,
             prev=last.mac if last else "",
             mac="",
+            owner=owner,
+            anchor=anchor,
         )
         entry = Entry(**{**draft.content(), "mac": _mac(draft.content())})
         if found.create(entry.seq, entry.as_json()):

@@ -48,6 +48,7 @@ from arkray.core.errors import (
     PermissionDeniedError,
     ServiceUnavailableError,
 )
+from arkray.core.models import HoldSubject
 from arkray.identity.models import User
 from arkray.identity.workspaces import authorize_write
 
@@ -412,7 +413,7 @@ def _object_missing(attachment: Attachment, operation: str) -> None:
 # --- delete ---------------------------------------------------------------------------------------
 def delete(*, actor: User, scope: AccessScope, attachment_id: UUID) -> None:
     """Hide the file at once and remove its object by a job. Deleting a deleted file is a
-    no-op (a retry)."""
+    no-op (a retry). Refused (409 `legal_hold`) while a legal hold covers the note's lead."""
     from .services import lock_note
 
     authorize_write(actor, scope)
@@ -433,6 +434,9 @@ def delete(*, actor: User, scope: AccessScope, attachment_id: UUID) -> None:
         attachment = Attachment.objects.select_for_update().get(pk=attachment_id)
         if attachment.deleted_at is not None:
             return
+        # A held lead's files stay where they are, visible, until the hold is released
+        # (core.holds; the purge's deferral also covers a file deleted before the hold).
+        holds.refuse_if_held(HoldSubject.LEAD, note.lead_id)
         attachment.deleted_at = timezone.now()
         attachment.deleted_by = actor
         attachment.save(update_fields=["deleted_at", "deleted_by"])

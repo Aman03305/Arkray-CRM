@@ -149,6 +149,21 @@ describe("LoginForm", () => {
     expect(screen.getByLabelText("Password")).toHaveAttribute("type", "password");
   });
 
+  it.each([
+    ["the request throttle", "Request was throttled. Expected available in 37 seconds.", "37", "Try again in about a minute."],
+    ["the account lockout", "Too many sign-in attempts. Try again in 15 minutes.", "900", "Try again in about 15 minutes."],
+  ])("says plainly when sign-in is throttled by %s, never the server's raw text (E2E-2)", async (_, raw, wait, when) => {
+    mockApi({
+      "GET /api/v1/auth/me": NOT_SIGNED_IN,
+      "POST /api/v1/auth/login": { ...apiError(429, "rate_limited", raw), headers: { "Retry-After": wait } },
+    });
+    renderWithProviders(<LoginForm />);
+    await fillAndSubmit();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(`Too many sign-in attempts. ${when}`);
+    expect(alert).not.toHaveTextContent(/throttled|Expected available/);
+  });
+
   it("doesn't leave the password in the mutation cache once the form is gone", async () => {
     mockApi({
       "GET /api/v1/auth/me": NOT_SIGNED_IN,

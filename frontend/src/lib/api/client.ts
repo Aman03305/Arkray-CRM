@@ -21,6 +21,11 @@ import { isIdempotencyKey } from "@/lib/random";
  * prefix and keeps `arkray_csrftoken`. The prefixed cookie wins when both exist.
  */
 export const CSRF_COOKIE_NAMES = ["__Host-arkray_csrftoken", "arkray_csrftoken"] as const;
+/**
+ * The session cookie, named the same way. HTTP-only: never read here, only checked for by the
+ * server render (app/layout), to tell a session that ended from one that never began.
+ */
+export const SESSION_COOKIE_NAMES = ["__Host-arkray_session", "arkray_session"] as const;
 export const CSRF_ENDPOINT = "/api/v1/auth/csrf";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const UPLOAD_TIMEOUT_MS = 120_000;

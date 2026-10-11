@@ -66,7 +66,7 @@ export function ActivateAccountForm({ token }: { token: string }) {
   if (invalid) return <InvalidInvitation message={(invalid as Error).message} />;
   if (invitation.isError) {
     // Anything else (rate limit, outage, network) says nothing about the link itself.
-    const { message, requestId } = describeError(invitation.error);
+    const { message, requestId } = describeError(invitation.error, { tooMany: "attempts" });
     return (
       <AuthCard title="We couldn't check your invitation">
         <Alert
@@ -94,7 +94,7 @@ export function ActivateAccountForm({ token }: { token: string }) {
 
   const server = fieldErrors(accept.error);
   const errors = { password: server.password, ...clientErrors };
-  const banner = accept.isError && !server.password ? describeError(accept.error) : null;
+  const banner = accept.isError && !server.password ? describeError(accept.error, { tooMany: "attempts" }) : null;
 
   return (
     <AuthCard

@@ -48,3 +48,16 @@ returned by any API.
   need.
 - **No cross-administrator deactivation**: would leave no way to remove a departed
   administrator without database access.
+
+## Addendum (independent audit remediation, 2026-10-11): pseudonymisation (SEC-2)
+Staff pseudonymisation (ADR-0032, privacy.staff) replaces an account's email and password, so
+it falls under this decision: the audit found one administrator could pseudonymise another
+(deactivate, then pseudonymise). Since nobody pseudonymises their own account, no administrator
+can do it through the API: for a target whose role is administrator, whatever its status, the
+API answers **403** `permission_denied` (not 422: no API caller may ever do it, not even the
+owner) and changes nothing. The service checks it under the user-administration lock, on the
+target's locked row, and re-reads the operator's capability there. The one path is the
+operator's command with `--allow-administrator` (shell and database access), audited with
+`administrator_target`; a ledger replay re-applies such a pseudonymisation unchanged. Tested in
+`tests/security/test_staff_pseudonymisation_administrators.py` (API, service, command, replay,
+support session, real races).

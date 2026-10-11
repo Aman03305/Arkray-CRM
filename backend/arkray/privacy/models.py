@@ -26,7 +26,13 @@ class DataExport(UUIDPrimaryKeyModel):
     """One export of a person's data, requested by an administrator after verifying the
     person's identity (`reference`: the request's ticket). Built by a job into private
     storage (STORAGES["exports"]), downloadable only by the administrator who asked, until
-    `expires_at`; then the file is deleted and the row kept (who exported whose data, when)."""
+    `expires_at`; then the file is deleted and the row kept (who exported whose data, when).
+
+    The file's deletion is durable (final audit PRIV-3): an export that ends (expired,
+    withdrawn, failed) gets `purge_requested_at` in the same transaction and keeps its
+    `storage_key` until the object, every version of it, is confirmed gone (`purged_at`; the
+    key is then cleared). Until then housekeeping retries (`purge_next_at`, backing off; the
+    last failure in `purge_error`, "retained" when the store's retention refused it)."""
 
     subject_type = models.CharField(max_length=8, choices=SubjectType.choices)
     subject_id = models.UUIDField()
@@ -47,6 +53,11 @@ class DataExport(UUIDPrimaryKeyModel):
     files_omitted = models.PositiveIntegerField(default=0)
     error_code = models.CharField(max_length=32, blank=True, default="")
     downloads = models.PositiveIntegerField(default=0)
+    purge_requested_at = models.DateTimeField(null=True, blank=True)
+    purge_next_at = models.DateTimeField(null=True, blank=True)
+    purge_attempts = models.PositiveIntegerField(default=0)
+    purge_error = models.CharField(max_length=16, blank=True, default="")
+    purged_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "privacy_data_export"
@@ -73,6 +84,12 @@ class DataExport(UUIDPrimaryKeyModel):
             models.CheckConstraint(
                 condition=~Q(status="ready") | (Q(expires_at__isnull=False) & ~Q(storage_key="")),
                 name="privacy_export_ready_complete",
+            ),
+            # A file being deleted is never downloadable, and nothing is purged unasked.
+            models.CheckConstraint(
+                condition=(~Q(status="ready") | Q(purge_requested_at__isnull=True))
+                & (Q(purged_at__isnull=True) | Q(purge_requested_at__isnull=False)),
+                name="privacy_export_purge_state",
             ),
         ]
 

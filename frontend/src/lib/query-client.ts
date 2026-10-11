@@ -7,7 +7,10 @@
  * - mutations are never retried automatically;
  * - any 401 on a signed-in page means the session ended (idle timeout, deactivation,
  *   password change elsewhere): the app reloads onto the sign-in page, dropping all cached
- *   data, and comes back here afterwards;
+ *   data, and comes back here afterwards. The sign-in page says the session ended when this
+ *   page had a viewer, or when the browser sent a session cookie with the page itself: a
+ *   session that ended while the tab was closed or before a reload (E2E-1) is still one
+ *   that ended, not a first visit;
  * - a 403 saying a new password must be chosen, or that a support session limits what can be
  *   done, means the signed-in user's state changed: the viewer is fetched again, and the
  *   session gate / shell follow it (the password form, or the end of the support session).
@@ -46,7 +49,12 @@ export function retryDelay(failureCount: number, error: unknown): number {
   return Math.min(1000 * 2 ** failureCount, 30_000);
 }
 
-export function createQueryClient(): QueryClient {
+export interface QueryClientOptions {
+  /** The page was requested with a session cookie (app/layout reads it; the cookie is HTTP-only). */
+  sessionAtLoad?: boolean;
+}
+
+export function createQueryClient({ sessionAtLoad = false }: QueryClientOptions = {}): QueryClient {
   let redirecting = false;
   const client: QueryClient = new QueryClient({
     queryCache: new QueryCache({ onError: (error) => onError(error) }),
@@ -67,7 +75,7 @@ export function createQueryClient(): QueryClient {
     if (error.status !== 401 || redirecting) return;
     if (isPublicPath(window.location.pathname)) return;
     redirecting = true;
-    const hadSession = client.getQueryData(VIEWER_QUERY_KEY) !== undefined;
+    const hadSession = sessionAtLoad || client.getQueryData(VIEWER_QUERY_KEY) !== undefined;
     hardNavigate(loginPath(currentLocation(), hadSession ? "expired" : undefined), hadSession ? "signed-out" : undefined);
   }
 

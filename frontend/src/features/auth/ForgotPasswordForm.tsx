@@ -50,7 +50,7 @@ export function ForgotPasswordForm() {
     );
   }
 
-  const error = describeError(request.error);
+  const error = describeError(request.error, { tooMany: "password reset requests" });
   const fields = fieldErrors(request.error);
   return (
     <AuthCard

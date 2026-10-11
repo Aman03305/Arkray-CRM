@@ -232,6 +232,7 @@ depend on a status another administrator can change):
 | Edit first or last name | allowed |
 | Deactivate, reactivate, resend invitation | allowed and audited (off-boarding; gives no credentials: reactivation restores the account's own password, invitations go to the account's own address). The last active administrator still can't be deactivated. |
 | Support session | refused (support sessions are for CRM users only) |
+| Pseudonymise (privacy) | 403 `permission_denied`, nothing changed (audit SEC-2): it replaces the account's email and password. Checked in `privacy.staff` under the same lock, on the locked row. Only an operator, on the server: `manage.py pseudonymise_user --allow-administrator` ([privacy.md](privacy.md#staff)). |
 
 The checks are in `identity.services` (`_refuse_for_another_administrator`), under the
 user-administration advisory lock, against the target's **locked** row, and before the
@@ -466,7 +467,9 @@ named by its organisation and instrument only ("Customer restricted" when the or
 the person's own name), free-text custom values are left out, and `customer_restricted: true`
 says why. This holds on the deal's page, lists, board and archived lists, global search
 (which then matches only the organisation and instrument), activity and timeline links, Ask
-Arkray's tools, and in an administrator's support session (which sees what the user sees).
+Arkray's tools (citations included; its stored answers that named the customer are withheld
+once the reader no longer sees them, and never replayed to the model), and in an
+administrator's support session (which sees what the user sees).
 The new owner and an administrator organisation-wide see everything. Tested before and after
 the reassignment in `tests/security/test_historical_deal_privacy.py`. Conservative by
 default; whether a previous owner should keep the contact details is a product decision.

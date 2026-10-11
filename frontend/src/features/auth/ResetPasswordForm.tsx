@@ -62,7 +62,7 @@ export function ResetPasswordForm({ token }: { token: string }) {
 
   const server = fieldErrors(reset.error);
   const errors = { password: server.new_password, ...clientErrors };
-  const banner = reset.isError && !server.new_password ? describeError(reset.error) : null;
+  const banner = reset.isError && !server.new_password ? describeError(reset.error, { tooMany: "attempts" }) : null;
 
   return (
     <AuthCard title="Choose a new password" subtitle="You'll be signed out everywhere and can then sign in with it.">

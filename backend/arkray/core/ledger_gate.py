@@ -12,7 +12,8 @@ instead of closing anything ("settling"). The API answers 503
 
 - **behind**: the database hasn't applied every entry (a restored backup, or an erasure that
   failed after its entry was written): someone erased may be back. `manage.py
-  replay_erasures` re-applies the rest;
+  replay_erasures` re-applies the rest; a small gap that continues what the database
+  applied (a failed commit) is re-applied automatically (privacy.reconcile);
 - **ahead / diverged**: the database records entries the ledger doesn't have (the ledger was
   rolled back, replaced or pointed elsewhere): erasures may be lost. An operator must
   restore the right ledger (never edit the database's state to match);
@@ -58,19 +59,18 @@ class Gate:
         self._checked_at: float | None = None
         self._status = "unknown"
         self._last_ok_at: float | None = None
-        # The ledger head whose whole chain this process has verified: the full chain is
-        # read again only when the head moves (erasures are rare), else just the head.
-        self._verified: tuple[int, str] | None = None
+        # How far this process has verified the chain: only entries added since are read
+        # when the head moves (erasures are rare), else just the head.
+        self._verified: ledger.Checked | None = None
 
     def _compare(self) -> str:
         last = ledger.head()
-        if last is not None and self._verified != (last.seq, last.mac):
-            known = self._verified
-            if known is not None and last.seq > known[0]:
-                ledger.verify(after=known)  # only what was added since
+        known = self._verified
+        if last is not None and (known is None or (known.seq, known.mac) != (last.seq, last.mac)):
+            if known is not None and last.seq > known.seq:
+                _, self._verified = ledger.verified(after=known)  # only what was added since
             else:
-                ledger.verify()
-            self._verified = (last.seq, last.mac)
+                _, self._verified = ledger.verified()
         applied_seq, applied_mac = ledger.applied()
         head_seq, head_mac = (last.seq, last.mac) if last else (0, "")
         if applied_seq == head_seq:

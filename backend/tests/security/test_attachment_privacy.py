@@ -96,13 +96,15 @@ def test_a_stored_file_found_missing_keeps_its_hash(user_a, note):
 def test_a_legal_hold_keeps_the_file_until_released(admin, user_a, note):
     client = signed_in(user_a)
     row = upload(client, note)
+    # Deleted just before the hold (since PRIV-2 a held note's files can't be deleted at
+    # all): its purge, still queued, is deferred.
+    delete(client, row)
     hold = LegalHold.objects.create(
         subject_type=HoldSubject.LEAD,
         subject_id=note.lead_id,
         reference="CASE-7",
         placed_by=admin.pk,
     )
-    delete(client, row)
     drain_outbox()
     attachments.housekeeping(timezone.now())
     row.refresh_from_db()

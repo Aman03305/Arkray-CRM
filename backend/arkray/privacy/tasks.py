@@ -1,5 +1,6 @@
-"""Privacy housekeeping (Celery beat, hourly): delete the files of expired data exports
-(privacy.exports). Safe to run late or twice."""
+"""Privacy housekeeping (Celery beat, hourly): end expired data exports and delete the files
+of ended ones, retrying those whose deletion failed, then reconcile the exports store
+(privacy.exports; docs/runbooks.md#export-file-cleanup). Safe to run late or twice."""
 
 from __future__ import annotations
 
@@ -17,4 +18,5 @@ def housekeeping() -> dict[str, int]:
     expired = exports.expire()
     if expired:
         logger.info("privacy_housekeeping", extra={"count": expired})
+    exports.reconcile_orphans()  # logs what it found; the metrics show its last run
     return {"expired_exports": expired}

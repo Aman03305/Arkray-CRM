@@ -46,6 +46,7 @@ CONCURRENT = [
     "ai.0003_question_finished_index",  # Phase 10 review
     "audit.0004_support_session_index",  # product enhancement phase
     "pipeline.0007_search_customer_names",  # ADR-0027: Leads left the UI
+    "pipeline.0010_stage_reference_indexes",  # final audit DOMAIN-3
 ]
 
 LIFT = "SET statement_timeout = 0; SET lock_timeout = 0;"
@@ -65,7 +66,9 @@ REFUSE_REVERSE = {
     "pipeline.0007_search_customer_names",
     "pipeline.0008_opportunity_expected_cpt",
     "pipeline.0009_agreed_cpt",
+    "pipeline.0010_stage_reference_indexes",  # final audit DOMAIN-3
     "privacy.0001_data_exports",  # privacy remediation
+    "privacy.0002_export_file_purge",  # final audit PRIV-3/ARCH-4
 }
 # Released migrations whose reverse deletes data and that a backwards plan reaches without a
 # refusal first: the data is derived or short-lived. ai.0001 (`migrate ai zero`): the notes'

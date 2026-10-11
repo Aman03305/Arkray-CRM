@@ -7,9 +7,13 @@ import { flushSync } from "react-dom";
 import { AUTH_CHANNEL, LEAVING_EVENT, reloadPage } from "@/lib/browser";
 import { createQueryClient, isPublicPath } from "@/lib/query-client";
 
-/** App-wide providers, plus the guards that stop data outliving a sign-in (lib/browser). */
-export function Providers({ children }: { children: ReactNode }) {
-  const [client] = useState(createQueryClient);
+/**
+ * App-wide providers, plus the guards that stop data outliving a sign-in (lib/browser).
+ * `sessionAtLoad`: the page was requested with a session cookie (app/layout). Only the value
+ * at the full page load counts: the client is created once.
+ */
+export function Providers({ children, sessionAtLoad = false }: { children: ReactNode; sessionAtLoad?: boolean }) {
+  const [client] = useState(() => createQueryClient({ sessionAtLoad }));
   const [leaving, setLeaving] = useState(false);
 
   useEffect(() => {

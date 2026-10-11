@@ -56,6 +56,7 @@ from arkray.identity.models import User
 from arkray.identity.policy import Capability, has_capability
 from arkray.identity.workspaces import resolve_workspace, workspace_segment
 from arkray.leads import selectors as lead_selectors
+from arkray.pipeline import customer
 from arkray.pipeline import selectors as pipeline_selectors
 
 from . import answers, breaker, prompts, router, tools
@@ -716,8 +717,10 @@ def _history(question: Question, scope: AccessScope) -> str:
     current = current_hashes(scope, [turn.answer for turn in earlier])
     turns: list[str] = []
     for turn in reversed(earlier):
-        if not set(answer_basis(turn.answer)) <= visible:
-            continue  # it used records the asker can no longer see: never replayed
+        if not set(answer_basis(turn.answer)) <= visible.of(turn.answer):
+            # It used records the asker can no longer see, or named a customer the asker no
+            # longer sees (a deal's lead reassigned since): never replayed.
+            continue
         if changed_citations(turn.answer, scope, current=current):
             continue  # it quoted text its record no longer holds: never replayed
         reply = answers.plain_text(turn.answer)  # masked
@@ -941,10 +944,30 @@ def answer_basis(answer: dict[str, Any]) -> list[str]:
     ]
 
 
-def visible_refs(scope: AccessScope, refs: Collection[str]) -> set[str]:
+@dataclass(frozen=True, slots=True)
+class Visible:
+    """What a reader may see now of the records stored answers were based on."""
+
+    refs: frozenset[str]  # the records the reader may see now
+    restricted: frozenset[str]  # of those, deals whose customer the reader may not see now
+
+    def of(self, answer: dict[str, Any]) -> set[str]:
+        """The records of `answer` the reader may still see *as the answer showed them*.
+        A deal it named with its customer, whose customer the reader no longer sees (its
+        lead reassigned since the question), is not: re-reading or replaying the answer
+        would show the reader that customer again (privacy audit PRIV-1: authorisation is
+        checked when the answer is used, not only when it was given). A deal the answer
+        already named without its customer (`masked`) is. An answer stored before `masked`
+        existed is treated as having named every customer."""
+        masked = set(answer.get("masked", [])) if answer else set()
+        return {ref for ref in self.refs if ref not in self.restricted or ref in masked}
+
+
+def visible_refs(scope: AccessScope, refs: Collection[str]) -> Visible:
     """Which of `refs` ("kind:id") `scope` may see now: one query per kind of record,
     through each module's scoped `listable` (archived records included: archiving is not
-    an access change)."""
+    an access change); and which of the deals among them it sees without their customer
+    (pipeline.customer)."""
     by_kind: dict[str, set[UUID]] = {}
     for ref in refs:
         kind, _, raw = ref.partition(":")
@@ -953,7 +976,7 @@ def visible_refs(scope: AccessScope, refs: Collection[str]) -> set[str]:
         except ValueError:
             continue
     seen: set[str] = set()
-    lookups = {"lead": lead_selectors.listable, "opportunity": pipeline_selectors.listable}
+    restricted: set[str] = set()
     activity_ids = (
         by_kind.pop("task", set()) | by_kind.pop("meeting", set()) | by_kind.pop("note", set())
     )
@@ -962,30 +985,42 @@ def visible_refs(scope: AccessScope, refs: Collection[str]) -> set[str]:
             activity_selectors.listable(scope).filter(pk__in=activity_ids).values_list("pk", "type")
         )
         seen |= {f"{kind}:{pk}" for pk, kind in found}
-    for kind in ("lead", "opportunity"):
-        ids = by_kind.get(kind)
-        if ids:
-            pks = lookups[kind](scope).filter(pk__in=ids).values_list("pk", flat=True)
-            seen |= {f"{kind}:{pk}" for pk in pks}
-    return seen
+    lead_ids = by_kind.get("lead")
+    if lead_ids:
+        pks = lead_selectors.listable(scope).filter(pk__in=lead_ids).values_list("pk", flat=True)
+        seen |= {f"lead:{pk}" for pk in pks}
+    opportunity_ids = by_kind.get("opportunity")
+    if opportunity_ids:
+        deals = (
+            pipeline_selectors.listable(scope)
+            .filter(pk__in=opportunity_ids)
+            .values_list("pk", "lead__owner_id")
+        )
+        for pk, lead_owner_id in deals:
+            seen.add(f"opportunity:{pk}")
+            if not customer.visible(scope, lead_owner_id):
+                restricted.add(f"opportunity:{pk}")
+    return Visible(frozenset(seen), frozenset(restricted))
 
 
 def visible_answer(
     answer: dict[str, Any],
     scope: AccessScope,
     *,
-    visible: set[str] | None = None,
+    visible: Visible | None = None,
     current: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """A stored answer as the reader may see it now. If any record it was based on is no
-    longer visible (reassigned, access lost), its narrative, quotes and links are withheld:
-    the CRM shows what is visible now, everywhere (the answer was right when given)."""
+    longer visible (reassigned, access lost), or it named a deal's customer the reader no
+    longer sees, its narrative, quotes and links are withheld: the CRM shows what is visible
+    now, everywhere (the answer was right when given)."""
     if not answer:
         return answer
     basis = answer_basis(answer)
     if visible is None:
         visible = visible_refs(scope, basis)
-    if set(basis) <= visible:
+    shown = visible.of(answer)
+    if set(basis) <= shown:
         changed = changed_citations(answer, scope, current=current)
         if not changed:
             return answer
@@ -1000,7 +1035,9 @@ def visible_answer(
         "blocks": [answers.text_block(HIDDEN)],
         # Figures go with the narrative (Phase 9 review: a hidden answer kept its facts).
         "facts": [],
-        "sources": [s for s in answer.get("sources", []) if s.get("ref") in visible],
+        # A source still listed is labelled as the answer showed it: never a deal named
+        # with a customer the reader no longer sees.
+        "sources": [s for s in answer.get("sources", []) if s.get("ref") in shown],
         "citations": [],
         "notices": [*answer.get("notices", []), "records_hidden"],
     }

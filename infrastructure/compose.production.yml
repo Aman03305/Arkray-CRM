@@ -179,6 +179,9 @@ services:
       db-roles:
         condition: service_completed_successfully
 
+  # Volumes merge with docker-compose.yml's by target path: every backend-image service
+  # keeps the erasure ledger's volume from there (x-ledger-volume; final audit ARCH-1), and
+  # its health check (manage.py ledger_status) for the Celery ones.
   backend:
     environment:
       <<: *production-env

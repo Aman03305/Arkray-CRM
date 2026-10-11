@@ -6,7 +6,11 @@ are back, and the API stays closed (core.ledger_gate). `manage.py replay_erasure
 the schema owner's credentials before traffic resumes:
 
 1. reads and verifies the whole ledger (every MAC and link): a ledger that can't be read or
-   was tampered with stops here, and the API stays closed;
+   was tampered with stops here, and the API stays closed. So does a ledger that is behind
+   the database or disagrees with it (the database has applied entries this ledger doesn't
+   have, or with other MACs: an empty or wrong ledger, as a container without the ledger
+   volume sees): replaying it would report success while erasures may be missing (final
+   production audit ARCH-6);
 2. applies every entry, in order, idempotently, each in its own transaction:
    - `lead_erased`: erased again if the lead is back (`privacy.services.erase`, which
      deletes its Ask Arkray conversations and index chunks and its files too); if it is still
@@ -14,8 +18,10 @@ the schema owner's credentials before traffic resumes:
      back is removed;
    - `user_pseudonymised`: pseudonymised again (`privacy.staff`), deactivated with it if the
      backup had the account active;
-   - `custom_values_deleted`: the field's values deleted again (`pipeline.field_values`);
+   - `custom_values_deleted`: the field's values deleted again (`pipeline.field_values`),
+     on the deals of the entry's `owner` only when it names one;
    - `attachment_deleted`: the file deleted again, its object purged and its name forgotten;
+   - `key_rotated`: nothing to apply (the key change is checked by the verification);
 3. reads the ledger again and applies what was added meanwhile (re-erasing a lead queues
    its files' purges, and each purge appends an entry), until it has reached the head; then,
    holding the append lock, records how far the database now matches the ledger
@@ -26,7 +32,8 @@ the schema owner's credentials before traffic resumes:
    command writes to a file as the restore's evidence, and audits `privacy.erasures_replayed`.
 
 `dry_run` checks every entry against the database and reports what would be done, changing
-nothing (and leaving the API closed).
+nothing (and leaving the API closed). Without an operator (`operator=None`) the work is
+recorded as the system's: the automatic reconciliation (privacy.reconcile).
 """
 
 from __future__ import annotations
@@ -101,7 +108,15 @@ def _lead_records(lead_id: UUID) -> set[UUID]:
     return {lead_id, *opportunity_ids, *activity_ids}
 
 
-def _lead(entry: ledger.Entry, operator: User, dry_run: bool) -> str:
+class LedgerMismatch(ledger.LedgerTampered):
+    """The ledger doesn't hold what this database has applied: never replayed."""
+
+
+def _operator_id(operator: User | None) -> Any:
+    return operator.pk if operator is not None else None
+
+
+def _lead(entry: ledger.Entry, operator: User | None, dry_run: bool) -> str:
     lead_id = UUID(entry.subject)
     lead = Lead.objects.filter(pk=lead_id).first()
     if lead is None:
@@ -109,7 +124,7 @@ def _lead(entry: ledger.Entry, operator: User, dry_run: bool) -> str:
     if not services._already_erased(lead):
         if dry_run:
             return WOULD
-        services.erase(lead_id, operator_id=operator.pk, replay=True)
+        services.erase(lead_id, operator_id=_operator_id(operator), replay=True)
         return REAPPLIED
     # Still erased: nothing a re-index or a restored bucket brought back may stay.
     records = _lead_records(lead_id)
@@ -130,7 +145,7 @@ def _lead(entry: ledger.Entry, operator: User, dry_run: bool) -> str:
     return CLEANED
 
 
-def _user(entry: ledger.Entry, operator: User, dry_run: bool) -> str:
+def _user(entry: ledger.Entry, operator: User | None, dry_run: bool) -> str:
     user = User.objects.filter(pk=UUID(entry.subject)).first()
     if user is None:
         return MISSING
@@ -138,28 +153,30 @@ def _user(entry: ledger.Entry, operator: User, dry_run: bool) -> str:
         return ALREADY
     if dry_run:
         return WOULD
-    staff.pseudonymise(user.pk, operator_id=operator.pk, replay=True)
+    staff.pseudonymise(user.pk, operator_id=_operator_id(operator), replay=True)
     return REAPPLIED
 
 
-def _custom_values(entry: ledger.Entry, operator: User, dry_run: bool) -> str:
+def _custom_values(entry: ledger.Entry, operator: User | None, dry_run: bool) -> str:
     found = CustomField.objects.filter(pk=UUID(entry.subject)).first()
     if found is None:
         return MISSING
-    key = str(found.pk)
-    if not Opportunity.objects.filter(
-        pipeline_id=found.pipeline_id, custom_fields__has_key=key
-    ).exists():
+    owner_id = UUID(entry.owner) if entry.owner else None
+    if not field_values.holding(found, owner_id).exists():
         return ALREADY
     if dry_run:
         return WOULD
     if found.is_active:  # the backup predates the removal: remove it again first
         CustomField.objects.filter(pk=found.pk).update(is_active=False)
-    field_values.purge(found.pk, replay=True)
+    field_values.purge(found.pk, owner_id=owner_id, replay=True)
     return REAPPLIED
 
 
-def _attachment(entry: ledger.Entry, operator: User, dry_run: bool) -> str:
+def _key_rotated(entry: ledger.Entry, operator: User | None, dry_run: bool) -> str:
+    return ALREADY  # verify() checked it; nothing in the database to change
+
+
+def _attachment(entry: ledger.Entry, operator: User | None, dry_run: bool) -> str:
     row = Attachment.objects.filter(pk=UUID(entry.subject)).first()
     if row is None:
         return MISSING
@@ -190,11 +207,12 @@ _APPLY = {
     "user_pseudonymised": _user,
     "custom_values_deleted": _custom_values,
     "attachment_deleted": _attachment,
+    ledger.KEY_ROTATED: _key_rotated,
 }
 
 
 def _apply(
-    entries: list[ledger.Entry], operator: User, dry_run: bool, report: ReplayReport
+    entries: list[ledger.Entry], operator: User | None, dry_run: bool, report: ReplayReport
 ) -> bool:
     """Apply each entry in order, recording its outcome; False if any failed."""
     ok = True
@@ -209,10 +227,31 @@ def _apply(
     return ok
 
 
-def replay(*, operator: User, dry_run: bool = False) -> ReplayReport:
-    """Re-apply every ledger entry (module docstring). Raises ledger.LedgerTampered or
-    LedgerUnavailable before changing anything."""
-    entries = ledger.verify()
+def require_consistent(entries: list[ledger.Entry]) -> None:
+    """The database's applied state must be a prefix of `entries` (LedgerMismatch)."""
+    applied_seq, applied_mac = ledger.applied()
+    if applied_seq > len(entries):
+        raise LedgerMismatch(
+            f"The database has applied {applied_seq} ledger entries but this ledger holds"
+            f" {len(entries)}: it is the wrong ledger, or was rolled back. Restore the right"
+            " one; nothing was changed."
+        )
+    if applied_seq and entries[applied_seq - 1].mac != applied_mac:
+        raise LedgerMismatch(
+            f"Ledger entry {applied_seq} isn't the one this database applied: it is the wrong"
+            " ledger. Restore the right one; nothing was changed."
+        )
+
+
+def replay(
+    *, operator: User | None, dry_run: bool = False, missing_only: bool = False
+) -> ReplayReport:
+    """Re-apply every ledger entry (module docstring), or with `missing_only` just those
+    after the database's applied state (the automatic reconciliation: they were never
+    committed; a restore re-checks them all). Raises ledger.LedgerTampered (or
+    LedgerMismatch) or LedgerUnavailable before changing anything."""
+    entries, verified = ledger.verified()
+    require_consistent(entries)
     applied_before, _ = ledger.applied()
     report = ReplayReport(
         started_at=timezone.now().isoformat(),
@@ -221,7 +260,9 @@ def replay(*, operator: User, dry_run: bool = False) -> ReplayReport:
         applied_before=applied_before,
         dry_run=dry_run,
     )
-    failed = not _apply(entries, operator, dry_run, report)
+    failed = not _apply(
+        entries[applied_before:] if missing_only else entries, operator, dry_run, report
+    )
     last = entries[-1] if entries else None
     caught_up = dry_run
     for _ in range(ROUNDS):
@@ -240,7 +281,7 @@ def replay(*, operator: User, dry_run: bool = False) -> ReplayReport:
                     ledger.mark_applied(last)
                 audit.record(
                     AUDIT_REPLAYED,
-                    actor_id=operator.pk,
+                    actor_id=_operator_id(operator),
                     target_type="ledger",
                     metadata={"head_seq": last.seq if last else 0, **report.counts()},
                 )
@@ -248,7 +289,7 @@ def replay(*, operator: User, dry_run: bool = False) -> ReplayReport:
                 break
         # Entries added while replaying (the purges that re-erasing queued): verified as
         # continuing the chain already checked, then applied the same way.
-        added = ledger.verify(after=(last.seq, last.mac) if last else None)
+        added, verified = ledger.verified(after=verified)
         failed = not _apply(added, operator, dry_run, report)
         last = added[-1] if added else last
     report.ledger_head_seq = last.seq if last else 0

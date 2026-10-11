@@ -400,12 +400,17 @@ ways back are the pre-upgrade backup or a forward fix
 4. **Re-apply the erasures made since the backup, before any traffic** (privacy remediation
    P2-8): the restored database is behind the erasure ledger, so the API answers 503
    `erasure_reconciliation_required` and readiness fails until, with the **owner**'s
-   credentials and the same `ERASURE_LEDGER_URL` and `ERASURE_LEDGER_KEY` as production:
+   credentials and the same `ERASURE_LEDGER_URL`, `ERASURE_LEDGER_KEY` (and
+   `ERASURE_LEDGER_VERIFY_KEYS`, during a key rotation) as production:
    `manage.py replay_erasures --by <admin email> --report restore-<date>.json --dry-run`
    (what it would do), then without `--dry-run`. Exit 0: complete, the API reopens within a
    minute; 1: an entry failed (the report names it; fix and rerun, the API stays closed);
-   2: the ledger can't be read or was tampered with (nothing changed: restore the ledger
-   from its own versioned store, never edit `core_erasure_ledger_state` to match). Keep the
+   2: the ledger can't be read, was tampered with, or doesn't hold what the database has
+   applied (an empty or another environment's ledger: check the URL and the volume; nothing
+   changed: restore the ledger from its own versioned store, never edit
+   `core_erasure_ledger_state` to match). A gap of at most `ERASURE_LEDGER_AUTO_RECONCILE_MAX`
+   entries is replayed by the automatic reconciliation within a minute if you don't; run
+   the command anyway to keep the report. Keep the
    report with the restore's record. **If the ledger is lost** the API stays closed: recover
    it from its bucket's versions or Object Lock copies; reopening without it would serve
    people who asked to be erased.
@@ -419,6 +424,59 @@ ways back are the pre-upgrade backup or a forward fix
    downloads as 410 `attachment_unavailable`. Then run `manage.py reconcile_attachments`
    and follow [Attachment bucket lost or restored](#attachment-bucket-lost-or-restored). Support sessions in the backup end at
    once: their browser sessions are gone.
+
+## Erasure ledger behind
+
+Symptom: the API answers 503 `erasure_reconciliation_required` and readiness fails although
+nothing was restored; the gate logged `erasure_ledger_gate_closed` with status `behind`. An
+erasure's transaction failed after its ledger entry was written (a worker killed mid-erasure,
+a slow ledger write cut short). Within a minute the reconciliation (`privacy.reconcile_ledger`,
+beat) carries the erasure out and logs `erasure_ledger_reconciled`; the API reopens within
+`ERASURE_LEDGER_CHECK_INTERVAL_S` after that (final production audit ARCH-3). It stays closed,
+and logs an error naming the command, when:
+
+- `erasure_ledger_reconciliation_required`: more than `ERASURE_LEDGER_AUTO_RECONCILE_MAX`
+  entries are missing (a restore): follow [Restore from backup](#restore-from-backup), step 4;
+- `erasure_ledger_reconciliation_refused` (`LedgerMismatch`, `LedgerTampered`): the ledger
+  isn't the one this database applied, or was tampered with; check `ERASURE_LEDGER_URL`, the
+  volume or bucket and the keys, never the database's state;
+- `erasure_ledger_reconciliation_failed`: an entry couldn't be applied, typically a lead
+  whose lost reasons only the schema owner may redact: run `manage.py replay_erasures --by
+  <admin> --report <file>` with the owner's credentials.
+
+Beat must run for this (one instance; [deployment.md](deployment.md)). Set
+`ERASURE_LEDGER_AUTO_RECONCILE_MAX=0` to require the operator every time.
+
+## Rotate the erasure ledger key
+
+When: on a schedule your security policy sets, when someone who knew the key leaves, or at
+once if it may have leaked. Nothing is re-signed or lost (final production audit ARCH-5;
+`core.ledger.rotate_key`). Never rotate production keys from a development machine.
+
+1. Generate the new key in the secret manager (48+ random characters; not `dev-`/`test-`).
+   Keep the old one there, versioned: losing every key that verifies the chain closes the
+   API until a key is recovered.
+2. Deploy `ERASURE_LEDGER_VERIFY_KEYS=<new key>` everywhere (web, every worker, beat; the old
+   key still signs). Every process now accepts entries signed with either.
+3. Deploy `ERASURE_LEDGER_KEY=<new key>` and `ERASURE_LEDGER_VERIFY_KEYS=<old key>` everywhere.
+   New entries are signed with the new key.
+4. `manage.py rotate_erasure_ledger_key --check` (verifies the whole chain, reports the key ids),
+   then `manage.py rotate_erasure_ledger_key`: it appends a `key_rotated` entry signed with the
+   new key, naming it by its id and anchoring every entry before it. From here an entry signed
+   with the old key is refused as tampering. Running it again is harmless; interrupted, it either
+   wrote nothing (run it again) or left the database one entry behind, which the
+   reconciliation applies within a minute.
+5. Retire the old key: deploy without it in `ERASURE_LEDGER_VERIFY_KEYS`. Entries it signed stay
+   verifiable through the anchor (a restore included: `replay_erasures` needs only the current
+   key). Keep the retired key in the secret manager's history until every backup older than
+   the rotation has expired; destroy it after that. A rotation retires the keys that signed
+   entries before it: a key listed in `ERASURE_LEDGER_VERIFY_KEYS` that never signed anything
+   stays accepted until you remove it, so list only the keys of this rotation and remove them
+   promptly.
+
+Skipping step 2 makes processes that haven't got the new key yet read the new entries as
+tampering and close the API until they are deployed (fail closed, never open). Removing the old
+key before step 4 does the same.
 
 ## Vacuum after a restore or a bulk load
 
@@ -513,12 +571,40 @@ reference), then the customer's page or the user's details → **Export data**; 
 through the organisation's secure channel; never by plain email. The export's request,
 download and expiry are audited.
 
+## Export file cleanup
+
+An ended export's file is deleted by `privacy.housekeeping` (hourly), retried until it is
+confirmed gone ([privacy.md](privacy.md#access-requests)). Signals:
+`arkray_export_file_purges{state="pending"}` (with `arkray_export_file_purge_oldest_seconds`),
+`{state="stuck"}` (failed 6 times or more; each further attempt logs
+`export_file_purge_failed` at ERROR with `reason`), `{state="retained"}` and the audit event
+`privacy.export_file_retained`, and the reconciliation's log lines
+(`export_orphans_reconciled`, `export_reconcile_refused`, `export_reconcile_failed`).
+
+- **Stuck** (`reason`: `connection`, `server_error`, `access_denied`, `missing_bucket`,
+  `partial`): fix the store or the credentials (they need `s3:ListBucketVersions`,
+  `s3:DeleteObjectVersion` and `s3:DeleteObject` on the exports prefix). Nothing else to do:
+  the next attempt (at most a day later) deletes it; to retry now,
+  `DataExport.objects.filter(purged_at=None).exclude(purge_requested_at=None).update(purge_next_at=timezone.now())`
+  in `manage.py shell`, then run `privacy.housekeeping`.
+- **Retained**: S3 Object Lock (a retention period or a legal hold on the version) refuses
+  the deletion; so does a missing `s3:DeleteObjectVersion` permission (also AccessDenied).
+  Check the version's lock (`aws s3api get-object-retention` / `get-object-legal-hold`). A
+  bucket-wide default retention must not apply to the exports prefix: remove it, or accept
+  that the ZIP lives until it ends (record that decision with the access request). Once the
+  lock ends, the daily retry deletes it.
+- **Reconciliation** `refused` = 1 (ERROR `export_reconcile_refused`): `EXPORT_S3_PREFIX` or
+  `EXPORT_ROOT` overlaps the attachments' store. Give exports their own prefix or directory;
+  nothing is deleted meanwhile. `unknown` objects (names no export is written under) are
+  never deleted: look at them and remove them by hand if they are not yours.
+
 ## Staff leaving
 
 Deactivate the user (Users page) at once; reassign their open work. When the organisation no
 longer needs to know who they were (its retention policy), pseudonymise them: `manage.py
 pseudonymise_user <user id> --by <admin email>` (a dry run, then `--yes`) or the user's page
-([privacy.md](privacy.md#staff)).
+([privacy.md](privacy.md#staff)). A former **administrator** is pseudonymised only on the
+server, by an operator, with `--allow-administrator` added (the API refuses it, ADR-0030).
 
 ## Minimise legacy audit details
 

@@ -118,7 +118,16 @@ if len(ERASURE_LEDGER_KEY) < 32 or ERASURE_LEDGER_KEY == SECRET_KEY:  # noqa: F4
     raise ImproperlyConfigured(
         "ERASURE_LEDGER_KEY must be at least 32 characters and differ from DJANGO_SECRET_KEY."
     )
-_ledger_dev_key = ERASURE_LEDGER_KEY.startswith(("dev-", "test-"))  # noqa: F405
+for _verify_key in ERASURE_LEDGER_VERIFY_KEYS:  # noqa: F405
+    if len(_verify_key) < 32 or _verify_key in (SECRET_KEY, ERASURE_LEDGER_KEY):  # noqa: F405
+        raise ImproperlyConfigured(
+            "Each ERASURE_LEDGER_VERIFY_KEYS key must be at least 32 characters and differ from"
+            " DJANGO_SECRET_KEY and ERASURE_LEDGER_KEY."
+        )
+_ledger_dev_key = any(
+    key.startswith(("dev-", "test-"))
+    for key in (ERASURE_LEDGER_KEY, *ERASURE_LEDGER_VERIFY_KEYS)  # noqa: F405
+)
 if LOG_EXCEPTION_MESSAGES:  # noqa: F405
     # Exception messages quote row values and request input (privacy remediation P2-2).
     raise ImproperlyConfigured("LOG_EXCEPTION_MESSAGES must not be set in production.")

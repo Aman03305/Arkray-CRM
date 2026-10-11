@@ -252,8 +252,8 @@ def erase(lead_id: UUID, *, operator_id: UUID, replay: bool = False) -> Erasure:
     lead = Lead.objects.select_for_update().get(pk=lead_id)
     if _already_erased(lead):
         raise AlreadyErased(lead_id)
-    if not replay and holds.is_held(HoldSubject.LEAD, lead_id):
-        raise holds.UnderLegalHold("lead", lead_id)
+    if not replay:  # serialised with placing a hold (core.holds)
+        holds.refuse_if_held(HoldSubject.LEAD, lead_id)
     opportunity_ids = list(
         Opportunity.objects.select_for_update().filter(lead_id=lead_id).values_list("pk", flat=True)
     )

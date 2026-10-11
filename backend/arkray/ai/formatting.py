@@ -83,7 +83,19 @@ def day(value: date | datetime | None) -> dict[str, str] | None:
 
 # What never leaves the deployment from user-written text (docs/rag-architecture.md#privacy):
 # web links, with or without a scheme (they often carry meeting passcodes or document
-# tokens), email addresses and phone numbers. The record itself is a click away.
+# tokens), email addresses, phone numbers and personal identity numbers. The record itself
+# is a click away.
+#
+# Phone numbers (privacy audit P3: landlines and trunk-0 mobiles went out whole): +country
+# numbers in any grouping; Indian mobiles, 10 digits from 6-9 (optionally 5+5), with or
+# without the trunk 0 ("09811155555"); landlines with their STD code, 0 then 10 digits in
+# all, as 2+8, 3+7 or 4+6 digits ("020 2612 0000", "(0124) 456-7890"). A bare local number
+# without its code ("2612 0000") is left: eight digits are as often a quantity or a
+# reference. A PAN ("ABCDE1234F": five capitals, four digits, a capital) becomes `[id]`: it
+# answers no CRM question and identifies a person for good, and its shape is narrow enough
+# that no amount, CPT, quantity, year, date, time, PIN code or instrument name matches it.
+# An Aadhaar number is not matched: its printed shape (4+4+4 digits) is also a list of
+# years or quantities ("2026 2027 2028"). Tested both ways.
 #
 # Linear time on any input (final audit RAG-1): a pattern that may start at every position of
 # a long run and re-scan it (the old host pattern, `[\w.+-]+@`) is quadratic, and one crafted
@@ -95,12 +107,17 @@ _SENSITIVE = re.compile(
     # scheme-less host/path: zoom.us/j/123?pwd=..., meet.google.com/abc-defg-hij
     r"|(?<![a-z0-9.-])[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/\S*)"
     r"|(?P<email>(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+)"
-    # +country numbers, and Indian mobiles (10 digits from 6-9, optionally 5+5): never a
-    # grouped amount such as 7,77,77,777 (commas and dots around digits don't match).
-    r"|(?P<phone>\+\d[\d ()-]{7,}\d|(?<![\d,.])[6-9]\d{4}[ -]?\d{5}(?![\d,]))",
+    # +country numbers, Indian mobiles and landlines (above): never a grouped amount such as
+    # 7,77,77,777 (commas and dots around digits don't match). Each starts only where its
+    # digits start and has a bounded length, so matching stays linear.
+    r"|(?P<phone>\+\d[\d ()-]{7,}\d"
+    r"|(?<![\d,.])(?:0[ -]?)?[6-9]\d{4}[ -]?\d{5}(?!\d|[,.]\d)"
+    r"|(?<![\d,.])\(?0(?:\d{2}\)?[ -]?\d{4}|\d{3}\)?[ -]?\d{3}|\d{4}\)?[ -]?\d{2})[ -]?\d{4}"
+    r"(?!\d|[,.]\d))"
+    r"|(?P<id>(?<![A-Za-z0-9])(?-i:[A-Z]{5}\d{4}[A-Z])(?![A-Za-z0-9]))",
     re.IGNORECASE,
 )
-_MARKERS = {"link": "[link]", "email": "[email]", "phone": "[phone]"}
+_MARKERS = {"link": "[link]", "email": "[email]", "phone": "[phone]", "id": "[id]"}
 
 
 def _marker(match: re.Match[str]) -> str:
@@ -108,9 +125,10 @@ def _marker(match: re.Match[str]) -> str:
 
 
 def user_text(text: str) -> str:
-    """User-written text as it may go to the model: links, email addresses and phone
-    numbers replaced by markers (Phase 9 review: titles, lost reasons and scheme-less links
-    went out verbatim). Every user-written string in a tool result passes through here."""
+    """User-written text as it may go to the model: links, email addresses, phone numbers
+    and identity numbers replaced by markers (Phase 9 review: titles, lost reasons and
+    scheme-less links went out verbatim). Every user-written string in a tool result passes
+    through here."""
     return _SENSITIVE.sub(_marker, text)
 
 

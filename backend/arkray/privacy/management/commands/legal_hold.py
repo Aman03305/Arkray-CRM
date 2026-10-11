@@ -21,6 +21,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from arkray.audit import services as audit
+from arkray.core import holds
 from arkray.core.models import HoldSubject, LegalHold
 from arkray.identity.models import User, normalize_email
 from arkray.identity.policy import Capability, has_capability
@@ -69,11 +70,10 @@ class Command(BaseCommand):
                     raise CommandError(REFERENCE_RULE)
                 try:
                     with transaction.atomic():
-                        LegalHold.objects.create(
-                            subject_type=subject_type,
-                            subject_id=subject_id,
-                            reference=reference,
-                            placed_by=operator.pk,
+                        # Waits for edits of the subject already past their hold check
+                        # (core.holds; final production audit PRIV-2).
+                        holds.place(
+                            subject_type, subject_id, reference=reference, placed_by=operator.pk
                         )
                 except IntegrityError:
                     raise CommandError("There is already an active hold on it.") from None

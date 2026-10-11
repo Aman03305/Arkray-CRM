@@ -21,8 +21,10 @@ docker compose run --rm backend python manage.py ai_reindex --rebuild
 docker compose run --rm backend python manage.py ai_reindex --enqueue
 ```
 
-- The command runs in bounded batches of 200 sources and prints progress; it lifts the
-  statement timeout for its own session only.
+- The command runs in bounded batches of 200 sources and prints progress. It never changes
+  its database session (safe behind a transaction pooler): only the `--rebuild` delete
+  lifts the statement timeout, with `SET LOCAL` inside its own transaction; every other
+  statement runs under the connection's usual timeout.
 - Throughput is CPU-bound (local embedding model): 5-7 chunks per second per 3-thread
   process for typical notes, 1.5-2 for long ones, on the benchmark machine; 486,646 notes
   took about 3 h 25 min in 8 processes. Run several workers on queue `ai_index` (with

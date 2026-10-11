@@ -429,6 +429,11 @@ class Opportunity(UUIDPrimaryKeyModel, TimeStampedModel):
             # phase, 11.6 -> 1.8 ms and 10.4 -> 1.9 ms for an owner of 20,000 (docs/database.md).
             models.Index(F("owner"), F("pipeline"), name="pipeline_opp_owner_pipe_idx"),
             models.Index(F("created_at").desc(), F("id").desc(), name="pipeline_opp_created_idx"),
+            # Any opportunity of one stage, archived ones included (the board's stage indexes
+            # are partial): whether a stage being removed is referenced or still holds deals
+            # (configuration.py), and the foreign-key checks when a stage is deleted or
+            # retyped. Audit DOMAIN-3, pipeline.0010 (docs/database.md).
+            models.Index(F("stage"), name="pipeline_opp_stage_idx"),
             # Global search (Phase 7; the customer names since ADR-0027): a substring of the
             # title or customer, in any workspace. Without it an organisation-wide search read
             # every opportunity (100-150 ms at 300,000) and one owner's walked all of theirs
@@ -556,6 +561,11 @@ class StageHistory(AppendOnlyModel):
                 F("id").desc(),
                 name="pipeline_history_opp_idx",
             ),
+            # Whether any transition into or out of a stage being removed exists, and the
+            # foreign-key checks (and Django's PROTECT queries) when a stage is deleted
+            # (audit DOMAIN-3, pipeline.0010).
+            models.Index(F("to_stage"), name="pipeline_hist_to_stage_idx"),
+            models.Index(F("from_stage"), name="pipeline_hist_from_stage_idx"),
         ]
         constraints = [
             models.CheckConstraint(
@@ -632,6 +642,8 @@ class NegotiationPrice(AppendOnlyModel):
                 F("id").desc(),
                 name="pipeline_negotiation_opp_idx",
             ),
+            # The same stage-reference checks as the history's (audit DOMAIN-3).
+            models.Index(F("stage"), name="pipeline_negotiation_stage_idx"),
         ]
         constraints = [
             models.CheckConstraint(

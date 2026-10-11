@@ -90,7 +90,7 @@ paths:
       operationId: privacy_pseudonymise_user
       description: |-
         Pseudonymise a deactivated user (privacy.staff), confirming them by their current
-        email. Irreversible.
+        email. Irreversible. Never an administrator's account: 403 (ADR-0030).
       parameters:
       - in: path
         name: user_id

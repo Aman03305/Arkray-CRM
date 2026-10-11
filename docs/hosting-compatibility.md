@@ -103,7 +103,7 @@ nothing needs a persistent local disk:
 | Frontend | Web Service (Docker) | frontend image | `API_ORIGIN` is a **build argument** (the `/api` rewrite is resolved at build time): put the API service's internal URL in it; in production prefer routing `/api` to the API at the edge |
 | Worker | Background Worker | `celery -A config worker --queues outbox,default,email --concurrency 2` | the three queue groups may be one or three workers |
 | Index / AI workers | Background Worker | `--queues ai_index` / `--queues ai` | load the embedding model (about 0.5 GB each): only when Ask Arkray is enabled |
-| Beat | Background Worker | `celery -A config beat` | **exactly one** instance |
+| Beat | Background Worker | `celery -A config beat --schedule /tmp/celerybeat-schedule` | **exactly one** instance, never scaled out. `--schedule` must name a writable path: the image's working directory isn't writable by the app user and beat stops at start without it (`Errno 13`); losing the file on a restart is harmless ([deployment.md](deployment.md#worker-and-beat-health)) |
 | Migrations | pre-deploy command | `python manage.py migrate --noinput && python manage.py grant_app_privileges arkray_app` | as the owner role, on a direct connection |
 | Redis | Key Value | two instances (broker with `noeviction` and AOF, cache with an eviction policy and no persistence) | `rediss://...?ssl_cert_reqs=required` with a password; production refuses Redis without them. Render's internal Key Value URLs may be plain `redis://` on its private network: that is refused unless the host is a single-label name listed in `BACKEND_TLS_PRIVATE_HOSTS`; prefer the TLS URL (not verified against Render here) |
 | Files | external S3-compatible bucket | `ATTACHMENT_STORAGE=s3` + `ATTACHMENT_S3_*` | Render has no object storage; `ATTACHMENT_STORAGE=filesystem` needs a persistent disk and a single instance, so it is for rehearsals only |
@@ -119,7 +119,17 @@ nothing needs a persistent local disk:
   attachment storage is **never** part of readiness: see [observability.md](observability.md)).
 - **The erasure ledger** needs a store outside the database: an S3 bucket
   (`ERASURE_LEDGER_URL=s3://...`, versioned, Object Lock) since Render's disks are per
-  instance ([privacy.md](privacy.md#restore-safe-erasure)).
+  instance ([privacy.md](privacy.md#restore-safe-erasure)). **Every** service above that runs
+  the backend image (API, every worker, beat and the pre-deploy command) gets the same
+  `ERASURE_LEDGER_URL`, `ERASURE_LEDGER_KEY` and `ERASURE_LEDGER_S3_*` settings (an
+  environment group): a worker given another ledger, or a `file:///` path on its own disk,
+  reads it as rolled back and refuses every task (final audit ARCH-1).
+- **Worker and beat health**: `python manage.py ledger_status` (plus
+  `--ping-worker <name>` for a worker started with `--hostname <name>@%h`) exits 1 while the
+  process's ledger gate is closed or the worker doesn't answer
+  ([deployment.md](deployment.md#worker-and-beat-health)). Where the platform runs no health
+  check for background workers, alert on the ERROR lines `erasure_ledger_gate_closed` and
+  `background_task_*` and on the outbox's oldest-pending age instead (not verified on Render).
 
 ## Low-cost pilot sizing
 

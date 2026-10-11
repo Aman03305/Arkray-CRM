@@ -3,6 +3,9 @@
 #   docker compose up -d                 # infrastructure only: postgres, redis, mailpit
 #   docker compose --profile app up -d   # + containerised backend, worker, beat, frontend
 #
+# Images: the third-party ones here are pinned by tag only (the Dockerfiles' base images are
+# pinned by digest); real manifests pin them by digest too (docs/deployment.md#images-phase-9).
+#
 # All ports bind to 127.0.0.1 only. Host ports are configurable in .env.
 name: arkray
 
@@ -69,6 +72,28 @@ x-hardened: &hardened
   security_opt:
     - no-new-privileges:true
 
+# The erasure ledger's volume, at the path ERASURE_LEDGER_URL names, in EVERY service that
+# carries x-backend-env (final audit ARCH-1: worker-ai, worker-index and beat had the URL but
+# not the volume; they read the image's empty directory as a ledger rolled back, the gate
+# closed, and every task was skipped). The image creates the directory owned by the app
+# user (10001), mode 0700, and an empty named volume takes that over when first mounted
+# (by migrate, which everything else waits for). Never mounted in nginx or the frontend.
+# tests/architecture/test_compose_ledger.py fails on a service with the URL and no volume.
+x-ledger-volume: &ledger-volume
+  type: volume
+  source: ledger
+  target: /var/lib/arkray/ledger
+
+# The Celery containers' health (manage.py ledger_status): unhealthy while the process's
+# ledger gate is closed (it would refuse every task) or, for a worker, when the worker
+# doesn't answer a ping through the broker. One short Django process a minute.
+x-ledger-health: &ledger-health
+  interval: 60s
+  timeout: 30s
+  retries: 3
+  start_period: 120s
+  start_interval: 10s
+
 services:
   postgres:
     <<: *logging
@@ -127,6 +152,10 @@ services:
     build: ./backend
     environment: *backend-env
     command: ["python", "manage.py", "migrate", "--noinput"]
+    # Creates the ledger's volume first; `docker compose run --rm migrate python manage.py
+    # replay_erasures ...` (the owner's credentials) reads it after a restore.
+    volumes:
+      - *ledger-volume
     depends_on:
       postgres:
         condition: service_healthy
@@ -139,7 +168,7 @@ services:
     volumes:
       - attachments:/var/lib/arkray/attachments
       - exports:/var/lib/arkray/exports
-      - ledger:/var/lib/arkray/ledger
+      - *ledger-volume
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
     depends_on:
@@ -169,12 +198,15 @@ services:
     volumes:
       - attachments:/var/lib/arkray/attachments
       - exports:/var/lib/arkray/exports
-      - ledger:/var/lib/arkray/ledger
+      - *ledger-volume
     depends_on:
       migrate:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    healthcheck:
+      <<: *ledger-health
+      test: ["CMD", "python", "manage.py", "ledger_status", "--ping-worker", "celery"]
     # Longer than the task hard limit (120 s): a warm shutdown finishes the running task.
     stop_grace_period: 130s
     restart: unless-stopped
@@ -189,11 +221,16 @@ services:
     # Ask Arkray's indexing (queue ai_index): CPU-bound embedding, kept away from email and
     # CRM background work, and from the questions' workers.
     command: ["celery", "-A", "config", "worker", "--queues", "ai_index", "--concurrency", "1", "--loglevel", "INFO", "--hostname", "index@%h"]
+    volumes:
+      - *ledger-volume
     depends_on:
       migrate:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    healthcheck:
+      <<: *ledger-health
+      test: ["CMD", "python", "manage.py", "ledger_status", "--ping-worker", "index"]
     # Longer than the task hard limit (120 s): a warm shutdown finishes the running task.
     stop_grace_period: 130s
     restart: unless-stopped
@@ -209,11 +246,16 @@ services:
       AI_LLM_KEY_HOLDER: "true"
     # Ask Arkray's questions only (queue ai): a slow model can't hold up anything else.
     command: ["celery", "-A", "config", "worker", "--queues", "ai", "--concurrency", "2", "--loglevel", "INFO", "--hostname", "ai@%h"]
+    volumes:
+      - *ledger-volume
     depends_on:
       migrate:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    healthcheck:
+      <<: *ledger-health
+      test: ["CMD", "python", "manage.py", "ledger_status", "--ping-worker", "ai"]
     # Longer than the task hard limit (120 s): a warm shutdown finishes the running task.
     stop_grace_period: 130s
     restart: unless-stopped
@@ -223,12 +265,20 @@ services:
     <<: *hardened
     build: ./backend
     environment: *backend-env
+    # Exactly one beat (no replicas). Its schedule file lives in tmpfs: /app is read-only to
+    # the app user, and without --schedule beat dies at start (Errno 13, final audit ARCH-2).
+    # It only holds last-run times; the slow entries are crontabs, so a restart loses nothing.
     command: ["celery", "-A", "config", "beat", "--loglevel", "INFO", "--schedule", "/tmp/celerybeat-schedule"]
+    volumes:
+      - *ledger-volume
     depends_on:
       migrate:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    healthcheck:
+      <<: *ledger-health
+      test: ["CMD", "python", "manage.py", "ledger_status"]
     restart: unless-stopped
 
   frontend:

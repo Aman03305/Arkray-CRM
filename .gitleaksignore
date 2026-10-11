@@ -21,3 +21,13 @@ a4a9b310133e8a624644bc9b6c285120db65877d:backend/arkray/pipeline/tests/test_nego
 3afea3cf66c8fd6ae337b381a375f42208df2ff7:backend/tests/security/test_secret_hygiene.py:generic-api-key:27
 3afea3cf66c8fd6ae337b381a375f42208df2ff7:backend/tests/security/test_secret_hygiene.py:generic-api-key:30
 a4a9b310133e8a624644bc9b6c285120db65877d:frontend/src/lib/api/client.test.ts:generic-api-key:51
+# Final production audit, 2026-10-11 (CI run 38070897057 failed on these): S3 Stubber
+# object keys ("Key": "attachments/...") in a test and the variable name `tokens =`; not credentials.
+7b6da1eb6cce628adce8ecdf519d507c192f8189:backend/tests/security/test_attachment_privacy.py:generic-api-key:201
+7b6da1eb6cce628adce8ecdf519d507c192f8189:backend/tests/security/test_attachment_privacy.py:generic-api-key:202
+7b6da1eb6cce628adce8ecdf519d507c192f8189:backend/tests/security/test_attachment_privacy.py:generic-api-key:203
+7b6da1eb6cce628adce8ecdf519d507c192f8189:backend/tests/security/test_attachment_privacy.py:generic-api-key:205
+7b6da1eb6cce628adce8ecdf519d507c192f8189:backend/tests/security/test_attachment_privacy.py:generic-api-key:216
+7b6da1eb6cce628adce8ecdf519d507c192f8189:backend/tests/security/test_attachment_privacy.py:generic-api-key:217
+7b6da1eb6cce628adce8ecdf519d507c192f8189:backend/tests/security/test_attachment_privacy.py:generic-api-key:218
+7b6da1eb6cce628adce8ecdf519d507c192f8189:backend/arkray/privacy/staff.py:generic-api-key:175

@@ -131,13 +131,19 @@ Conventions:
   lead's id, counts).
 - Privacy remediation (ADR-0032; ids and counts only): `audit_housekeeping`
   (`details_expired`, `held`), `privacy_housekeeping` and `export_ready` / `export_failed` /
-  `export_expiry_failed` / `export_file_delete_failed` (`export_id`),
+  `export_file_purged` / `export_file_purge_failed` (`export_id`, `count`, `held`, `kind`,
+  `reason`, `attempt`; ERROR from the 6th failed attempt), `export_files_purged`,
+  `export_orphans_reconciled` (`listed`, `orphaned`, `purged`, `failed`, `problems`),
+  `export_reconcile_failed`, `export_reconcile_refused` (ERROR),
   `erasure_ledger_gate_closed` (ERROR, `status`: behind, ahead, diverged, tampered or
-  unavailable), `erasure_ledger_gate_opened`, and `background_task_deferred` (WARNING, a
-  worker skipping a task while the gate is closed; the task name is in the context).
+  unavailable), `erasure_ledger_gate_opened`, and a worker refusing a task while its gate
+  is closed (ERROR, `task`, `status`, `suppressed`: at most once a minute per task and
+  process; final audit ARCH-1): `background_task_skipped` (a periodic tick),
+  `background_task_deferred` (sent back to its queue: `attempt`, `retry_in_s`) and
+  `background_task_dropped` (out of retries, `attempt`) ([reliability.md](reliability.md#failure-and-degradation-matrix)).
   Audit: `audit.details_expired`, `audit.legacy_minimised`, `lead.corrected`,
   `opportunity.customer_corrected`, `user.pseudonymised`, `privacy.export_requested`,
-  `privacy.export_downloaded`, `privacy.export_expired`, `privacy.legal_hold_placed`,
+  `privacy.export_downloaded`, `privacy.export_expired`, `privacy.export_file_retained`, `privacy.legal_hold_placed`,
   `privacy.legal_hold_released`, `privacy.erasures_replayed`,
   `pipeline.field_values_deletion_requested`, `pipeline.field_values_deleted`,
   `attachment.metadata_removed`.

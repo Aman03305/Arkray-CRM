@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ApiError } from "./client";
-import { describeError, fieldErrors, isApiError } from "./errors";
+import { describeError, fieldErrors, isApiError, tryAgainIn } from "./errors";
 
 describe("describeError", () => {
   it("never shows raw exceptions", () => {
@@ -53,10 +53,56 @@ describe("describeError", () => {
     expect(limited("Too many new opportunities at once.", 1)).toBe("Too many new opportunities at once. Try again in 1 second.");
     expect(limited("", 45)).toBe("Too many requests. Try again in 45 seconds.");
     // Already said, or no Retry-After: as sent.
-    expect(limited("Request was throttled. Expected available in 45 seconds.", 45)).toBe("Request was throttled. Expected available in 45 seconds.");
     expect(limited("Too many sign-in attempts. Try again in 1 minute.", 60)).toBe("Too many sign-in attempts. Try again in 1 minute.");
     expect(limited("Too many attempts. Please try again later.", null)).toBe("Too many attempts. Please try again later.");
     expect(describeError(new ApiError(429, "rate_limited", "Slow down.", null, "req-9", 5)).requestId).toBe("req-9");
+  });
+
+  it("never shows the request throttle's own text (E2E-2)", () => {
+    const throttled = (wait: number | null) =>
+      describeError(new ApiError(429, "rate_limited", "Request was throttled. Expected available in 37 seconds.", null, "r", wait)).message;
+    expect(throttled(37)).toBe("Too many requests. Try again in about a minute.");
+    expect(throttled(null)).toBe("Too many requests. Try again later.");
+  });
+
+  it("replaces 'Try again later.' with the wait rather than adding a second sentence", () => {
+    const error = new ApiError(429, "rate_limited", "Too many password reset requests. Try again later.", null, "r", 30);
+    expect(describeError(error).message).toBe("Too many password reset requests. Try again in 30 seconds.");
+  });
+
+  it("gives a single-purpose form one consistent message whichever limit was hit (E2E-2)", () => {
+    const signIn = (message: string, wait: number | null) =>
+      describeError(new ApiError(429, "rate_limited", message, null, "r", wait), { tooMany: "sign-in attempts" }).message;
+    expect(signIn("Request was throttled. Expected available in 37 seconds.", 37)).toBe(
+      "Too many sign-in attempts. Try again in about a minute.",
+    );
+    expect(signIn("Too many sign-in attempts. Try again in 15 minutes.", 900)).toBe(
+      "Too many sign-in attempts. Try again in about 15 minutes.",
+    );
+    expect(signIn("Request was throttled.", null)).toBe("Too many sign-in attempts. Try again later.");
+    // No Retry-After: the server's own message is all there is to go on.
+    expect(signIn("Too many sign-in attempts. Try again in 1 minute.", null)).toBe("Too many sign-in attempts. Try again in 1 minute.");
+    // Other errors are described as usual.
+    expect(describeError(new ApiError(400, "invalid_credentials", "Invalid email or password."), { tooMany: "sign-in attempts" }).message).toBe(
+      "Invalid email or password.",
+    );
+  });
+});
+
+describe("tryAgainIn", () => {
+  it("rounds Retry-After to words people use", () => {
+    expect(tryAgainIn(null)).toBe("later");
+    expect(tryAgainIn(0)).toBe("later");
+    expect(tryAgainIn(3)).toBe("in a few seconds");
+    expect(tryAgainIn(10)).toBe("in a few seconds");
+    expect(tryAgainIn(11)).toBe("in about a minute");
+    expect(tryAgainIn(37)).toBe("in about a minute");
+    expect(tryAgainIn(89)).toBe("in about a minute");
+    expect(tryAgainIn(90)).toBe("in about 2 minutes");
+    expect(tryAgainIn(900)).toBe("in about 15 minutes");
+    expect(tryAgainIn(3540)).toBe("in about 59 minutes");
+    expect(tryAgainIn(3600)).toBe("in about an hour");
+    expect(tryAgainIn(4 * 3600)).toBe("in about 4 hours");
   });
 });
 

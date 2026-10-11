@@ -17,7 +17,7 @@ misspelt name, an old address) is served here, narrowly:
   was agreed.
 - **Who**: whoever may edit in the workspace that sees the lead (its owner in their own
   workspace, an administrator); a closed deal's previous owner can't see the lead and can't
-  correct it. An erased lead can't be corrected.
+  correct it. An erased lead can't be corrected, nor one under a legal hold (core.holds).
 - **Safely**: one transaction, the lead locked first and then its opportunities in id
   order (docs/pipeline.md#lock-order); the lead's `version` must match (409 otherwise), and
   every changed record gets a new version, so a stale edit of a corrected deal is refused
@@ -51,7 +51,7 @@ from arkray.leads.models import Lead
 from arkray.leads.phones import phone_key
 
 from . import events, naming
-from .models import Opportunity
+from .models import CUSTOMER_NAME_MAX_LENGTH, Opportunity
 
 AUDIT_LEAD_CORRECTED = "lead.corrected"
 AUDIT_OPPORTUNITY_CORRECTED = "opportunity.customer_corrected"
@@ -84,7 +84,11 @@ class Correction:
 
 
 def _name(first: str, last: str) -> str:
-    return f"{first} {last}".strip()
+    """The lead's full name as a deal's customer copy holds it: cut to the copy's 200
+    characters, as a deal created for an existing lead takes it (leads.selectors.
+    customer_names). Two 100-character names make 201 with the space (audit DOMAIN-1: a
+    500); the comparison with the copy uses the same cut, so a later correction follows."""
+    return f"{first} {last}".strip()[:CUSTOMER_NAME_MAX_LENGTH]
 
 
 def _address(values: Mapping[str, Any]) -> str:
@@ -153,10 +157,9 @@ def correct_customer(
         lead = Lead.objects.get(pk=lead_id)
         if lead.first_name == ERASED:
             raise BusinessRuleViolation(ERASED_REFUSED)
-        if holds.is_held(HoldSubject.LEAD, lead.pk):
-            # The held record is evidence: corrected only once the hold is released (the
-            # lead's lock is held, so a hold placed now waits for this to finish).
-            raise holds.UnderLegalHold("lead", lead.pk)
+        # The held record is evidence: corrected only once the hold is released (checked
+        # under the lead's lock and serialised with placing a hold: core.holds).
+        holds.refuse_if_held(HoldSubject.LEAD, lead.pk)
         if lead.version != version:
             raise ConflictError()
         before = {field: getattr(lead, field) for field in CORRECTABLE}

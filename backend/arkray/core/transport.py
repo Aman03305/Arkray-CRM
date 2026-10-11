@@ -29,6 +29,7 @@ directly as well as through a fresh interpreter.
 from __future__ import annotations
 
 import ipaddress
+import os
 from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any
@@ -77,11 +78,21 @@ def database_problem(
     database: Mapping[str, Any], private_hosts: Collection[str] = ()
 ) -> str | None:
     """DATABASES["default"] must use verified TLS to anything but loopback or a listed
-    private host."""
-    host = str(database.get("HOST") or "")
-    if not host or host.startswith("/") or _exempt(host, private_hosts):
-        return None  # a Unix socket, the machine itself, or an explicitly private name
+    private host. Judged on where libpq actually connects (final production audit P3): a
+    `hostaddr` option replaces the host's address, a `host` option stands in for a missing
+    HOST, a comma
+    list names several servers, and no host at all falls back to PGHOSTADDR/PGHOST from
+    the environment (a Unix socket only when those are empty too)."""
     options = database.get("OPTIONS") or {}
+    destinations = [
+        str(options.get("hostaddr") or os.environ.get("PGHOSTADDR") or ""),
+        # Django's HOST wins over a `host` option (DatabaseWrapper.get_connection_params).
+        str(database.get("HOST") or options.get("host") or os.environ.get("PGHOST") or ""),
+    ]
+    hosts = [h.strip() for d in destinations for h in d.split(",") if h.strip()]
+    host = ", ".join(hosts)
+    if all(h.startswith("/") or _exempt(h, private_hosts) for h in hosts):
+        return None  # a Unix socket, the machine itself, or an explicitly private name
     sslmode = str(options.get("sslmode", "")).lower()
     if sslmode != "verify-full":
         return (

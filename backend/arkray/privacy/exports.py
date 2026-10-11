@@ -32,6 +32,25 @@ EXPORT_MAX_PENDING_PER_ADMIN queued and EXPORT_MAX_PER_HOUR per administrator; o
 administrator who asked can download it, until EXPORT_TTL_HOURS after it was built; every
 request, download and expiry is audited (ids only). The file is deleted when it expires
 (hourly) and the row kept.
+
+**Deleting the file** (final audit PRIV-3, ARCH-4): an export that ends (expires, is
+withdrawn because its subject was erased, or times out) is marked in the same transaction
+(`purge_requested_at`; never downloadable again) and keeps its storage key until the object
+is confirmed gone: every version and delete marker of it in a versioned bucket
+(core.storage_purge), the file otherwise. `purge_file` claims the row with a short lease
+(SKIP LOCKED: a duplicate task or a concurrent housekeeping run skips it; a crashed attempt's
+lease runs out), deletes outside any transaction, and records the outcome: `purged_at` (the
+key cleared), or the failure in `purge_error` with the next attempt backing off from 5
+minutes to a day. A version the store's retention (S3 Object Lock retention or legal hold)
+refuses is *retained*: audited once (`privacy.export_file_retained`), retried daily, never in
+a loop. After PURGE_ALERT_AFTER failed attempts each further one logs at ERROR; the
+`arkray_export_file_purges` gauge counts what is pending, retained and stuck
+(docs/runbooks.md#export-file-cleanup).
+
+`reconcile_orphans` (hourly, bounded) lists the exports store and deletes what no live export
+explains: an object of an ended export (through its row, as above), or of no export at all
+(a database restored to before it). Only names an export is written under, older than
+ORPHAN_GRACE, and never when the exports store overlaps the attachments store.
 """
 
 from __future__ import annotations
@@ -42,6 +61,7 @@ import hashlib
 import io
 import json
 import logging
+import re
 import tempfile
 import zipfile
 from collections.abc import Iterable, Mapping, Sequence
@@ -51,10 +71,12 @@ from typing import IO, Any
 from uuid import UUID
 
 from django.conf import settings
+from django.core.cache import cache
 from django.core.files import File
 from django.core.files.storage import storages
 from django.db import transaction
 from django.db.models import F, Q
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from arkray.activities import attachments, storage
@@ -63,7 +85,7 @@ from arkray.ai import answers
 from arkray.ai.models import Conversation, Question
 from arkray.audit import services as audit
 from arkray.audit.models import AuditDetail, AuditEvent
-from arkray.core import outbox
+from arkray.core import outbox, storage_purge
 from arkray.core.errors import BusinessRuleViolation, NotFoundError, RateLimitedError
 from arkray.identity.models import SupportSession, User
 from arkray.leads.models import Lead
@@ -78,13 +100,29 @@ TOPIC_BUILD = "privacy.build_export"
 AUDIT_REQUESTED = "privacy.export_requested"
 AUDIT_DOWNLOADED = "privacy.export_downloaded"
 AUDIT_EXPIRED = "privacy.export_expired"
+AUDIT_RETAINED = "privacy.export_file_retained"
 STAFF = "an Arkray user"
 OTHER_RECORD = "[another record]"
 NOTHING_LEFT = "This person's data was erased: there is nothing left to export."
 TOO_MANY_PENDING = "You have exports still being built. Wait for them to finish."
 TOO_MANY = "Too many exports in the last hour. Try again later."
+UNAVAILABLE = "This export isn't available (still being built, failed or expired)."
 MAX_EVENTS = 20_000  # a staff member's audit events in one export
 _FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+# Deleting an ended export's file (module docstring).
+PURGE_LEASE = timedelta(minutes=15)  # a claimed attempt; longer than the store's timeouts
+PURGE_RETRY_FIRST = timedelta(minutes=5)
+PURGE_RETRY_MAX = timedelta(days=1)
+PURGE_ALERT_AFTER = 6  # failed attempts before each further one logs at ERROR ("stuck")
+PURGE_BATCH = 200  # attempts per housekeeping run
+RETAINED = "retained"
+# Reconciliation: objects listed per run (resumed from a cursor), the age below which an
+# object may still be being written, and the names an export is written under (storage_key,
+# or the storage's alternative name when that key was taken).
+RECONCILE_KEYS = 1000
+ORPHAN_GRACE = timedelta(hours=2)
+RECONCILE_CURSOR = "privacy:export_reconcile_after"
+_EXPORT_NAME = re.compile(r"^\d{4}/\d{2}/(?P<id>[0-9a-f]{32})(?:_[A-Za-z0-9]{7})?\.zip$")
 
 
 # --- requesting ----------------------------------------------------------------------------------
@@ -150,17 +188,19 @@ def for_download(*, actor: User, export_id: UUID) -> tuple[DataExport, IO[bytes]
     export = DataExport.objects.filter(pk=export_id, requested_by=actor).first()
     if export is None:
         raise NotFoundError()
-    if (
-        export.status != ExportStatus.READY
-        or export.expires_at is None
-        or export.expires_at <= timezone.now()
-    ):
-        raise BusinessRuleViolation(
-            "This export isn't available (still being built, failed or expired)."
-        )
+    now = timezone.now()
+    downloadable = Q(status=ExportStatus.READY, expires_at__gt=now, purge_requested_at__isnull=True)
+    if not DataExport.objects.filter(downloadable, pk=export.pk).exists():
+        raise BusinessRuleViolation(UNAVAILABLE)
     file = storages["exports"].open(export.storage_key, "rb")
     with transaction.atomic():
-        DataExport.objects.filter(pk=export.pk).update(downloads=F("downloads") + 1)
+        # Counted only while still downloadable: an erasure that ended it meanwhile holds
+        # the row until it commits, and then this matches nothing (PRIV-3).
+        if not DataExport.objects.filter(downloadable, pk=export.pk).update(
+            downloads=F("downloads") + 1
+        ):
+            file.close()
+            raise BusinessRuleViolation(UNAVAILABLE)
         audit.record(
             AUDIT_DOWNLOADED,
             actor_id=actor.pk,
@@ -177,18 +217,110 @@ def storage_key(export: DataExport) -> str:
     return f"{export.created_at:%Y/%m}/{export.pk.hex}.zip"
 
 
-def _delete_file(export: DataExport) -> None:
-    for key in {export.storage_key, storage_key(export)} - {""}:
-        try:
-            storages["exports"].delete(key)
-        except OSError:
-            logger.warning("export_file_delete_failed", extra={"export_id": str(export.pk)})
+# --- deleting the file (PRIV-3, ARCH-4; module docstring) ---------------------------------------
+def _purge_due(now: datetime) -> Q:
+    return Q(purge_requested_at__isnull=False, purged_at__isnull=True, purge_next_at__lte=now)
+
+
+def _ended(now: datetime) -> dict[str, Any]:
+    """The fields that end an export's file: never downloadable again, deleted next."""
+    return {"purge_requested_at": now, "purge_next_at": now}
+
+
+def _keys(export: DataExport) -> list[str]:
+    """Everything this export may have written: the key it was saved under (the storage's
+    alternative name when the usual one was taken) and the usual one (a build that died)."""
+    return sorted({export.storage_key, storage_key(export)} - {""})
+
+
+def _retry_delay(attempts: int) -> timedelta:
+    return min(PURGE_RETRY_FIRST * (1 << min(attempts - 1, 16)), PURGE_RETRY_MAX)
+
+
+def purge_file(export_id: UUID, now: datetime | None = None) -> str:
+    """Delete an ended export's file for good, if it is due: "purged", "retained" (the
+    store's retention refused a version), "failed" (try again later), or "skipped" (not due,
+    done already, or another worker holds it). Idempotent; never raises for storage."""
+    now = now or timezone.now()
+    with transaction.atomic():
+        export = (
+            DataExport.objects.select_for_update(skip_locked=True)
+            .filter(_purge_due(now), pk=export_id)
+            .first()
+        )
+        if export is None:
+            return "skipped"
+        # Claimed: a duplicate task sees it not due; a crashed attempt's lease runs out.
+        DataExport.objects.filter(pk=export.pk).update(purge_next_at=now + PURGE_LEASE)
+    result = storage_purge.PurgeResult()
+    error = ""
+    try:
+        for key in _keys(export):
+            result += storage_purge.purge(storages["exports"], key)
+    except storage_purge.PurgeFailed as exc:
+        error = exc.error_class
+    else:
+        error = RETAINED if result.retained else "partial" if result.failed else ""
+    # Log fields from core.logging's allowlist: `count` removed, `held` retained.
+    found = {
+        "export_id": str(export.pk),
+        "count": result.removed,
+        "held": result.retained,
+        "kind": "versions" if result.versioned else "object",
+    }
+    if not error:
+        DataExport.objects.filter(pk=export.pk, purged_at__isnull=True).update(
+            purged_at=timezone.now(), storage_key="", purge_error="", purge_next_at=None
+        )
+        logger.info("export_file_purged", extra=found)
+        return "purged"
+    attempts = export.purge_attempts + 1
+    with transaction.atomic():
+        DataExport.objects.filter(pk=export.pk, purged_at__isnull=True).update(
+            purge_attempts=F("purge_attempts") + 1,
+            purge_error=error,
+            purge_next_at=now + _retry_delay(attempts),
+        )
+        if error == RETAINED and export.purge_error != RETAINED:
+            # Personal data kept past its time by the store, not by us: on the record once.
+            audit.record(
+                AUDIT_RETAINED,
+                actor_id=None,
+                target_type=export.subject_type,
+                target_id=export.subject_id,
+                metadata={"export_id": str(export.pk), "count": result.retained},
+            )
+    logger.log(
+        logging.ERROR if attempts >= PURGE_ALERT_AFTER else logging.WARNING,
+        "export_file_purge_failed",
+        extra={**found, "reason": error, "attempt": attempts},
+    )
+    return RETAINED if error == RETAINED else "failed"
+
+
+def _purge_after_commit(export_id: UUID) -> None:
+    purge_file(export_id)  # its failure is on the row: housekeeping tries again
+
+
+def purge_due(now: datetime | None = None) -> dict[str, int]:
+    """Housekeeping: every ended export's file whose deletion is due (bounded)."""
+    now = now or timezone.now()
+    outcomes = {"purged": 0, RETAINED: 0, "failed": 0, "skipped": 0}
+    due = (
+        DataExport.objects.filter(_purge_due(now))
+        .order_by("purge_next_at")
+        .values_list("pk", flat=True)[:PURGE_BATCH]
+    )
+    for export_id in list(due):
+        outcomes[purge_file(export_id, now)] += 1
+    return outcomes
 
 
 def withdraw_for(subject_type: str, subject_id: UUID) -> int:
     """The subject has been erased or pseudonymised: their exports, queued or ready, end now
-    (inside the caller's transaction; the files go once it commits). A job building one
-    finds it no longer queued and deletes what it wrote (backend review P2)."""
+    (inside the caller's transaction; the files go once it commits, or housekeeping deletes
+    them later). A job building one finds it no longer queued and has its file deleted the
+    same way (backend review P2)."""
     found = list(
         DataExport.objects.select_for_update().filter(
             subject_type=subject_type,
@@ -199,7 +331,7 @@ def withdraw_for(subject_type: str, subject_id: UUID) -> int:
     if not found:
         return 0
     DataExport.objects.filter(pk__in=[e.pk for e in found]).update(
-        status=ExportStatus.EXPIRED, storage_key="", error_code="subject_erased"
+        status=ExportStatus.EXPIRED, error_code="subject_erased", **_ended(timezone.now())
     )
     for export in found:
         audit.record(
@@ -209,41 +341,149 @@ def withdraw_for(subject_type: str, subject_id: UUID) -> int:
             target_id=export.subject_id,
             metadata={"export_id": str(export.pk), "reason": "subject_erased"},
         )
-        transaction.on_commit(functools.partial(_delete_file, export))
+        transaction.on_commit(functools.partial(_purge_after_commit, export.pk), robust=True)
     return len(found)
 
 
 def expire(now: datetime | None = None) -> int:
-    """Delete the files of exports past their expiry (hourly; idempotent)."""
+    """End the exports past their expiry and those queued too long, and delete the files due
+    (hourly; idempotent; rows another worker holds are left for the next run)."""
     now = now or timezone.now()
-    expired = 0
-    for export in DataExport.objects.filter(status=ExportStatus.READY, expires_at__lte=now)[:500]:
-        try:
-            storages["exports"].delete(export.storage_key)
-        except OSError:
-            logger.warning("export_expiry_failed", extra={"export_id": str(export.pk)})
-            continue
-        with transaction.atomic():
-            if DataExport.objects.filter(pk=export.pk, status=ExportStatus.READY).update(
-                status=ExportStatus.EXPIRED, storage_key=""
-            ):
-                audit.record(
-                    AUDIT_EXPIRED,
-                    actor_id=None,
-                    target_type=export.subject_type,
-                    target_id=export.subject_id,
-                    metadata={"export_id": str(export.pk)},
-                )
-                expired += 1
+    with transaction.atomic():
+        due = list(
+            DataExport.objects.select_for_update(skip_locked=True).filter(
+                status=ExportStatus.READY, expires_at__lte=now
+            )[:500]
+        )
+        DataExport.objects.filter(pk__in=[e.pk for e in due]).update(
+            status=ExportStatus.EXPIRED, **_ended(now)
+        )
+        for export in due:
+            audit.record(
+                AUDIT_EXPIRED,
+                actor_id=None,
+                target_type=export.subject_type,
+                target_id=export.subject_id,
+                metadata={"export_id": str(export.pk)},
+            )
     # Queued too long (the job died): failed, so the administrator can ask again, and
     # whatever a crashed attempt wrote is deleted (backend review P2: orphaned files).
     stale = now - timedelta(hours=settings.EXPORT_TTL_HOURS)
-    for export in DataExport.objects.filter(status=ExportStatus.QUEUED, created_at__lt=stale)[:500]:
-        if DataExport.objects.filter(pk=export.pk, status=ExportStatus.QUEUED).update(
-            status=ExportStatus.FAILED, error_code="timed_out"
+    with transaction.atomic():
+        timed_out = list(
+            DataExport.objects.select_for_update(skip_locked=True)
+            .filter(status=ExportStatus.QUEUED, created_at__lt=stale)
+            .values_list("pk", flat=True)[:500]
+        )
+        DataExport.objects.filter(pk__in=timed_out).update(
+            status=ExportStatus.FAILED, error_code="timed_out", **_ended(now)
+        )
+    outcomes = purge_due(now)
+    if any(outcomes[name] for name in ("purged", RETAINED, "failed")):
+        logger.info(
+            "export_files_purged",
+            extra={
+                "purged": outcomes["purged"],
+                "held": outcomes[RETAINED],
+                "failed": outcomes["failed"],
+            },
+        )
+    return len(due)
+
+
+def reconcile_orphans(now: datetime | None = None) -> dict[str, int]:
+    """Hourly, bounded (RECONCILE_KEYS objects a run, resumed from a cursor): delete the
+    objects in the exports store that no live export explains. Through the row when there is
+    one (re-armed: deleted, retried and recorded as above); directly when no export has that
+    id (a database restored to before it), found again next run if that fails. Left alone: a
+    queued export's (being built), a ready export's own file, one whose row's deletion is
+    pending, anything newer than ORPHAN_GRACE, and any name an export is never written
+    under. Refused outright if the exports store overlaps the attachments store."""
+    now = now or timezone.now()
+    report = {"listed": 0, "orphans": 0, "removed": 0, "failed": 0, "unknown": 0, "refused": 0}
+    store = storages["exports"]
+    if storage_purge.overlaps(store, storages["attachments"]):
+        logger.error("export_reconcile_refused", extra={"reason": "overlapping_store"})
+        return _reconciled({**report, "refused": 1})
+    try:
+        after = str(cache.get(RECONCILE_CURSOR) or "")
+    except Exception:  # noqa: BLE001 — the cache is an optimisation: start over
+        after = ""
+    try:
+        found, done = storage_purge.objects(store, after=after, limit=RECONCILE_KEYS)
+    except storage_purge.PurgeFailed as exc:
+        logger.warning("export_reconcile_failed", extra={"reason": exc.error_class})
+        return _reconciled({**report, "failed": 1})
+    _remember(RECONCILE_CURSOR, "" if done or not found else found[-1].key)
+    report["listed"] = len(found)
+    named: dict[str, UUID] = {}
+    for item in found:
+        match = _EXPORT_NAME.match(item.key)
+        if match is None:
+            report["unknown"] += 1  # not an export's name: reported, never deleted
+        elif item.modified <= now - ORPHAN_GRACE:
+            named[item.key] = UUID(match["id"])
+    rows = DataExport.objects.in_bulk(set(named.values()))
+    for key, export_id in named.items():
+        export = rows.get(export_id)
+        if export is not None and _explains(export, key):
+            continue
+        report["orphans"] += 1
+        if (
+            export is not None
+            and export.status not in (ExportStatus.QUEUED, ExportStatus.READY)
+            and (export.purged_at is not None or export.purge_requested_at is None)
         ):
-            _delete_file(export)
-    return expired
+            # An ended export's file, deleted once already or before deletion was recorded
+            # (a restored bucket, an older release): its row's deletion again.
+            DataExport.objects.filter(pk=export.pk).exclude(status=ExportStatus.READY).update(
+                storage_key=key,
+                purged_at=None,
+                purge_requested_at=Coalesce(F("purge_requested_at"), now),
+                purge_next_at=now,
+            )
+            outcome = purge_file(export.pk, now)
+            report["removed" if outcome == "purged" else "failed"] += 1
+            continue
+        try:
+            result = storage_purge.purge(store, key)
+        except storage_purge.PurgeFailed:
+            report["failed"] += 1
+            continue
+        report["removed" if result.complete else "failed"] += 1
+    if report["orphans"] or report["failed"] or report["unknown"]:
+        logger.warning(
+            "export_orphans_reconciled",
+            extra={
+                "listed": report["listed"],
+                "orphaned": report["orphans"],
+                "purged": report["removed"],
+                "failed": report["failed"],
+                "problems": report["unknown"],  # names no export is written under
+            },
+        )
+    return _reconciled(report)
+
+
+def _explains(export: DataExport, key: str) -> bool:
+    """Whether the export accounts for this object, so it must stay (for now)."""
+    if export.status == ExportStatus.QUEUED:
+        return True  # being built; ended later, its deletion covers what it wrote
+    if export.status == ExportStatus.READY:
+        return key == export.storage_key
+    pending = export.purge_requested_at is not None and export.purged_at is None
+    return pending and key in _keys(export)
+
+
+def _remember(name: str, value: Any) -> None:
+    try:
+        cache.set(name, value, timeout=7 * 24 * 3600)
+    except Exception:  # noqa: BLE001 — the cache is an optimisation
+        logger.warning("export_reconcile_cache_failed")
+
+
+def _reconciled(report: dict[str, int]) -> dict[str, int]:
+    return report  # its outcomes are logged above
 
 
 # --- shaping values ------------------------------------------------------------------------------
@@ -762,8 +1002,15 @@ def run(export_id: UUID) -> None:
         expires_at=now + timedelta(hours=settings.EXPORT_TTL_HOURS),
     )
     if not finished:  # withdrawn or timed out meanwhile: nothing may stay in storage
-        export.storage_key = key
-        _delete_file(export)
+        # Its deletion may have run already, before this file existed: due again, for the
+        # key just written, durably (PRIV-3).
+        DataExport.objects.filter(pk=export.pk).exclude(status=ExportStatus.READY).update(
+            storage_key=key,
+            purged_at=None,
+            purge_requested_at=Coalesce(F("purge_requested_at"), now),
+            purge_next_at=now,
+        )
+        purge_file(export.pk, now)
         return
     logger.info("export_ready", extra={"export_id": str(export.pk), "count": included})
 

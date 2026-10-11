@@ -36,6 +36,11 @@ Concurrency: every change requires the `version` the client last saw (409 otherw
 bumps it. Requests that would change nothing (completing a completed task, cancelling a
 cancelled meeting, reopening open work, archiving an archived activity) succeed without a
 version check or a new version, so double submits and retries are harmless.
+
+Legal holds (core.holds, docs/privacy.md#legal-holds): while one covers the lead, its
+activities' text (HELD_FIELDS) can't change and its notes' files can't be deleted (409
+`legal_hold`, nothing written); checked under the lead's lock, serialised with placing a
+hold. Adding work and moving it on stay allowed.
 """
 
 from __future__ import annotations
@@ -51,7 +56,7 @@ from django.db.models import F, Q
 from django.utils import timezone
 
 from arkray.audit import services as audit
-from arkray.core import idempotency
+from arkray.core import holds, idempotency
 from arkray.core.access import AccessScope
 from arkray.core.domain_events import publish
 from arkray.core.errors import (
@@ -117,6 +122,10 @@ OPPORTUNITY_ARCHIVED_RESTORE = "This opportunity is archived. Restore the opport
 ALREADY_CREATED_ELSEWHERE = (
     "This was already created by an earlier request and has since left this workspace."
 )
+# What a legal hold on the lead freezes in its activities (core.holds, docs/privacy.md#legal-
+# holds): the text an erasure redacts. Times, priority, completing, cancelling, reopening and
+# archiving still change, and new activities can be added.
+HELD_FIELDS = frozenset({"title", "description", "location", "meeting_url"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,7 +386,8 @@ def update_activity(
     """Change an activity's own fields (its type's: a task's subject, description, priority
     and due time; a meeting's subject, agenda, times, location and link; a note's text).
     Completed and cancelled work is history: reopen it first. Only fields whose value
-    actually changes are written and audited (by name: no text)."""
+    actually changes are written and audited (by name: no text). Refused (409 `legal_hold`)
+    while a legal hold covers the lead if its text (HELD_FIELDS) would change."""
     authorize_write(actor, scope)
     cleaned = validation.clean_fields(changes)
     with transaction.atomic():
@@ -406,6 +416,8 @@ def update_activity(
         changed = [f for f, v in cleaned.items() if getattr(activity, f) != v]
         if not changed:
             return selectors.activity_by_id(activity.pk)
+        # Before anything is written (the lead's lock is held): a refusal changes nothing.
+        holds.refuse_frozen_changes(lead.pk, changed, HELD_FIELDS)
         previous_start = activity.starts_at
         for field in changed:
             setattr(activity, field, cleaned[field])

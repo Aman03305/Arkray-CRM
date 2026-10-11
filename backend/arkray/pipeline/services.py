@@ -50,6 +50,11 @@ owner isn't its lead's owner can't be committed (models.Opportunity).
 Concurrency: every change requires the `version` the client last saw (409 otherwise) and
 increments it. Requests that change nothing (moving to the current stage, archiving an
 archived opportunity) succeed without a new version, so retries are harmless.
+
+Legal holds (core.holds, docs/privacy.md#legal-holds): while one covers the lead, an edit
+of its deals' customer copy, text and custom values (HELD_FIELDS) is refused (409
+`legal_hold`, nothing written), checked under the lead's lock and serialised with placing a
+hold. Moves, agreed prices and new deals go on.
 """
 
 from __future__ import annotations
@@ -67,7 +72,7 @@ from django.db.models import F
 from django.utils import timezone
 
 from arkray.audit import services as audit
-from arkray.core import idempotency
+from arkray.core import holds, idempotency
 from arkray.core.access import AccessScope, ScopeKind
 from arkray.core.context import current_support_session_id
 from arkray.core.domain_events import publish
@@ -176,6 +181,24 @@ NOT_IN_NEGOTIATION = (
 )
 ALREADY_CREATED_ELSEWHERE = (
     "This was already created by an earlier request and has since left this workspace."
+)
+# What a legal hold on the deal's lead freezes in an edit (core.holds, docs/privacy.md#legal-
+# holds): the fields an erasure blanks or redacts (and so the name derived from them). Value,
+# probability, dates, stage moves and agreed prices go on: they add to the history.
+HELD_FIELDS = frozenset(
+    {
+        "account_name",
+        "customer_name",
+        "contact_phone",
+        "contact_email",
+        "address",
+        "instrument_name",
+        "work_load",
+        "expected_cpt",
+        "description",
+        "lost_reason",
+        "custom_fields",
+    }
 )
 
 
@@ -939,7 +962,8 @@ def update_opportunity(
     (null clears one). A change to the customer, account or instrument renames it (naming.py).
     Only fields whose value actually changes are written and audited (by name, and custom
     fields by id: no values, no text). Never touches its lead: the opportunity keeps the same
-    customer record, and no other is made."""
+    customer record, and no other is made. Refused (409 `legal_hold`) while a legal hold
+    covers its lead if a frozen field (HELD_FIELDS) would change."""
     authorize_write(actor, scope)
     cleaned = validation.clean_fields(changes)
     custom_changed: list[str] = []
@@ -968,6 +992,8 @@ def update_opportunity(
         changed = [f for f, v in cleaned.items() if getattr(opportunity, f) != v]
         if not changed:
             return selectors.opportunity_by_id(opportunity.pk)
+        # Before anything is written (the lead's lock is held): a refusal changes nothing.
+        holds.refuse_frozen_changes(opportunity.lead_id, changed, HELD_FIELDS)
         for field in changed:
             setattr(opportunity, field, cleaned[field])
         if naming.SOURCES & set(changed):

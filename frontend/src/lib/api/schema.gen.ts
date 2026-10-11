@@ -66,7 +66,7 @@ export interface paths {
         readonly put?: never;
         /**
          * @description Pseudonymise a deactivated user (privacy.staff), confirming them by their current
-         *     email. Irreversible.
+         *     email. Irreversible. Never an administrator's account: 403 (ADR-0030).
          */
         readonly post: operations["privacy_pseudonymise_user"];
         readonly delete?: never;

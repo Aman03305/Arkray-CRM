@@ -58,7 +58,7 @@ function ChangePasswordForm() {
   useFocusFirstInvalid(form, Object.keys(clientErrors).length ? clientErrors : change.error);
   const errors = { current: server.current_password, password: server.new_password, ...clientErrors };
   const banner =
-    change.isError && !server.current_password && !server.new_password ? describeError(change.error) : null;
+    change.isError && !server.current_password && !server.new_password ? describeError(change.error, { tooMany: "password change attempts" }) : null;
 
   return (
     <form ref={form} onSubmit={onSubmit} noValidate className="max-w-sm space-y-4">

@@ -6,6 +6,12 @@
 
 The index is derived data: deleting it loses nothing, the CRM is the source. While it is
 rebuilt, semantic search finds fewer passages; nothing else is affected.
+
+Nothing here changes the session (final audit P3: `SET statement_timeout = 0` outlived the
+command behind a transaction-mode pooler, on whichever server connection ran it, for its
+other clients, and the `RESET` could run on another). The one unbounded statement, the
+`--rebuild` delete, lifts the timeout for its own transaction only (`SET LOCAL`); every other
+statement is one bounded batch and runs under the connection's usual timeout.
 """
 
 from __future__ import annotations
@@ -13,10 +19,20 @@ from __future__ import annotations
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandParser
-from django.db import connection
+from django.db import connection, transaction
 
 from arkray.ai import indexing
 from arkray.ai.models import KnowledgeChunk
+
+
+def delete_all_chunks() -> int:
+    """Empty the index in one transaction, its statement timeout lifted for that transaction
+    alone (safe behind a transaction pooler)."""
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute("SET LOCAL statement_timeout = 0")
+        deleted, _ = KnowledgeChunk.objects.all().delete()
+    return deleted
 
 
 class Command(BaseCommand):
@@ -33,18 +49,8 @@ class Command(BaseCommand):
             indexing.start_reconciliation()
             self.stdout.write("Reconciliation queued (ai_index workers).")
             return
-        with connection.cursor() as cursor:
-            cursor.execute("SET statement_timeout = 0")  # an operator command, bounded batches
-        try:
-            self._index(rebuild=options["rebuild"])
-        finally:
-            with connection.cursor() as cursor:
-                cursor.execute("RESET statement_timeout")
-
-    def _index(self, *, rebuild: bool) -> None:
-        if rebuild:
-            deleted, _ = KnowledgeChunk.objects.all().delete()
-            self.stdout.write(f"Deleted {deleted} chunks.")
+        if options["rebuild"]:
+            self.stdout.write(f"Deleted {delete_all_chunks()} chunks.")
 
         def progress(module: Any, batch: int, totals: dict[Any, int]) -> None:
             done = ", ".join(f"{k.value}={v}" for k, v in sorted(totals.items()))

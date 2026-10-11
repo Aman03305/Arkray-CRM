@@ -45,7 +45,7 @@ Verified against the code; contracts and regions are the operator's to put in pl
 
 | Recipient | When | What it receives | Transport | Retention there |
 |---|---|---|---|---|
-| **Anthropic** (the language model) | only with `AI_LLM_PROVIDER=anthropic` (the default is `none`; production runs `none` until the conditions in [rag-architecture.md](rag-architecture.md#privacy-and-data-minimisation) are met) | the question and up to four earlier turns, with links, email addresses and phone numbers replaced by markers; tool results: lead name, organisation, job title, status and dates; deal names, account, customer (only where the asker may see the customer), amounts, prices, CPTs, work load, lost reason, description; activity titles and note passages (masked the same way). Never: contact fields, addresses, meeting links or places, custom values, audit data | HTTPS only (`AI_LLM_BASE_URL` must be https; SDK variables refused) | the provider's, under the organisation's agreement (not verified here) |
+| **Anthropic** (the language model) | only with `AI_LLM_PROVIDER=anthropic` (the default is `none`; production runs `none` until the conditions in [rag-architecture.md](rag-architecture.md#privacy-and-data-minimisation) are met) | the question and up to four earlier turns, with links, email addresses, phone numbers and PANs replaced by markers; tool results: lead name, organisation, job title, status and dates; deal names, account, customer, lost reason and description (only where the asker may see the customer), amounts, prices, CPTs, work load; activity titles and note passages (masked the same way). Never: contact fields, addresses, meeting links or places, custom values, audit data | HTTPS only (`AI_LLM_BASE_URL` must be https; SDK variables refused) | the provider's, under the organisation's agreement (not verified here) |
 | **SMTP provider** | always (account emails) | recipient address, first name, the inviter's name, a one-time link (invitation or reset), the old address and a masked new one (email change) | STARTTLS or TLS with certificate verification, enforced in production | the provider's |
 | **Object storage (S3-compatible)** | with `ATTACHMENT_STORAGE=s3` | attachment bytes under a random key (never the file name); export ZIPs (24 h) | HTTPS with certificate verification, enforced; objects private, SSE-AES256 | until purged; a versioned bucket keeps earlier versions until its lifecycle rule or `ATTACHMENT_S3_PURGE_VERSIONS` removes them |
 | **ClamAV** (clamd) | with `ATTACHMENT_SCANNER` | attachment bytes, to scan | plain TCP: must be loopback or a listed private container name (enforced) | none (scans in memory) |
@@ -89,6 +89,25 @@ attachment purges on their notes, the deletion of their deals' custom values and
 support-reason blanking. The reference names the matter, never describes it. Placing and
 releasing are audited (`privacy.legal_hold_placed` / `_released`). A backup directory is held
 by creating a file named `LEGAL_HOLD` in it.
+
+**Edits of a held lead** (audit PRIV-2; `core/holds.py`). The hold preserves the record as
+evidence, so what an erasure would clear can't change through the application either, by
+anyone, through any path (the services check it, not the forms):
+
+| Frozen while held (409 `legal_hold`, nothing written, version unchanged) | Still allowed |
+|---|---|
+| the lead's name, organisation, job title, email, phones, address and description (an edit or a [correction](#correction)) | status, owner, source, rating, last contact; archiving and restoring (archiving hides, deletes nothing) |
+| its deals' customer, account, contact phone and email, address, instrument, work load, Expected CPT, description, lost reason and custom values (and so their derived name) | new deals; value, probability, dates; stage moves and agreed prices (the history is append-only) |
+| its activities' subject and text, meeting place and link | new notes, tasks, meetings and files; times and priority; completing, cancelling, reopening, archiving |
+| deleting a file of its notes | uploading one |
+
+"Frozen" means no change at all, filling an empty field included: the record stays as it
+was when the hold was placed. A request changing a frozen field and an allowed one is
+refused whole. Releasing the hold re-allows every edit. Placing a hold is serialised with
+edits in flight (`holds.place`): an edit already past its check commits first and the hold
+waits for it; an edit arriving while a hold is being placed waits and is then refused. Holds
+on a user (staff) stop their pseudonymisation and the expiry of details about them; they
+don't freeze CRM records.
 
 ## Audit trail
 
@@ -148,6 +167,20 @@ retried build replaces its earlier attempt, and a build that never finished has 
 deleted when it is timed out: no export file outlives its record's 24 hours. **Before
 releasing an export, review it**: free text staff wrote may mention other people, which the
 system can't tell apart.
+
+Deleting an export's file is durable (final audit PRIV-3, ARCH-4). An export that ends is
+no longer downloadable at once, and its record keeps the file's key until the object is
+confirmed gone (`purged_at`); a failed deletion is retried by the hourly
+`privacy.housekeeping`, backing off from 5 minutes to a day, with the last failure on the
+record and in the `arkray_export_file_purges` gauge. In S3 every version and delete marker
+of the key is deleted (a versioned bucket otherwise keeps the ZIP), whatever
+`ATTACHMENT_S3_PURGE_VERSIONS` says, so the credentials need `s3:ListBucketVersions` and
+`s3:DeleteObjectVersion`. A version that S3 Object Lock (a retention period or a legal hold)
+protects is *retained*: audited once (`privacy.export_file_retained`) and retried daily
+until the lock ends. Each hour a bounded reconciliation also deletes objects in the exports
+store that no live export explains (an ended export's, or one a restored database no longer
+knows), never names an export isn't written under, and never anything while the exports
+store overlaps the attachments store ([runbooks.md](runbooks.md#export-file-cleanup)).
 
 ### Correction
 
@@ -219,6 +252,21 @@ Their id, role, dates, ownership, the append-only trail and every amount and neg
 price stay. Audited (`user.pseudonymised`, counts only), recorded in the erasure ledger,
 irreversible, idempotent. This is not lead erasure: their customers are untouched.
 
+**Never another administrator's account through the API** (audit SEC-2,
+[ADR-0030](adr/0030-administrator-accounts-change-only-by-their-owner.md)): pseudonymising
+replaces the account's email and password, which only the administrator themselves may
+change, and nobody pseudonymises their own account. So for an account whose **role** is
+administrator, whatever its status (a deactivated former administrator included), the API
+answers 403 `permission_denied` and changes nothing, and the user's page doesn't offer it. The
+service (`privacy.staff`) enforces it, not only the view: it takes the user-administration
+lock and the account's row lock and reads the role from the locked row, so a promotion racing
+it is either seen or finds the account changed (`tests/security/test_staff_pseudonymisation_administrators.py`,
+with real races). The one way is the higher-trust operator path, with shell and database
+access: `manage.py pseudonymise_user <id> --by <admin> --allow-administrator [--yes]`; it keeps
+every other rule (deactivated, no current work, no hold, not oneself) and the audit event says
+`administrator_target`. Restoring a backup re-applies an administrator's pseudonymisation like
+any other (it was authorised when it happened).
+
 ### Custom fields
 
 Removing a pipeline's custom field keeps its values, hidden (removal is reversible). To delete
@@ -228,6 +276,13 @@ name. The request is audited (`pipeline.field_values_deletion_requested`); a job
 request has committed, records it in the erasure ledger and removes the field's key from every deal of the pipeline in batches, row by row atomically (a
 concurrent edit of the deal's other values is kept), leaving deals under a legal hold
 (counted), and audits the result (`pipeline.field_values_deleted`). Irreversible.
+Configuring a pipeline is not authority over every deal in it (final production audit
+SEC-1): a deal reassigned with its lead stays in its old owner's personal pipeline, out of
+their sight. So outside the organization-wide workspace the deletion is refused as a whole
+(403, nothing removed, archived or queued) while any deal of another user holds a value, and
+the job and its ledger entry are limited to the workspace owner's deals: a deal reassigned
+between the request and the job keeps its value, after a restore too. An administrator
+deletes every deal's values from the organization-wide workspace.
 
 ### Attachments
 
@@ -275,9 +330,20 @@ has applied it (`core_erasure_ledger_state`):
   changed, removed or reordered breaks the chain, and a full disk leaves no partial entry;
 - an erasure appends its entry last, just before its transaction commits; a deletion carried
   out by a job (a removed field's values, a deleted file's object) is appended by the job,
-  after the request committed, so a request that fails leaves no entry behind. (A commit
-  that fails after the entry was written leaves the ledger ahead: the API closes until the
-  replay carries out the erasure that was asked for, R122);
+  after the request committed, so a request that fails leaves no entry behind. A commit
+  that fails after the entry was written leaves the ledger ahead and the API closed; the
+  **automatic reconciliation** (`privacy.reconcile_ledger`, every minute, the one task that
+  runs while the gate is closed) then carries out the erasure that was asked for and the
+  API reopens once the database matches the ledger, never before (final production audit
+  ARCH-3). It acts only on a gap of at most `ERASURE_LEDGER_AUTO_RECONCILE_MAX` entries
+  (10) whose earlier entries are exactly those the database applied, with no erasure in
+  progress; a larger gap (a restore), a different ledger, or an entry it can't apply waits
+  for an operator ([runbooks.md](runbooks.md#erasure-ledger-behind));
+- the key can be rotated without losing or re-signing anything
+  (`ERASURE_LEDGER_VERIFY_KEYS`, `manage.py rotate_erasure_ledger_key`): a `key_rotated`
+  entry signed with the new key names it by an id (never the key) and anchors a SHA-256
+  digest of every entry before it, so the old key can then be removed and can never add
+  entries again ([runbooks.md](runbooks.md#rotate-the-erasure-ledger-key), ARCH-5);
 - every process compares the database with the ledger at most once a minute, reading only
   the entries added since its last check (the whole chain at its first). A check that
   falls between an erasure's entry and its commit sees the eraser holding the append lock
@@ -295,7 +361,10 @@ has applied it (`core_erasure_ledger_state`):
   purges the file again), then applies whatever was appended meanwhile until it reaches the
   ledger's head, records the database as current while holding the append lock (never
   moving it backwards), and writes a reconciliation report (ids, outcomes and counts). The
-  API and the workers resume within a minute.
+  API and the workers resume within a minute. A ledger that doesn't hold what the database
+  has applied (fewer entries, or other ones: an empty directory where the volume wasn't
+  mounted, another environment's ledger) is refused before anything changes, never
+  "replayed" as complete (final production audit ARCH-6).
 
 Tested in `tests/security/test_erasure_ledger.py` and drilled for real with
 `tests/drills/restore_drill.py` (an encrypted `backup.sh` dump, erasures after it,

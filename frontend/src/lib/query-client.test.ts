@@ -67,6 +67,20 @@ describe("a 401 on a signed-in page", () => {
     expect(browser.hardNavigate).toHaveBeenCalledWith(expect.stringContaining("reason=expired"), "signed-out");
   });
 
+  it("says the session ended on a fresh page load that was sent with a session cookie (E2E-1)", async () => {
+    // Expired while the tab was closed, then reloaded: no viewer was ever cached on this page.
+    await failWith(unauthenticated, createQueryClient({ sessionAtLoad: true }));
+    expect(browser.hardNavigate).toHaveBeenCalledWith(
+      "/login?next=%2Fleads%3Fstatus%3Dnew&reason=expired",
+      "signed-out",
+    );
+  });
+
+  it("says nothing about a session when there was none (first visit, signed out)", async () => {
+    await failWith(unauthenticated, createQueryClient({ sessionAtLoad: false }));
+    expect(browser.hardNavigate).toHaveBeenCalledWith(expect.not.stringContaining("reason="), undefined);
+  });
+
   it("redirects only once however many requests fail", async () => {
     const client = await failWith(unauthenticated);
     await failWith(unauthenticated, client);

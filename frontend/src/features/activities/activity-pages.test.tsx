@@ -254,7 +254,7 @@ describe("the task form on a deal's page", () => {
     const dialog = screen.getByRole("dialog", { name: "New task" });
     await user.type(within(dialog).getByRole("textbox", { name: "Subject" }), "Call back");
     await user.click(within(dialog).getByRole("button", { name: "Create task" }));
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Expected available in 30 seconds.");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Too many requests. Try again in about a minute.");
     expect(within(dialog).getByRole("textbox", { name: "Subject" })).toHaveValue("Call back");
     const create = within(dialog).getByRole("button", { name: "Create task" });
     expect(create).not.toHaveAttribute("aria-disabled");

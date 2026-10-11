@@ -178,8 +178,28 @@ class _ScopedLead(serializers.Serializer[Any]):
     def get_customer_restricted(self, opportunity: m.Opportunity) -> bool:
         return not customer.visible(self.context["scope"], opportunity.lead.owner_id)
 
+    def _active_fields(self, pipeline_id: Any) -> set[str]:
+        """The pipeline's active custom fields (once per pipeline per response)."""
+        known: dict[Any, set[str]] = self.context.setdefault("_active_custom_fields", {})
+        if pipeline_id not in known:
+            known[pipeline_id] = {
+                str(pk)
+                for pk in m.CustomField.objects.filter(
+                    pipeline_id=pipeline_id, is_active=True
+                ).values_list("pk", flat=True)
+            }
+        return known[pipeline_id]
+
     def to_representation(self, instance: m.Opportunity) -> dict[str, Any]:
         data: dict[str, Any] = super().to_representation(instance)
+        if isinstance(data.get("custom_fields"), dict) and data["custom_fields"]:
+            # A removed field's values are kept, hidden (docs/privacy.md#custom-fields):
+            # hidden from the API too, not only from the screens (final production audit;
+            # one query per pipeline per response, only for deals holding values).
+            active = self._active_fields(instance.pipeline_id)
+            data["custom_fields"] = {
+                key: value for key, value in data["custom_fields"].items() if key in active
+            }
         if data.get("customer_restricted"):
             free_text = None
             if "custom_fields" in data:

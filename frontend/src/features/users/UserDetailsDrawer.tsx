@@ -75,7 +75,9 @@ export function UserDetailsDrawer({ user: listed, notice, onClose, onSetPassword
   const opensCrm = hasCapability(viewer, "workspace.view_any");
   // Privacy requests are refused inside a support session (and the Users page isn't offered there).
   const privacy = hasCapability(viewer, "privacy.manage") && !viewer?.supportSession;
-  const pseudonymisable = user.status === "deactivated" && user.id !== viewer?.id;
+  // Never an administrator's account (ADR-0030; the API refuses it): an operator does that on the server.
+  const administrator = user.role === "admin";
+  const pseudonymisable = user.status === "deactivated" && user.id !== viewer?.id && !administrator;
   const blocked = supportBlockedReason(user, user.id === viewer?.id);
   const loadError = detail.isError ? describeError(detail.error) : null;
 
@@ -163,7 +165,11 @@ export function UserDetailsDrawer({ user: listed, notice, onClose, onSetPassword
               ) : null}
             </div>
             {pseudonymisable ? null : (
-              <p className="mt-2 text-xs text-slate-500">Only a deactivated user can be pseudonymised.</p>
+              <p className="mt-2 text-xs text-slate-500">
+                {administrator
+                  ? "An administrator's account can't be pseudonymised here."
+                  : "Only a deactivated user can be pseudonymised."}
+              </p>
             )}
           </div>
         ) : null}

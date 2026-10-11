@@ -185,6 +185,11 @@ administrator could fix another administrator's email or demote them in the UI.
   ```
 
   It appears in the security events as a role change by the system.
+- *Pseudonymise a former administrator*: no administrator can through the API (403, audit
+  SEC-2: it replaces the account's email and password). Once the account is deactivated and
+  its work reassigned, an operator runs `manage.py pseudonymise_user <id> --by <admin>
+  --allow-administrator`, then again with `--yes`; audited as `user.pseudonymised` with
+  `administrator_target` ([privacy.md](privacy.md#staff)).
 
 Residual: an administrator can still create or promote *new* administrator accounts (that is
 what the role is for); off-boarding an administrator should include reviewing the

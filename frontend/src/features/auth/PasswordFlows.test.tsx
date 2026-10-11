@@ -14,6 +14,11 @@ vi.mock("@/lib/browser", () => ({ hardNavigate: nav.hardNavigate, currentLocatio
 const TOKEN = "A".repeat(43);
 const GENERIC = "If an eligible account exists, password reset instructions have been sent.";
 const INVALID = apiError(400, "invalid_token", "This link is invalid or has expired. Ask for a new one.");
+// The general request throttle's refusal, as the API sends it (E2E-2).
+const THROTTLED = {
+  ...apiError(429, "rate_limited", "Request was throttled. Expected available in 37 seconds."),
+  headers: { "Retry-After": "37" },
+};
 
 async function choosePassword(label: string, password: string, confirmation = password) {
   const user = userEvent.setup();
@@ -44,6 +49,17 @@ describe("ForgotPasswordForm", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Too many password reset requests");
   });
 
+  it("words the request throttle like its own limit (E2E-2)", async () => {
+    mockApi({ "POST /api/v1/auth/password-reset": THROTTLED });
+    renderWithProviders(<ForgotPasswordForm />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("Email"), "someone@example.test");
+    await user.click(screen.getByRole("button", { name: "Send reset link" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Too many password reset requests. Try again in about a minute.");
+    expect(alert).not.toHaveTextContent(/throttled/);
+  });
+
   it("requires an email", async () => {
     const api = mockApi({});
     renderWithProviders(<ForgotPasswordForm />);
@@ -64,6 +80,16 @@ describe("ResetPasswordForm", () => {
       token: TOKEN,
       new_password: "a fresh long passphrase",
     });
+  });
+
+  it("says plainly when throttled (E2E-2)", async () => {
+    mockApi({ "POST /api/v1/auth/password-reset/confirm": THROTTLED });
+    renderWithProviders(<ResetPasswordForm token={TOKEN} />);
+    const user = await choosePassword("New password", "a fresh long passphrase");
+    await user.click(screen.getByRole("button", { name: "Change password" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Too many attempts. Try again in about a minute.");
+    expect(alert).not.toHaveTextContent(/throttled/);
   });
 
   it("checks the confirmation locally", async () => {
@@ -140,6 +166,28 @@ describe("ActivateAccountForm", () => {
     const user = await choosePassword("Password", "a long invitation passphrase");
     await user.click(screen.getByRole("button", { name: "Activate account" }));
     expect(await screen.findByRole("heading", { name: "This invitation can't be used" })).toBeInTheDocument();
+  });
+
+  it("says plainly when checking the invitation is throttled (E2E-2)", async () => {
+    mockApi({ "POST /api/v1/auth/invitations/verify": THROTTLED });
+    renderWithProviders(<ActivateAccountForm token={TOKEN} />);
+    expect(await screen.findByRole("heading", { name: "We couldn't check your invitation" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Too many attempts. Try again in about a minute.");
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/throttled/);
+  });
+
+  it("says plainly when activating is throttled (E2E-2)", async () => {
+    mockApi({
+      "POST /api/v1/auth/invitations/verify": { status: 200, body: PREVIEW },
+      "POST /api/v1/auth/invitations/accept": THROTTLED,
+    });
+    renderWithProviders(<ActivateAccountForm token={TOKEN} />);
+    await screen.findByRole("heading", { name: "Welcome, Neha" });
+    const user = await choosePassword("Password", "a long invitation passphrase");
+    await user.click(screen.getByRole("button", { name: "Activate account" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Too many attempts. Try again in about a minute.");
+    expect(alert).not.toHaveTextContent(/throttled/);
   });
 
   it("offers show/hide for the password", async () => {

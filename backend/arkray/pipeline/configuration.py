@@ -9,6 +9,11 @@ Who may configure what (checked here for every caller):
   crm.manage_any, recorded as the actor with the owner as the subject). Seeing a pipeline
   (because one of your deals sits in it) never implies configuring it.
 A pipeline the caller may not see is a 404; one they may see but not configure, a 403.
+Configuring a pipeline is never authority over the deals in it either: a deal reassigned
+with its lead stays in its old owner's personal pipeline, out of their sight. Deleting
+custom values is refused while a deal outside the caller's scope holds one, and its job
+only touches the workspace's deals (field_values); refusals count only the deals the
+caller can see (final production audit SEC-1).
 
 Concurrency: every change requires the pipeline version the client saw (409 otherwise) and
 bumps it, so two people editing one pipeline can't overwrite each other. Lock order: the
@@ -75,6 +80,16 @@ OPEN_DEALS = (
 )
 STAGE_IN_USE = (
     "“{name}” has {count} opportunit{plural}. Move them to another stage before removing it."
+)
+# Deals the caller can't see (reassigned away, still in this pipeline) are never counted:
+# the refusal says only that they exist (final production audit SEC-1b).
+STAGE_IN_USE_BY_OTHERS = (
+    "“{name}” still has opportunities that belong to other users. An administrator can "
+    "move them before the stage is removed."
+)
+OPEN_DEALS_OF_OTHERS = (
+    "This pipeline still has open opportunities that belong to other users. An "
+    "administrator can close or move them before the pipeline is archived."
 )
 STAGE_TYPE_LOCKED = (
     "“{name}” has opportunities, so it can't change between open, won and lost. Add a new "
@@ -282,11 +297,14 @@ def archive_pipeline(
             raise ConflictError()
         if pipeline.is_default:
             raise BusinessRuleViolation(DEFAULT_CANNOT_ARCHIVE)
-        open_count = m.Opportunity.objects.filter(
+        open_deals = m.Opportunity.objects.filter(
             pipeline=pipeline, status=m.StageCategory.OPEN, archived_at__isnull=True
-        ).count()
+        )
+        open_count = scope.apply(open_deals).count()
         if open_count:
             raise BusinessRuleViolation(OPEN_DEALS.format(**_plural(open_count)))
+        if open_deals.exists():
+            raise BusinessRuleViolation(OPEN_DEALS_OF_OTHERS)
         pipeline.is_active = False
         pipeline.version += 1
         pipeline.save(update_fields=["is_active", "version", "updated_at"])
@@ -379,9 +397,12 @@ def replace_stages(
         problems: list[str] = []
         for stage in locked:
             if stage.pk in removed_ids:
-                count = m.Opportunity.objects.filter(stage=stage, archived_at__isnull=True).count()
+                in_stage = m.Opportunity.objects.filter(stage=stage, archived_at__isnull=True)
+                count = scope.apply(in_stage).count()
                 if count:
                     problems.append(STAGE_IN_USE.format(name=stage.name, **_plural(count)))
+                elif in_stage.exists():
+                    problems.append(STAGE_IN_USE_BY_OTHERS.format(name=stage.name))
             elif m.Opportunity.objects.filter(stage=stage).exists():
                 problems.append(STAGE_TYPE_LOCKED.format(name=stage.name))
         if problems:
@@ -536,6 +557,8 @@ def replace_fields(
         listed = {spec.id for spec in specs if spec.id is not None}
         originals = {pk: (f.name, f.required, f.options, f.position) for pk, f in current.items()}
         removed = [field for pk, field in current.items() if pk not in listed]
+        if delete_removed_values:  # before anything changes: refused as a whole
+            field_values.require_deletable(scope, pipeline.pk, [field.pk for field in removed])
         for field in removed:
             field.is_active = False
             field.save(update_fields=["is_active", "updated_at"])

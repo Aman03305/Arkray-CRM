@@ -17,6 +17,12 @@
   ("lead:<uuid>") that an answer may cite; only refs registered here become links.
 - **User-written text is data.** Descriptions, notes and retrieved passages are returned
   under `untrusted_text`, which the system prompt tells the model never to follow.
+- **A deal is named as the asker may see it.** A closed deal whose customer the asker no
+  longer sees (pipeline.customer) is named without them by every tool, in its content *and*
+  in the label its citation carries (`_deal`, the one place that decides), and its free text
+  (description, lost reason), written about the customer, is left out, as retrieval leaves
+  it out. Such a citation is `restricted`: the stored answer records it, so a re-read or a
+  replay can tell an answer that named the customer from one that never did.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ from arkray.activities.selectors import ActivityFilters
 from arkray.core.access import AccessScope
 from arkray.core.business_time import business_date
 from arkray.core.errors import NotFoundError
+from arkray.core.knowledge import SourceType
 from arkray.core.ranking import SearchQuery
 from arkray.identity import selectors as identity_selectors
 from arkray.leads import selectors as lead_selectors
@@ -74,6 +81,9 @@ class RecordRef:
     id: UUID
     label: str
     detail: str = ""
+    # A deal named without its customer (pipeline.customer): stored with the answer
+    # (answers.assemble: `masked`), never serialised.
+    restricted: bool = False
 
     @property
     def ref(self) -> str:
@@ -112,8 +122,10 @@ class ToolContext:
     retrieved_chars: int = 0
     result_chars: int = 0
 
-    def cite(self, kind: str, record_id: UUID, label: str, detail: str = "") -> str:
-        record = RecordRef(kind, record_id, label or kind.capitalize(), detail)
+    def cite(
+        self, kind: str, record_id: UUID, label: str, detail: str = "", *, restricted: bool = False
+    ) -> str:
+        record = RecordRef(kind, record_id, label or kind.capitalize(), detail, restricted)
         self.records.setdefault(record.ref, record)
         return record.ref
 
@@ -231,16 +243,32 @@ def _named_pipeline(ctx: ToolContext, name: str) -> Pipeline:
     return matched[0]
 
 
+@dataclass(frozen=True, slots=True)
+class _Deal:
+    ref: str
+    title: str  # as this workspace may see it
+    known: bool  # the customer is visible here
+
+
+def _deal(ctx: ToolContext, found: Opportunity, detail: str = "") -> _Deal:
+    """Cite a deal, named as this workspace may see it: a closed deal whose customer it no
+    longer sees is named without them, in the citation's label too (pipeline.customer; the
+    same rule as the pipeline's own screens). Every tool that returns a deal cites it here
+    (privacy audit PRIV-1: one cited it by its full title)."""
+    known = customer.visible(ctx.scope, found.lead.owner_id)
+    title = found.title if known else customer.shown_title(found)
+    ref = ctx.cite("opportunity", found.pk, title, detail, restricted=not known)
+    return _Deal(ref, title, known)
+
+
 def _opportunity_row(
     ctx: ToolContext, found: Opportunity, stages: dict[UUID, Stage]
 ) -> dict[str, Any]:
     stage = stages.get(found.stage_id)
-    # A closed deal whose customer this workspace no longer sees: named without them, and
-    # no customer field (pipeline.customer; the same rule as the pipeline's own screens).
-    known = customer.visible(ctx.scope, found.lead.owner_id)
-    title = found.title if known else customer.shown_title(found)
+    deal = _deal(ctx, found, stage.name if stage else "")
+    known, title = deal.known, deal.title
     row: dict[str, Any] = {
-        "ref": ctx.cite("opportunity", found.pk, title, stage.name if stage else ""),
+        "ref": deal.ref,
         "title": fmt.label(title),
         "stage": stage.name if stage else None,
         "status": found.status,
@@ -263,6 +291,8 @@ def _opportunity_row(
         row["negotiated_price"] = fmt.money(found.negotiated_price)
     if found.closed_at is not None:
         row["closed"] = fmt.day(found.closed_at)
+    if not known:
+        row["customer_restricted"] = True  # why it is named without its customer
     owner = _person(ctx, found.owner)
     if owner:
         row["owner"] = owner
@@ -687,23 +717,7 @@ def find_records(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
             }
             for lead in found.leads.items
         ],
-        "opportunities": [
-            {
-                # A closed deal whose customer this workspace no longer sees is named
-                # without them (pipeline.customer), in the citation too.
-                "ref": ctx.cite(
-                    "opportunity",
-                    o.pk,
-                    customer.title_for(o, ctx.scope, o.lead.owner_id),
-                    stages[o.stage_id].name if o.stage_id in stages else "",
-                ),
-                "title": fmt.label(customer.title_for(o, ctx.scope, o.lead.owner_id)),
-                "status": o.status,
-                "stage": stages[o.stage_id].name if o.stage_id in stages else None,
-                "lead": _lead_link(ctx, o.lead),
-            }
-            for o in found.opportunities.items
-        ],
+        "opportunities": [_found_deal(ctx, o, stages) for o in found.opportunities.items],
         "tasks": [_activity_row(ctx, a) for a in found.tasks.items],
         "meetings": [_activity_row(ctx, a) for a in found.meetings.items],
         "notes": [_activity_row(ctx, a) for a in found.notes.items],
@@ -718,6 +732,21 @@ def find_records(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
             )
         ),
     }
+
+
+def _found_deal(ctx: ToolContext, found: Opportunity, stages: dict[UUID, Stage]) -> dict[str, Any]:
+    stage = stages.get(found.stage_id)
+    deal = _deal(ctx, found, stage.name if stage else "")
+    row: dict[str, Any] = {
+        "ref": deal.ref,
+        "title": fmt.label(deal.title),
+        "status": found.status,
+        "stage": stage.name if stage else None,
+        "lead": _lead_link(ctx, found.lead),
+    }
+    if not deal.known:
+        row["customer_restricted"] = True
+    return row
 
 
 def get_record(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -768,9 +797,17 @@ def _opportunity_details(ctx: ToolContext, opportunity_id: UUID) -> dict[str, An
     stages = _stage_names(ctx)
     row = _opportunity_row(ctx, card, stages)
     row["archived"] = found.archived_at is not None
-    row["untrusted_text"] = fmt.clip(found.description, TEXT_LIMIT) if found.description else None
-    if found.lost_reason:
-        row["lost_reason"] = {"untrusted_text": fmt.clip(found.lost_reason, TEXT_LIMIT)}
+    if row.get("customer_restricted"):
+        # Its description and lost reason were written about the customer this workspace
+        # no longer sees: never sent, as retrieval never returns them (pipeline selectors'
+        # knowledge_documents). Amounts, stages, prices and CPTs stay.
+        row["untrusted_text"] = None
+    else:
+        row["untrusted_text"] = (
+            fmt.clip(found.description, TEXT_LIMIT) if found.description else None
+        )
+        if found.lost_reason:
+            row["lost_reason"] = {"untrusted_text": fmt.clip(found.lost_reason, TEXT_LIMIT)}
     history = pipeline_selectors.stage_history(ctx.scope, opportunity_id)[:STAGE_HISTORY_LIMIT]
     row["stage_history"] = [
         {"from": h.from_stage_name or None, "to": h.to_stage_name, "on": fmt.when(h.occurred_at)}
@@ -828,8 +865,11 @@ def get_negotiation_history(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
     if found.negotiated_price is not None:
         ctx.amount("Latest negotiated price", found.negotiated_price)
     latest_cpt: str = found.agreed_cpt  # type: ignore[attr-defined]  # the newest row's
+    deal = _deal(ctx, found)
     return {
-        "ref": ctx.cite("opportunity", found.pk, found.title),
+        "ref": deal.ref,
+        "title": fmt.label(deal.title),
+        **({} if deal.known else {"customer_restricted": True}),
         "latest": fmt.money(found.negotiated_price) if found.negotiated_price is not None else None,
         "latest_agreed_cpt": fmt.label(latest_cpt) if latest_cpt else None,
         "history": rows,
@@ -889,6 +929,12 @@ def search_notes(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     }
     passages = []
     for passage in found.passages:
+        if passage.source_type is SourceType.OPPORTUNITY and passage.lead_id not in leads:
+            # A deal's text quoted under its full title for a workspace that no longer sees
+            # its customer: the source module never returns one (knowledge_documents); this
+            # keeps it so if that ever changes (defence in depth, privacy audit PRIV-1).
+            ctx.retrieval_dropped += 1
+            continue
         ref = ctx.cite(passage.source_type.value, passage.source_id, passage.label)
         when = fmt.when(passage.occurred_at)
         text = passage.text  # sanitised as sliced (retrieval: user_text_slice)

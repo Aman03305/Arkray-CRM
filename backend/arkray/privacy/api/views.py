@@ -102,7 +102,10 @@ class DataExportDownloadView(ApiView):
 
 class PseudonymiseUserView(ApiView):
     """Pseudonymise a deactivated user (privacy.staff), confirming them by their current
-    email. Irreversible."""
+    email. Irreversible. Never an administrator's account: 403 (ADR-0030)."""
+
+    # The service checks that on the locked row; this view never passes
+    # `allow_administrator` (the operator's command does, SEC-2).
 
     permission_classes = [requires(Capability.PRIVACY_MANAGE)]
     refused_in_support_session = True

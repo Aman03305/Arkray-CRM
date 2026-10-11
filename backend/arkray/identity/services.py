@@ -90,7 +90,9 @@ class InvalidTokenError(DomainError):
 
 
 # --- helpers ---------------------------------------------------------------------------------
-def _serialise_user_administration() -> None:
+def serialise_user_administration() -> None:
+    """The user-administration lock (transaction-scoped). Also taken by privacy.staff before
+    it locks the account it pseudonymises: one lock order for every account write."""
     with connection.cursor() as cursor:
         cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", list(_ADMIN_LOCK))
 
@@ -114,9 +116,10 @@ def _manages_users(user: User) -> bool:
     return user.status == UserStatus.ACTIVE and user.role in roles_with(Capability.USERS_MANAGE)
 
 
-def _is_administrator(user: User) -> bool:
+def is_administrator(user: User) -> bool:
     """An administrator account whatever its status: an invited or deactivated one is
-    protected like an active one, or deactivating it would unlock its credentials."""
+    protected like an active one, or deactivating it would unlock its credentials. The one
+    definition ADR-0030 is enforced with, here and in privacy.staff (SEC-2)."""
     return user.role in roles_with(Capability.USERS_MANAGE)
 
 
@@ -125,7 +128,7 @@ def _refuse_for_another_administrator(actor: User, user: User, message: str) -> 
     (risk R100: email change, then Forgot password at the new address, was a takeover).
     Called with the target's *locked* row, under the admin lock, so a concurrent promotion
     or demotion can't slip between the check and the write."""
-    if user.pk != actor.pk and _is_administrator(user):
+    if user.pk != actor.pk and is_administrator(user):
         raise BusinessRuleViolation(message)
 
 
@@ -248,7 +251,7 @@ def create_user(
         raise InvalidInputError(details={"password": [ADMINISTRATOR_INVITED]})
     try:
         with transaction.atomic():
-            _serialise_user_administration()
+            serialise_user_administration()
             actor = _acting_manager(actor_id)
             if conflict := _email_conflict(email):
                 raise conflict
@@ -299,7 +302,7 @@ def update_user(*, actor_id: UUID, user_id: UUID, version: int, changes: Mapping
     if unknown:
         raise InvalidInputError(details={"non_field_errors": ["These fields cannot be edited."]})
     with transaction.atomic():
-        _serialise_user_administration()
+        serialise_user_administration()
         actor = _acting_manager(actor_id)
         user = _lock_user(user_id)
         if changes.get("role", user.role) != user.role:
@@ -382,7 +385,7 @@ def change_user_email(
     new_email = normalize_email(email)
     try:
         with transaction.atomic():
-            _serialise_user_administration()
+            serialise_user_administration()
             actor = _acting_manager(actor_id)
             user = _lock_user(user_id)
             if still_signed_in is not None and not still_signed_in(user):
@@ -464,7 +467,7 @@ def set_user_password(*, actor_id: UUID, user_id: UUID, version: int, new_passwo
     administrator's, whatever its status (that would let one administrator sign in as
     another)."""
     with transaction.atomic():
-        _serialise_user_administration()
+        serialise_user_administration()
         actor = _acting_manager(actor_id)
         if user_id == actor.pk:
             raise BusinessRuleViolation(OWN_ACCOUNT_REFUSED)
@@ -507,7 +510,7 @@ def set_user_password(*, actor_id: UUID, user_id: UUID, version: int, new_passwo
 def deactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
     """Block sign-in and end every session now. History and references are kept."""
     with transaction.atomic():
-        _serialise_user_administration()
+        serialise_user_administration()
         actor = _acting_manager(actor_id)
         user = _lock_user(user_id)
         if user.pk == actor.pk:
@@ -550,7 +553,7 @@ def deactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
 def reactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
     """Restore access. A user who never accepted their invitation gets a fresh one."""
     with transaction.atomic():
-        _serialise_user_administration()
+        serialise_user_administration()
         actor = _acting_manager(actor_id)
         user = _lock_user(user_id)
         if user.status == UserStatus.ACTIVE:
@@ -592,7 +595,7 @@ def reactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
 def resend_invitation(*, actor_id: UUID, user_id: UUID) -> User:
     """Supersede the current invitation with a new one (the old link stops working)."""
     with transaction.atomic():
-        _serialise_user_administration()
+        serialise_user_administration()
         actor = _acting_manager(actor_id)
         user = _lock_user(user_id)
         if user.status != UserStatus.INVITED:

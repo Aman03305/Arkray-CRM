@@ -459,6 +459,7 @@ Default FK indexes are disabled (`db_index=False`): nothing queries those column
 | `pipeline_opp_created_idx (created_at DESC, id DESC)` | organisation-wide default list and archived view; global search's recent pass organisation-wide (Phase 7) | 0.14-0.2 ms | 12 MB |
 | `pipeline_opp_owner_pipe_idx (owner_id, pipeline_id)` (product enhancement phase, `pipeline.0006`) | which pipelines hold one owner's deals (`selectors.visible`, index-only), one owner's deals in one personal pipeline (board counts) | 1.8 ms (11.6 ms without: 10,346 heap blocks for an owner of 20,000) / 1.9 ms (10.4 ms) | 2.2 MB |
 | `pipeline_opp_text_trgm GIN (upper(title \|\| ' ' \|\| account_name \|\| ' ' \|\| customer_name) gin_trgm_ops) WHERE archived_at IS NULL` (Phase 7 as `pipeline_opp_search_trgm` over the title; the customer names added by `pipeline.0007`, ADR-0027) | global search's older pass: title and customer substrings ([search.md](search.md#database-and-indexes)); trigrams only, so no list or board query can choose it | 4-8 ms per search at 300,000 (100-150 ms of sequential scan without it) | 17 MB |
+| `pipeline_opp_stage_idx (stage_id)` (audit DOMAIN-3, `pipeline.0010`) | any opportunity of one stage, archived included (the board's stage indexes are partial): whether a stage being removed is referenced or still holds deals (`configuration.py`), the foreign-key checks when a stage is deleted or retyped (the composite key leads with `stage_id`) | 0.07 ms (a 23-56 ms parallel sequential scan of 300,000 narrow test rows without it; the audit measured about 1.5 s cold on the benchmark data) | about 2 MB (few distinct stages: B-tree deduplication) |
 
 The board's partial indexes cover one status each, so the board's per-stage query and a
 stage-filtered list state the stage's category as the status (always equal, database-
@@ -485,6 +486,11 @@ the opportunity entered the stage, `lost_reason`, `actor_id` FK, `occurred_at`.
 - Written in the transaction that moves the stage, while holding the opportunity's lock.
 - Index `pipeline_history_opp_idx (opportunity_id, occurred_at DESC, id DESC)`: the
   history page (keyset, newest first).
+- Indexes `pipeline_hist_to_stage_idx (to_stage_id)` and `pipeline_hist_from_stage_idx
+  (from_stage_id)` (audit DOMAIN-3, `pipeline.0010`): whether a stage being removed has any
+  transition (a BitmapOr of the two, 0.02 ms; a 25-57 ms sequential scan of 600,000 rows
+  without them, more when cold), and the foreign-key checks and Django's PROTECT queries when
+  a stage is deleted. Both are needed: the check and the foreign keys read each column alone.
 
 ### `pipeline_negotiation_price` (product enhancement phase, append-only)
 
@@ -495,7 +501,10 @@ before it was asked for), `currency` (CHECK `^[A-Z]{3}$`, INR), `stage_id` FK an
 price was recorded at), `actor_id` FK, `subject_user_id` NULL (the owner when the actor is
 someone else), `support_session_id` NULL, `occurred_at`. Append-only: `AppendOnlyModel` plus
 the `pipeline_negotiation_price_append_only` trigger. Index `pipeline_negotiation_opp_idx
-(opportunity_id, occurred_at DESC, id DESC)`: the history, newest first (0.02 ms).
+(opportunity_id, occurred_at DESC, id DESC)`: the history, newest first (0.02 ms). Index
+`pipeline_negotiation_stage_idx (stage_id)` (audit DOMAIN-3, `pipeline.0010`): the same
+stage-reference check and foreign-key lookups as the history's (0.01 ms; 6-13 ms of
+sequential scan at 100,000 rows without it).
 
 ### `pipeline_custom_field` (product enhancement phase)
 

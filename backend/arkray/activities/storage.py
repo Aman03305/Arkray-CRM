@@ -56,6 +56,7 @@ from django.core.files import File
 from django.core.files.base import ContentFile
 from django.core.files.storage import FileSystemStorage, Storage, storages
 
+from arkray.core import storage_purge
 from arkray.core.redis import CircuitBreaker
 from arkray.core.text import TextRejected, clean_line
 
@@ -749,25 +750,24 @@ def delete_versions(key: str) -> int:
     as well, so a deleted file doesn't live on until the bucket's lifecycle rule expires it
     (ATTACHMENT_S3_PURGE_VERSIONS; the credentials then need s3:ListBucketVersions and
     s3:DeleteObjectVersion). Returns how many versions were removed. Nothing to do for the
-    filesystem store."""
+    filesystem store. Every page of versions, in batches DeleteObjects accepts, and a
+    version it refused (its `Errors`: Object Lock retention, a missing permission) is a
+    failure, never success (final audit ARCH-4; core.storage_purge)."""
     store = _store()
     if backend_name(store) != "s3":
         return 0
-    client = store.connection.meta.client  # type: ignore[attr-defined]
-    bucket = store.bucket_name  # type: ignore[attr-defined]
-    full_key = store._normalize_name(key)  # type: ignore[attr-defined]  # the prefix added
 
     def remove(_cancel: Any) -> int:
-        listing = client.list_object_versions(Bucket=bucket, Prefix=full_key)
-        versions = [
-            {"Key": item["Key"], "VersionId": item["VersionId"]}
-            for kind in ("Versions", "DeleteMarkers")
-            for item in listing.get(kind, [])
-            if item["Key"] == full_key
-        ]
-        if versions:
-            client.delete_objects(Bucket=bucket, Delete={"Objects": versions, "Quiet": True})
-        return len(versions)
+        try:
+            result = storage_purge.purge(store, key)
+        except storage_purge.PurgeFailed as exc:
+            raise StorageUnavailable("Versions not deleted.", error_class=exc.error_class) from exc
+        if not result.complete:
+            raise StorageUnavailable(
+                "Versions not deleted.",
+                error_class="access_denied" if result.retained else "server_error",
+            )
+        return result.removed
 
     return int(_call("delete", remove))  # a delete, as the metrics count it
 

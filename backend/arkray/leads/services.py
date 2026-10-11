@@ -15,6 +15,10 @@ Concurrency (docs/leads.md#concurrency): every change locks the lead row, requir
 Requests that would change nothing (moving to the current status or owner, archiving an
 archived lead) succeed without a new version, so retries are harmless. Archived leads are
 read-only until restored (422).
+
+Legal holds (core.holds, docs/privacy.md#legal-holds): while one covers the lead, its
+personal fields (HELD_FIELDS) can't change (409 `legal_hold`, nothing written); the check
+runs under the lead's lock and is serialised with placing a hold.
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from django.db.models import F
 from django.utils import timezone
 
 from arkray.audit import services as audit
-from arkray.core import idempotency
+from arkray.core import holds, idempotency
 from arkray.core.access import AccessScope, ScopeKind
 from arkray.core.domain_events import publish
 from arkray.core.errors import (
@@ -70,6 +74,28 @@ INVALID_STATUS = "Choose a status from the list."
 INVALID_SOURCE = "Choose a source from the list."
 ALREADY_CREATED_ELSEWHERE = (
     "This lead was already created by an earlier request and has since left this workspace."
+)
+# What a legal hold on the lead freezes here (core.holds, docs/privacy.md#legal-holds): the
+# fields an erasure clears. Its source, rating and last contact, status, owner and archive
+# state aren't the person's data and still change.
+HELD_FIELDS = frozenset(
+    {
+        "first_name",
+        "last_name",
+        "organization_name",
+        "job_title",
+        "email",
+        "phone",
+        "mobile",
+        "alternate_phone",
+        "address_line_1",
+        "address_line_2",
+        "city",
+        "state",
+        "postal_code",
+        "country",
+        "description",
+    }
 )
 
 
@@ -239,7 +265,8 @@ def update_lead(
 ) -> Lead:
     """Change profile fields (validation.EDITABLE_FIELDS). Only fields whose value actually
     changes are written and audited (by name; values are contact data and stay out of the
-    audit log)."""
+    audit log). Refused (409 `legal_hold`) while a legal hold covers the lead if a frozen
+    field (HELD_FIELDS) would change."""
     authorize_write(actor, scope)
     cleaned = validation.clean_fields(changes)
     with transaction.atomic():
@@ -257,6 +284,8 @@ def update_lead(
             changed.append(field)
         if not changed:
             return selectors.lead_by_id(lead.pk)
+        # Before anything is written: a refusal leaves the lead (and its version) as it was.
+        holds.refuse_frozen_changes(lead.pk, changed, HELD_FIELDS)
         validation.require_identity(lead.first_name, lead.last_name, lead.organization_name)
         lead.version += 1
         lead.save(update_fields=[*changed, "version", "updated_at"])
