@@ -4,9 +4,10 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "@/lib/api/client";
-import { createQueryClient } from "@/lib/query-client";
+import { createQueryClient, VIEWER_QUERY_KEY } from "@/lib/query-client";
 import { useViewer } from "@/lib/viewer-context";
 import { adminViewer } from "@/test/fixtures";
+import { MFA_SETUP, RECOVERY_CODES } from "@/test/mfa-fixtures";
 import { apiError, mockApi, renderWithProviders } from "@/test/render";
 
 import { RequireCapability } from "./RequireCapability";
@@ -243,5 +244,94 @@ describe("RequireCapability", () => {
     renderWithProviders(<RequireCapability capability="users.manage">Admin area</RequireCapability>);
     expect(screen.queryByText("Admin area")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Page not found" })).not.toBeInTheDocument();
+  });
+});
+
+describe("SessionGate: two-step verification required for the role (ADR-0033)", () => {
+  const REQUIRED = { ...ME, role: "admin", password_change_required: false, mfa_enabled: false, mfa_enrollment_required: true, support_session: null };
+  const SET_UP = { ...REQUIRED, mfa_enabled: true, mfa_enrollment_required: false };
+
+  beforeEach(() => nav.hardNavigate.mockReset());
+
+  it("must be set up before the app opens; the recovery codes stay until saved, even if the viewer is fetched meanwhile", async () => {
+    let confirmed = false;
+    const api = mockApi({
+      "GET /api/v1/auth/me": () => ({ status: 200, body: confirmed ? SET_UP : REQUIRED }),
+      "POST /api/v1/auth/mfa/setup": { status: 200, body: MFA_SETUP },
+      "POST /api/v1/auth/mfa/confirm": () => {
+        confirmed = true;
+        return { status: 200, body: { recovery_codes: RECOVERY_CODES } };
+      },
+    });
+    const { client } = renderWithProviders(
+      <SessionGate>
+        <WhoAmI />
+      </SessionGate>,
+    );
+    expect(await screen.findByRole("heading", { name: "Set up two-step verification" })).toBeInTheDocument();
+    expect(screen.queryByText(/Signed in as/)).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("Current password"), "my passphrase");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.type(await screen.findByLabelText("Authentication code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Turn on two-step verification" }));
+    await screen.findByRole("list", { name: "Recovery codes" });
+
+    // Back from the password manager: the viewer is fetched again and says "set up" now.
+    await act(() => client.invalidateQueries({ queryKey: VIEWER_QUERY_KEY }));
+    expect(screen.getByRole("list", { name: "Recovery codes" })).toBeInTheDocument();
+    expect(screen.queryByText(/Signed in as/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("checkbox", { name: "I have saved these codes" }));
+    await user.click(screen.getByRole("button", { name: "Done" }));
+    expect(await screen.findByText("Signed in as Rahul Sharma")).toBeInTheDocument();
+    expect(api.callsTo("POST", "/api/v1/auth/mfa/confirm")).toHaveLength(1);
+  });
+
+  it("comes after a password change an administrator asked for", async () => {
+    mockApi({ "GET /api/v1/auth/me": { status: 200, body: { ...REQUIRED, password_change_required: true } } });
+    renderWithProviders(
+      <SessionGate>
+        <WhoAmI />
+      </SessionGate>,
+    );
+    expect(await screen.findByRole("heading", { name: "Choose a new password" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Set up two-step verification" })).not.toBeInTheDocument();
+  });
+
+  it("can sign out instead", async () => {
+    const api = mockApi({
+      "GET /api/v1/auth/me": { status: 200, body: REQUIRED },
+      "POST /api/v1/auth/logout": { status: 204 },
+    });
+    renderWithProviders(
+      <SessionGate>
+        <WhoAmI />
+      </SessionGate>,
+    );
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Sign out" }));
+    await waitFor(() => expect(nav.hardNavigate).toHaveBeenCalledWith("/login?reason=signed-out", "signed-out"));
+    expect(api.callsTo("POST", "/api/v1/auth/logout")).toHaveLength(1);
+  });
+
+  it("opens as soon as any request says the set-up is required", async () => {
+    let required = false;
+    mockApi({
+      "GET /api/v1/auth/me": () => ({ status: 200, body: required ? REQUIRED : { ...REQUIRED, mfa_enrollment_required: false } }),
+      "GET /api/v1/admin/users": apiError(403, "mfa_enrollment_required", "Set up two-step verification first."),
+    });
+    const client = createQueryClient();
+    render(
+      <QueryClientProvider client={client}>
+        <SessionGate>
+          <WhoAmI />
+        </SessionGate>
+      </QueryClientProvider>,
+    );
+    await screen.findByText("Signed in as Rahul Sharma");
+    required = true; // the requirement was switched on meanwhile
+    await client.fetchQuery({ queryKey: ["users"], queryFn: () => apiFetch("/api/v1/admin/users") }).catch(() => undefined);
+    expect(await screen.findByRole("heading", { name: "Set up two-step verification" })).toBeInTheDocument();
   });
 });

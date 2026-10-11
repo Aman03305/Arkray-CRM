@@ -143,8 +143,9 @@ def test_a_scrape_costs_a_constant_number_of_queries():
         OutboxEvent.objects.bulk_create([OutboxEvent(topic="t", queue=queue) for _ in range(20)])
     with CaptureQueriesContext(connection) as many:
         scrape()
-    # 10: the attachment gauges' one query (SRE-4), the export file purges' one (PRIV-3)
-    assert len(many) == len(few) <= 10
+    # 11: the attachment gauges' one query (SRE-4), the export file purges' one (PRIV-3), the
+    # administrator deactivations' one (ADR-0033: an index-only count of recent audit events)
+    assert len(many) == len(few) <= 11
 
 
 @pytest.mark.usefixtures("configured")

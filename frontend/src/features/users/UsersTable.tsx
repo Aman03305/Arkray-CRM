@@ -3,6 +3,7 @@
 import Link from "next/link";
 
 import { ActionMenu, type MenuAction } from "@/components/ui/ActionMenu";
+import { Badge } from "@/components/ui/Badge";
 import { Skeleton } from "@/components/ui/Skeleton";
 import type { AdminUser } from "@/lib/api/types";
 import { formatDate, formatDateTime, formatRelative } from "@/lib/format";
@@ -12,13 +13,15 @@ import { userWorkspaceHref } from "@/lib/workspace";
 
 import { UserStatus } from "./UserStatus";
 
-export type UserAction = "edit" | "change-email" | "resend" | "deactivate" | "activate";
+export type UserAction = "edit" | "change-email" | "resend" | "reset-mfa" | "deactivate" | "activate";
 
 export function actionsFor(user: AdminUser, isSelf: boolean): UserAction[] {
   const actions: UserAction[] = ["edit"];
   // Another administrator changes their own email in Settings (the API refuses it).
   if (isSelf || user.role !== "admin") actions.push("change-email");
   if (user.status === "invited") actions.push("resend");
+  // Never an administrator's (ADR-0033: an operator does that on the server); the API refuses it.
+  if (user.mfa_enabled && user.role !== "admin" && !isSelf) actions.push("reset-mfa");
   if (user.status === "deactivated") actions.push("activate");
   else if (!isSelf) actions.push("deactivate"); // the API refuses self-deactivation too
   return actions;
@@ -28,11 +31,17 @@ const ACTION_LABELS: Record<UserAction, { label: string; tone?: "danger" }> = {
   edit: { label: "Edit details" },
   "change-email": { label: "Change email" },
   resend: { label: "Resend invitation" },
+  "reset-mfa": { label: "Reset two-step verification" },
   activate: { label: "Reactivate" },
   deactivate: { label: "Deactivate", tone: "danger" },
 };
 
-const COLUMNS = ["Name", "Email", "Role", "Status", "Last login", "Created"] as const;
+const COLUMNS = ["Name", "Email", "Role", "Status", "Two-step", "Last login", "Created"] as const;
+
+/** Whether two-step verification is on. */
+export function TwoStepBadge({ user }: { user: AdminUser }) {
+  return user.mfa_enabled ? <Badge tone="green">On</Badge> : <Badge>Off</Badge>;
+}
 
 interface UsersTableProps {
   users: readonly AdminUser[] | undefined;
@@ -98,6 +107,9 @@ export function UsersTable({ users, loading, viewerId, onAction, onOpen }: Users
                     <td className="whitespace-nowrap px-4 py-3 text-slate-600">{user.role_label}</td>
                     <td className="px-4 py-3">
                       <UserStatus user={user} />
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3">
+                      <TwoStepBadge user={user} />
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-slate-600">
                       {user.last_login ? (

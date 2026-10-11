@@ -25,11 +25,19 @@ from arkray.core.holds import UnderLegalHold
 from arkray.core.models import HoldSubject, LegalHold, OutboxEvent
 from arkray.identity import services as identity_services
 from arkray.identity import throttling
-from arkray.identity.models import AccountToken, SupportSession, TokenPurpose, User
+from arkray.identity.models import (
+    AccountToken,
+    MfaDevice,
+    MfaRecoveryCode,
+    SupportSession,
+    TokenPurpose,
+    User,
+)
 from arkray.pipeline.models import NegotiationPrice, Opportunity
 from arkray.privacy import staff
 from tests.factories import LeadFactory, OpportunityFactory, UserFactory
 from tests.helpers import signed_in
+from tests.mfa_helpers import enrol
 
 pytestmark = pytest.mark.django_db
 
@@ -227,3 +235,16 @@ def test_the_api_answers_409_under_a_hold_and_503_without_a_ledger(
     user_b.refresh_from_db()
     assert user_b.email
     assert not user_b.email.startswith("former-")
+
+
+def test_their_second_factor_is_deleted(admin, former, user_a):
+    """ADR-0033: the encrypted TOTP secret and the recovery codes' hashes are theirs alone;
+    another user's are untouched."""
+    user = former["user"]
+    enrol(user)
+    enrol(user_a)
+    staff.pseudonymise(user.pk, operator_id=admin.pk)
+    assert not MfaDevice.objects.filter(user=user).exists()
+    assert not MfaRecoveryCode.objects.filter(user=user).exists()
+    assert MfaDevice.objects.filter(user=user_a).exists()
+    assert MfaRecoveryCode.objects.filter(user=user_a).count() == 10

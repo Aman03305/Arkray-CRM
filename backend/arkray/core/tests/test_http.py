@@ -91,14 +91,14 @@ class TestClientIp:
         request = RequestFactory().get("/", REMOTE_ADDR="10.0.0.5", HTTP_X_FORWARDED_FOR="1.2.3.4")
         assert client_ip(request) == "10.0.0.5"
 
-    @override_settings(TRUSTED_PROXY_COUNT=1)
+    @override_settings(TRUSTED_PROXY_COUNT=1, TRUSTED_PROXY_ADDRESSES=["10.0.0.0/24"])
     def test_uses_entry_appended_by_trusted_proxy(self):
         request = RequestFactory().get(
             "/", REMOTE_ADDR="10.0.0.5", HTTP_X_FORWARDED_FOR="6.6.6.6, 203.0.113.9"
         )
         assert client_ip(request) == "203.0.113.9"  # the spoofable first entry is ignored
 
-    @override_settings(TRUSTED_PROXY_COUNT=1)
+    @override_settings(TRUSTED_PROXY_COUNT=1, TRUSTED_PROXY_ADDRESSES=["10.0.0.0/24"])
     def test_invalid_address_yields_none(self):
         request = RequestFactory().get(
             "/", REMOTE_ADDR="10.0.0.5", HTTP_X_FORWARDED_FOR="not-an-ip"

@@ -23,6 +23,9 @@ CSRF_COOKIE_SECURE = False
 PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
+# Two-step verification is opt-in per test (`settings.MFA_REQUIRED_FOR_ADMINS = True`), so
+# the many tests that sign administrators in directly keep working (ADR-0033).
+MFA_REQUIRED_FOR_ADMINS = False
 LOG_LEVEL = "WARNING"
 LOGGING["root"]["level"] = "WARNING"  # noqa: F405
 

@@ -62,6 +62,7 @@ REFUSE_REVERSE = {
     "audit.0005_audit_details",  # privacy remediation
     "core.0006_privacy_remediation",  # privacy remediation
     "identity.0004_support_sessions",
+    "identity.0005_mfa",  # ADR-0033: two-step verification
     "pipeline.0006_ownership_negotiation_fields",
     "pipeline.0007_search_customer_names",
     "pipeline.0008_opportunity_expected_cpt",

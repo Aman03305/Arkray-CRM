@@ -213,6 +213,27 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/admin/users/{user_id}/mfa/reset": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Remove an ordinary user's second factor (they lost the device and the recovery codes):
+         *     their sessions end; they sign in with their password and may set up a new one. 422 for
+         *     an administrator, whoever asks (ADR-0033: an operator runs `manage.py reset_mfa`).
+         */
+        readonly post: operations["admin_users_mfa_reset"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/admin/users/{user_id}/resend-invitation": {
         readonly parameters: {
             readonly query?: never;
@@ -326,7 +347,32 @@ export interface paths {
         };
         readonly get?: never;
         readonly put?: never;
+        /**
+         * @description 200 with the viewer when signed in; 202 when the account has a second factor:
+         *     send a code to /auth/login/mfa within `expires_in` seconds (ADR-0033).
+         */
         readonly post: operations["auth_login_create"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/login/mfa": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description The second step of a sign-in with a second factor: a code from the authenticator, or
+         *     an unused recovery code. Wrong codes count as failed sign-ins (identity.throttling); five
+         *     void the challenge.
+         */
+        readonly post: operations["auth_login_mfa"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -360,6 +406,119 @@ export interface paths {
         readonly get: operations["auth_me_retrieve"];
         readonly put?: never;
         readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/mfa": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get: operations["auth_mfa_status"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/mfa/confirm": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Turn two-step verification on with a code from the new device: ten recovery codes,
+         *     shown once; every other session of the account ends.
+         */
+        readonly post: operations["auth_mfa_confirm"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/mfa/disable": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Turn two-step verification off (current password and a code): 422 where the role
+         *     requires it; other sessions end.
+         */
+        readonly post: operations["auth_mfa_disable"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/mfa/recovery-codes": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** @description Replace the recovery codes (the old ones stop working; other sessions end). */
+        readonly post: operations["auth_mfa_recovery_codes"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/mfa/setup": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Start (or restart) a setup after the current password: the secret, its otpauth://
+         *     URI and QR code, shown this once. 409 when two-step verification is already on.
+         */
+        readonly post: operations["auth_mfa_setup"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/mfa/verify": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Step-up: a code renews this session's verification for MFA_STEP_UP_TTL_S, for the
+         *     operations that answer 403 `mfa_required`.
+         */
+        readonly post: operations["auth_mfa_verify"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -1557,6 +1716,8 @@ export interface components {
             readonly password_change_required: boolean;
             /** Format: date-time */
             readonly password_changed_at: string | null;
+            /** @description The user has a confirmed second factor. */
+            readonly mfa_enabled: boolean;
             readonly version: number;
         };
         /** @description One keyset-paginated page of users (follow `next` / `previous` as given). */
@@ -1725,6 +1886,11 @@ export interface components {
          * @enum {string}
          */
         readonly CategoryEnum: "open" | "qualified" | "unqualified" | "converted";
+        /** @description Exactly one of `code` (the authenticator's six digits) and `recovery_code`. */
+        readonly CodeOrRecoveryCodeRequest: {
+            readonly code?: string;
+            readonly recovery_code?: string;
+        };
         readonly Conversation: {
             /** Format: uuid */
             readonly id: string;
@@ -2168,6 +2334,41 @@ export interface components {
          * @enum {string}
          */
         readonly MatchedOnEnum: "email" | "phone";
+        /** @description 202 from /auth/login: the password was right; send a code to /auth/login/mfa. */
+        readonly MfaChallenge: {
+            readonly mfa_required: boolean;
+            /** @description Seconds left for the second step. */
+            readonly expires_in: number;
+        };
+        readonly MfaCodeRequest: {
+            /** @description A code from the authenticator app. */
+            readonly code: string;
+        };
+        readonly MfaDisableRequest: {
+            readonly current_password: string;
+            /** @description A code from the authenticator app, or an unused recovery code. */
+            readonly code: string;
+        };
+        /** @description Shown once, at setup: the secret is never returned again. */
+        readonly MfaSetup: {
+            /** @description Base32, for typing into an authenticator app. */
+            readonly secret: string;
+            readonly otpauth_uri: string;
+            readonly qr: components["schemas"]["QrMatrix"];
+        };
+        readonly MfaSetupStartRequest: {
+            readonly current_password: string;
+        };
+        /** @description The two-step verification state of one's own account. */
+        readonly MfaStatus: {
+            readonly enabled: boolean;
+            /** Format: date-time */
+            readonly confirmed_at: string | null;
+            readonly recovery_codes_remaining: number;
+            /** @description Required for this account's role. */
+            readonly required: boolean;
+            readonly can_disable: boolean;
+        };
         readonly NegotiatedPriceInputRequest: {
             readonly version: number;
             /** @description The agreed (negotiated) price (INR), e.g. "1050000.00". */
@@ -2615,6 +2816,12 @@ export interface components {
             readonly queued_payloads: number;
             readonly access_windows: number;
         };
+        readonly QrMatrix: {
+            /** @description Modules per side (no quiet zone). */
+            readonly size: number;
+            /** @description One string of "1" (dark) and "0" per row. */
+            readonly rows: readonly string[];
+        };
         readonly Question: {
             /** Format: uuid */
             readonly id: string;
@@ -2646,6 +2853,10 @@ export interface components {
         readonly RatingOption: {
             readonly key: components["schemas"]["RatingEnum"];
             readonly name: string;
+        };
+        readonly RecoveryCodes: {
+            /** @description Ten single-use codes, shown once. */
+            readonly recovery_codes: readonly string[];
         };
         /**
          * @description * `admin` - Admin
@@ -3024,6 +3235,10 @@ export interface components {
             readonly features: components["schemas"]["ViewerFeatures"];
             readonly password_change_required: boolean;
             readonly support_session: components["schemas"]["SupportSession"] | null;
+            /** @description The account has a confirmed second factor (two-step verification). */
+            readonly mfa_enabled: boolean;
+            /** @description The account must set up two-step verification before anything else (administrators, when required): only /auth/me, sign-out, the password change and the /auth/mfa setup answer until then. */
+            readonly mfa_enrollment_required: boolean;
         };
         /** @description Deployment-wide features the UI should offer (configuration, not permissions). */
         readonly ViewerFeatures: {
@@ -3398,6 +3613,27 @@ export interface operations {
             };
         };
     };
+    readonly admin_users_mfa_reset: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly user_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AdminUser"];
+                };
+            };
+        };
+    };
     readonly admin_users_resend_invitation_create: {
         readonly parameters: {
             readonly query?: never;
@@ -3552,6 +3788,37 @@ export interface operations {
                     readonly "application/json": components["schemas"]["Viewer"];
                 };
             };
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["MfaChallenge"];
+                };
+            };
+        };
+    };
+    readonly auth_login_mfa: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["CodeOrRecoveryCodeRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Viewer"];
+                };
+            };
         };
     };
     readonly auth_logout_create: {
@@ -3588,6 +3855,138 @@ export interface operations {
                 content: {
                     readonly "application/json": components["schemas"]["Viewer"];
                 };
+            };
+        };
+    };
+    readonly auth_mfa_status: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["MfaStatus"];
+                };
+            };
+        };
+    };
+    readonly auth_mfa_confirm: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["MfaCodeRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["RecoveryCodes"];
+                };
+            };
+        };
+    };
+    readonly auth_mfa_disable: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["MfaDisableRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description No response body */
+            readonly 204: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly auth_mfa_recovery_codes: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["MfaCodeRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["RecoveryCodes"];
+                };
+            };
+        };
+    };
+    readonly auth_mfa_setup: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["MfaSetupStartRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["MfaSetup"];
+                };
+            };
+        };
+    };
+    readonly auth_mfa_verify: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["CodeOrRecoveryCodeRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description No response body */
+            readonly 204: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

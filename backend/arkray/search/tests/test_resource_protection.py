@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -157,12 +158,27 @@ class TestStatementTimeout:
     ):
         """Each runaway search would hold its connection for 10 s under the connection's own
         timeout (30 s without one); under the search's, all twenty are refused in about its
-        length, and another user's search meanwhile answers normally."""
-        monkeypatch.setattr(selectors, "STATEMENT_TIMEOUT_MS", 300)
+        length, and another user's search meanwhile answers normally: fast, and while the
+        whole flood still holds the database (not queued behind it).
+
+        The colleague's search starts once all twenty runaways are inside PostgreSQL
+        (pg_stat_activity), with every thread's connection opened before the clock starts,
+        as a gunicorn worker's is. The twenty requests share this process (and its GIL),
+        where in production each worker is its own process: started on a fixed 0.1 s sleep,
+        the colleague's request competed with the flood's Django work for the interpreter,
+        and once with twenty-one connections being opened, so a search whose statements
+        took 15 ms each measured over 2 s under a busy suite (final hardening)."""
         notes_never_finish(monkeypatch, when="runaway")
         LeadFactory(owner=user_b, first_name="Ordinary")
         flood = [signed_in(user_a) for _ in range(20)]  # sessions made before the threads
         colleague = signed_in(user_b)
+        ready = threading.Barrier(21)
+
+        def connect():
+            try:
+                connection.ensure_connection()
+            finally:
+                ready.wait(timeout=30)  # one connection per pool thread
 
         def run(client, q):
             try:
@@ -172,19 +188,36 @@ class TestStatementTimeout:
             finally:
                 connection.close()  # each thread's own connection
 
-        started = time.monotonic()
+        def runaways_in_database() -> int:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                    " AND state = 'active' AND query = 'SELECT pg_sleep(30)'"
+                )
+                count: int = cursor.fetchone()[0]
+            return count
+
+        assert selectors.STATEMENT_TIMEOUT_MS == 2_000  # the production value, unpatched
         with ThreadPoolExecutor(max_workers=21) as pool:
+            for future in [pool.submit(connect) for _ in range(21)]:
+                future.result()
+            started = time.monotonic()
             runaway = [pool.submit(run, client, "runaway query") for client in flood]
-            time.sleep(0.1)  # the flood is in the database
+            while runaways_in_database() < 20 and time.monotonic() - started < 10:
+                time.sleep(0.01)
+            assert runaways_in_database() == 20  # the whole flood holds the database
             ordinary = pool.submit(run, colleague, "ordinary").result()
+            # Answered while the whole flood still held the database: not queued behind it.
+            still_held = runaways_in_database()
             results = [future.result() for future in runaway]
         elapsed = time.monotonic() - started
         assert [status for status, _, _ in results] == [503] * 20
-        assert elapsed < 6, elapsed
+        assert elapsed < 6, elapsed  # in parallel: one after another would take 40 s
         status, took, response = ordinary
         assert status == 200
         assert len(response.json()["leads"]["results"]) == 1
         assert took < 2, took
+        assert still_held == 20, still_held
 
 
 # --- bounded results --------------------------------------------------------------------------

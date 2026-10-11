@@ -1,15 +1,18 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useState } from "react";
 
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { describeError, isApiError } from "@/lib/api/errors";
 import { currentLocation, hardNavigate } from "@/lib/browser";
+import { VIEWER_QUERY_KEY } from "@/lib/query-client";
 import { ViewerProvider } from "@/lib/viewer-context";
 
 import { useViewerQuery } from "./api";
 import { ForcedPasswordChange } from "./ForcedPasswordChange";
+import { MfaEnrollment } from "./MfaEnrollment";
 
 /**
  * Loads the signed-in user for every authenticated page. Without a session the global 401
@@ -17,11 +20,18 @@ import { ForcedPasswordChange } from "./ForcedPasswordChange";
  * never guessed data. This is UX only: the API refuses unauthenticated requests anyway.
  *
  * Someone whose password was set by an administrator must choose their own before anything
- * else: until then the password form replaces the app.
+ * else: until then the password form replaces the app. Then, when their role requires
+ * two-step verification and it isn't set up (ADR-0033), the set-up replaces the app.
  */
 export function SessionGate({ children }: { children: ReactNode }) {
   const viewer = useViewerQuery();
+  const queryClient = useQueryClient();
   const id = viewer.data?.id;
+  // Once shown, the set-up stays until the user has saved their recovery codes: the viewer
+  // stops saying "required" as soon as the first code is confirmed (a refetch on focus, say
+  // after switching to a password manager), and the codes must not vanish then.
+  const [enrolling, setEnrolling] = useState(false);
+  if (viewer.data?.mfaEnrollmentRequired && !viewer.data.passwordChangeRequired && !enrolling) setEnrolling(true);
   // Who this page was loaded for: the first viewer it saw.
   const [signedInAs, setSignedInAs] = useState<string | null>(null);
   if (id && signedInAs === null) setSignedInAs(id);
@@ -58,5 +68,13 @@ export function SessionGate({ children }: { children: ReactNode }) {
   }
 
   if (viewer.data?.passwordChangeRequired) return <ForcedPasswordChange viewer={viewer.data} />;
+  if (enrolling) {
+    const finish = async () => {
+      // The app opens with the viewer as it is now (set up), never the stale "required".
+      await queryClient.invalidateQueries({ queryKey: VIEWER_QUERY_KEY });
+      setEnrolling(false);
+    };
+    return <MfaEnrollment onDone={() => void finish()} />;
+  }
   return <ViewerProvider viewer={viewer.data ?? null}>{children}</ViewerProvider>;
 }

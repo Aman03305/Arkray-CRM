@@ -447,6 +447,52 @@ def test_the_gate_verifies_only_new_entries_after_its_first_check(ledger_dir, ad
     assert GATE.status() == "tampered"  # ...a fresh process checks the whole chain
 
 
+def test_a_primed_gate_reads_only_what_was_added_after_the_fork(ledger_dir, admin, user_a):
+    """Production readiness review: every new gunicorn worker read the whole ledger inside
+    its first request (one GET per entry on S3). Primed in the parent before the fork, a
+    child reads only the entries added since, and still compares with the database."""
+    erase(LeadFactory(owner=user_a), admin)
+    erase(LeadFactory(owner=user_a), admin)
+    from arkray.core.ledger_gate import prime
+
+    GATE.reset()
+    prime()  # the master, before forking
+    erase(LeadFactory(owner=user_a), admin)  # entry 3, after the fork
+    store = ledger.store()
+    reads = []
+    original = type(store).read
+
+    def counting(self, after=0):
+        reads.append(after)
+        return original(self, after)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(type(store), "read", counting)
+        assert GATE.status() == "ok"
+    assert reads == [2]  # only entry 3 was read
+    # Priming never opens the gate by itself: the first check still compares with the
+    # database (here, a database that lost its last erasure is behind).
+    LedgerState.objects.update(applied_seq=2)
+    GATE.reset()
+    prime()
+    assert GATE.status() == "behind"
+
+
+def test_a_failed_prime_leaves_the_full_check_to_the_first_request(ledger_dir, admin, user_a):
+    erase(LeadFactory(owner=user_a), admin)
+    from arkray.core.ledger_gate import prime
+
+    GATE.reset()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            type(ledger.store()),
+            "read",
+            lambda self, after=0: (_ for _ in ()).throw(ledger.LedgerUnavailable("down")),
+        )
+        prime()  # logged, never raised: the master still starts
+    assert GATE.status() == "ok"
+
+
 @pytest.mark.django_db(transaction=True)
 def test_a_check_during_an_erasures_commit_never_closes_the_api(ledger_dir, admin, user_a):
     """Backend review P2: the entry is written just before its transaction commits; a check

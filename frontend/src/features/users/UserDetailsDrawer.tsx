@@ -16,6 +16,7 @@ import { useViewer } from "@/lib/viewer-context";
 import { userWorkspaceHref } from "@/lib/workspace";
 
 import { userDetailKey, usersApi } from "./api";
+import { TwoStepBadge } from "./UsersTable";
 import { UserStatus } from "./UserStatus";
 
 /** The password's state, never the password (the API has none to give). */
@@ -131,6 +132,9 @@ export function UserDetailsDrawer({ user: listed, notice, onClose, onSetPassword
           <Row label="Password">
             {passwordState(user)}
             <span className="mt-0.5 block text-xs text-slate-500">Passwords are never shown.</span>
+          </Row>
+          <Row label="Two-step">
+            <TwoStepBadge user={user} />
           </Row>
         </dl>
         {manages ? (

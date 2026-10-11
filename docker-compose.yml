@@ -3,8 +3,10 @@
 #   docker compose up -d                 # infrastructure only: postgres, redis, mailpit
 #   docker compose --profile app up -d   # + containerised backend, worker, beat, frontend
 #
-# Images: the third-party ones here are pinned by tag only (the Dockerfiles' base images are
-# pinned by digest); real manifests pin them by digest too (docs/deployment.md#images-phase-9).
+# Images: every third-party image is pinned by digest (`name:tag@sha256:<index digest>`, the
+# multi-architecture index), like the Dockerfiles' base images (R128): a moved or replaced
+# tag can't change what runs. The tag is kept for people and update tools; move both
+# together, deliberately (docs/deployment.md#images).
 #
 # All ports bind to 127.0.0.1 only. Host ports are configurable in .env.
 name: arkray
@@ -97,7 +99,7 @@ x-ledger-health: &ledger-health
 services:
   postgres:
     <<: *logging
-    image: pgvector/pgvector:0.8.6-pg16
+    image: pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     # Docker's default 64 MB /dev/shm makes parallel maintenance (a manual VACUUM, an index
     # build) and large parallel queries fail ("could not resize shared memory segment"):
     # measured in Phase 10.
@@ -122,7 +124,7 @@ services:
 
   redis:
     <<: *logging
-    image: redis:7.4-alpine
+    image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     # The broker must never silently drop messages, so eviction is disabled.
     # (Production runs the broker and the cache on separate Redis instances.)
     command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
@@ -140,7 +142,7 @@ services:
   mailpit:
     <<: *logging
     # Captures all outgoing email in development (invitations, password resets).
-    image: axllent/mailpit:v1.31
+    image: axllent/mailpit:v1.31@sha256:94f6b70c1436defae6799d9ac7ff0eeff9540465b842026d5cdb018f1c0234ea
     ports:
       - "127.0.0.1:${MAILPIT_SMTP_HOST_PORT:-51025}:1025"
       - "127.0.0.1:${MAILPIT_UI_HOST_PORT:-58025}:8025"
@@ -192,8 +194,10 @@ services:
     environment:
       <<: *backend-env
       DB_STATEMENT_TIMEOUT_MS: "60000"
-    # CRM background work only (Ask Arkray's indexing and questions have their own workers).
-    command: ["celery", "-A", "config", "worker", "--queues", "outbox,default,email", "--concurrency", "2", "--loglevel", "INFO"]
+    # CRM background work: attachment scans and clean-up, data exports, the nightly checks
+    # (the outbox relay, email with password-reset requests, and the erasure ledger's
+    # reconcile have worker-outbox; Ask Arkray's indexing and questions have their own workers).
+    command: ["celery", "-A", "config", "worker", "--queues", "default", "--concurrency", "2", "--loglevel", "INFO"]
     # Attachment jobs (virus scan, removing deleted files) read and delete objects here.
     volumes:
       - attachments:/var/lib/arkray/attachments
@@ -207,6 +211,37 @@ services:
     healthcheck:
       <<: *ledger-health
       test: ["CMD", "python", "manage.py", "ledger_status", "--ping-worker", "celery"]
+    # Longer than the longest task's hard limit: the nightly attachment check
+    # (activities.reconcile_check, 17 minutes), so a deploy's warm shutdown lets it finish
+    # instead of killing it (R128). A deploy that lands while it runs (22:10 UTC) holds this
+    # queue's new work (attachment scans, exports) until the new worker starts; the relay,
+    # email (password-reset requests included) and the ledger reconcile are worker-outbox's
+    # and never wait for it.
+    stop_grace_period: 18m
+    restart: unless-stopped
+
+  # The outbox relay and the erasure ledger's reconcile (queue outbox, from beat every 5 s
+  # and every minute) and email delivery (queue email): short tasks that people wait on, on
+  # a worker of their own (R128). A deploy stops it in seconds, and no long CRM job can hold
+  # them up or be killed by its grace period.
+  worker-outbox:
+    profiles: ["app"]
+    <<: *hardened
+    build: ./backend
+    environment:
+      <<: *backend-env
+      DB_STATEMENT_TIMEOUT_MS: "60000"
+    command: ["celery", "-A", "config", "worker", "--queues", "outbox,email", "--concurrency", "2", "--loglevel", "INFO", "--hostname", "outbox@%h"]
+    volumes:
+      - *ledger-volume
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *ledger-health
+      test: ["CMD", "python", "manage.py", "ledger_status", "--ping-worker", "outbox"]
     # Longer than the task hard limit (120 s): a warm shutdown finishes the running task.
     stop_grace_period: 130s
     restart: unless-stopped

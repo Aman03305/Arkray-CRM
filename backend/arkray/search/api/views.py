@@ -22,11 +22,11 @@ from django.utils import timezone
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework.request import Request
 from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle, UserRateThrottle
 
 from arkray.core.api import ApiView, validated
 from arkray.core.errors import PermissionDeniedError, error_body
 from arkray.core.ranking import Matches
+from arkray.core.throttling import ScopedRateThrottle, UserRateThrottle
 from arkray.identity.models import User
 from arkray.identity.permissions import IsActiveUser
 from arkray.identity.workspaces import resolve_workspace
@@ -50,7 +50,8 @@ class SearchView(ApiView):
     permission_classes = [IsActiveUser]
     query_param_methods = frozenset({"GET"})
     # The global per-user limit, plus search's own (settings: API_THROTTLE_SEARCH). Both
-    # live in the cache: with Redis down they don't apply, and search still answers.
+    # live in the cache; with Redis down each process counts them in memory instead
+    # (core.throttling, R127), and search still answers.
     throttle_classes = [UserRateThrottle, ScopedRateThrottle]
     throttle_scope = "search"
 

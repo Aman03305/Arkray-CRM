@@ -23,6 +23,7 @@ from arkray.activities import metrics as attachment_metrics
 from arkray.ai import metrics as ai_metrics
 from arkray.core import metrics
 from arkray.core.views import database_unavailable
+from arkray.identity import metrics as identity_metrics
 from arkray.privacy import metrics as privacy_metrics
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ def metrics_view(request: HttpRequest) -> HttpResponse:
         ai_metrics.gauges,
         attachment_metrics.gauges,
         privacy_metrics.gauges,
+        identity_metrics.gauges,
     )
     for collect in collectors:
         try:

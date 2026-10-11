@@ -149,7 +149,15 @@ def test_the_scan_sees_every_backend_image_service():
         for name, service in services.items()
         if _ledger_path(service["environment"].get("ERASURE_LEDGER_URL", ""))
     }
-    assert carrying == {"migrate", "backend", "worker", "worker-index", "worker-ai", "beat"}
+    assert carrying == {
+        "migrate",
+        "backend",
+        "worker",
+        "worker-outbox",
+        "worker-index",
+        "worker-ai",
+        "beat",
+    }
     for name in ("nginx", "frontend", "postgres", "redis"):
         assert "/var/lib/arkray/ledger" not in services[name]["volumes"], name
 

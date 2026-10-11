@@ -50,9 +50,29 @@ the system can't verify them.
       credentials; verify upload, download, delete and an outage against it (R99); the
       proxy's 11 MB limit on the upload route only
       ([deployment.md](deployment.md#attachments-storage)).
-- [ ] A ClamAV daemon reachable from the workers and `ATTACHMENT_SCANNER=clamd://…`
-      (R94); upload the EICAR test file once: it must be blocked.
+- [ ] A ClamAV daemon reachable **only** from the scanning worker (queue `default`) on the
+      private network (clamd is plain TCP, no authentication), `ATTACHMENT_SCANNER=clamd://<host>:3310`,
+      `BACKEND_TLS_PRIVATE_HOSTS` naming it, no `ATTACHMENT_SCANNER_WAIVED`, freshclam
+      updating (R94). Keep `ATTACHMENT_MAX_BYTES` ≤ `StreamMaxLength` ≤ `MaxFileSize` and
+      `AlertExceedsMax yes` (`infrastructure/clamav/clamd.conf`); about 1.2 GB of memory,
+      3 GB during a signature reload. `python tests/drills/clamav_drill.py --scanner
+      clamd://<host>:3310` passes against it after every clamd configuration change, and an
+      EICAR upload is blocked. Production refuses to start without a scanner unless
+      `ATTACHMENT_SCANNER_WAIVED=true` records the organisation's acceptance of R94 **(org)**.
+- [ ] A separate worker for the `outbox,email` queues; the default worker's grace period is
+      at least 18 minutes (the nightly attachment check) ([deployment.md](deployment.md#production-topology)).
+- [ ] Every image pinned by digest, the pins moved on each release (Redis, nginx and ClamAV
+      had fixable OS-package findings that newer digests clear); containers read-only,
+      `cap_drop: ALL`, no-new-privileges, CPU/memory/pids limits and health checks (R128).
+- [ ] The edge proxy keys IPv6 clients by their /64 (the reference nginx map, or the
+      platform's equivalent) and, behind another load balancer, has `real_ip` configured
+      (R127).
 - [ ] The bucket's backups on the database's schedule and retention (R93).
+- [ ] Backups signed and verified: `BACKUP_GPG_SIGNING_KEY_FILE` on the backup host,
+      `BACKUP_SIGNER_KEY_FILE` where restores happen, and a database URL with
+      `sslmode=verify-full` and `sslrootcert` for both scripts, one host and no service file
+      ([runbooks.md](runbooks.md#backup-encryption-keys)); `RESTORE_WORK_DIR` with room for the
+      dump twice.
 
 **Secrets** (from the secret manager, never in the repository or an image)
 
@@ -64,11 +84,15 @@ the system can't verify them.
 **Configuration** ([deployment.md](deployment.md#configuration))
 
 - [ ] `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS`, `APP_BASE_URL` (https),
-      `TRUSTED_PROXY_COUNT`, `FORWARDED_ALLOW_IPS`, `TRUST_INCOMING_REQUEST_ID=true` behind
-      the reference proxy.
+      `TRUSTED_PROXY_COUNT`, `TRUST_INCOMING_REQUEST_ID=true` behind the reference proxy;
+      `TRUSTED_PROXY_ADDRESSES` and `FORWARDED_ALLOW_IPS` set to the edge proxy's own
+      addresses, and the edge reaching the API only from them.
 - [ ] `DATABASE_URL` as `arkray_app` for web and workers, as `arkray_owner` for the migrate
       job only; `DB_STATEMENT_TIMEOUT_MS=60000` for workers.
 - [ ] `DJANGO_ALLOW_INSECURE_LOCAL_HTTP` **unset**.
+- [ ] `MFA_REQUIRED_FOR_ADMINS` unset or `true` (ADR-0033); a secret-key rotation includes
+      `manage.py mfa_reencrypt` before a fallback key is retired.
+- [ ] `DEFAULT_FROM_EMAIL` on a real domain with SPF, DKIM and DMARC.
 - [ ] `API_THROTTLE_AUTH` sized to the largest office behind one address (R77).
 - [ ] Ask Arkray: `AI_ENABLED` decided; with `AI_LLM_PROVIDER=anthropic`, the items in
       [AI configuration](deployment.md#ai-configuration): a data-processing agreement and
@@ -88,6 +112,16 @@ the system can't verify them.
 **People and policy (org)**
 
 - [ ] The first administrator created (`manage.py createsuperuser`); everyone else invited.
+- [ ] Every administrator has set up two-step verification (the Users page shows "On") and
+      stored their recovery codes; the identity check for an operator's
+      `manage.py reset_mfa --by <administrator>` is agreed ([runbooks.md](runbooks.md#lost-second-factor)).
+- [ ] Mail delivery checked end to end before administrators enrol: owners are emailed about
+      every change to their two-step verification, the rollout's check against someone with
+      a phished password enrolling first.
+- [ ] The ClamAV container's health (it also fails on signatures older than 3 days),
+      `ArkrayAdministratorDeactivated`, `ArkrayAttachmentScanOverdue` and `ArkrayCacheDown`
+      routed to people who act on them (while Redis is down, request limits are counted per
+      process: R127).
 - [ ] Retention periods agreed: audit trail, audit details (90 days default), backups
       (30 days), logs, Ask Arkray (30 days), customer records
       ([privacy.md](privacy.md#decisions-that-arent-the-systems)).

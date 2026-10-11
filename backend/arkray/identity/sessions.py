@@ -23,10 +23,11 @@ from collections.abc import Callable
 from datetime import timedelta
 
 from django.conf import settings
-from django.contrib.auth import SESSION_KEY, login, logout
+from django.contrib.auth import HASH_SESSION_KEY, SESSION_KEY, login, logout
 from django.contrib.sessions.backends.base import SessionBase
 from django.http import HttpRequest, HttpResponse
 from django.utils import timezone
+from django.utils.crypto import constant_time_compare
 
 from .models import User
 
@@ -52,6 +53,14 @@ def start_session(request: HttpRequest, user: User) -> None:
     # The row's expiry, pinned (activity never extends it); the cookie itself is a
     # browser-session cookie (identity.session_store).
     request.session.set_expiry(timezone.now() + timedelta(seconds=settings.SESSION_COOKIE_AGE))
+
+
+def session_matches(request: HttpRequest, user: User) -> bool:
+    """Whether this request's session still belongs to `user` as it is now (pass the row
+    read under its lock). The hash covers the password and `session_epoch`, so a reset, a
+    password or email change or "sign out everywhere" committed meanwhile makes it false."""
+    stored = request.session.get(HASH_SESSION_KEY)
+    return isinstance(stored, str) and constant_time_compare(stored, user.get_session_auth_hash())
 
 
 def end_session(request: HttpRequest) -> None:

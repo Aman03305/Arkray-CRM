@@ -57,6 +57,8 @@ from arkray.identity import throttling
 from arkray.identity.models import (
     AccountToken,
     AuthThrottleEvent,
+    MfaDevice,
+    MfaRecoveryCode,
     SupportEnd,
     SupportSession,
     TokenStatus,
@@ -239,6 +241,10 @@ def pseudonymise(
         last_error="",
     ) + queued.exclude(status__in=[OutboxStatus.PENDING, OutboxStatus.IN_FLIGHT]).update(payload={})
     windows, _ = WorkspaceAccessWindow.objects.filter(actor_id=user.pk).delete()
+    # Their second factor (ADR-0033): the encrypted secret and the recovery codes' hashes
+    # are theirs alone and unusable on a pseudonymised account.
+    MfaRecoveryCode.objects.filter(user=user).delete()
+    MfaDevice.objects.filter(user=user).delete()
 
     user.first_name = "Former user"
     user.last_name = user.pk.hex[:8]

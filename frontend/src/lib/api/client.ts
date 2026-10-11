@@ -12,6 +12,8 @@
  *   `{"error": {"code", "message", "details", "request_id"}}`.
  * - JSON bodies go through `apiFetch`; a file goes through `apiUpload` (same rules).
  * - A create that requires an Idempotency-Key is never sent without a valid one.
+ * - A request refused with 403 `mfa_required` (a recent second factor is needed, ADR-0033)
+ *   asks the registered step-up handler for one and is then sent again, once (see below).
  */
 import { isIdempotencyKey } from "@/lib/random";
 
@@ -93,13 +95,16 @@ function retryAfter(response: Response): number | null {
 
 function toApiError(response: Response, payload: unknown): ApiError {
   const envelope = (payload as { error?: Record<string, unknown> } | null)?.error;
+  // The edge proxy names every response, its own errors included (a 502 page has no
+  // envelope): the header is the fallback reference a user can quote.
+  const headerId = response.headers.get("X-Request-ID");
   if (envelope && typeof envelope.code === "string" && typeof envelope.message === "string") {
     return new ApiError(
       response.status,
       envelope.code,
       envelope.message,
       envelope.details ?? null,
-      typeof envelope.request_id === "string" ? envelope.request_id : null,
+      typeof envelope.request_id === "string" ? envelope.request_id : headerId,
       retryAfter(response),
     );
   }
@@ -107,6 +112,9 @@ function toApiError(response: Response, payload: unknown): ApiError {
     response.status,
     "http_error",
     `Something went wrong (HTTP ${response.status}). Please try again.`,
+    null,
+    headerId,
+    retryAfter(response),
   );
 }
 
@@ -183,6 +191,68 @@ async function request<T>(
   return payload as T;
 }
 
+// --- Step-up verification (ADR-0033) ---------------------------------------------------------
+/**
+ * Asks the person for a second factor and verifies it with the server (the web app's
+ * StepUpProvider does, with a dialog). Resolves true once verified, false when they cancel.
+ * The code never passes through here.
+ */
+export type StepUpHandler = (error: ApiError) => Promise<boolean>;
+
+let stepUpHandler: StepUpHandler | null = null;
+/** The prompt on screen: every request refused meanwhile waits for this same one. */
+let stepUpPrompt: Promise<boolean> | null = null;
+/** Counts successful verifications: a request sent before the latest one is retried
+ * without asking again (its refusal predates the verification). */
+let stepUpGeneration = 0;
+
+/** Installs the handler; returns the function that removes it again. */
+export function registerStepUpHandler(handler: StepUpHandler): () => void {
+  stepUpHandler = handler;
+  return () => {
+    if (stepUpHandler === handler) stepUpHandler = null;
+  };
+}
+
+/** The sign-in and two-step endpoints themselves never ask for a step-up (no loops). */
+const STEP_UP_EXEMPT_PREFIX = "/api/v1/auth/";
+
+function needsStepUp(error: unknown, path: string): error is ApiError {
+  return error instanceof ApiError && error.status === 403 && error.code === "mfa_required" && !path.startsWith(STEP_UP_EXEMPT_PREFIX);
+}
+
+/**
+ * Runs a request; when the server wants a recent second factor, asks for it (one prompt
+ * shared by every request refused at the same time) and repeats the request exactly once.
+ * The repeat's answer is final, even another `mfa_required`: never a loop. Cancelling, or
+ * the caller giving up meanwhile, rejects with the original refusal. The repeat is safe for
+ * the same reason as the CSRF retry: the server refused before doing anything.
+ */
+async function withStepUp<T>(path: string, run: () => Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  const generation = stepUpGeneration;
+  try {
+    return await run();
+  } catch (error) {
+    const handler = stepUpHandler;
+    if (!handler || !needsStepUp(error, path)) throw error;
+    if (generation === stepUpGeneration) {
+      stepUpPrompt ??= handler(error)
+        .catch(() => false)
+        .then((verified) => {
+          if (verified) stepUpGeneration += 1;
+          return verified;
+        })
+        .finally(() => {
+          stepUpPrompt = null;
+        });
+      const verified = await stepUpPrompt;
+      if (!verified) throw error;
+    }
+    if (signal?.aborted) throw error;
+    return run();
+  }
+}
+
 /**
  * Creates the server refuses without an Idempotency-Key (docs/api-conventions.md#idempotency).
  * Checked here as well, before anything is sent: a create without a key, or with one that
@@ -204,7 +274,7 @@ export async function apiFetch<T>(path: string, options: ApiRequestOptions = {})
   const { method = "GET", body, signal, timeoutMs = DEFAULT_TIMEOUT_MS, headers } = options;
   requireIdempotencyKey(path, method, headers);
   const payload = body === undefined ? undefined : { encode: () => JSON.stringify(body), contentType: "application/json" };
-  return request<T>(path, method, payload, { signal, timeoutMs, headers });
+  return withStepUp(path, () => request<T>(path, method, payload, { signal, timeoutMs, headers }), signal);
 }
 
 export interface ApiUploadOptions {
@@ -223,10 +293,15 @@ export async function apiUpload<T>(path: string, file: Blob, filename: string, o
     throw new Error(`apiUpload only calls same-origin API paths, got: ${path}`);
   }
   const { signal, timeoutMs = UPLOAD_TIMEOUT_MS, headers } = options;
-  return request<T>(
+  return withStepUp(
     path,
-    "POST",
-    { encode: () => file, contentType: "application/octet-stream" },
-    { signal, timeoutMs, headers: { ...headers, "X-Filename": encodeURIComponent(filename) } },
+    () =>
+      request<T>(
+        path,
+        "POST",
+        { encode: () => file, contentType: "application/octet-stream" },
+        { signal, timeoutMs, headers: { ...headers, "X-Filename": encodeURIComponent(filename) } },
+      ),
+    signal,
   );
 }

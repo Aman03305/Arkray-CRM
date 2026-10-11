@@ -77,10 +77,13 @@ business logic.
 | 400 `validation_error` / `malformed_request` | invalid input (field details included) |
 | 401 `not_authenticated` | no or expired session (with `WWW-Authenticate: Session realm="arkray"`) |
 | 400 `invalid_credentials` / `invalid_token` | failed sign-in (always the same body) / unusable emailed link |
+| 400 `invalid_mfa_code` / `mfa_challenge_expired` / `mfa_setup_required` | a wrong or reused second-factor code / the sign-in's second step came too late, or after 5 wrong codes: sign in again / no two-step setup in progress (ADR-0033) |
 | 403 `permission_denied` / `csrf_failed` | authenticated but lacking a capability; CSRF failure |
+| 403 `password_change_required` / `support_session_active` | choose your own password first / not inside a support session |
+| 403 `mfa_enrollment_required` / `mfa_required` | set up two-step verification first / verify a code (`POST /auth/mfa/verify`) and repeat the request |
 | 404 `not_found` | does not exist **or is outside your scope** (deliberately indistinguishable) |
 | 405, 406, 415 | method / accept / media type |
-| 409 `conflict` | stale `version` or uniqueness conflict: reload and retry |
+| 409 `conflict` / `mfa_already_enabled` | stale `version` or uniqueness conflict: reload and retry / two-step verification is already on |
 | 422 `business_rule_violation` | valid shape, but not allowed (for example, moving a won deal without reopening) |
 | 429 `rate_limited` | throttled; `Retry-After` header |
 | 500 `server_error` | unexpected; never contains internals |

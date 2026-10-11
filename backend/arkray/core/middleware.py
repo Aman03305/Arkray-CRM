@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import ipaddress
 import logging
 import re
@@ -53,14 +54,53 @@ def _parse_address(value: str) -> str | None:
         return None
 
 
+Network = ipaddress.IPv4Network | ipaddress.IPv6Network
+
+
+@functools.lru_cache(maxsize=8)
+def _networks(entries: tuple[str, ...]) -> tuple[Network, ...]:
+    """TRUSTED_PROXY_ADDRESSES as networks (an address is its own /32 or /128). Entries that
+    aren't addresses are dropped here; production refuses them at startup."""
+    networks: list[Network] = []
+    for entry in entries:
+        try:
+            networks.append(ipaddress.ip_network(entry.strip(), strict=False))
+        except ValueError:
+            continue
+    return tuple(networks)
+
+
+def is_trusted_proxy(address: str | None) -> bool:
+    """Whether the peer that connected to us is one of the configured proxies."""
+    if not address:
+        return False
+    try:
+        peer = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if isinstance(peer, ipaddress.IPv6Address) and peer.ipv4_mapped is not None:
+        peer = peer.ipv4_mapped
+    entries = tuple(settings.TRUSTED_PROXY_ADDRESSES)
+    return any(peer in network for network in _networks(entries))
+
+
 def client_ip(request: HttpRequest) -> str | None:
-    """Client IP, trusting X-Forwarded-For only for the configured number of proxies.
+    """Client IP, trusting X-Forwarded-For only from a configured proxy.
+
+    The header is read only when the connecting peer (REMOTE_ADDR) is one of
+    TRUSTED_PROXY_ADDRESSES, and then from the right: each trusted proxy appends the address
+    it saw, so the entry TRUSTED_PROXY_COUNT places from the end is the client (entries to
+    its left were written by the client). From any other peer (a container that reaches the
+    app server directly, a probe) the header is ignored and the peer's own address counts
+    (adversarial review P2-2: with the count alone, anything that could reach gunicorn got a
+    fresh rate-limit budget per request by rotating the header).
 
     None when the address can't be determined; rate limits then share one bucket for all
     such requests (they fail closed, see identity.throttling)."""
-    candidate: str = request.META.get("REMOTE_ADDR") or ""
+    remote: str = request.META.get("REMOTE_ADDR") or ""
+    candidate = remote
     proxies = settings.TRUSTED_PROXY_COUNT
-    if proxies > 0:
+    if proxies > 0 and is_trusted_proxy(_parse_address(remote) if remote else None):
         forwarded = [p.strip() for p in request.META.get("HTTP_X_FORWARDED_FOR", "").split(",")]
         forwarded = [p for p in forwarded if p]
         if len(forwarded) >= proxies:

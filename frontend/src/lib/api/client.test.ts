@@ -77,6 +77,23 @@ describe("apiFetch", () => {
     await expect(apiFetch("/api/v1/x")).rejects.toMatchObject({ status: 502, code: "http_error" });
   });
 
+  it("falls back to the edge proxy's X-Request-ID header for a reference", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response("<html>Bad gateway</html>", {
+        status: 502,
+        headers: { "Content-Type": "text/html", "X-Request-ID": "edge-1" },
+      }),
+    );
+    await expect(apiFetch("/api/v1/x")).rejects.toMatchObject({ status: 502, requestId: "edge-1" });
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { code: "conflict", message: "Changed.", details: null } }), {
+        status: 409,
+        headers: { "Content-Type": "application/json", "X-Request-ID": "edge-2" },
+      }),
+    );
+    await expect(apiFetch("/api/v1/x")).rejects.toMatchObject({ code: "conflict", requestId: "edge-2" });
+  });
+
   it("reports network failures without leaking internals", async () => {
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
     await expect(apiFetch("/api/v1/x")).rejects.toMatchObject({ code: "network_error", status: 0 });

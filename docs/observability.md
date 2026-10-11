@@ -206,8 +206,9 @@ at scrape time in a bounded number of queries, `config/metrics.py`):
 | `arkray_ai_questions_last_hour` | `status`, `mode`, `error` | Ask Arkray outcomes (router, llm, retrieval; timeout, ai_unavailable, ...) |
 | `arkray_ai_questions_pending` | — | questions waiting for an ai worker and not yet expired |
 | `arkray_ai_breaker_open` | — | the model provider's circuit breaker (its state is shared through the cache: no sample while the cache can't answer) |
+| `arkray_administrator_deactivations_last_hour` | — | administrator accounts deactivated in the last hour (`user.deactivated` audit events recording an administrator's role; one database count, no cache read; ADR-0033) |
 | `arkray_attachments` | `state` (uploading, failed, pending_scan) | attachment rows still in progress, failed with their object not yet removed, waiting for a malware scan |
-| `arkray_attachment_oldest_seconds` | `state` (uploading, unpurged) | age of the oldest unfinished upload; of the oldest failed or deleted file whose object isn't removed yet |
+| `arkray_attachment_oldest_seconds` | `state` (uploading, unpurged, pending_scan) | age of the oldest unfinished upload; of the oldest failed or deleted file whose object isn't removed yet; of the oldest stored file still waiting for its malware scan |
 | `arkray_attachment_storage_up` | `backend` (filesystem, s3) | the store answered a liveness check (S3 `head_bucket`; a directory: a sentinel written, read back, deleted), at most every 30 s per process, within the 2 s probe deadline |
 | `arkray_attachment_uploads_last_hour` | `outcome` (stored, failed), `reason` (too_large, rejected, storage_error, timeout, quota, other) | uploads in the last hour |
 | `arkray_attachment_download_failures_last_hour` | `reason` (storage_unavailable, missing) | downloads that answered 503 or 410 |
@@ -282,5 +283,6 @@ The metric-based rows are shipped as Prometheus rules in `infrastructure/alerts/
 | File storage | `attachment_storage_failed` or `attachment_upload_failed` repeating for 10 min; housekeeping `storage_failures` > 0 two runs in a row | runbooks: file storage |
 | Attachment storage down | `arkray_attachment_storage_up` = 0 for 5 min (`ArkrayAttachmentStorageDown`); storage errors and timeouts above 20 % of uploads in an hour (`ArkrayAttachmentUploadsFailing`) | runbooks: attachment storage degraded |
 | Attachment object missing | `arkray_attachment_objects_missing_last_hour` > 0 (`ArkrayAttachmentObjectMissing`) | runbooks: attachment object missing |
-| Attachment reconciliation | mismatches > 0, outcome 2, no whole pass for 48 h (`ArkrayAttachmentReconcile*`); an upload unfinished for over an hour (`ArkrayAttachmentUploadStuck`) | runbooks: attachment reconciliation |
+| Administrator deactivated | any administrator account deactivated in the last hour (`ArkrayAdministratorDeactivated`, ticket) | runbooks: administrator deactivated |
+| Attachment reconciliation | mismatches > 0, outcome 2, no whole pass for 48 h (`ArkrayAttachmentReconcile*`); an upload unfinished for over an hour (`ArkrayAttachmentUploadStuck`); a file waiting over an hour for its malware scan, so not downloadable (`ArkrayAttachmentScanOverdue`) | runbooks: attachment reconciliation |
 | Malware | any `attachment_malware_blocked`; `pending_scans` growing for an hour (scanner down: files don't download) | runbooks: file storage |

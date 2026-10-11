@@ -375,6 +375,31 @@ paths:
               schema:
                 $ref: '#/components/schemas/AdminUser'
           description: ''
+  /api/v1/admin/users/{user_id}/mfa/reset:
+    post:
+      operationId: admin_users_mfa_reset
+      description: |-
+        Remove an ordinary user's second factor (they lost the device and the recovery codes):
+        their sessions end; they sign in with their password and may set up a new one. 422 for
+        an administrator, whoever asks (ADR-0033: an operator runs `manage.py reset_mfa`).
+      parameters:
+      - in: path
+        name: user_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - admin
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+          description: ''
   /api/v1/admin/users/{user_id}/resend-invitation:
     post:
       operationId: admin_users_resend_invitation_create
@@ -525,6 +550,9 @@ paths:
   /api/v1/auth/login:
     post:
       operationId: auth_login_create
+      description: |-
+        200 with the viewer when signed in; 202 when the account has a second factor:
+        send a code to /auth/login/mfa within `expires_in` seconds (ADR-0033).
       tags:
       - auth
       requestBody:
@@ -533,6 +561,36 @@ paths:
             schema:
               $ref: '#/components/schemas/LoginRequest'
         required: true
+      security:
+      - sessionAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Viewer'
+          description: ''
+        '202':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaChallenge'
+          description: ''
+  /api/v1/auth/login/mfa:
+    post:
+      operationId: auth_login_mfa
+      description: |-
+        The second step of a sign-in with a second factor: a code from the authenticator, or
+        an unused recovery code. Wrong codes count as failed sign-ins (identity.throttling); five
+        void the challenge.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CodeOrRecoveryCodeRequest'
       security:
       - sessionAuth: []
       - {}
@@ -570,6 +628,125 @@ paths:
               schema:
                 $ref: '#/components/schemas/Viewer'
           description: ''
+  /api/v1/auth/mfa:
+    get:
+      operationId: auth_mfa_status
+      tags:
+      - auth
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaStatus'
+          description: ''
+  /api/v1/auth/mfa/confirm:
+    post:
+      operationId: auth_mfa_confirm
+      description: |-
+        Turn two-step verification on with a code from the new device: ten recovery codes,
+        shown once; every other session of the account ends.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MfaCodeRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecoveryCodes'
+          description: ''
+  /api/v1/auth/mfa/disable:
+    post:
+      operationId: auth_mfa_disable
+      description: |-
+        Turn two-step verification off (current password and a code): 422 where the role
+        requires it; other sessions end.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MfaDisableRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/auth/mfa/recovery-codes:
+    post:
+      operationId: auth_mfa_recovery_codes
+      description: Replace the recovery codes (the old ones stop working; other sessions
+        end).
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MfaCodeRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecoveryCodes'
+          description: ''
+  /api/v1/auth/mfa/setup:
+    post:
+      operationId: auth_mfa_setup
+      description: |-
+        Start (or restart) a setup after the current password: the secret, its otpauth://
+        URI and QR code, shown this once. 409 when two-step verification is already on.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MfaSetupStartRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaSetup'
+          description: ''
+  /api/v1/auth/mfa/verify:
+    post:
+      operationId: auth_mfa_verify
+      description: |-
+        Step-up: a code renews this session's verification for MFA_STEP_UP_TTL_S, for the
+        operations that answer 403 `mfa_required`.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CodeOrRecoveryCodeRequest'
+      security:
+      - sessionAuth: []
+      responses:
+        '204':
+          description: No response body
   /api/v1/auth/password-reset:
     post:
       operationId: auth_password_reset_create
@@ -3571,6 +3748,10 @@ components:
           format: date-time
           readOnly: true
           nullable: true
+        mfa_enabled:
+          type: boolean
+          readOnly: true
+          description: The user has a confirmed second factor.
         version:
           type: integer
           readOnly: true
@@ -3585,6 +3766,7 @@ components:
       - invitation
       - last_login
       - last_name
+      - mfa_enabled
       - password_change_required
       - password_changed_at
       - role
@@ -3972,6 +4154,18 @@ components:
         * `qualified` - Qualified
         * `unqualified` - Unqualified
         * `converted` - Converted
+    CodeOrRecoveryCodeRequest:
+      type: object
+      description: Exactly one of `code` (the authenticator's six digits) and `recovery_code`.
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 64
+        recovery_code:
+          type: string
+          minLength: 1
+          maxLength: 64
     Conversation:
       type: object
       properties:
@@ -5187,6 +5381,90 @@ components:
       description: |-
         * `email` - email
         * `phone` - phone
+    MfaChallenge:
+      type: object
+      description: '202 from /auth/login: the password was right; send a code to /auth/login/mfa.'
+      properties:
+        mfa_required:
+          type: boolean
+        expires_in:
+          type: integer
+          description: Seconds left for the second step.
+      required:
+      - expires_in
+      - mfa_required
+    MfaCodeRequest:
+      type: object
+      properties:
+        code:
+          type: string
+          minLength: 1
+          description: A code from the authenticator app.
+          maxLength: 64
+      required:
+      - code
+    MfaDisableRequest:
+      type: object
+      properties:
+        current_password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        code:
+          type: string
+          minLength: 1
+          description: A code from the authenticator app, or an unused recovery code.
+          maxLength: 64
+      required:
+      - code
+      - current_password
+    MfaSetup:
+      type: object
+      description: 'Shown once, at setup: the secret is never returned again.'
+      properties:
+        secret:
+          type: string
+          description: Base32, for typing into an authenticator app.
+        otpauth_uri:
+          type: string
+        qr:
+          $ref: '#/components/schemas/QrMatrix'
+      required:
+      - otpauth_uri
+      - qr
+      - secret
+    MfaSetupStartRequest:
+      type: object
+      properties:
+        current_password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+      required:
+      - current_password
+    MfaStatus:
+      type: object
+      description: The two-step verification state of one's own account.
+      properties:
+        enabled:
+          type: boolean
+        confirmed_at:
+          type: string
+          format: date-time
+          nullable: true
+        recovery_codes_remaining:
+          type: integer
+        required:
+          type: boolean
+          description: Required for this account's role.
+        can_disable:
+          type: boolean
+      required:
+      - can_disable
+      - confirmed_at
+      - enabled
+      - recovery_codes_remaining
+      - required
     NegotiatedPriceInputRequest:
       type: object
       properties:
@@ -6301,6 +6579,20 @@ components:
       - support_sessions_ended
       - throttle_events
       - tokens_revoked
+    QrMatrix:
+      type: object
+      properties:
+        size:
+          type: integer
+          description: Modules per side (no quiet zone).
+        rows:
+          type: array
+          items:
+            type: string
+          description: One string of "1" (dark) and "0" per row.
+      required:
+      - rows
+      - size
     Question:
       type: object
       properties:
@@ -6376,6 +6668,16 @@ components:
       required:
       - key
       - name
+    RecoveryCodes:
+      type: object
+      properties:
+        recovery_codes:
+          type: array
+          items:
+            type: string
+          description: Ten single-use codes, shown once.
+      required:
+      - recovery_codes
     RoleEnum:
       enum:
       - admin
@@ -7321,6 +7623,16 @@ components:
           - $ref: '#/components/schemas/SupportSession'
           nullable: true
           readOnly: true
+        mfa_enabled:
+          type: boolean
+          readOnly: true
+          description: The account has a confirmed second factor (two-step verification).
+        mfa_enrollment_required:
+          type: boolean
+          readOnly: true
+          description: 'The account must set up two-step verification before anything
+            else (administrators, when required): only /auth/me, sign-out, the password
+            change and the /auth/mfa setup answer until then.'
       required:
       - capabilities
       - email
@@ -7329,6 +7641,8 @@ components:
       - full_name
       - id
       - last_name
+      - mfa_enabled
+      - mfa_enrollment_required
       - password_change_required
       - role
       - role_label

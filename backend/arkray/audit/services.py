@@ -50,6 +50,7 @@ REDACTED = "[REDACTED]"
 # request id ties those to the access log while the log is kept.
 IP_ACTIONS = (
     "auth.",
+    "mfa.",
     "user.",
     "support_session.",
     "workspace.",

@@ -128,6 +128,15 @@ def _check_database_role(**_: Any) -> None:
         raise SystemExit(1) from exc
 
 
+@worker_init.connect
+def _prime_ledger_gate(**_: Any) -> None:
+    """The erasure ledger's chain, verified once in the parent before the pool forks
+    (core.ledger_gate.prime): a child's first gated task reads only the entries added since."""
+    from arkray.core.ledger_gate import prime
+
+    prime()
+
+
 @task_prerun.connect
 def _bind_task_context(task_id: str, task: Any, **_: Any) -> None:
     from arkray.core.context import ExecutionContext, bind_context

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { ViewerDto } from "@/lib/api/types";
 import { makeViewer } from "@/test/fixtures";
 
 import { hasCapability, initials, toViewer, type Viewer } from "./viewer";
@@ -28,6 +29,22 @@ describe("hasCapability", () => {
   });
 });
 
+const VIEWER_DTO_REQUIRED = {
+  id: "a1",
+  email: "a@x.test",
+  first_name: "Anita",
+  last_name: "Rao",
+  full_name: "Anita Rao",
+  role: "admin" as const,
+  role_label: "Admin",
+  capabilities: ["users.manage"],
+  features: { ask: false },
+  password_change_required: false,
+  mfa_enabled: false,
+  mfa_enrollment_required: true,
+  support_session: null,
+};
+
 describe("toViewer", () => {
   it("maps the API shape and ignores capabilities the UI doesn't know", () => {
     const viewer = toViewer({
@@ -41,6 +58,8 @@ describe("toViewer", () => {
       capabilities: ["crm.access_own", "superpowers.all"],
       features: { ask: true },
       password_change_required: false,
+      mfa_enabled: true,
+      mfa_enrollment_required: false,
       support_session: null,
     });
     expect(viewer).toEqual({
@@ -53,8 +72,30 @@ describe("toViewer", () => {
       capabilities: ["crm.access_own"],
       features: { ask: true },
       passwordChangeRequired: false,
+      mfaEnabled: true,
+      mfaEnrollmentRequired: false,
       supportSession: null,
     });
+  });
+
+  it("reads two-step verification as off and not required from a backend without it", () => {
+    // An older backend's response (the generated schema now requires both fields).
+    const older = {
+      id: "u1",
+      email: "p@x.test",
+      first_name: "Priya",
+      last_name: "Patel",
+      full_name: "Priya Patel",
+      role: "admin",
+      role_label: "Admin",
+      capabilities: [],
+      features: { ask: false },
+      password_change_required: false,
+      support_session: null,
+    } as const;
+    const viewer = toViewer(older as unknown as ViewerDto);
+    expect(viewer).toMatchObject({ mfaEnabled: false, mfaEnrollmentRequired: false });
+    expect(toViewer({ ...VIEWER_DTO_REQUIRED })).toMatchObject({ mfaEnabled: false, mfaEnrollmentRequired: true });
   });
 
   it("maps a support session (the target's id in its canonical spelling)", () => {
@@ -69,6 +110,8 @@ describe("toViewer", () => {
       capabilities: ["support.access"],
       features: { ask: false },
       password_change_required: false,
+      mfa_enabled: true,
+      mfa_enrollment_required: false,
       support_session: {
         id: "s1",
         target: { id: "3F2B8C1E-9A4D-4E2F-8B7A-1C2D3E4F5A6B", full_name: "Rahul Sharma" },

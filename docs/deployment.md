@@ -17,15 +17,16 @@ flowchart TB
     LB -->|/api/*, /health/*| API[api: gunicorn<br/>N replicas, stateless]
     LB -->|everything else| WEB[web: Next.js standalone<br/>N replicas, stateless]
     API --> PGB[PgBouncer<br/>transaction pooling]
-    WK0[worker-outbox<br/>queue: outbox, concurrency 1] --> PGB
-    WK1[worker-default-email<br/>queues: default, email] --> PGB
+    WK0[worker-outbox<br/>queues: outbox, email] --> PGB
+    WK1[worker-default<br/>queue: default] --> PGB
     WK3[worker-index<br/>queue: ai_index] --> PGB
     WK2[worker-ai<br/>queue: ai] --> PGB
     BEAT[beat<br/>exactly 1 replica] --> BR
     PGB --> PG[(PostgreSQL 16 + pgvector<br/>managed, PITR backups)]
     API --> RC[(Redis cache<br/>allkeys-lru)]
     WK1 & WK2 & WK3 --> BR[(Redis broker<br/>AOF, noeviction)]
-    WK1 --> SMTP[SMTP provider]
+    WK0 --> SMTP[SMTP provider]
+    WK1 -->|private network only| AV[ClamAV clamd<br/>+ freshclam]
     WK2 -->|optional| AIP[Anthropic API]
 ```
 
@@ -33,8 +34,9 @@ flowchart TB
 |---|---|---|---|
 | api | backend image, default `gunicorn` CMD | horizontal; stateless | live: TCP on the port (an HTTP probe shares the request workers, which a stalled database pins: [reliability.md](reliability.md#failure-and-degradation-matrix)), or `/health/live` with more than 35 s of tolerance; ready `/health/ready` |
 | web | frontend image, `node server.js` | horizontal; stateless | HTTP GET `/login` |
-| worker-outbox | `celery -A config worker -Q outbox --concurrency 1 --hostname outbox@%h` | 1-2 replicas; tiny | `python manage.py ledger_status --ping-worker outbox` ([below](#worker-and-beat-health)) |
-| worker-default-email | `celery -A config worker -Q default,email --hostname celery@%h` | horizontal | `... --ping-worker celery` |
+| worker-outbox | `celery -A config worker -Q outbox,email --concurrency 2 --hostname outbox@%h` (the relay's 5 s tick, the erasure ledger's reconcile every minute, email delivery: short tasks people wait on) | 1-2 replicas; small. Grace period 130 s (the 120 s task limit) | `python manage.py ledger_status --ping-worker outbox` ([below](#worker-and-beat-health)) |
+| worker-default | `celery -A config worker -Q default --hostname celery@%h` (attachment scans and clean-up, data exports, the nightly checks) | horizontal | `... --ping-worker celery`. **Grace period at least 18 minutes**: the nightly attachment check (`activities.reconcile_check`) may run 17; a shorter one kills it on every deploy that lands at 22:10 UTC (R128). A deploy during that check holds this queue's new work (scans, exports) until the new worker starts; the relay, email (password-reset requests included) and the ledger reconcile don't wait |
+| clamav | `clamav/clamav` (clamd and freshclam), [Attachments storage](#attachments-storage) | 1 replica (or a sidecar per worker) | clamd `PING` (`clamdcheck.sh`) |
 | worker-index | `celery -A config worker -Q ai_index --concurrency 1 --hostname index@%h` (Ask Arkray's indexing: CPU-bound embedding, loads the model) | 1 replica normally; scale out temporarily for a large backfill | `... --ping-worker index` |
 | worker-ai | `celery -A config worker -Q ai --concurrency 2 --hostname ai@%h` (Ask Arkray's questions only; loads the embedding model, ~0.5 GB RAM per process) | horizontal, sized to question volume and the provider's rate limits | `... --ping-worker ai` |
 | beat | `celery -A config beat --schedule /tmp/celerybeat-schedule` (a writable path: the image's `/app` isn't writable by the app user, and beat dies at start without it, `Errno 13`) | **exactly one** replica, never autoscaled: duplicates cause duplicate relay ticks and housekeeping runs (harmless but wasteful) | `python manage.py ledger_status` |
@@ -87,9 +89,16 @@ The WSGI entry point defaults to production settings, so a deployment that forge
   (`api.crm.example.com`) would break sign-in by design. Renaming the cookies signs
   everyone out once, at the first deploy that has them.
 - `TRUSTED_PROXY_COUNT` is **required** in production, and startup fails without it. Set it
-  to the number of proxies that append `X-Forwarded-For`, and set `FORWARDED_ALLOW_IPS` for
-  gunicorn. Client IPs drive rate limits and audit records, so they must be correct and
-  unspoofable.
+  to the number of proxies that append `X-Forwarded-For`, **and `TRUSTED_PROXY_ADDRESSES`
+  to those proxies' addresses (or CIDR ranges) as Django sees them connect**: the header is
+  read only from those peers, and anything else that reaches the app server directly is
+  keyed by its own address (adversarial review P2-2: with the count alone, a container that
+  could reach gunicorn got a fresh rate-limit budget per request by rotating the header).
+  Production refuses a count without addresses, an unparsable entry and `0.0.0.0/0` or
+  `::/0`. Set `FORWARDED_ALLOW_IPS` for gunicorn to the same addresses. Client IPs drive
+  rate limits and audit records, so they must be correct and unspoofable. In the reference
+  stack the edge has a fixed address (`10.252.17.10`) on an internal network it shares with
+  the API alone.
 - The edge proxy must **overwrite** (never pass through) `X-Forwarded-Proto` and
   `X-Forwarded-For`. If it also sets `X-Request-ID`, enable `TRUST_INCOMING_REQUEST_ID`.
   Otherwise Django mints its own correlation ids, and client-sent ids are logged only as
@@ -107,7 +116,8 @@ The WSGI entry point defaults to production settings, so a deployment that forge
 
 ## Reverse proxy
 
-`infrastructure/nginx/arkray.conf` is the reference edge (nginx 1.27.3 or newer). What the
+`infrastructure/nginx/arkray.conf` is the reference edge (nginx 1.27.3 or newer; the
+reference stack runs 1.30, the stable series). What the
 application depends on, whatever proxy or load balancer is used:
 
 - **TLS terminates here**; plain HTTP only redirects; a request for any other host name
@@ -141,7 +151,19 @@ application depends on, whatever proxy or load balancer is used:
   it takes a gunicorn worker: in the capacity test it had raised every other user's p99 to 3.2 s
   ([capacity.md](capacity.md#abuse)). Django's own limits stay the authority. There is
   deliberately **no** global per-address limit: an office shares one address. A platform edge
-  without nginx needs an equivalent rule.
+  without nginx needs an equivalent rule. **An IPv6 client counts as its /64** (R127), like
+  in Django: the `$arkray_client_key` map turns nginx's text of the address into its first
+  four groups (an IPv4 address stays as it is), so one host can't rotate through its /64
+  for fresh budgets ([operations.md](operations.md#edge-rate-limits)). The limit lives in
+  nginx's shared memory: it holds whatever happens to Redis.
+- **Errors nginx answers itself name the request**: on API routes the API's JSON envelope
+  (502/504 become 503 `service_unavailable`, 413, 429) with `request_id`; on pages (the web
+  tier, Next.js, unreachable or too slow) a minimal HTML page with the request id as a
+  reference, 503 with `Retry-After`, under a CSP that lets nothing load
+  (`default-src 'none'`), `nosniff`, `DENY` framing and `no-store`. Every one carries
+  `X-Request-ID` and HSTS.
+- **The container's health check** is `GET /edge-health` on the plain-HTTP port, answered by
+  nginx itself to loopback only (404 to anyone else).
 - Request bodies are JSON only: 1 MB at the proxy (Django refuses more than 2.5 MB anyway);
   the proxy's read timeout (35 s) is longer than gunicorn's (30 s).
 
@@ -210,14 +232,15 @@ release to `CANNOT_INSERT` in that test).
    statement timeout (`DB_STATEMENT_TIMEOUT_MS=1000`) and passed: 0006 lifts the timeout for
    its own transaction, as the table-wide migrations must. Every opportunity's id, stage,
    value, owner, version and timestamps had the same checksum before and after.
-5. Stopped deploy: stop web, workers and beat (no writes during the migration), run the
+5. **Two-step verification (the release with ADR-0033)**: `identity.0005` adds two tables and can't be reversed; the backend image gains the `segno` dependency (rebuild the images). After the deploy, each administrator sets up two-step verification at their next sign-in (nothing else answers until they do); agree the identity check for the operator's `manage.py reset_mfa` before go-live ([runbooks.md](runbooks.md#lost-second-factor)).
+6. Stopped deploy: stop web, workers and beat (no writes during the migration), run the
    migrate job, then start the new release (step 3 above).
 
 ## Rollback
 
 **Rollback and downgrade policy.** Schema down-migrations are **not supported past the v1.0
 RC** (`64bb641`). Every migration after it (`pipeline` 0006-0009, `identity.0004`,
-`activities.0010`, `audit` 0003-0004) refuses to be reversed: `migrate pipeline 0005` (or any
+`activities.0010`, `audit` 0003-0004, `identity.0005`) refuses to be reversed: `migrate pipeline 0005` (or any
 target that would undo one of them) stops with `IrreversibleError: <migration> can't be
 reversed: that would delete ... restore the database backup taken before the upgrade (with
 that release), or deploy a forward fix` **before changing anything**, whether or not anything
@@ -289,16 +312,18 @@ is a failed deploy, not a weakened service.
 | Variable | Required | Default and notes |
 |---|---|---|
 | `DJANGO_SETTINGS_MODULE` | yes | `config.settings.production` (the image's default) |
-| `DJANGO_SECRET_KEY` | yes | at least 50 characters, production-only; startup fails otherwise. Rotation: [runbooks.md](runbooks.md#rotate-a-secret) |
+| `DJANGO_SECRET_KEY` | yes | at least 50 characters with at least 5 distinct ones, production-only (not `dev-`, `test-` or `django-insecure-`); startup fails otherwise. Rotation: [runbooks.md](runbooks.md#rotate-a-secret) |
 | `DJANGO_SECRET_KEY_FALLBACKS` | no | comma-separated earlier keys, during a rotation only: sessions, sealed page links and trusted-browser cookies signed with them keep working until they're removed; each must be as strong as the key |
+| `MFA_REQUIRED_FOR_ADMINS` | no | `true` in production: administrators must set up two-step verification (TOTP, [ADR-0033](adr/0033-administrator-mfa-and-reactivation.md)) at their next sign-in and give a code again (step-up) for user administration, support sessions, export requests and pseudonymisation; `false` is refused unless `DJANGO_ALLOW_INSECURE_LOCAL_HTTP=true`. The authenticator secrets are encrypted with a key derived from `DJANGO_SECRET_KEY`: before retiring a key from `DJANGO_SECRET_KEY_FALLBACKS`, run `manage.py mfa_reencrypt` ([runbooks.md](runbooks.md#lost-second-factor)) |
 | `DJANGO_ALLOWED_HOSTS` | yes | the public host(s) **and** the probes' host |
-| `DJANGO_CSRF_TRUSTED_ORIGINS` | yes | `https://crm.example.com` |
+| `DJANGO_CSRF_TRUSTED_ORIGINS` | yes | `https://crm.example.com`; production refuses `http://` origins and wildcards (`https://*.example.com`) |
 | `APP_BASE_URL` | **yes** | the public web URL for emailed links, `https://crm.example.com`; startup fails if unset or not `https://` |
 | `DJANGO_SECURE_COOKIES`, `DJANGO_SECURE_SSL_REDIRECT` | no | `true`; turning either off needs `DJANGO_ALLOW_INSECURE_LOCAL_HTTP` |
-| `DJANGO_HSTS_SECONDS`, `DJANGO_HSTS_INCLUDE_SUBDOMAINS` | no | one year, `false` (the edge proxy also sends HSTS, [below](#reverse-proxy)) |
+| `DJANGO_HSTS_SECONDS`, `DJANGO_HSTS_INCLUDE_SUBDOMAINS` | no | one year (production refuses less than a day), `false` (the edge proxy also sends HSTS, [below](#reverse-proxy)) |
 | `DJANGO_ALLOW_INSECURE_LOCAL_HTTP` | no | **never in a real deployment**: the local development stack's opt-in for plain HTTP, Redis without a password and the like; refused when any allowed host is a public name |
 | `TRUSTED_PROXY_COUNT` | **yes** | proxies appending `X-Forwarded-For` (1 behind [the reference proxy](#reverse-proxy)); startup fails if unset |
-| `FORWARDED_ALLOW_IPS` | yes | gunicorn's trusted proxy addresses |
+| `TRUSTED_PROXY_ADDRESSES` | **yes** when the count is above 0 | the proxies' addresses or CIDR ranges, comma-separated, IPv4 or IPv6 (`10.252.17.10`, `10.0.0.0/24,fd00:1::/64`): `X-Forwarded-For` is believed only from these peers. Startup fails without it (count above 0), on an entry that isn't an address or range, and on `0.0.0.0/0` / `::/0` |
+| `FORWARDED_ALLOW_IPS` | yes | gunicorn's trusted proxy addresses: the same as `TRUSTED_PROXY_ADDRESSES` (never `*` in production) |
 | `TRUST_INCOMING_REQUEST_ID` | no | `false`; `true` only when the edge proxy sets or overwrites `X-Request-ID` |
 | `PORT`, `WEB_CONCURRENCY`, `GUNICORN_TIMEOUT_S` | no | 8000; 2 × CPUs + 1 (at most 8); 30 s |
 | `SESSION_COOKIE_AGE_S`, `SESSION_IDLE_TIMEOUT_S` | no | 12 h absolute, 2 h idle |
@@ -335,7 +360,7 @@ value on the server alone made the API and the screens disagree (whole-software 
 | `OUTBOX_DONE_RETENTION_DAYS` | no | 7: finished background work kept for investigation, then purged hourly |
 | `EMAIL_URL` | **yes** | `smtp+tls://user:pass@smtp.example.com:587` (STARTTLS; `smtps://` means the same) or `smtp+ssl://...:465` (implicit TLS); startup fails if unset, a console, file, in-memory or dummy backend (they would put one-time account links in logs or on disk, or drop them), or plain `smtp://` to a remote relay |
 | `EMAIL_TLS_CA_FILE` | no | a private CA (PEM) for the relay's certificate; otherwise the system store. Certificates and host names are always verified, TLS 1.2+ |
-| `DEFAULT_FROM_EMAIL` | **yes** | the sender, on a domain with SPF, DKIM and DMARC ([Email](#email)) |
+| `DEFAULT_FROM_EMAIL` | **yes** | the sender, on a domain with SPF, DKIM and DMARC ([Email](#email)); production refuses to start without it, or with a reserved domain (`.local`, `.localhost`, `.internal`, `.invalid`, `.test`, `.example`) |
 | `EMAIL_TIMEOUT_S` | no | 10 |
 
 ### Attachments
@@ -361,7 +386,8 @@ PostgreSQL: a database backup is not a backup of the files ([below](#attachments
 | `ATTACHMENT_MAX_BYTES` | no | 10 MB per file; the proxy's body limit on the upload route must be a little above it ([below](#reverse-proxy)) |
 | `ATTACHMENT_MAX_PER_NOTE` | no | 10 |
 | `ATTACHMENT_ALLOWED_EXTENSIONS` | no | `pdf,png,jpg,jpeg,webp,docx,xlsx,csv,txt`; only from the catalog the server can recognise by content (adds: `gif`, `pptx`); anything else fails startup |
-| `ATTACHMENT_SCANNER` | **recommended** | empty (no scanning: files are "not scanned" and downloadable) or `clamd://host:3310` (a ClamAV daemon: files stay "being checked" until clean; infected ones are blocked and deleted). clamd has no TLS: its host must be loopback or listed in `BACKEND_TLS_PRIVATE_HOSTS` (a sidecar or a container on the private network); startup fails otherwise |
+| `ATTACHMENT_SCANNER` | **yes** (or the waiver) | `clamd://host:3310`; production refuses to start without it unless `ATTACHMENT_SCANNER_WAIVED=true` states that the organisation accepts unscanned attachments (R94: files are then "not scanned" and downloadable). With `clamd://host:3310` (a ClamAV daemon: files stay "being checked" until clean; infected ones are blocked and deleted). clamd has no TLS: its host must be loopback or listed in `BACKEND_TLS_PRIVATE_HOSTS` (a sidecar or a container on the private network); startup fails otherwise |
+| `ATTACHMENT_SCANNER_WAIVED` | no | `false`; `true` only when the organisation accepts unscanned attachments (R94) and runs without `ATTACHMENT_SCANNER`; any value other than `true` or `false` is refused at startup |
 
 **Rate limits** (per user, or per client address for anonymous and sign-in requests)
 
@@ -376,6 +402,14 @@ PostgreSQL: a database backup is not a backup of the files ([below](#attachments
 
 The format is `<count>/<period>` with a period of `s`, `min`, `h` or `day`; production
 refuses anything else at startup (DRF would otherwise fail on the first request).
+
+"Client address" is the trusted-proxy-aware one (`TRUSTED_PROXY_COUNT`: the entry that many
+places from the right of `X-Forwarded-For`, never one the client wrote), and an IPv6 client
+counts as its /64 (`arkray.core.throttling`, R127). The counts live in the Redis cache; while
+it is unavailable each API process counts in its own memory instead, at the same rates, so
+a Redis outage neither lifts the limits nor refuses everyone. During an outage a client can
+therefore reach the rate times the number of API processes its requests land on
+([operations.md](operations.md#rate-limits-while-redis-is-down)).
 
 **Observability**
 
@@ -494,16 +528,30 @@ statement timeout with `SET LOCAL`). Platform notes: [hosting-compatibility.md](
 - **Primary backup: point-in-time recovery** on the managed service (RPO: minutes).
   **Secondary: a logical dump** (`scripts/backup.sh`: `pg_dump` custom format, checked to
   read back, **encrypted** to the backup public key (`BACKUP_GPG_RECIPIENT_FILE`; the private
-  key offline, [runbooks.md](runbooks.md#backup-encryption-keys)), with a SHA-256 of the
-  encrypted file next to it; sessions left out; created owner-only, the password passed
-  through the environment rather than the command line), daily to a bucket in another
-  region, kept 30 days (`--prune`, honouring a `LEGAL_HOLD` file; [privacy.md](privacy.md#retention)).
+  key offline, [runbooks.md](runbooks.md#backup-encryption-keys)), **signed** by the backup
+  host's own OpenPGP signing key (`BACKUP_GPG_SIGNING_KEY_FILE`, a detached `.sig`: encryption
+  to a public key proves nothing about who wrote the file, and a checksum beside it is
+  replaced as easily, R128), with a SHA-256 of the encrypted file next to it; sessions left
+  out; created owner-only, the password passed through the environment rather than the
+  command line; **over verified TLS only**: a remote server needs `sslmode=verify-full` (the
+  default the script sets when the URL names none) and its CA in `sslrootcert` or
+  `PGSSLROOTCERT`, anything weaker is refused; the URL is read as libpq reads it, and several
+  hosts, a repeated `host` or `sslmode`, percent-encoded parameter names and service files
+  are refused outright; only a server whose every address is loopback or a Unix socket is
+  exempt), daily to a bucket in another region, kept 30
+  days (`--prune`, honouring a `LEGAL_HOLD` file; [privacy.md](privacy.md#retention)).
 - **The erasure ledger is not in the backups**, by design: after **any** restore (dump or
   point-in-time), the API stays closed until `manage.py replay_erasures --by <admin> --report
   <file>` (the owner's credentials) has re-applied every erasure made since
   ([privacy.md](privacy.md#restore-safe-erasure)); keep its report with the restore's record.
 - **Restore** (`scripts/restore.sh`): into an **empty** database only (it refuses one with
-  tables), as the owner; verifies the checksum, decrypts an encrypted dump with the keyring in
+  tables), as the owner, over verified TLS like the backup; first copies the dump, its
+  `.sha256` and its `.sig` into a private working directory (`RESTORE_WORK_DIR`, else
+  `TMPDIR`: room for the dump twice when encrypted) and from then on reads only those
+  copies, never the backup store (adversarial review P2-1); verifies the checksum and,
+  **for every dump whatever its name**, the signature (with the signing key's PUBLIC half,
+  `BACKUP_SIGNER_KEY_FILE`; an unsigned or wrongly signed dump, a plain `.dump` included, is
+  refused unless `RESTORE_UNVERIFIED=1`: adversarial review P1-1), decrypts an encrypted dump with the keyring in
   `BACKUP_GNUPGHOME` (into a private temporary directory removed afterwards), restores in
   parallel, gives the index
   builds more memory, then runs `VACUUM (ANALYZE)`, because a restored database has an empty
@@ -625,14 +673,33 @@ The kill switch is `AI_ENABLED=false` (it also stops queued questions).
 - **Capacity:** start with 2 api replicas × `WEB_CONCURRENCY` 4, 1 default/email worker, 1 ai
   worker, 1 beat. Scale api on p95 latency and CPU, and workers on oldest-pending age.
 
-## Images (Phase 9)
+## Images
 
 - Base images are pinned **by digest** in the Dockerfiles (the tag names the series). Move a
   digest deliberately (Dependabot or a reviewed edit) and rebuild; OS packages are upgraded
   at build time, so a rebuild also picks up security updates published since the base.
-  The Compose files' third-party images (PostgreSQL, Redis, Mailpit, nginx, alpine) are
-  pinned **by tag only** (a rehearsal stack; a re-pull can bring a newer build of the same
-  tag): a real deployment's manifests pin every image by digest, its own by commit SHA.
+- **Every third-party image in the Compose files and the CI service containers is pinned by
+  digest too** (R128): `name:tag@sha256:<digest>`, the digest of the multi-architecture
+  index (`docker buildx imagetools inspect name:tag`), the tag kept for people and update
+  tools. Pinned: `pgvector/pgvector:0.8.7-pg16-trixie` (the production-shaped stack and CI;
+  the development stack keeps `0.8.6-pg16`, bookworm, because its existing volume's
+  collations come from bookworm's glibc: move it after a `REINDEX`), `redis:7.4-alpine`,
+  `axllent/mailpit:v1.31`, `nginx:1.30-alpine`, `clamav/clamav:1.5`; the one-shot
+  certificate jobs use the PostgreSQL image's own `openssl` (no `alpine` with a run-time
+  `apk add` any more). Trivy (HIGH and CRITICAL, 2026-10-11): PostgreSQL trixie, Mailpit
+  and the web image none; Redis 2, nginx 3, ClamAV 1 (all fixed upstream in OS packages, so
+  a newer digest of the same tag clears them: move the pins on each release); the backend
+  image 57 with no fixed version (judged in the risk register). A real
+  deployment's manifests do the same, and pin its own images by commit SHA.
+  `tests/architecture/test_compose_hardening.py` fails on an image without a digest.
+- **Least privilege for every container, the data services included** (the production-shaped
+  stack, `infrastructure/compose.production.yml`): a read-only root filesystem with tmpfs
+  only where a process writes; `cap_drop: [ALL]` and no privilege escalation; PostgreSQL
+  (999), Redis (999:1000), Mailpit (nobody) and ClamAV (100:101) run as their own users from
+  the start, so they need no capability at all; only nginx (`CHOWN`, `SETGID`, `SETUID`: its
+  master switches to its worker user) and the one-shot TLS job (`CHOWN`: it hands each
+  server its key) add any back. Each long-running service has memory, CPU and process limits
+  and a health check. Verified by starting the whole stack with them.
 - The application code is owned by root and read-only to the runtime user (uid 10001); only
   Next.js's `.next/cache` is writable. Run every container with a **read-only root
   filesystem** (a tmpfs `/tmp`, and `/app/.next/cache` for the web image), **no Linux
@@ -661,7 +728,18 @@ Note attachments (product enhancement phase, [activities.md](activities.md#attac
   by the hourly housekeeping, 500 at a time; until clean they don't download): run a ClamAV
   daemon (`clamav/clamav`, kept updated by freshclam)
   reachable from the workers and set `ATTACHMENT_SCANNER=clamd://clamav:3310`; files then stay
-  "being checked" until clean, infected ones are blocked and deleted. Watch
+  "being checked" until clean, infected ones are blocked and deleted. The reference stack
+  does exactly this (R94): a `clamav` service (pinned by digest, `infrastructure/clamav/`
+  for its configuration, about 1.2 GB of memory for the signatures and up to twice that
+  while freshclam's new set loads, so a 3 GB limit; a volume for the signatures) on an
+  **internal network shared with the scanning worker alone** (queue `default`), freshclam
+  reaching the mirrors over a network nothing else joins, `BACKEND_TLS_PRIVATE_HOSTS=clamav`
+  (clamd has no TLS). Keep `ATTACHMENT_MAX_BYTES <= StreamMaxLength <= MaxFileSize`
+  `<= MaxScanSize` (10 MB, 16 MB, 128 MB, 128 MB: a document's unpacked members count
+  against MaxFileSize, and a 10 MB spreadsheet's XML can be several times larger) and
+  `AlertExceedsMax yes`, or larger files fail closed forever or a partly scanned archive
+  could pass. The container's health check also fails when the signatures are more than 3
+  days old ([operations.md](operations.md#clamav-signature-freshness)). Watch
   `arkray_outbox_events{queue="default"}` and the dead-event alert: a scanner outage keeps
   files pending and retries.
 - **Backup**: the database backup holds the files' metadata only. Back up the bucket with

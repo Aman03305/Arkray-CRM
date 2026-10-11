@@ -28,10 +28,11 @@ from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.request import Request
 from rest_framework.response import Response
-from rest_framework.throttling import BaseThrottle, ScopedRateThrottle, UserRateThrottle
+from rest_framework.throttling import BaseThrottle
 
 from arkray.core.api import ApiView, validated
 from arkray.core.errors import NotFoundError, PermissionDeniedError
+from arkray.core.throttling import ScopedRateThrottle, UserRateThrottle
 from arkray.identity.models import User
 from arkray.identity.permissions import requires
 from arkray.identity.policy import Capability

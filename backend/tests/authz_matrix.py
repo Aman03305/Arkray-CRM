@@ -49,6 +49,16 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     "api/v1/auth/password-reset/confirm": _rule("public", "POST"),
     "api/v1/auth/invitations/verify": _rule("public", "POST"),
     "api/v1/auth/invitations/accept": _rule("public", "POST"),
+    # --- two-step verification (ADR-0033): the second sign-in step is public (it needs the
+    # pending challenge of a right password); the rest act on one's own account, refused in
+    # a support session (identity.permissions). ----------------------------------------------
+    "api/v1/auth/login/mfa": _rule("public", "POST"),
+    "api/v1/auth/mfa": _rule("authenticated", "GET"),
+    "api/v1/auth/mfa/setup": _rule("authenticated", "POST"),
+    "api/v1/auth/mfa/confirm": _rule("authenticated", "POST"),
+    "api/v1/auth/mfa/recovery-codes": _rule("authenticated", "POST"),
+    "api/v1/auth/mfa/disable": _rule("authenticated", "POST"),
+    "api/v1/auth/mfa/verify": _rule("authenticated", "POST"),
     # --- user administration (Phase 1). Since R100 the services also refuse another
     # administrator's email, password and role (tests/security/test_admin_takeover.py). ----
     "api/v1/admin/users": _rule(USERS_MANAGE, "GET", "POST"),
@@ -60,6 +70,8 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     # --- product enhancement phase: admin-set passwords, security events, support sessions
     # (refused during a support session where marked; identity.permissions) ----------------
     "api/v1/admin/users/<uuid:user_id>/set-password": _rule(USERS_MANAGE, "POST"),
+    # An ordinary user's second factor; never an administrator's (ADR-0033).
+    "api/v1/admin/users/<uuid:user_id>/mfa/reset": _rule(USERS_MANAGE, "POST"),
     "api/v1/admin/security-events": _rule("capability:audit.view", "GET"),
     "api/v1/admin/support-sessions": _rule("capability:support.access", "POST"),
     "api/v1/admin/support-sessions/current": _rule("capability:support.access", "DELETE"),

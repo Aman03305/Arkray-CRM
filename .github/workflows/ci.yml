@@ -44,7 +44,7 @@ jobs:
     timeout-minutes: 40
     services:
       postgres:
-        image: pgvector/pgvector:0.8.6-pg16
+        image: pgvector/pgvector:0.8.7-pg16-trixie@sha256:40d828eda66737aaacb934387a337babf1455ebd56e9bdd13fc08e211257c972
         env:
           POSTGRES_DB: arkray
           POSTGRES_USER: arkray
@@ -153,10 +153,13 @@ jobs:
             -e DATABASE_URL=postgres://arkray_app:x@127.0.0.1:5432/arkray
             -e CELERY_BROKER_URL=redis://:x@127.0.0.1:6379/0
             -e REDIS_CACHE_URL=redis://:x@127.0.0.1:6379/1
-            -e TRUSTED_PROXY_COUNT=1 -e APP_BASE_URL=https://crm.example.com
+            -e TRUSTED_PROXY_COUNT=1 -e TRUSTED_PROXY_ADDRESSES=10.0.0.10
+            -e APP_BASE_URL=https://crm.example.com
             -e EMAIL_URL=smtp+tls://user:x@smtp.example.com:587
             -e ERASURE_LEDGER_URL=file:///tmp/erasure-ledger
             -e ERASURE_LEDGER_KEY="ci-image-smoke-ledger-$(openssl rand -hex 32)"
+            -e DEFAULT_FROM_EMAIL=no-reply@crm.example.com
+            -e ATTACHMENT_SCANNER_WAIVED=true
           )
           hardened=(--read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true)
           docker run --rm "${prod_env[@]}" "${hardened[@]}" arkray-backend:ci python manage.py check --deploy

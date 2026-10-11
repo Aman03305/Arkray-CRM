@@ -26,6 +26,7 @@ daily reconciliation flags the row, and `reconcile_attachments --repair` marks i
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -528,9 +529,11 @@ def forget_purged(*, actor_id: UUID | None, dry_run: bool = True) -> int:
 
 
 def scan(attachment_id: UUID) -> str | None:
-    """Scan a pending file (the outbox job). Clean files become downloadable; infected ones
-    are blocked and their object removed. ScannerUnavailable / StorageUnavailable propagate,
-    so the job retries with backoff and finally goes dead (an alert)."""
+    """Scan a pending file (the outbox job, on a worker). Clean files become downloadable;
+    infected ones are blocked and their object removed. ScannerUnavailable /
+    StorageUnavailable propagate, so the job retries with backoff and finally goes dead (an
+    alert): the file stays "being checked" (never downloadable) meanwhile. Logged and
+    audited by id, outcome and reason only: never the file's name or content."""
     attachment = Attachment.objects.filter(
         pk=attachment_id,
         scan_status=ScanStatus.PENDING,
@@ -546,20 +549,61 @@ def scan(attachment_id: UUID) -> str | None:
         # downloadable) and reconciliation reports it missing.
         _object_missing(attachment, "scan")
         return None
+    started = time.monotonic()
     try:
-        clean = storage.scan(file)
+        found = storage.scan(file, expected_sha256=attachment.sha256)
+    except storage.ScannerUnavailable as exc:
+        logger.warning(
+            "attachment_scan_failed",
+            extra={
+                "attachment_id": str(attachment.pk),
+                "reason": exc.reason,
+                "duration_ms": round((time.monotonic() - started) * 1000),
+                # bytes in storage that aren't the uploaded file: worth a security review
+                **({"security": True} if exc.reason == "integrity" else {}),
+            },
+        )
+        raise
     finally:
         file.close()
-    verdict = ScanStatus.CLEAN if clean else ScanStatus.REJECTED
+    verdict = ScanStatus.CLEAN if found.clean else ScanStatus.REJECTED
     with transaction.atomic():
         updated = Attachment.objects.filter(
             pk=attachment.pk, scan_status=ScanStatus.PENDING
         ).update(scan_status=verdict)
         if updated and verdict == ScanStatus.REJECTED:
             note = Activity.objects.only("id", "owner_id").get(pk=attachment.note_id)
-            _audit(AUDIT_REJECTED, None, attachment, note, extension=attachment.extension)
+            _audit(
+                AUDIT_REJECTED,
+                None,
+                attachment,
+                note,
+                extension=attachment.extension,
+                detected=found.signature,  # "signature" is a redacted key name
+            )
             outbox.enqueue(TOPIC_PURGE, {"attachment_id": str(attachment.pk)})
-            logger.warning("attachment_malware_blocked", extra={"extension": attachment.extension})
+    took = round((time.monotonic() - started) * 1000)
+    if verdict == ScanStatus.REJECTED:
+        logger.warning(
+            "attachment_malware_blocked",
+            extra={
+                "attachment_id": str(attachment.pk),
+                "outcome": verdict.value,
+                "extension": attachment.extension,
+                "duration_ms": took,
+                "security": True,
+            },
+        )
+    else:
+        logger.info(
+            "attachment_scanned",
+            extra={
+                "attachment_id": str(attachment.pk),
+                "outcome": verdict.value,
+                "extension": attachment.extension,
+                "duration_ms": took,
+            },
+        )
     return verdict.value
 
 

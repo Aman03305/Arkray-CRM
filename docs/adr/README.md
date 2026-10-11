@@ -38,6 +38,7 @@ and update the old one's status line.
 | [0030](0030-administrator-accounts-change-only-by-their-owner.md) | An administrator's email, password and role are changed only by that administrator (closes the admin-to-admin takeover); deactivation stays the off-boarding path |
 | [0031](0031-opportunity-creation-requires-an-idempotency-key.md) | Opportunity creation requires an `Idempotency-Key`; concurrent duplicates wait on an advisory lock and replay the first result |
 | [0032](0032-privacy-remediation.md) | Privacy remediation: verified backend TLS, logs by allowlist, AI payload masking, expiring audit details, legal holds, export, correction (amends 0028), staff pseudonymisation, restore-safe erasure ledger, attachment and custom-value purges, historical-deal masking, browser-session cookies |
+| [0033](0033-administrator-mfa-and-reactivation.md) | Two-step verification (TOTP) for every user, required for administrators in production, with step-up for sensitive administration; an administrator reactivated by another must reset their password |
 
 Template:
 

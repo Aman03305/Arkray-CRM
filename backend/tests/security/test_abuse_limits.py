@@ -12,7 +12,8 @@ What limits each path (docs/security.md "Excessive requests", docs/search.md#res
 - Sign-in: PostgreSQL-backed budgets per account and browser, and per address (identity.
   throttling); password-reset requests per address per hour (and emails per account, in
   the job). These hold when Redis is down.
-- Every DRF rate lives in the cache: with Redis down they don't apply (fail open).
+- Every DRF rate lives in the cache; with Redis down each process counts it in memory
+  instead (core.throttling, R127): bounded, never "no limit" and never "refuse all".
 
 Rates are lowered here so a test needs a handful of requests; the keys and the refusals are
 the production ones.
@@ -37,6 +38,7 @@ from rest_framework.throttling import (
     UserRateThrottle,
 )
 
+from arkray.core import throttling
 from arkray.core.redis import cache_breaker, fail_fast_pool_kwargs
 from tests.factories import (
     DEFAULT_PASSWORD,
@@ -219,19 +221,102 @@ def redis_down() -> Iterator[None]:
     cache_breaker.reset()
 
 
-@pytest.mark.usefixtures("redis_down")
-def test_with_redis_down_request_rates_fail_open(rates, user_a):
-    """The documented policy (docs/reliability.md): the CRM keeps answering without its
-    cache, so no DRF rate applies; sign-in budgets don't depend on Redis
-    (test_outages.py::test_brute_force_protection_does_not_switch_off)."""
-    rates(user="1/min", search="1/min")
-    client = signed_in(user_a)
-    lead = str(LeadFactory(owner=user_a).pk)
-    note = {"type": "note", "lead": lead, "description": "x"}
-    assert [client.get("/api/v1/workspaces/me/search?q=abc").status_code for _ in range(3)] == [
-        200
-    ] * 3
-    assert [
-        client.post("/api/v1/workspaces/me/activities", note, format="json").status_code
-        for _ in range(3)
-    ] == [201] * 3
+@pytest.fixture
+def local_counts() -> Iterator[None]:
+    throttling.local_buckets.clear()
+    yield
+    throttling.local_buckets.clear()
+
+
+@pytest.mark.usefixtures("redis_down", "local_counts")
+class TestRedisDownLimitsStayBounded:
+    """The CRM keeps answering without its cache (docs/reliability.md), and the request
+    rates still hold, counted per process (core.throttling). Sign-in budgets don't depend
+    on Redis at all (test_outages.py::test_brute_force_protection_does_not_switch_off)."""
+
+    def test_search(self, rates, user_a, user_b):
+        rates(search="2/min")
+        spammer, colleague = signed_in(user_a), signed_in(user_b)
+        url = "/api/v1/workspaces/me/search?q=abc"
+        assert [spammer.get(url).status_code for _ in range(2)] == [200, 200]
+        assert refused(spammer.get(url))
+        assert colleague.get(url).status_code == 200
+
+    def test_writes_and_every_other_request(self, rates, user_a, user_b):
+        rates(user="3/min")
+        spammer, colleague = signed_in(user_a), signed_in(user_b)
+        note = {"type": "note", "lead": str(LeadFactory(owner=user_a).pk), "description": "x"}
+        url = "/api/v1/workspaces/me/activities"
+        codes = [spammer.post(url, note, format="json").status_code for _ in range(3)]
+        assert codes == [201] * 3
+        assert refused(spammer.post(url, note, format="json"))
+        assert colleague.get("/api/v1/auth/me").status_code == 200
+
+    @pytest.mark.usefixtures("ai_on")
+    def test_asking_arkray(self, rates, user_a):
+        rates(ask="2/min")
+        url = "/api/v1/workspaces/me/ask"
+        with mock.patch("arkray.ai.tasks.answer_question.apply_async"):
+            client = signed_in(user_a)
+
+            def ask() -> Any:
+                return client.post(url, {"question": "pipeline value"}, format="json")
+
+            assert [ask().status_code for _ in range(2)] == [201, 201]
+            assert refused(ask())
+
+    def test_anonymous_requests_per_address(self, rates):
+        rates(anon="2/min")
+        url = "/api/v1/auth/csrf"
+
+        def get(address: str) -> Any:
+            return APIClient().get(url, REMOTE_ADDR=address)
+
+        assert [get(f"2001:db8:5:6::{n}").status_code for n in (1, 2)] == [204, 204]
+        assert refused(get("2001:db8:5:6::3"))  # the same /64
+        assert get("2001:db8:5:7::1").status_code == 204
+
+    def test_data_exports_are_capped_in_postgresql(self, settings, admin, user_a):
+        settings.EXPORT_MAX_PENDING_PER_ADMIN = 1
+        client = signed_in(admin)
+        lead = LeadFactory(owner=user_a)
+
+        def export() -> Any:
+            body = {
+                "subject_type": "lead",
+                "subject_id": str(lead.pk),
+                "reference": "DSAR-2026-17",
+                "identity_verified": True,
+            }
+            return client.post("/api/v1/admin/privacy/exports", body, format="json")
+
+        assert export().status_code == 202
+        assert refused(export())
+
+    def test_password_reset_requests_are_capped_in_postgresql(self, settings, user_a):
+        settings.PASSWORD_RESET_SOURCE_LIMIT_PER_HOUR = 2
+
+        def reset() -> Any:
+            return APIClient().post(
+                "/api/v1/auth/password-reset",
+                {"email": user_a.email},
+                format="json",
+                REMOTE_ADDR="203.0.113.5",
+            )
+
+        assert [reset().status_code for _ in range(2)] == [202, 202]
+        assert refused(reset())
+
+    def test_invitation_links_per_address(self, rates):
+        rates(auth="2/min", anon="100/min")
+
+        def verify() -> Any:
+            return APIClient().post(
+                "/api/v1/auth/invitations/verify",
+                {"token": "x" * 43},
+                format="json",
+                REMOTE_ADDR="203.0.113.9",
+            )
+
+        assert [verify().status_code for _ in range(2)] == [400, 400]
+        assert refused(verify())

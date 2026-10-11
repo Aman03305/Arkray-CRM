@@ -203,6 +203,41 @@ reconciliation re-indexes any source whose chunks drifted.
    `SELECT action, target_type, target_id, occurred_at FROM audit_event WHERE
    support_session_id = '<id>' ORDER BY occurred_at`.
 
+## Administrator deactivated
+
+*Alert: `ArkrayAdministratorDeactivated` (an administrator account was deactivated in the
+last hour; it stays raised for that hour).*
+
+1. Security events (Admin home, *Security activity*): who deactivated whom, when
+   (`user.deactivated` with role `admin`).
+2. Planned off-boarding: nothing to do. Otherwise call the deactivated administrator on a
+   known number. One administrator can deactivate the others (only the last active one is
+   protected): if it wasn't intended, treat it as a [Security incident](#security-incident).
+3. Reactivating them (Users page) doesn't bring the old password back: they get a reset link
+   at their own address and keep their second factor (ADR-0033, R126).
+
+## Lost second factor
+
+A user without their authenticator and without any recovery code.
+
+- **Ordinary user**: an administrator resets it (Users page, *Reset two-step verification*;
+  `POST /api/v1/admin/users/{id}/mfa/reset`, needs the administrator's own recent code). Their
+  sessions end; they sign in with their password and may set it up again.
+- **Administrator**: never another administrator (ADR-0030/0033). Confirm the person's
+  identity out of band (a call on a known number, their manager), then on a server:
+
+  ```sh
+  manage.py reset_mfa --email bina@example.com --by anita@example.com --reason "lost phone, ticket 1234"
+  ```
+
+  `--by` names the active administrator who asked for it (the sole administrator may name
+  themselves). Audited as `mfa.reset` (by `operator`, that administrator as the actor, the
+  reason kept as an expiring detail); the owner is emailed; their sessions end; they sign in with their password and must set up a new authenticator before
+  anything else.
+- **After a `DJANGO_SECRET_KEY` rotation**: run `manage.py mfa_reencrypt` before removing the
+  old key from `DJANGO_SECRET_KEY_FALLBACKS`; it exits non-zero if a secret is under no
+  configured key (put the old key back, or reset those accounts).
+
 ## File storage
 
 *Alert: `attachment_storage_failed` / `attachment_upload_failed` repeating; housekeeping
@@ -282,7 +317,7 @@ gone), or a reconciliation's `missing` count.*
 ## Attachment reconciliation
 
 *Alerts: `ArkrayAttachmentReconcileMismatch`, `ArkrayAttachmentReconcileFailed`,
-`ArkrayAttachmentReconcileNotRun` / `NeverRun`, `ArkrayAttachmentUploadStuck`.*
+`ArkrayAttachmentReconcileNotRun` / `NeverRun`, `ArkrayAttachmentUploadStuck`, `ArkrayAttachmentScanOverdue`.*
 
 `manage.py reconcile_attachments` compares every row of `activities_attachment` with the
 objects in storage: rows by keyset on the unique `storage_key` index, objects by listing
@@ -545,6 +580,18 @@ applied). Keep `drill.json` (ids and counts only). Last run: 2026-10-10, PASS.
   once with a new key. **Leaked private key**: rotate, and treat every backup still kept as
   exposed (an incident).
 - `BACKUP_ALLOW_UNENCRYPTED=1` exists for throwaway drills only.
+- **Signing key** (R128): the backup host also signs each encrypted dump (a detached
+  `.sig`), so a restore can tell a dump the backup host made from one placed in the bucket by
+  anyone else. Create it on the backup host's side:
+  `gpg --quick-generate-key "Arkray backup host <ops@example.com>" ed25519 sign never`; the
+  secret half stays on the backup host (`BACKUP_GPG_SIGNING_KEY_FILE`, owner-only), the
+  public half goes wherever restores happen (`BACKUP_SIGNER_KEY_FILE`). `restore.sh` checks
+  the signature in a throwaway keyring before decrypting and refuses an unsigned or altered
+  dump (`RESTORE_UNVERIFIED=1` only for a drill). Rotate it like the encryption key; a leaked
+  signing key is an incident (rotate, re-sign nothing: take new backups).
+- Both scripts refuse a remote database connection weaker than `sslmode=verify-full` (they
+  set it when the URL names no mode; loopback and Unix sockets are exempt): give
+  `sslrootcert` for a private CA.
 
 ## Legal holds
 
@@ -661,6 +708,14 @@ Record that it was done (who, when, the cut-off) outside the application.
 
 ## First administrator and locked-out users
 
-- First administrator: `manage.py createsuperuser`.
+- First administrator: `manage.py createsuperuser`. With `MFA_REQUIRED_FOR_ADMINS` on, they
+  set up two-step verification at their first sign-in (only Settings answers until then).
+- A user who lost their authenticator signs in with a recovery code, then turns two-step
+  verification off and on again in Settings (or replaces the codes). Every such change is
+  emailed to the account's own address: someone who reports a notice for a change they didn't
+  make is a [Security incident](#security-incident) (reset their password and second factor).
+- A setup that wasn't confirmed within 10 minutes, or after five wrong codes, is gone: start
+  it again in Settings. Without any code: see
+  [Lost second factor](#lost-second-factor).
 - A user locked out by failed sign-ins waits the lockout (at most 15 minutes) or resets
   their password; an administrator can reactivate a deactivated user on the Users page.

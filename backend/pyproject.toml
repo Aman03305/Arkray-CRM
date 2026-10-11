@@ -22,6 +22,7 @@ dependencies = [
     "numpy>=2.3,<3",
     "cryptography>=46",
     "django-storages[s3]>=1.14,<2",  # private S3-compatible storage for attachments
+    "segno>=1.6,<2",
 ]
 
 [dependency-groups]

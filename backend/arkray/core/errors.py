@@ -72,6 +72,23 @@ class SupportSessionActive(PermissionDeniedError):
     default_message = "Exit the support session to do this."
 
 
+class MfaEnrollmentRequired(PermissionDeniedError):
+    """An administrator without a confirmed second factor (when it is required): until they
+    set one up, only who-am-I, signing out, the password change and the two-step setup are
+    allowed (ADR-0033)."""
+
+    code = "mfa_enrollment_required"
+    default_message = "Set up two-step verification to continue."
+
+
+class MfaRequired(PermissionDeniedError):
+    """A sensitive operation (`requires_recent_mfa`) and no code verified in this session
+    within MFA_STEP_UP_TTL_S: verify one (POST /auth/mfa/verify) and repeat the request."""
+
+    code = "mfa_required"
+    default_message = "Enter a code from your authenticator app to continue."
+
+
 class ConflictError(DomainError):
     """Optimistic-concurrency or uniqueness conflict; the client should reload and retry."""
 

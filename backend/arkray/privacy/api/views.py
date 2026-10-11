@@ -44,6 +44,9 @@ class DataExportListView(ApiView):
 
     permission_classes = [requires(Capability.PRIVACY_MANAGE)]
     refused_in_support_session = True
+    # Requesting one needs a recent second-factor code (ADR-0033). The download, an ordinary
+    # link for the requester only, doesn't ask again.
+    requires_recent_mfa = frozenset({"POST"})
 
     @extend_schema(operation_id="privacy_exports_list", responses={200: s.DataExportListSerializer})
     def get(self, request: Request) -> Response:
@@ -109,6 +112,7 @@ class PseudonymiseUserView(ApiView):
 
     permission_classes = [requires(Capability.PRIVACY_MANAGE)]
     refused_in_support_session = True
+    requires_recent_mfa = True
 
     @extend_schema(
         operation_id="privacy_pseudonymise_user",

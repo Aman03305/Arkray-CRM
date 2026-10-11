@@ -1,0 +1,671 @@
+"""Two-step verification use cases (ADR-0033; the primitives are in identity.mfa).
+
+- **State**: a user has a second factor once their device is confirmed. Administrators must
+  have one when MFA_REQUIRED_FOR_ADMINS is on (`enrollment_required`): until then they reach
+  only the views marked `allowed_before_mfa_enrollment` (identity.permissions).
+- **Step-up**: the session records when a code was last verified (`SESSION_VERIFIED_AT`):
+  at the second step of a sign-in, at confirmation, at POST /auth/mfa/verify. Views marked
+  `requires_recent_mfa` need it within MFA_STEP_UP_TTL_S from a user with a device.
+- **Codes** are checked under the device's row lock; the accepted time step is stored there,
+  so the same code (or an older one) is refused afterwards, on any server. A recovery code
+  is used up by a conditional update (two requests can't both use it).
+- **Guessing is throttled** by the durable sign-in throttle (identity.throttling): every
+  wrong code at sign-in, at step-up, when replacing recovery codes or disabling counts as a
+  failed sign-in of the account from that browser.
+- **Changes end other sessions**: confirming, disabling, resetting a device and replacing
+  recovery codes increment `session_epoch`; the session making the change is kept, re-hashed.
+- **Setups expire**: a started setup must be confirmed within MFA_SETUP_TTL_S and with
+  fewer than MFA_SETUP_MAX_ATTEMPTS wrong codes (each also a failed sign-in in the durable
+  throttle); otherwise it is deleted and must start again. The hourly housekeeping deletes
+  the ones nobody finished.
+- **Audit** (never a secret, a code or a hash): mfa.enabled, mfa.disabled, mfa.reset,
+  mfa.recovery_codes_replaced, mfa.recovery_code_used. Each also emails the account's own
+  address (no code, no secret): an owner learns of a change they didn't make.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from uuid import UUID
+
+from cryptography.fernet import InvalidToken
+from django.conf import settings
+from django.contrib.auth import update_session_auth_hash
+from django.contrib.sessions.backends.base import SessionBase
+from django.db import transaction
+from django.http import HttpRequest
+from django.utils import timezone
+from django.utils.crypto import constant_time_compare
+
+from arkray.audit import services as audit
+from arkray.core import outbox
+from arkray.core.errors import (
+    BusinessRuleViolation,
+    DomainError,
+    NotFoundError,
+    PermissionDeniedError,
+)
+
+from . import emails, mfa, selectors, throttling
+from .models import MfaDevice, MfaRecoveryCode, User, normalize_email
+from .policy import Capability, roles_with
+from .services import (
+    SESSION_ENDED,
+    _acting_manager,
+    _lock_user,
+    serialise_user_administration,
+)
+from .sessions import session_matches
+
+SESSION_VERIFIED_AT = "_arkray_mfa_at"  # epoch seconds of the last verified code
+SESSION_CHALLENGE = "_arkray_mfa_challenge"  # the pending second step of a sign-in
+_CLOCK_SKEW_S = 60
+_CACHE = "_arkray_mfa_confirmed"  # memo on a User instance, for one request
+
+AUDIT_ENABLED = "mfa.enabled"
+AUDIT_DISABLED = "mfa.disabled"
+AUDIT_RESET = "mfa.reset"
+AUDIT_CODES_REPLACED = "mfa.recovery_codes_replaced"
+AUDIT_CODE_USED = "mfa.recovery_code_used"
+
+TOPIC_MFA_CHANGED = "identity.notify_mfa_changed"
+# What the owner is told about (identity.emails.send_mfa_notice).
+NOTICES = ("enabled", "disabled", "reset", "recovery_codes_replaced", "recovery_code_used")
+
+FACTOR_TOTP = "totp"
+FACTOR_RECOVERY_CODE = "recovery_code"
+
+REQUIRED_FOR_ROLE = (
+    "Two-step verification is required for administrators, so it can't be turned off."
+)
+ADMINISTRATOR_MFA_REFUSED = (
+    "Administrators manage their own two-step verification. If one is locked out, an operator"
+    " resets it on the server."
+)
+
+
+class InvalidMfaCodeError(DomainError):
+    code = "invalid_mfa_code"
+    http_status = 400
+    default_message = "That code didn't work. Check your authenticator app and try again."
+
+
+class MfaChallengeExpiredError(DomainError):
+    code = "mfa_challenge_expired"
+    http_status = 400
+    default_message = "Your sign-in timed out. Enter your email and password again."
+
+
+class MfaSetupRequiredError(DomainError):
+    code = "mfa_setup_required"
+    http_status = 400
+    default_message = "Start setting up two-step verification first."
+
+
+class MfaAlreadyEnabledError(DomainError):
+    code = "mfa_already_enabled"
+    http_status = 409
+    default_message = "Two-step verification is already on for your account."
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _moment() -> datetime:
+    return datetime.fromtimestamp(_now(), tz=UTC)
+
+
+# --- state ------------------------------------------------------------------------------------
+def has_confirmed_device(user: Any) -> bool:
+    """Whether `user` has a confirmed second factor (memoised on the instance)."""
+    if not isinstance(user, User) or user.pk is None:
+        return False
+    cached = user.__dict__.get(_CACHE)
+    if cached is None:
+        cached = MfaDevice.objects.filter(user_id=user.pk, confirmed_at__isnull=False).exists()
+        user.__dict__[_CACHE] = cached
+    return bool(cached)
+
+
+def _forget(user: Any) -> None:
+    if isinstance(user, User):
+        user.__dict__.pop(_CACHE, None)
+
+
+def required_for(user: Any) -> bool:
+    """Whether the account's role must have a second factor (ADR-0033: administrators)."""
+    return bool(settings.MFA_REQUIRED_FOR_ADMINS) and (
+        getattr(user, "role", None) in roles_with(Capability.USERS_MANAGE)
+    )
+
+
+def enrollment_required(user: Any) -> bool:
+    return required_for(user) and not has_confirmed_device(user)
+
+
+def mark_verified(session: SessionBase) -> None:
+    session[SESSION_VERIFIED_AT] = _now()
+
+
+def recently_verified(request: Any, user: Any) -> bool:
+    """A code verified in this session within MFA_STEP_UP_TTL_S, or no device to ask for."""
+    at = request.session.get(SESSION_VERIFIED_AT)
+    if isinstance(at, int | float) and not isinstance(at, bool):
+        age = _now() - at
+        if -_CLOCK_SKEW_S <= age < settings.MFA_STEP_UP_TTL_S:
+            return True
+    return not has_confirmed_device(user)
+
+
+@dataclass(frozen=True, slots=True)
+class Status:
+    enabled: bool
+    confirmed_at: Any
+    recovery_codes_remaining: int
+    required: bool
+    can_disable: bool
+
+
+def status(user: User) -> Status:
+    device = MfaDevice.objects.filter(user_id=user.pk, confirmed_at__isnull=False).first()
+    remaining = (
+        MfaRecoveryCode.objects.filter(user_id=user.pk, used_at__isnull=True).count()
+        if device is not None
+        else 0
+    )
+    required = required_for(user)
+    return Status(
+        enabled=device is not None,
+        confirmed_at=device.confirmed_at if device else None,
+        recovery_codes_remaining=remaining,
+        required=required,
+        can_disable=device is not None and not required,
+    )
+
+
+# --- verifying a factor -------------------------------------------------------------------------
+def _verify_totp(user_id: UUID, code: str) -> bool:
+    """Check a code against the confirmed device under its row lock; accept each time step
+    once (replay prevention) and re-encrypt the secret under the current key."""
+    if mfa.normalise_code(code) is None:
+        return False
+    with transaction.atomic():
+        device = (
+            MfaDevice.objects.select_for_update()
+            .filter(user_id=user_id, confirmed_at__isnull=False)
+            .first()
+        )
+        if device is None:
+            return False
+        try:
+            secret = mfa.decrypt(device.secret)
+        except InvalidToken:
+            return False  # encrypted under a key no longer configured: an operator resets it
+        step = mfa.matching_step(secret, code, at=_now(), after_step=device.last_used_step)
+        if step is None:
+            return False
+        device.last_used_step = step
+        device.secret = mfa.rotate(device.secret)
+        device.save(update_fields=["last_used_step", "secret", "updated_at"])
+    return True
+
+
+def _use_recovery_code(user: User, raw: str) -> bool:
+    """Use up a recovery code (audited with how many remain)."""
+    if mfa.normalise_recovery_code(raw) is None:
+        return False
+    with transaction.atomic():
+        # The device's lock serialises this with a replacement of the codes.
+        if not (
+            MfaDevice.objects.select_for_update()
+            .filter(user_id=user.pk, confirmed_at__isnull=False)
+            .exists()
+        ):
+            return False
+        unused = dict(
+            MfaRecoveryCode.objects.filter(user_id=user.pk, used_at__isnull=True).values_list(
+                "code_hash", "pk"
+            )
+        )
+        found = mfa.matching_hash(raw, list(unused))
+        if found is None:
+            return False
+        used = MfaRecoveryCode.objects.filter(pk=unused[found], used_at__isnull=True).update(
+            used_at=timezone.now()
+        )
+        if not used:
+            return False
+        audit.record(
+            AUDIT_CODE_USED,
+            actor_id=user.pk,
+            target_type="user",
+            target_id=user.pk,
+            subject_user_id=user.pk,
+            metadata={"remaining": len(unused) - 1},
+        )
+        _notify(user, "recovery_code_used")
+    return True
+
+
+def verify_factor(
+    user: User, *, code: str | None = None, recovery_code: str | None = None
+) -> str | None:
+    """FACTOR_TOTP or FACTOR_RECOVERY_CODE when it is right (and now used), else None."""
+    if code is not None:
+        return FACTOR_TOTP if _verify_totp(user.pk, code) else None
+    if recovery_code is not None:
+        return FACTOR_RECOVERY_CODE if _use_recovery_code(user, recovery_code) else None
+    return None
+
+
+def _either(code: str) -> dict[str, str]:
+    """A typed `code` as what it is: an authenticator code or a recovery code."""
+    return {"code": code} if mfa.normalise_code(code) is not None else {"recovery_code": code}
+
+
+def _throttled_verify(
+    request: HttpRequest, user: User, *, code: str | None = None, recovery_code: str | None = None
+) -> str:
+    """Verify a factor of the signed-in user, throttled exactly like a sign-in: a hijacked
+    session can't be used to guess the second factor."""
+    throttle = throttling.for_request(request, user.email)
+    denied = throttle.reserve()
+    if denied is not None:
+        raise throttling.rate_limited(denied)
+    factor = verify_factor(user, code=code, recovery_code=recovery_code)
+    if factor is None:
+        throttle.failed()
+        raise InvalidMfaCodeError()
+    throttle.succeeded()
+    return factor
+
+
+def _locked_signed_in(request: HttpRequest, user_id: UUID) -> User:
+    user = User.objects.select_for_update().filter(pk=user_id).first()
+    if user is None or not user.is_active:
+        raise PermissionDeniedError()
+    if not session_matches(request, user):
+        raise PermissionDeniedError(SESSION_ENDED)
+    return user
+
+
+def _end_other_sessions(request: HttpRequest, user: User) -> None:
+    """Every other session of the user ends; this one is kept (re-hashed, new key)."""
+    user.session_epoch += 1
+    user.save(update_fields=["session_epoch", "updated_at"])
+    update_session_auth_hash(request, user)
+
+
+def _issue_recovery_codes(user: User) -> list[str]:
+    MfaRecoveryCode.objects.filter(user_id=user.pk).delete()
+    codes = mfa.generate_recovery_codes()
+    now = timezone.now()
+    MfaRecoveryCode.objects.bulk_create(
+        [
+            MfaRecoveryCode(user_id=user.pk, code_hash=digest, created_at=now)
+            for digest in mfa.hash_recovery_codes(codes)
+        ]
+    )
+    return codes
+
+
+def _notify(user: User, change: str) -> None:
+    """Email the account's own address about a change to its second factor (outbox, in the
+    caller's transaction: no change without its notice, no notice without its change)."""
+    outbox.enqueue(TOPIC_MFA_CHANGED, {"user_id": str(user.pk), "change": change})
+
+
+def notify_change(user_id: UUID, change: str) -> None:
+    """Outbox job (queue "email"). Skipped for an unknown change or a deactivated account."""
+    user = User.objects.filter(pk=user_id, is_active=True).only("email", "first_name").first()
+    if user is None or change not in NOTICES:
+        return
+    emails.send_mfa_notice(to=user.email, first_name=user.first_name, change=change)
+
+
+def _audit(action: str, actor_id: UUID | None, user: User, **metadata: object) -> None:
+    audit.record(
+        action,
+        actor_id=actor_id,
+        target_type="user",
+        target_id=user.pk,
+        subject_user_id=user.pk,
+        metadata=metadata or None,
+    )
+
+
+# --- enrolment ------------------------------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class Setup:
+    secret: str
+    otpauth_uri: str
+    qr: mfa.QrMatrix
+
+
+def begin_setup(user: User) -> Setup:
+    """A new unconfirmed device (replacing an earlier unconfirmed one). The caller checked
+    the current password. The secret is returned here, once, and never again."""
+    with transaction.atomic():
+        locked = User.objects.select_for_update().get(pk=user.pk)
+        device = MfaDevice.objects.select_for_update().filter(user_id=locked.pk).first()
+        if device is not None and device.confirmed_at is not None:
+            raise MfaAlreadyEnabledError()
+        secret = mfa.generate_secret()
+        deadline = _moment() + timedelta(seconds=settings.MFA_SETUP_TTL_S)
+        if device is None:
+            MfaDevice.objects.create(
+                user_id=locked.pk, secret=mfa.encrypt(secret), pending_until=deadline
+            )
+        else:
+            device.secret, device.last_used_step = mfa.encrypt(secret), None
+            device.pending_until, device.setup_attempts = deadline, 0
+            device.save(
+                update_fields=[
+                    "secret",
+                    "last_used_step",
+                    "pending_until",
+                    "setup_attempts",
+                    "updated_at",
+                ]
+            )
+    uri = mfa.otpauth_uri(secret, locked.email)
+    return Setup(secret=secret, otpauth_uri=uri, qr=mfa.qr_matrix(uri))
+
+
+def confirm(request: HttpRequest, user_id: UUID, code: str) -> list[str]:
+    """Activate the pending device with a code from it: ten recovery codes (shown once),
+    this session counts as verified now, every other session ends.
+
+    Throttled like a sign-in (a session taken before enrolment can't guess its way in), and
+    the setup itself expires: MFA_SETUP_MAX_ATTEMPTS wrong codes or MFA_SETUP_TTL_S after
+    it started, it is deleted (`mfa_setup_required`: start again, with the password)."""
+    owner = User.objects.filter(pk=user_id).only("email").first()
+    if owner is None:
+        raise PermissionDeniedError()
+    throttle = throttling.for_request(request, owner.email)
+    denied = throttle.reserve()
+    if denied is not None:
+        raise throttling.rate_limited(denied)
+    try:
+        codes = _confirm_locked(request, user_id, code)
+    except InvalidMfaCodeError:
+        throttle.failed()
+        raise
+    except DomainError:
+        throttle.release()  # nothing was guessed
+        raise
+    throttle.succeeded()
+    _forget(request.user)
+    return codes
+
+
+def _confirm_locked(request: HttpRequest, user_id: UUID, code: str) -> list[str]:
+    """The confirmation under the user's and the device's locks. A wrong code's count (or the
+    setup's deletion) commits before the error is raised."""
+    outcome = "confirmed"
+    codes: list[str] = []
+    with transaction.atomic():
+        user = _locked_signed_in(request, user_id)
+        device = MfaDevice.objects.select_for_update().filter(user_id=user.pk).first()
+        if device is None:
+            raise MfaSetupRequiredError()
+        if device.confirmed_at is not None:
+            raise MfaAlreadyEnabledError()
+        now = _moment()
+        try:
+            secret: str | None = mfa.decrypt(device.secret)
+        except InvalidToken:
+            secret = None
+        step = None if secret is None else mfa.matching_step(secret, code, at=_now())
+        if secret is None or device.pending_until is None or device.pending_until <= now:
+            device.delete()  # expired (or under a retired key): start again
+            outcome = "expired"
+        elif step is None:
+            device.setup_attempts += 1
+            if device.setup_attempts >= settings.MFA_SETUP_MAX_ATTEMPTS:
+                device.delete()
+            else:
+                device.save(update_fields=["setup_attempts", "updated_at"])
+            outcome = "wrong"
+        else:
+            device.confirmed_at, device.pending_until = timezone.now(), None
+            device.last_used_step = step
+            device.secret = mfa.rotate(device.secret)
+            device.save(
+                update_fields=[
+                    "confirmed_at",
+                    "pending_until",
+                    "last_used_step",
+                    "secret",
+                    "updated_at",
+                ]
+            )
+            codes = _issue_recovery_codes(user)
+            _end_other_sessions(request, user)
+            _audit(AUDIT_ENABLED, user.pk, user)
+            _notify(user, "enabled")
+            mark_verified(request.session)
+    if outcome == "expired":
+        raise MfaSetupRequiredError()
+    if outcome == "wrong":
+        raise InvalidMfaCodeError()
+    return codes
+
+
+def purge_expired_setups(now: datetime) -> int:
+    """Delete setups nobody confirmed in time (hourly, identity.housekeeping)."""
+    deleted, _ = MfaDevice.objects.filter(
+        confirmed_at__isnull=True, pending_until__lte=now
+    ).delete()
+    return deleted
+
+
+def replace_recovery_codes(request: HttpRequest, user: User, code: str) -> list[str]:
+    """New recovery codes for a code from the authenticator (or an unused recovery code);
+    the old ones stop working and every other session ends."""
+    if not has_confirmed_device(user):
+        raise MfaSetupRequiredError()
+    _throttled_verify(request, user, **_either(code))
+    with transaction.atomic():
+        locked = _locked_signed_in(request, user.pk)
+        if not (
+            MfaDevice.objects.select_for_update()
+            .filter(user_id=locked.pk, confirmed_at__isnull=False)
+            .exists()
+        ):
+            raise MfaSetupRequiredError()
+        codes = _issue_recovery_codes(locked)
+        _end_other_sessions(request, locked)
+        _audit(AUDIT_CODES_REPLACED, locked.pk, locked)
+        _notify(locked, "recovery_codes_replaced")
+        mark_verified(request.session)
+    return codes
+
+
+def disable(request: HttpRequest, user: User, code: str) -> None:
+    """Turn the second factor off (the caller checked the current password): refused where
+    the role requires it. Every other session ends."""
+    if required_for(user):
+        raise BusinessRuleViolation(REQUIRED_FOR_ROLE)
+    if not has_confirmed_device(user):
+        raise MfaSetupRequiredError()
+    _throttled_verify(request, user, **_either(code))
+    with transaction.atomic():
+        locked = _locked_signed_in(request, user.pk)
+        if required_for(locked):  # promoted meanwhile
+            raise BusinessRuleViolation(REQUIRED_FOR_ROLE)
+        _remove_factor(locked)
+        _end_other_sessions(request, locked)
+        _audit(AUDIT_DISABLED, locked.pk, locked)
+        _notify(locked, "disabled")
+        request.session.pop(SESSION_VERIFIED_AT, None)
+    _forget(request.user)
+
+
+def step_up(
+    request: HttpRequest, user: User, *, code: str | None = None, recovery_code: str | None = None
+) -> None:
+    """Renew this session's verification (POST /auth/mfa/verify)."""
+    if not has_confirmed_device(user):
+        raise MfaSetupRequiredError()
+    _throttled_verify(request, user, code=code, recovery_code=recovery_code)
+    mark_verified(request.session)
+
+
+def _remove_factor(user: User) -> bool:
+    deleted, _ = MfaDevice.objects.filter(user_id=user.pk).delete()
+    MfaRecoveryCode.objects.filter(user_id=user.pk).delete()
+    return deleted > 0
+
+
+# --- resets ------------------------------------------------------------------------------------
+def reset_for_user(*, actor_id: UUID, user_id: UUID) -> User:
+    """An administrator removes an ordinary user's second factor (lost phone and codes): the
+    user signs in with their password and may set up a new one; their sessions end. Never an
+    administrator's, their own included (ADR-0030/0033): an operator runs `reset_mfa`."""
+    with transaction.atomic():
+        serialise_user_administration()
+        actor = _acting_manager(actor_id)
+        user = _lock_user(user_id)
+        if user.role in roles_with(Capability.USERS_MANAGE):
+            raise BusinessRuleViolation(ADMINISTRATOR_MFA_REFUSED)
+        if _remove_factor(user):
+            user.session_epoch += 1
+            user.version += 1
+            user.save(update_fields=["session_epoch", "version", "updated_at"])
+            _audit(AUDIT_RESET, actor.pk, user, by="administrator")
+            _notify(user, "reset")
+    return selectors.admin_user_detail(user.pk)
+
+
+def operator_reset(email: str, reason: str, *, operator_id: UUID) -> bool:
+    """`manage.py reset_mfa`: remove anyone's second factor (administrators included), with
+    shell and database access, on behalf of `operator_id` (an active administrator, re-read
+    under the lock; the sole administrator may reset their own). Audited with them as the
+    actor and the reason as an expiring detail. False when there was nothing to remove."""
+    with transaction.atomic():
+        serialise_user_administration()
+        operator = _acting_manager(operator_id)
+        user = User.objects.select_for_update().filter(email=normalize_email(email)).first()
+        if user is None:
+            raise NotFoundError("No account has this email address.")
+        if not _remove_factor(user):
+            return False
+        user.session_epoch += 1
+        user.version += 1
+        user.save(update_fields=["session_epoch", "version", "updated_at"])
+        audit.record(
+            AUDIT_RESET,
+            actor_id=operator.pk,
+            target_type="user",
+            target_id=user.pk,
+            subject_user_id=user.pk,
+            metadata={"by": "operator"},
+            sensitive={"reason": reason},
+        )
+        _notify(user, "reset")
+    return True
+
+
+def reencrypt_all() -> tuple[int, int]:
+    """Re-encrypt every device's secret under the current SECRET_KEY (before a fallback key
+    is retired). (re-encrypted, unreadable): an unreadable one is under no configured key
+    and its owner needs a reset."""
+    done = unreadable = 0
+    for pk in MfaDevice.objects.order_by("pk").values_list("pk", flat=True):
+        with transaction.atomic():
+            device = MfaDevice.objects.select_for_update().get(pk=pk)
+            try:
+                device.secret = mfa.rotate(device.secret)
+            except InvalidToken:
+                unreadable += 1
+                continue
+            device.save(update_fields=["secret", "updated_at"])
+            done += 1
+    return done, unreadable
+
+
+# --- the sign-in challenge (second step) ------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class Challenge:
+    user: User
+    attempts: int
+
+
+def begin_challenge(request: HttpRequest, user: User) -> int:
+    """After the right password of an account with a second factor: a fresh, anonymous
+    session holding only the pending sign-in (no signed-in session yet). Its lifetime (s)."""
+    request.session.flush()  # nothing of an earlier session carries over
+    request.session[SESSION_CHALLENGE] = {
+        "user": str(user.pk),
+        "hash": user.get_session_auth_hash(),
+        "at": _now(),
+        "attempts": 0,
+    }
+    ttl = int(settings.MFA_CHALLENGE_TTL_S)
+    request.session.set_expiry(timezone.now() + timedelta(seconds=ttl))
+    return ttl
+
+
+def end_challenge(request: HttpRequest) -> None:
+    request.session.pop(SESSION_CHALLENGE, None)
+
+
+def read_challenge(request: HttpRequest) -> Challenge:
+    """The pending sign-in, if still valid: not expired, the account still active, and its
+    password and session epoch unchanged since the password was checked."""
+    data = request.session.get(SESSION_CHALLENGE)
+    if not isinstance(data, dict):
+        raise MfaChallengeExpiredError()
+    at, attempts, user_id, digest = (
+        data.get("at"),
+        data.get("attempts"),
+        data.get("user"),
+        data.get("hash"),
+    )
+    if (
+        not isinstance(at, int | float)
+        or not isinstance(attempts, int)
+        or not isinstance(user_id, str)
+        or not isinstance(digest, str)
+    ):
+        end_challenge(request)
+        raise MfaChallengeExpiredError()
+    age = _now() - at
+    if not -_CLOCK_SKEW_S <= age < settings.MFA_CHALLENGE_TTL_S or (
+        attempts >= settings.MFA_CHALLENGE_MAX_ATTEMPTS
+    ):
+        end_challenge(request)
+        raise MfaChallengeExpiredError()
+    try:
+        user = User.objects.filter(pk=UUID(user_id)).first()
+    except ValueError:
+        user = None
+    if (
+        user is None
+        or not user.is_active
+        or not session_digest_matches(digest, user)
+        or not has_confirmed_device(user)
+    ):
+        end_challenge(request)
+        raise MfaChallengeExpiredError()
+    return Challenge(user=user, attempts=attempts)
+
+
+def session_digest_matches(digest: str, user: User) -> bool:
+    return constant_time_compare(digest, user.get_session_auth_hash())
+
+
+def record_wrong_code(request: HttpRequest, challenge: Challenge) -> None:
+    """Count a wrong code; the MFA_CHALLENGE_MAX_ATTEMPTS-th voids the challenge."""
+    attempts = challenge.attempts + 1
+    if attempts >= settings.MFA_CHALLENGE_MAX_ATTEMPTS:
+        end_challenge(request)
+        return
+    data = dict(request.session[SESSION_CHALLENGE])
+    data["attempts"] = attempts
+    request.session[SESSION_CHALLENGE] = data

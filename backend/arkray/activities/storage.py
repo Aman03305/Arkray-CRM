@@ -19,7 +19,10 @@ scanned (docs/activities.md#attachments).
   (docs/reliability.md#attachment-storage): a wall-clock deadline, a per-process cap on
   calls in flight, and a circuit breaker that fails fast during an outage.
 - **Scanning**: none, or a ClamAV daemon (clamd's INSTREAM protocol) when ATTACHMENT_SCANNER
-  is set; never a pretend scanner.
+  is set; never a pretend scanner. Only clamd's exact clean reply is "clean"; anything else
+  (no answer, a timeout, a dropped connection, an error reply such as a stream over clamd's
+  StreamMaxLength, a reply of any other shape, or bytes that aren't the uploaded file) is
+  no verdict, and the file stays unavailable.
 """
 
 from __future__ import annotations
@@ -96,7 +99,12 @@ class ObjectMissing(StorageUnavailable):
 
 
 class ScannerUnavailable(Exception):
-    """The malware scanner could not give an answer (retry later)."""
+    """The malware scanner gave no verdict (the job retries, then goes dead): never "clean".
+    `reason` says why, from SCAN_FAILURES: logs and the outbox's last error, never users."""
+
+    def __init__(self, reason: str = "protocol") -> None:
+        super().__init__(f"No verdict from the scanner ({reason}).")
+        self.reason = reason
 
 
 class RejectedFile(ValueError):
@@ -939,7 +947,47 @@ def forget_probe() -> None:
 
 
 # --- scanning -------------------------------------------------------------------------------------
-SCAN_TIMEOUT_S = 60
+# One INSTREAM conversation per file, on a worker (the outbox job; never in a request). clamd
+# speaks plain TCP without authentication: it must sit on loopback or the private network
+# (production refuses any other host: core.transport.scanner_problem).
+#
+# The whole conversation has one wall-clock deadline, not a timeout per call: a scanner that
+# drips its reply, or reads slowly, can't hold the worker past the task's soft time limit
+# (CELERY_TASK_SOFT_TIME_LIMIT, 100 s; the object was fetched within the storage deadline,
+# 12 s, before).
+SCAN_DEADLINE_S = 75.0
+SCAN_REPLY_MAX_BYTES = 4096
+# Why a scan gave no verdict (ScannerUnavailable.reason). `size_limit`: clamd refused a stream
+# over its StreamMaxLength, which must be at least ATTACHMENT_MAX_BYTES (docs/deployment.md):
+# every such file stays unavailable until it is raised. `limits_exceeded`: clamd (with
+# AlertExceedsMax) says the file is over one of its scan limits (MaxFileSize, MaxScanSize,
+# MaxFiles, MaxRecursion, ...): not scanned whole, so not clean, and not malware either (the
+# file is kept, unavailable, rather than deleted as infected). Without AlertExceedsMax, clamd
+# answers OK for a file over MaxFileSize after scanning only its start: its limits must be at
+# least ATTACHMENT_MAX_BYTES (tests/drills/clamav_drill.py proves them). `integrity`: the
+# bytes scanned are not the file that was uploaded (its SHA-256 differs): never clean.
+SCAN_FAILURES = (
+    "unconfigured",
+    "timeout",
+    "connection",
+    "size_limit",
+    "error_reply",
+    "protocol",
+    "integrity",
+    "limits_exceeded",
+)
+CLEAN_REPLY = "stream: OK"
+_FOUND_REPLY = re.compile(r"stream: (?P<signature>.+) FOUND")
+_SIGNATURE = re.compile(r"[A-Za-z0-9._:+/()-]{1,128}")
+_LIMITS_EXCEEDED = "Heuristics.Limits.Exceeded"
+
+
+@dataclass(frozen=True, slots=True)
+class Verdict:
+    clean: bool
+    # What clamd found (empty when clean): a signature name such as "Win.Test.EICAR_HDB-1",
+    # never anything from the file; "unknown" if the reply named it in another shape.
+    signature: str = ""
 
 
 def scanning_enabled() -> bool:
@@ -957,32 +1005,102 @@ def _scanner_address(value: str) -> tuple[str, int] | None:
     return parts.hostname, port
 
 
-def scan(file: IO[bytes]) -> bool:
-    """Ask the ClamAV daemon about the file: True if clean, False if it found malware.
-    ScannerUnavailable when there is no answer (the job retries)."""
+def scan(file: IO[bytes], *, expected_sha256: str | None = None) -> Verdict:
+    """Ask the ClamAV daemon about the file (zINSTREAM): clean, or what it found. Fails
+    closed: ScannerUnavailable (with its reason) whenever clamd didn't give one of its two
+    verdicts in full, so the job retries and the file stays unavailable meanwhile. With
+    `expected_sha256`, a clean verdict also needs the bytes sent to be that file."""
     address = _scanner_address(settings.ATTACHMENT_SCANNER)
     if address is None:
-        raise ScannerUnavailable("No scanner is configured.")
+        raise ScannerUnavailable("unconfigured")
+    deadline = time.monotonic() + SCAN_DEADLINE_S
+    digest = hashlib.sha256()
     file.seek(0)
     try:
-        with socket.create_connection(address, timeout=SCAN_TIMEOUT_S) as connection:
-            connection.sendall(b"zINSTREAM\0")
-            for chunk in iter(lambda: file.read(CHUNK_BYTES), b""):
-                connection.sendall(struct.pack("!L", len(chunk)) + chunk)
-            connection.sendall(struct.pack("!L", 0))
-            reply = b""
-            while not reply.endswith(b"\0"):
-                part = connection.recv(4096)
-                if not part:
-                    break
-                reply += part
-                if len(reply) > 4096:
-                    break
+        connection = socket.create_connection(address, timeout=_scan_time_left(deadline))
     except OSError as error:
-        raise ScannerUnavailable(type(error).__name__) from error
-    answer = reply.rstrip(b"\0").decode("utf-8", "replace").strip()
-    if answer.endswith(" OK"):
-        return True
-    if answer.endswith(" FOUND"):
-        return False
-    raise ScannerUnavailable("The scanner gave no verdict.")
+        raise ScannerUnavailable(_scan_failure(error)) from error
+    with connection:
+        try:
+            _send_stream(connection, file, deadline, digest)
+        except OSError as error:
+            # clamd answers a stream over its StreamMaxLength with an error and closes the
+            # connection while the file is still being sent: read what it said, if anything.
+            said = _read_reply(connection, deadline, quiet=True)
+            reason = _reply_failure(said) if said else _scan_failure(error)
+            raise ScannerUnavailable(reason) from error
+        try:
+            reply = _read_reply(connection, deadline)
+        except OSError as error:
+            raise ScannerUnavailable(_scan_failure(error)) from error
+    verdict = _verdict(reply)
+    if verdict.clean and expected_sha256 is not None and digest.hexdigest() != expected_sha256:
+        raise ScannerUnavailable("integrity")
+    return verdict
+
+
+def _scan_time_left(deadline: float) -> float:
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimeoutError("The scan's deadline passed.")
+    return left
+
+
+def _send_stream(connection: socket.socket, file: IO[bytes], deadline: float, digest: Any) -> None:
+    connection.settimeout(_scan_time_left(deadline))
+    connection.sendall(b"zINSTREAM\0")
+    for chunk in iter(lambda: file.read(CHUNK_BYTES), b""):
+        digest.update(chunk)
+        connection.settimeout(_scan_time_left(deadline))
+        connection.sendall(struct.pack("!L", len(chunk)) + chunk)
+    connection.settimeout(_scan_time_left(deadline))
+    connection.sendall(struct.pack("!L", 0))
+
+
+def _read_reply(connection: socket.socket, deadline: float, *, quiet: bool = False) -> bytes:
+    """clamd's reply up to its NUL terminator (bounded). `quiet`: whatever arrived before
+    an error, the error swallowed (the connection already failed)."""
+    reply = b""
+    try:
+        while not reply.endswith(b"\0") and len(reply) <= SCAN_REPLY_MAX_BYTES:
+            connection.settimeout(_scan_time_left(deadline))
+            part = connection.recv(SCAN_REPLY_MAX_BYTES)
+            if not part:
+                break
+            reply += part
+    except OSError:
+        if not quiet:
+            raise
+    return reply
+
+
+def _scan_failure(error: OSError) -> str:
+    return "timeout" if isinstance(error, TimeoutError) else "connection"
+
+
+def _reply_failure(reply: bytes) -> str:
+    text = reply.rstrip(b"\0").decode("utf-8", "replace").strip()
+    if "size limit exceeded" in text.lower():
+        return "size_limit"
+    if text.endswith("ERROR"):
+        return "error_reply"
+    return "protocol"
+
+
+def _verdict(reply: bytes) -> Verdict:
+    """Exactly "stream: OK" is clean, "stream: <signature> FOUND" is malware; a reply cut
+    off before its terminator, or of any other shape, is no verdict."""
+    if not reply:
+        raise ScannerUnavailable("connection")  # closed without a word
+    if not reply.endswith(b"\0") or reply.count(b"\0") != 1:
+        raise ScannerUnavailable("protocol")
+    text = reply[:-1].decode("utf-8", "replace").strip()
+    if text == CLEAN_REPLY:
+        return Verdict(clean=True)
+    found = _FOUND_REPLY.fullmatch(text)
+    if found is not None:
+        name = found["signature"].strip()
+        if name.startswith(_LIMITS_EXCEEDED):
+            raise ScannerUnavailable("limits_exceeded")
+        return Verdict(clean=False, signature=name if _SIGNATURE.fullmatch(name) else "unknown")
+    raise ScannerUnavailable(_reply_failure(reply))

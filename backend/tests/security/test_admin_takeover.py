@@ -248,13 +248,20 @@ class TestOffBoardingStillWorks:
         assert admin_client.post(url(b, "deactivate")).json()["status"] == "deactivated"
         assert b_client.get("/api/v1/auth/me").status_code == 401  # their sessions end
         assert admin_client.post(url(b, "activate")).json()["status"] == "active"
-        assert sign_in(b.email, DEFAULT_PASSWORD).status_code == 200  # their own password
+        # ADR-0033 (R126; was: back with their own password): an administrator reactivated by
+        # another comes back without the old password and gets a reset link at their own
+        # address (tests/security/test_admin_reactivation.py).
+        assert sign_in(b.email, DEFAULT_PASSWORD).status_code == 400
         actions = list(
             AuditEvent.objects.filter(actor_id=admin.pk, target_id=str(b.pk))
             .order_by("id")
             .values_list("action", flat=True)
         )
-        assert actions == [services.AUDIT_USER_DEACTIVATED, services.AUDIT_USER_REACTIVATED]
+        assert actions == [
+            services.AUDIT_USER_DEACTIVATED,
+            services.AUDIT_USER_REACTIVATED,
+            services.AUDIT_PASSWORD_RESET_ISSUED,
+        ]
 
     def test_an_invited_administrators_invitation_is_resent_to_their_own_address(
         self, admin, admin_client

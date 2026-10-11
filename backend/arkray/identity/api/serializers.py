@@ -18,6 +18,7 @@ from rest_framework import serializers
 from arkray.core.api import OpaqueIdField, StrictInputSerializer
 from arkray.core.text import SEARCH_MAX_LENGTH, SEARCH_MIN_LENGTH
 
+from .. import mfa_services
 from ..emails import validate_ascii_email
 from ..models import NAME_MAX_LENGTH, Role, SupportSession, User, UserStatus
 from ..policy import capabilities_for
@@ -27,6 +28,7 @@ EMAIL_MAX_LENGTH = 254
 # Generous parse limit; the password policy itself caps new passwords at 128 characters.
 PASSWORD_INPUT_MAX_LENGTH = 1024
 TOKEN_INPUT_MAX_LENGTH = 128
+MFA_CODE_INPUT_MAX_LENGTH = 64
 
 
 def _password_field() -> serializers.CharField:
@@ -89,8 +91,27 @@ class ViewerSerializer(serializers.ModelSerializer[User]):
             "features",
             "password_change_required",
             "support_session",
+            "mfa_enabled",
+            "mfa_enrollment_required",
         ]
         read_only_fields = fields
+
+    mfa_enabled = serializers.SerializerMethodField(
+        help_text="The account has a confirmed second factor (two-step verification)."
+    )
+    mfa_enrollment_required = serializers.SerializerMethodField(
+        help_text="The account must set up two-step verification before anything else "
+        "(administrators, when required): only /auth/me, sign-out, the password change and "
+        "the /auth/mfa setup answer until then."
+    )
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_mfa_enabled(self, user: User) -> bool:
+        return mfa_services.has_confirmed_device(user)
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_mfa_enrollment_required(self, user: User) -> bool:
+        return mfa_services.enrollment_required(user)
 
     @extend_schema_field(SupportSessionSerializer(allow_null=True))
     def get_support_session(self, user: User) -> dict[str, Any] | None:
@@ -139,9 +160,19 @@ class AdminUserSerializer(serializers.ModelSerializer[User]):
             "invitation",
             "password_change_required",
             "password_changed_at",
+            "mfa_enabled",
             "version",
         ]
         read_only_fields = fields
+
+    mfa_enabled = serializers.SerializerMethodField(
+        help_text="The user has a confirmed second factor."
+    )
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_mfa_enabled(self, user: User) -> bool:
+        annotated = getattr(user, "mfa_enabled", None)  # selectors.admin_user_*
+        return bool(annotated) if annotated is not None else mfa_services.has_confirmed_device(user)
 
     @extend_schema_field(InvitationStateSerializer(allow_null=True))
     def get_invitation(self, user: User) -> dict[str, Any] | None:
@@ -201,6 +232,48 @@ class InvitationPreviewSerializer(serializers.Serializer[Any]):
     first_name = serializers.CharField()
 
 
+class MfaChallengeSerializer(serializers.Serializer[Any]):
+    """202 from /auth/login: the password was right; send a code to /auth/login/mfa."""
+
+    mfa_required = serializers.BooleanField()
+    expires_in = serializers.IntegerField(help_text="Seconds left for the second step.")
+
+
+class MfaStatusSerializer(serializers.Serializer[Any]):
+    """The two-step verification state of one's own account."""
+
+    def get_fields(self) -> dict[str, serializers.Field[Any, Any, Any, Any]]:
+        # Built here: a declared field named `required` would shadow Field.required.
+        return {
+            "enabled": serializers.BooleanField(),
+            "confirmed_at": serializers.DateTimeField(allow_null=True),
+            "recovery_codes_remaining": serializers.IntegerField(),
+            "required": serializers.BooleanField(help_text="Required for this account's role."),
+            "can_disable": serializers.BooleanField(),
+        }
+
+
+class QrMatrixSerializer(serializers.Serializer[Any]):
+    size = serializers.IntegerField(help_text="Modules per side (no quiet zone).")
+    rows = serializers.ListField(
+        child=serializers.CharField(), help_text='One string of "1" (dark) and "0" per row.'
+    )
+
+
+class MfaSetupSerializer(serializers.Serializer[Any]):
+    """Shown once, at setup: the secret is never returned again."""
+
+    secret = serializers.CharField(help_text="Base32, for typing into an authenticator app.")
+    otpauth_uri = serializers.CharField()
+    qr = QrMatrixSerializer()
+
+
+class RecoveryCodesSerializer(serializers.Serializer[Any]):
+    recovery_codes = serializers.ListField(
+        child=serializers.CharField(), help_text="Ten single-use codes, shown once."
+    )
+
+
 class DetailSerializer(serializers.Serializer[Any]):
     detail = serializers.CharField()
 
@@ -210,6 +283,36 @@ class LoginSerializer(StrictInputSerializer):
     # Not an EmailField: a malformed address must fail exactly like an unknown one.
     email = serializers.CharField(max_length=EMAIL_MAX_LENGTH)
     password = _password_field()
+
+
+def _code_field(**extra: Any) -> serializers.CharField:
+    return serializers.CharField(max_length=MFA_CODE_INPUT_MAX_LENGTH, **extra)
+
+
+class CodeOrRecoveryCodeSerializer(StrictInputSerializer):
+    """Exactly one of `code` (the authenticator's six digits) and `recovery_code`."""
+
+    code = _code_field(required=False)
+    recovery_code = _code_field(required=False)
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        if ("code" in attrs) == ("recovery_code" in attrs):
+            message = "Enter either a code from your authenticator app or a recovery code."
+            raise serializers.ValidationError({"non_field_errors": [message]})
+        return attrs
+
+
+class MfaSetupStartSerializer(StrictInputSerializer):
+    current_password = _password_field()
+
+
+class MfaCodeSerializer(StrictInputSerializer):
+    code = _code_field(help_text="A code from the authenticator app.")
+
+
+class MfaDisableSerializer(StrictInputSerializer):
+    current_password = _password_field()
+    code = _code_field(help_text="A code from the authenticator app, or an unused recovery code.")
 
 
 class PasswordChangeSerializer(StrictInputSerializer):

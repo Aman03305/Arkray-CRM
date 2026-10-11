@@ -116,6 +116,20 @@ class Gate:
             self._status, self._checked_at = found, now
             return found
 
+    def prime(self) -> None:
+        """Verify the whole chain now, outside any request: in a parent process before it
+        forks, each child inherits the verified prefix and its first check reads only the
+        entries added since (`_compare`). Without it every new gunicorn worker (recycled
+        every ~2,000 requests) read the whole ledger inside its first request: one GET per
+        entry on S3, which can outlast the 30 s worker timeout as the ledger grows
+        (production readiness review). The status isn't set: the first check still compares
+        with the database. A failure leaves the full check to that first request."""
+        with self._lock:
+            try:
+                _, self._verified = ledger.verified()
+            except ledger.LedgerError as exc:
+                logger.warning("erasure_ledger_prime_failed", extra={"error": type(exc).__name__})
+
     def reset(self) -> None:
         with self._lock:
             self._checked_at, self._status, self._last_ok_at = None, "unknown", None
@@ -123,6 +137,13 @@ class Gate:
 
 
 GATE = Gate()
+
+
+def prime() -> None:
+    """GATE.prime(), when a ledger is configured (gunicorn's master and the Celery worker's
+    parent call it before forking)."""
+    if ledger.enabled():
+        GATE.prime()
 
 
 def is_open() -> bool:

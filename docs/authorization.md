@@ -38,9 +38,16 @@ A session without valid timestamps is treated as expired: deny by default.
 | Endpoint | Access | Behaviour |
 |---|---|---|
 | `GET /api/v1/auth/csrf` | public | sets the CSRF cookie (204) |
-| `POST /api/v1/auth/login` | public | `{email, password}` → the viewer. Every failure returns the identical `400 invalid_credentials` "Invalid email or password.": unknown email, wrong password, invited (no password yet), deactivated, malformed email. The hasher runs in every case, against a decoy hash when there is no usable one, so timing reveals nothing either. Throttled attempts get `429` with `Retry-After`. |
+| `POST /api/v1/auth/login` | public | `{email, password}` → the viewer (200), or, for an account with a second factor, `202 {"mfa_required": true, "expires_in": 300}` and nothing signed in yet (see [Two-step verification](#two-step-verification)). Every failure returns the identical `400 invalid_credentials` "Invalid email or password.": unknown email, wrong password, invited (no password yet), deactivated, malformed email. The hasher runs in every case, against a decoy hash when there is no usable one, so timing reveals nothing either. Throttled attempts get `429` with `Retry-After`. |
+| `POST /api/v1/auth/login/mfa` | public (needs the pending challenge) | `{code}` or `{recovery_code}` → the viewer, like `login`. `400 invalid_mfa_code` / `400 mfa_challenge_expired` / `429` |
+| `GET /api/v1/auth/mfa` | signed in | `{enabled, confirmed_at, recovery_codes_remaining, required, can_disable}` |
+| `POST /api/v1/auth/mfa/setup` | signed in | `{current_password}` → `{secret, otpauth_uri, qr: {size, rows}}`, shown once; `409 mfa_already_enabled` |
+| `POST /api/v1/auth/mfa/confirm` | signed in | `{code}` → `{recovery_codes: [10]}`; other sessions end |
+| `POST /api/v1/auth/mfa/recovery-codes` | signed in | `{code}` → new `{recovery_codes}`; the old ones and other sessions end |
+| `POST /api/v1/auth/mfa/disable` | signed in | `{current_password, code}` → 204; `422` where the role requires it |
+| `POST /api/v1/auth/mfa/verify` | signed in | `{code}` or `{recovery_code}` → 204 (step-up) |
 | `POST /api/v1/auth/logout` | public (idempotent) | deletes the session; audited when a user was signed in |
-| `GET /api/v1/auth/me` | signed in | `{id, email, first_name, last_name, full_name, role, role_label, capabilities[]}` |
+| `GET /api/v1/auth/me` | signed in | `{id, email, first_name, last_name, full_name, role, role_label, capabilities[], features, password_change_required, support_session, mfa_enabled, mfa_enrollment_required}` |
 | `POST /api/v1/auth/password/change` | signed in | `{current_password, new_password}`; throttled like sign-in; keeps this session (new key), ends all others, and voids any outstanding password-reset link |
 | `POST /api/v1/auth/password-reset` | public | `{email}` → always `202` "If an eligible account exists, password reset instructions have been sent." |
 | `POST /api/v1/auth/password-reset/confirm` | public | `{token, new_password}` → 204; every session ends; the user then signs in |
@@ -66,7 +73,8 @@ working during a Redis outage (tested). DRF's Redis-backed limits (`anon` 60/min
 | Resets | a successful sign-in clears that browser's bucket; a completed reset or activation clears the account's buckets |
 | Password-reset requests | 20 per source per hour (durable, reserved atomically like sign-in); at most 3 reset emails per account per hour (in the job; suppression is audited) |
 | Key rotation | identifiers and trusted-browser cookies made with a key in `SECRET_KEY_FALLBACKS` still count and still match, so rotating the key neither lifts lockouts nor untrusts browsers |
-| Audit | crossing a threshold is audited once (`auth.login_throttled`, target = identifier prefix, never the email) |
+| Audit | crossing a threshold is audited once (`auth.login_throttled`, target = identifier prefix, never the email). Each failed sign-in of an **existing** account is audited too (`auth.login_failed`, reason `wrong_password`, `account_inactive`, `wrong_code` or `wrong_recovery_code`; shown in the security events; bounded by this throttle, since refused attempts aren't recorded). An unknown email is a log line only. |
+| Second factor | every wrong code (sign-in, step-up, replacing recovery codes, disabling) counts as a failed sign-in of the account from that browser. A right password with a second factor still to come withdraws only its own reservation: earlier failures stand until the code is right. |
 | Housekeeping | evidence older than 24 h is purged hourly (`identity.housekeeping`, which also clears expired sessions) |
 
 ### Account lifecycle
@@ -249,8 +257,70 @@ changes an administrator when the policy is in the way: [security.md](security.m
   their invitations by hand, see [security.md](security.md#administrator-account-protection).)
 - The rules check capabilities (`users.manage`) through `roles_with()`, never role names.
 
-MFA (TOTP) is a planned extension. Neither the capability model nor the session design needs
-to change for it.
+### Two-step verification
+
+[ADR-0033](adr/0033-administrator-mfa-and-reactivation.md) (R125). TOTP (RFC 6238: 6 digits,
+30-second steps, one step of drift either way) with any authenticator app; `identity.mfa`
+(primitives) and `identity.mfa_services` (use cases).
+
+- **Who**: available to everyone; **required for administrators** when
+  `MFA_REQUIRED_FOR_ADMINS` is on (production default; refused off without the local opt-in).
+  An administrator without a confirmed device reaches only `GET /auth/me`, sign-out, the
+  password change and `/auth/mfa`, `/auth/mfa/setup`, `/auth/mfa/confirm`
+  (`allowed_before_mfa_enrollment`): everything else answers `403 mfa_enrollment_required`.
+  The viewer says so (`mfa_enrollment_required`).
+- **Enrolment** verifies before it activates: setup (current password, throttled like a
+  sign-in) creates an unconfirmed device and returns the secret, the `otpauth://` URI and the
+  QR code as a module matrix (`{"size": n, "rows": ["1010…", …]}`, no quiet zone; the web app
+  draws it). Only a confirmed device counts. Confirmation returns ten single-use recovery
+  codes (`XXXX-XXXX-XXXX-XXXX`, 80 bits, Crockford base32; case, spaces and dashes ignored),
+  shown once and stored as SHA-256 only. A setup must be confirmed within 10 minutes
+  (`MFA_SETUP_TTL_S`) and with fewer than five wrong codes, each a failed sign-in in the
+  durable throttle; otherwise it is deleted (the hourly housekeeping deletes abandoned ones)
+  and starts again.
+- **The secret** is encrypted at rest (Fernet; key derived by HKDF-SHA256 from `SECRET_KEY`,
+  then each of `SECRET_KEY_FALLBACKS`, with a context of its own) and never returned after
+  setup. Each verification re-encrypts it under the current key; `manage.py mfa_reencrypt`
+  does all of them before a fallback key is retired.
+- **Sign-in** is two requests: the right password answers `202` and keeps only a pending
+  challenge (user, session hash, time, attempts) in a fresh anonymous session; `POST
+  /auth/login/mfa` signs in. Five wrong codes void the challenge, 5 minutes expire it, and a
+  password change, "sign out everywhere" or deactivation in between voids it. `auth.login`
+  records the factor (`password_only`, `totp`, `recovery_code`). For an account with a
+  second factor a right password forgives no earlier failure, also when it is re-checked for
+  a change in Settings: only a right code does.
+- **Replay**: the last accepted time step is stored on the device and updated under its row
+  lock: the same code, or an older one, is refused afterwards on any server. A recovery code
+  is used up by a conditional update (`mfa.recovery_code_used`, with how many remain).
+- **Step-up**: the session records when a code was last verified (at sign-in, confirmation or
+  `POST /auth/mfa/verify`). Views marked `requires_recent_mfa` answer `403 mfa_required` when
+  the caller has a confirmed device and that is older than `MFA_STEP_UP_TTL_S` (15 minutes):
+  creating and changing users (`POST /admin/users`, `PATCH /admin/users/{id}`, change-email,
+  deactivate, activate, resend-invitation, set-password, `mfa/reset`), starting a support
+  session, requesting a data export and pseudonymising. Reads need no code; an export's
+  download (an ordinary link, for its requester only) doesn't ask again. Erasure and legal
+  holds are operator commands, with no API. The web app asks for a code and repeats the
+  request once. Deliberately outside the step-up (ADR-0033): reassignment, Ask Arkray,
+  ending a support session, pipeline configuration and export downloads; and a step-up
+  survives a password change in the same session.
+- **Changes end other sessions**: confirming, disabling, resetting and replacing recovery
+  codes increment `session_epoch` (the session making the change is kept, re-hashed, and its
+  browser's trusted-device cookie is re-issued, as after a password change or one's own email
+  change, so it keeps its own failure budget).
+- **Support sessions** don't bypass it: starting one needs a recent code, and every two-step
+  endpoint (`/auth/login/mfa` included) answers `403 support_session_active` inside one.
+- **Recovery**: a recovery code signs in, steps up, or stands in for the device to replace
+  codes or disable. A user may disable their own (password and a code) unless their role
+  requires it. An administrator may reset an **ordinary user's** device (`POST
+  /admin/users/{id}/mfa/reset`, audited, their sessions end); never another administrator's
+  or their own (422): an operator runs `manage.py reset_mfa --email … --by … --reason …`
+  ([runbooks](runbooks.md#lost-second-factor)).
+- **Audit**: `mfa.enabled`, `mfa.disabled`, `mfa.reset` (by `administrator` or `operator`,
+  the operator's reason as an expiring detail), `mfa.recovery_codes_replaced`,
+  `mfa.recovery_code_used`; all in the security events, and each emailed to the account's
+  own address. Never a secret, a code or a hash. Accepted (ADR-0033): an administrator can
+  reset an ordinary user's factor, set a temporary password and promote the account; that
+  gives nothing an invitation wouldn't, and every step is in the security events.
 
 ## Authorization model
 

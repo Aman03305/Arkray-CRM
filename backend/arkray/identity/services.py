@@ -21,6 +21,7 @@ and the user must replace it at their first sign-in (docs/authorization.md#admin
 from __future__ import annotations
 
 import logging
+import secrets
 from collections.abc import Callable, Collection, Mapping
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -543,6 +544,9 @@ def deactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
             AUDIT_USER_DEACTIVATED,
             actor.pk,
             user,
+            # The role at the time: an administrator's deactivation raises an alert
+            # (ArkrayAdministratorDeactivated, identity.metrics; ADR-0033).
+            role=user.role,
             previous_status=previous_status,
             revoked_links=revoked_links,
             revoked_invitations=revoked_invitations,
@@ -551,7 +555,14 @@ def deactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
 
 
 def reactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
-    """Restore access. A user who never accepted their invitation gets a fresh one."""
+    """Restore access. A user who never accepted their invitation gets a fresh one.
+
+    An administrator reactivated by another administrator (R126, ADR-0033) comes back without
+    the password they were deactivated with: it is replaced by a random one nobody knows (the
+    database requires an active account to hold a usable hash), every session and trusted
+    browser stays retired (`session_epoch`), pending reset links are revoked, and a new reset
+    link goes to the account's own address. Their second factor is kept. An ordinary user
+    comes back with their own password, as before."""
     with transaction.atomic():
         serialise_user_administration()
         actor = _acting_manager(actor_id)
@@ -563,23 +574,31 @@ def reactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
                 "This user hasn't accepted their invitation yet. Resend the invitation instead."
             )
         now = timezone.now()
+        reset_link = False
+        fields = ["status", "is_active", "activated_at", "deactivated_at", "version", "updated_at"]
         if user.activated_at is not None and user.has_usable_password():
             user.status, user.is_active = UserStatus.ACTIVE, True
+            if is_administrator(user) and user.pk != actor.pk:
+                user.set_password(secrets.token_urlsafe(32))  # nobody knows it: never stored
+                user.session_epoch += 1
+                fields += ["password", "session_epoch"]
+                reset_link = True
         else:
             user.status, user.is_active, user.activated_at = UserStatus.INVITED, False, None
         user.deactivated_at = None
         user.version += 1
-        user.save(
-            update_fields=[
-                "status",
-                "is_active",
-                "activated_at",
-                "deactivated_at",
-                "version",
-                "updated_at",
-            ]
+        user.save(update_fields=fields)
+        _audit_user(
+            AUDIT_USER_REACTIVATED,
+            actor.pk,
+            user,
+            status=user.status,
+            **({"reset_link": True} if reset_link else {}),
         )
-        _audit_user(AUDIT_USER_REACTIVATED, actor.pk, user, status=user.status)
+        if reset_link:
+            _revoke_pending(user, now, [TokenPurpose.PASSWORD_RESET])
+            _issue_token(user, TokenPurpose.PASSWORD_RESET, created_by=actor, now=now)
+            _audit_user(AUDIT_PASSWORD_RESET_ISSUED, actor.pk, user, reason="reactivated")
         if user.status == UserStatus.INVITED:
             invitation = _issue_token(user, TokenPurpose.INVITATION, created_by=actor, now=now)
             _audit_user(

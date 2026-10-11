@@ -141,9 +141,12 @@ the API now refuses with 422 `business_rule_violation` and a plain reason:
 - changing its **role** (demotion).
 
 Still allowed, and audited: editing the name, **deactivating** (sessions end at once, pending
-links and the invitations they sent are revoked) and reactivating (the account's own password
-comes back; a never-activated one gets an invitation at its own address), resending an
-invitation. The last active administrator can't be deactivated. Promoting a user to
+links and the invitations they sent are revoked; it raises `ArkrayAdministratorDeactivated`)
+and reactivating, resending an invitation. Since ADR-0033 (R126) a reactivated administrator
+doesn't get the old password back: it is replaced by a random one nobody knows, sessions and
+trusted browsers stay retired, pending reset links are revoked and a new reset link goes to
+the account's own address (their second factor is kept). A never-activated one gets an
+invitation at its own address; an ordinary user comes back with their own password. The last active administrator can't be deactivated. Promoting a user to
 administrator is unchanged. The checks run in the service layer, under the
 user-administration lock, against the target's locked row, so a concurrent promotion can't
 slip between the check and the write (`tests/security/test_admin_takeover.py`, including real
@@ -191,6 +194,31 @@ administrator could fix another administrator's email or demote them in the UI.
   --allow-administrator`, then again with `--yes`; audited as `user.pseudonymised` with
   `administrator_target` ([privacy.md](privacy.md#staff)).
 
+- *Reset an administrator's second factor* (lost phone and recovery codes): no
+  administrator can, not even their own (422, ADR-0033). After confirming the person out of
+  band, an operator runs `manage.py reset_mfa --email <address> --by <administrator>
+  --reason "<ticket>"` (audited as `mfa.reset` by `operator`, that administrator the actor;
+  the owner is emailed); they sign in with their password and enrol again.
+
+## Two-step verification
+
+Required for administrators in production (ADR-0033, R125; details in
+[authorization.md](authorization.md#two-step-verification)). What it protects: a phished or
+reused administrator password alone no longer signs in, and a hijacked session alone can't
+administer users, start support sessions, export or pseudonymise personal data (step-up within
+15 minutes), replace recovery codes or turn the factor off. Codes are guessed no faster than
+passwords (the durable sign-in throttle counts each wrong code, at setup too, and a right
+password never forgives them); a setup expires after 10 minutes or five wrong codes; the owner
+is emailed about every change to their second factor; the browser making a change keeps its
+trusted-device cookie, so nobody can lock its owner out by guessing; a code is accepted once
+(replay); the secret is encrypted at rest under a key derived from `SECRET_KEY` and survives a
+rotation while the old key is a fallback (`manage.py mfa_reencrypt` before retiring it).
+Residuals: TOTP is phishable in real time (a proxy relaying the code within its 30-90 s
+window); WebAuthn/passkeys would close that and remain a possible addition. An export's
+download link, for its requester only, doesn't ask for a new code. Failed sign-ins of existing
+accounts are audited, which adds a database write only when the account exists (a
+sub-millisecond difference next to the password hash's work; accepted).
+
 Residual: an administrator can still create or promote *new* administrator accounts (that is
 what the role is for); off-boarding an administrator should include reviewing the
 administrators they created or promoted (security events: `user.created`,
@@ -219,6 +247,19 @@ or new), its hash, or a reset or invitation link's secret:
   sessions, or any text or JSON column of any table (the current hash only in the user's
   `password` column). The password-reset request's outbox payload holds the requested
   *email address* until housekeeping blanks it (SEC-8, accepted), never a secret.
+
+## Client addresses and proxies
+
+The client address that drives rate limits and the audit trail is read from
+X-Forwarded-For only when the connecting peer is one of `TRUSTED_PROXY_ADDRESSES` (the edge
+proxy's own addresses), and then it is the entry `TRUSTED_PROXY_COUNT` places from the right,
+never one the client wrote. Any other peer that reaches the application server directly (a
+worker, another container, a misrouted request) is keyed by its own address whatever header
+it sends. Production refuses a proxy count without proxy addresses, and a range covering
+every address. API rate limits key an IPv6 client by its /64; while Redis is down they are
+counted per process in memory rather than lifted (R127,
+[operations.md](operations.md#rate-limits-while-redis-is-down)). In the reference stack the
+edge has a fixed address on an internal network it shares with the API alone.
 
 ## Security headers
 

@@ -46,6 +46,12 @@ export function describeError(error: unknown, { tooMany }: DescribeOptions = {})
   if (error.status === 403 && error.code === "password_change_required") {
     return { message: "Choose a new password to continue.", requestId: error.requestId };
   }
+  if (error.status === 403 && error.code === "mfa_enrollment_required") {
+    return { message: "Set up two-step verification to continue.", requestId: error.requestId };
+  }
+  if (error.status === 403 && error.code === "mfa_required") {
+    return { message: "Confirm it's you with a code from your authenticator app to do that.", requestId: error.requestId };
+  }
   return { message: error.message || GENERIC, requestId: error.requestId };
 }
 

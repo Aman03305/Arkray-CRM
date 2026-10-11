@@ -385,7 +385,13 @@ class TestDeactivateAndReactivate:
         event = AuditEvent.objects.get(action=AUDIT_USER_DEACTIVATED)
         assert (event.actor_id, event.metadata) == (
             admin.pk,
-            {"previous_status": "active", "revoked_links": 0, "revoked_invitations": 0},
+            # The role (ADR-0033): an administrator's deactivation raises an alert.
+            {
+                "role": "sales_user",
+                "previous_status": "active",
+                "revoked_links": 0,
+                "revoked_invitations": 0,
+            },
         )
 
     def test_deactivation_is_idempotent(self, admin_client, user_a):

@@ -53,10 +53,12 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "arkray.core.middleware.RequestContextMiddleware",
-    # No API traffic while the database doesn't match the erasure ledger (a restored backup
-    # whose erasures haven't been re-applied): arkray.core.ledger_gate.
-    "arkray.core.ledger_gate.LedgerGateMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    # No API traffic while the database doesn't match the erasure ledger (a restored backup
+    # whose erasures haven't been re-applied): arkray.core.ledger_gate. After the security
+    # middleware, so its 503 carries nosniff and the frame headers too (production
+    # readiness review).
+    "arkray.core.ledger_gate.LedgerGateMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -242,6 +244,22 @@ PASSWORD_RESET_ACCOUNT_LIMIT_PER_HOUR = 3
 # Throttle evidence older than this is purged (hourly housekeeping).
 AUTH_THROTTLE_RETENTION_S = 24 * 60 * 60
 
+# Two-step verification (TOTP; identity.mfa, ADR-0033). Required for administrators in
+# production (production.py refuses false without the local opt-in); off by default here,
+# for development and tests (dedicated tests turn it on).
+MFA_REQUIRED_FOR_ADMINS = env.bool("MFA_REQUIRED_FOR_ADMINS", default=False)
+# How long a verified code covers the sensitive operations marked `requires_recent_mfa`.
+MFA_STEP_UP_TTL_S = 15 * 60
+# How long the second step of a sign-in may follow the password, and how many wrong codes
+# void it.
+MFA_CHALLENGE_TTL_S = 5 * 60
+MFA_CHALLENGE_MAX_ATTEMPTS = 5
+# How long a started setup may be confirmed, and how many wrong codes void it.
+MFA_SETUP_TTL_S = 10 * 60
+MFA_SETUP_MAX_ATTEMPTS = 5
+# The name authenticator apps show next to the account.
+MFA_ISSUER = "Arkray CRM"
+
 # --- Security headers (API responses) ------------------------------------------------------
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "same-origin"
@@ -263,6 +281,10 @@ CRM_TIME_ZONE = "Asia/Kolkata"
 CRM_CURRENCY = "INR"
 # Number of reverse proxies in front of Django whose X-Forwarded-For entries are trusted.
 TRUSTED_PROXY_COUNT = env.int("TRUSTED_PROXY_COUNT", default=0)
+# The addresses (or CIDR ranges) of those proxies, as Django sees them connect: X-Forwarded-For
+# is read only from these peers; from anything else the peer address counts (core.middleware,
+# adversarial review P2-2). Production refuses TRUSTED_PROXY_COUNT > 0 without them.
+TRUSTED_PROXY_ADDRESSES: list[str] = env.list("TRUSTED_PROXY_ADDRESSES", default=[])
 # Adopt an incoming X-Request-ID as our correlation id only when a trusted edge proxy sets
 # (overwrites) it. Otherwise a client could spoof or replay ids that end up in audit records;
 # the client's value is then only logged as `client_request_id`.
@@ -303,8 +325,9 @@ REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "arkray.core.exceptions.api_exception_handler",
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
+        # Keyed by the trusted client address (IPv6 by /64), bounded while Redis is down (R127).
+        "arkray.core.throttling.AnonRateThrottle",
+        "arkray.core.throttling.UserRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
         "anon": env("API_THROTTLE_ANON", default="60/min"),
@@ -398,6 +421,9 @@ CELERY_TASK_DEFAULT_QUEUE = "default"
 # would stall every queue, including email). Production runs a dedicated consumer for it.
 CELERY_TASK_ROUTES = {
     "core.outbox.relay": {"queue": "outbox"},
+    # Reopens the API after an erasure whose commit failed (privacy.reconcile): on the relay's
+    # worker, never behind long CRM work on `default` (the nightly checks run for minutes).
+    "privacy.reconcile_ledger": {"queue": "outbox"},
     # Ask Arkray questions are dispatched straight to their own queue (an answer is
     # interactive; the outbox relay's 5 s tick would add latency for nothing) and answered
     # by their own workers, so a slow AI provider can never occupy the web workers or the

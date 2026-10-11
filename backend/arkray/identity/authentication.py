@@ -4,7 +4,14 @@ Every failed sign-in (unknown email, wrong password, invited or deactivated acco
 the same response, and the password hasher runs in every case, so neither the response
 nor its timing reveals whether an account exists or what state it is in. Throttling
 happens before the password is checked and is keyed by the submitted email, so a
-throttled attempt reveals nothing either.
+throttled attempt reveals nothing either. A failed sign-in of an existing account is
+audited (`auth.login_failed`, shown in security events; bounded by the throttle); one of an
+unknown email is a log line only, so an anonymous caller can't create audit rows at will.
+
+With a second factor (ADR-0033) the sign-in takes two requests: the right password gives a
+202 and a pending challenge in a fresh anonymous session (identity.mfa_services), and
+`sign_in_second_step` with a code completes it. The password alone forgives no earlier
+failure: only the second factor does.
 """
 
 from __future__ import annotations
@@ -15,32 +22,34 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from django.conf import settings
-from django.contrib.auth import HASH_SESSION_KEY, update_session_auth_hash
+from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.hashers import check_password, make_password
 from django.db import transaction
 from django.http import HttpRequest
 from django.utils import timezone
-from django.utils.crypto import constant_time_compare
 
 from arkray.audit import services as audit
 from arkray.core.errors import (
+    BusinessRuleViolation,
     DomainError,
     InvalidInputError,
     PermissionDeniedError,
     RateLimitedError,
 )
-from arkray.core.middleware import client_ip
 
-from . import support, throttling
+from . import mfa_services, support, throttling
 from .models import AccountToken, TokenPurpose, TokenStatus, User, normalize_email
 from .passwords import check_new_password
 from .services import SESSION_ENDED
-from .sessions import end_session, start_session
+from .sessions import end_session, session_matches, start_session
 
 logger = logging.getLogger(__name__)
 
 AUDIT_LOGIN = "auth.login"
 AUDIT_LOGIN_TEMPORARY = "auth.login_with_temporary_password"
+AUDIT_LOGIN_FAILED = "auth.login_failed"
+# `auth.login` records the factor: this, mfa_services.FACTOR_TOTP or FACTOR_RECOVERY_CODE.
+FACTOR_PASSWORD_ONLY = "password_only"  # noqa: S105 — a label
 AUDIT_LOGOUT = "auth.logout"
 AUDIT_PASSWORD_CHANGED = "auth.password_changed"  # noqa: S105 — an event name
 CURRENT_PASSWORD_WRONG = "Your current password is incorrect."  # noqa: S105 — a message
@@ -76,37 +85,52 @@ class SignIn:
     device_trust: str  # the account's credentials as the cookie trusts them
 
 
+@dataclass(frozen=True, slots=True)
+class SecondFactorNeeded:
+    """The password was right; a code must follow within `expires_in` seconds."""
+
+    expires_in: int
+
+
 @lru_cache(maxsize=1)
 def _decoy_hash() -> str:
     """A real hash in the current default format, verified when there is no usable one."""
     return make_password(secrets.token_urlsafe(16))
 
 
-def _verify_credentials(email: str, password: str) -> User | None:
-    user = User.objects.filter(email=normalize_email(email)).first()
-    if user is None or not user.has_usable_password():
+def _verify_credentials(email: str, password: str) -> tuple[User | None, User | None]:
+    """(the user signing in, or None; the account the email names, if any)."""
+    account = User.objects.filter(email=normalize_email(email)).first()
+    if account is None or not account.has_usable_password():
         check_password(password, _decoy_hash())  # same work as a real check: no timing oracle
-        return None
-    if not user.check_password(password):  # may transparently upgrade the hash
-        return None
-    return user if user.is_active else None
+        return None, account
+    if not account.check_password(password):  # may transparently upgrade the hash
+        return None, account
+    return (account if account.is_active else None), account
 
 
 def _throttled(denied: throttling.Denied) -> RateLimitedError:
-    minutes = max(1, round(denied.retry_after / 60))
-    unit = "minute" if minutes == 1 else "minutes"
-    return RateLimitedError(
-        f"Too many sign-in attempts. Try again in {minutes} {unit}.", retry_after=denied.retry_after
-    )
+    return throttling.rate_limited(denied)
 
 
 def _throttle_for(request: HttpRequest, email: str) -> throttling.LoginThrottle:
-    identifiers = throttling.login_identifiers(email)
-    device_id = throttling.read_device(request, identifiers, email)
-    return throttling.LoginThrottle(identifiers, device_id, client_ip(request))
+    return throttling.for_request(request, email)
 
 
-def sign_in(request: HttpRequest, email: str, password: str) -> SignIn:
+def _audit_failure(account: User, reason: str, throttle: throttling.LoginThrottle) -> None:
+    """A failed sign-in of an existing account, for administrators' security events: the
+    reason, never what was typed. Bounded by the throttle (refused attempts aren't recorded)."""
+    audit.record(
+        AUDIT_LOGIN_FAILED,
+        actor_id=None,
+        target_type="user",
+        target_id=account.pk,
+        subject_user_id=account.pk,
+        metadata={"reason": reason, "trusted_device": bool(throttle.device_id)},
+    )
+
+
+def sign_in(request: HttpRequest, email: str, password: str) -> SignIn | SecondFactorNeeded:
     throttle = _throttle_for(request, email)
     denied = throttle.reserve()
     if denied is not None:
@@ -115,24 +139,67 @@ def sign_in(request: HttpRequest, email: str, password: str) -> SignIn:
         )
         raise _throttled(denied)
 
-    user = _verify_credentials(email, password)  # outside any transaction
+    user, account = _verify_credentials(email, password)  # outside any transaction
     if user is None:
         throttle.failed()
         logger.info("login_failed", extra={"login": throttle.identifier[:12]})
+        if account is not None:
+            reason = "wrong_password" if account.is_active else "account_inactive"
+            _audit_failure(account, reason, throttle)
         raise InvalidCredentialsError()
     if temporary_password_expired(user):
         logger.info("login_temporary_password_expired", extra={"login": throttle.identifier[:12]})
         raise TemporaryPasswordExpiredError()
 
+    if mfa_services.has_confirmed_device(user):
+        # Not a failure, but nothing is forgiven until the second factor is proved.
+        throttle.release()
+        return SecondFactorNeeded(expires_in=mfa_services.begin_challenge(request, user))
+
     throttle.succeeded()
+    return _complete_sign_in(request, user, throttle, factor=FACTOR_PASSWORD_ONLY)
+
+
+def sign_in_second_step(
+    request: HttpRequest, *, code: str | None = None, recovery_code: str | None = None
+) -> SignIn:
+    """The second request of a sign-in with a second factor. Each wrong code counts as a
+    failed sign-in in the durable throttle; MFA_CHALLENGE_MAX_ATTEMPTS of them void the
+    challenge (the password is asked again)."""
+    challenge = mfa_services.read_challenge(request)
+    user = challenge.user
+    throttle = _throttle_for(request, user.email)
+    denied = throttle.reserve()
+    if denied is not None:
+        logger.info(
+            "login_throttled", extra={"reason": denied.reason, "login": throttle.identifier[:12]}
+        )
+        raise _throttled(denied)
+    factor = mfa_services.verify_factor(user, code=code, recovery_code=recovery_code)
+    if factor is None:
+        throttle.failed()
+        mfa_services.record_wrong_code(request, challenge)
+        logger.info("login_mfa_failed", extra={"login": throttle.identifier[:12]})
+        _audit_failure(user, "wrong_recovery_code" if code is None else "wrong_code", throttle)
+        raise mfa_services.InvalidMfaCodeError()
+    throttle.succeeded()
+    mfa_services.end_challenge(request)
+    return _complete_sign_in(request, user, throttle, factor=factor)
+
+
+def _complete_sign_in(
+    request: HttpRequest, user: User, throttle: throttling.LoginThrottle, *, factor: str
+) -> SignIn:
     with transaction.atomic():
         start_session(request, user)
+        if factor != FACTOR_PASSWORD_ONLY:
+            mfa_services.mark_verified(request.session)
         audit.record(
             AUDIT_LOGIN,
             actor_id=user.pk,
             target_type="user",
             target_id=user.pk,
-            metadata={"trusted_device": bool(throttle.device_id)},
+            metadata={"trusted_device": bool(throttle.device_id), "factor": factor},
         )
         if user.password_change_required:
             # Shown in administrators' security events (unlike every sign-in): whoever
@@ -181,7 +248,13 @@ def verify_current_password(request: HttpRequest, password: str) -> None:
         raise InvalidInputError(
             CURRENT_PASSWORD_WRONG, details={"current_password": [CURRENT_PASSWORD_WRONG]}
         )
-    throttle.succeeded()
+    if mfa_services.has_confirmed_device(actor):
+        # The bucket also holds wrong second-factor codes (step-up, disabling, new recovery
+        # codes): a password proves nothing about those, so only this attempt is withdrawn.
+        # Only a right code forgives them (review P2-1).
+        throttle.release()
+    else:
+        throttle.succeeded()
 
 
 def session_still_current(request: HttpRequest, user: User) -> bool:
@@ -190,8 +263,7 @@ def session_still_current(request: HttpRequest, user: User) -> bool:
     a password or email change, or "sign out everywhere" committed while this request was
     running makes it false (Phase 9 review, P1: a password change in flight must not undo a
     reset that ended its session)."""
-    stored = request.session.get(HASH_SESSION_KEY)
-    return isinstance(stored, str) and constant_time_compare(stored, user.get_session_auth_hash())
+    return session_matches(request, user)
 
 
 def change_password(request: HttpRequest, current_password: str, new_password: str) -> None:
@@ -234,3 +306,21 @@ def change_password(request: HttpRequest, current_password: str, new_password: s
             target_id=user.pk,
         )
         update_session_auth_hash(request, user)
+
+
+# --- two-step verification of one's own account (ADR-0033) -----------------------------------
+def begin_mfa_setup(request: HttpRequest, current_password: str) -> mfa_services.Setup:
+    """Re-authenticate (throttled like a sign-in), then start a setup."""
+    actor = _signed_in_user(request)
+    verify_current_password(request, current_password)
+    return mfa_services.begin_setup(actor)
+
+
+def disable_mfa(request: HttpRequest, current_password: str, code: str) -> None:
+    """The current password and a code (or an unused recovery code), unless the role
+    requires a second factor (checked first: nothing to guess then)."""
+    actor = _signed_in_user(request)
+    if mfa_services.required_for(actor):
+        raise BusinessRuleViolation(mfa_services.REQUIRED_FOR_ROLE)
+    verify_current_password(request, current_password)
+    mfa_services.disable(request, actor, code)

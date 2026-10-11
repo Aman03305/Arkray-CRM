@@ -4,11 +4,13 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useState } from "react";
 import { flushSync } from "react-dom";
 
+import { StepUpProvider } from "@/features/auth/StepUpProvider";
 import { AUTH_CHANNEL, LEAVING_EVENT, reloadPage } from "@/lib/browser";
 import { createQueryClient, isPublicPath } from "@/lib/query-client";
 
 /**
- * App-wide providers, plus the guards that stop data outliving a sign-in (lib/browser).
+ * App-wide providers, plus the guards that stop data outliving a sign-in (lib/browser), and
+ * the step-up prompt every API call can ask for (features/auth/StepUpProvider).
  * `sessionAtLoad`: the page was requested with a session cookie (app/layout). Only the value
  * at the full page load counts: the client is created once.
  */
@@ -57,5 +59,9 @@ export function Providers({ children, sessionAtLoad = false }: { children: React
   }, []);
 
   if (leaving) return null;
-  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  return (
+    <QueryClientProvider client={client}>
+      <StepUpProvider>{children}</StepUpProvider>
+    </QueryClientProvider>
+  );
 }

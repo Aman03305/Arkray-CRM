@@ -56,12 +56,16 @@ export function useModalFocus(
     if (!open || !root) return;
     const overlay = boundary.current ?? root;
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // On top first, then focus in: a modal opened over another (a step-up code prompt over
+    // "New user") would otherwise have its focus pulled back by the one below (still on top
+    // for its focusin handler), which then turned inert and left focus on <body> (final
+    // hardening, browser regression).
+    const modal = Symbol("modal");
+    openModals.push(modal);
+    const restoreInert = inertOutside(overlay);
     // A disabled element can't take focus: skip it rather than leave focus behind the modal.
     const first = root.querySelector<HTMLElement>("[data-autofocus]:not(:disabled)") ?? tabbable(root)[0];
     (first ?? root).focus();
-    const restoreInert = inertOutside(overlay);
-    const modal = Symbol("modal");
-    openModals.push(modal);
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (!isTop(modal)) return; // a modal opened on top of this one handles it

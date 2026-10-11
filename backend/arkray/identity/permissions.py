@@ -11,8 +11,14 @@ from typing import TYPE_CHECKING, ClassVar
 
 from rest_framework.permissions import BasePermission
 
-from arkray.core.errors import PasswordChangeRequired, SupportSessionActive
+from arkray.core.errors import (
+    MfaEnrollmentRequired,
+    MfaRequired,
+    PasswordChangeRequired,
+    SupportSessionActive,
+)
 
+from . import mfa_services
 from .policy import Capability, has_capability
 
 if TYPE_CHECKING:
@@ -27,7 +33,13 @@ def _account_gates(request: Request, view: APIView) -> None:
       `allowed_before_password_change` (who am I, change password);
     - an administrator in a support session can't use views marked
       `refused_in_support_session` (user administration, passwords, security events):
-      identity and security work needs their normal administrator context."""
+      identity and security work needs their normal administrator context;
+    - an administrator who must have a second factor and hasn't set one up reaches only the
+      views marked `allowed_before_mfa_enrollment` (who am I, change password, two-step
+      setup): 403 `mfa_enrollment_required` (ADR-0033);
+    - views marked `requires_recent_mfa` (True: every method; or a set of methods) need a
+      code verified in this session within MFA_STEP_UP_TTL_S from a caller who has a second
+      factor: 403 `mfa_required` otherwise (POST /auth/mfa/verify, then repeat)."""
     if getattr(request.user, "password_change_required", False) and not getattr(
         view, "allowed_before_password_change", False
     ):
@@ -36,6 +48,25 @@ def _account_gates(request: Request, view: APIView) -> None:
         getattr(request, "support_session", None) is not None
     ):
         raise SupportSessionActive()
+    user = request.user
+    if not getattr(view, "allowed_before_mfa_enrollment", False) and (
+        mfa_services.enrollment_required(user)
+    ):
+        raise MfaEnrollmentRequired()
+    if needs_recent_mfa(view, request.method or "") and not mfa_services.recently_verified(
+        request, user
+    ):
+        raise MfaRequired()
+
+
+def needs_recent_mfa(view: object, method: str) -> bool:
+    """Whether `view` marks `method` as needing a recent second-factor verification."""
+    marked = getattr(view, "requires_recent_mfa", False)
+    if marked is True:
+        return True
+    if isinstance(marked, frozenset | set | tuple):
+        return method.upper() in marked
+    return False
 
 
 class IsActiveUser(BasePermission):

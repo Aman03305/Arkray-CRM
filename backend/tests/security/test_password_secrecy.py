@@ -360,6 +360,8 @@ USER_SERIALIZER_FIELDS = {
         "features",
         "password_change_required",
         "support_session",
+        "mfa_enabled",  # ADR-0033: booleans only, never a secret or a code
+        "mfa_enrollment_required",
     },
     "arkray.identity.api.serializers.AdminUserSerializer": {
         "id",
@@ -378,6 +380,7 @@ USER_SERIALIZER_FIELDS = {
         "invitation",
         "password_change_required",
         "password_changed_at",
+        "mfa_enabled",
         "version",
     },
     "arkray.identity.api.serializers.WorkspaceSubjectSerializer": {"id", "full_name", "status"},

@@ -271,7 +271,13 @@ class TestGauges:
         row("k/1", state="uploading", created_at=now - timedelta(minutes=90))
         row("k/2", state="uploading", created_at=now - timedelta(minutes=1))
         row("k/3", state="failed", created_at=now - timedelta(hours=3))
-        row("k/4", state="stored", scan_status="pending", created_at=now)
+        row(
+            "k/4",
+            state="stored",
+            scan_status="pending",
+            created_at=now - timedelta(hours=2),
+            stored_at=now - timedelta(minutes=45),
+        )
         row("k/5", state="stored", created_at=now, deleted_at=now)
         row("k/6", state="stored", created_at=now)
         return note
@@ -287,6 +293,9 @@ class TestGauges:
         assert 5390 <= float(uploading.split()[-1]) <= 5420
         unpurged = next(x for x in text.splitlines() if 'oldest_seconds{state="unpurged"}' in x)
         assert float(unpurged.split()[-1]) >= 3 * 3600 - 10
+        # Waiting for its malware scan since it was stored (it doesn't download until then).
+        waiting = next(x for x in text.splitlines() if 'oldest_seconds{state="pending_scan"}' in x)
+        assert 2690 <= float(waiting.split()[-1]) <= 2720
         assert 'arkray_attachment_storage_up{backend="filesystem"} 1' in text
         assert "SECRET-CUSTOMER-FILE" not in text
         assert "k/1" not in text

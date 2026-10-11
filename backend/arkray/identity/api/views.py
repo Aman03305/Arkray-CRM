@@ -4,6 +4,7 @@ DenyAll), and every route is listed in tests/authz_matrix.py."""
 
 from __future__ import annotations
 
+import secrets
 from typing import Any
 from uuid import UUID
 
@@ -14,10 +15,9 @@ from rest_framework import serializers, status
 from rest_framework.permissions import AllowAny
 from rest_framework.request import Request
 from rest_framework.response import Response
-from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle, UserRateThrottle
 
 from arkray.core.api import ApiView
-from arkray.core.errors import InvalidInputError, PermissionDeniedError
+from arkray.core.errors import InvalidInputError, PermissionDeniedError, SupportSessionActive
 from arkray.core.keyset import (
     CursorBinding,
     KeysetOrdering,
@@ -26,8 +26,9 @@ from arkray.core.keyset import (
     page_links,
 )
 from arkray.core.middleware import client_ip
+from arkray.core.throttling import AnonRateThrottle, ScopedRateThrottle, UserRateThrottle
 
-from .. import authentication, selectors, services, support, throttling
+from .. import authentication, mfa_services, selectors, services, support, throttling
 from ..models import Role, User, UserStatus
 from ..permissions import IsActiveUser, requires
 from ..policy import Capability
@@ -48,6 +49,27 @@ def _validated[S: serializers.Serializer[Any]](
     serializer = serializer_class(data=data)
     serializer.is_valid(raise_exception=True)
     return dict(serializer.validated_data)
+
+
+def _trusted_device(request: Request) -> str:
+    """This browser's trusted-device id for the signed-in account ("" if none), read before
+    a change that retires every trust (a new password or `session_epoch`)."""
+    actor = _actor(request)
+    identifiers = throttling.login_identifiers(actor.email)
+    return throttling.read_device(request._request, identifiers, actor.email)
+
+
+def _keep_device_trusted(response: Response, user_id: UUID, device_id: str) -> None:
+    """Re-issue the trusted-device cookie after the signed-in owner changed their own
+    credentials or session epoch here (review P2-3): their browser keeps its own failure
+    budget, so an attacker's wrong guesses still can't lock them out of it."""
+    user = User.objects.only("email", "password", "session_epoch").get(pk=user_id)
+    throttling.remember_device(
+        response,
+        throttling.login_identifier(user.email),
+        device_id or secrets.token_hex(16),
+        throttling.device_trust(user.password, user.session_epoch),
+    )
 
 
 def _actor(request: Request) -> User:
@@ -74,15 +96,54 @@ class LoginView(ApiView):
     throttle_classes = AUTH_THROTTLES
     throttle_scope = "auth"
 
-    @extend_schema(request=s.LoginSerializer, responses={200: s.ViewerSerializer})
+    @extend_schema(
+        request=s.LoginSerializer,
+        responses={200: s.ViewerSerializer, 202: s.MfaChallengeSerializer},
+    )
     def post(self, request: Request) -> Response:
+        """200 with the viewer when signed in; 202 when the account has a second factor:
+        send a code to /auth/login/mfa within `expires_in` seconds (ADR-0033)."""
         data = _validated(s.LoginSerializer, request.data)
         result = authentication.sign_in(request._request, data["email"], data["password"])
-        response = Response(s.ViewerSerializer(result.user).data)
-        throttling.remember_device(
-            response, result.identifier, result.device_id, result.device_trust
+        if isinstance(result, authentication.SecondFactorNeeded):
+            return Response(
+                {"mfa_required": True, "expires_in": result.expires_in},
+                status=status.HTTP_202_ACCEPTED,
+            )
+        return _signed_in_response(result)
+
+
+def _signed_in_response(result: authentication.SignIn) -> Response:
+    response = Response(s.ViewerSerializer(result.user).data)
+    throttling.remember_device(response, result.identifier, result.device_id, result.device_trust)
+    return response
+
+
+class LoginMfaView(ApiView):
+    """The second step of a sign-in with a second factor: a code from the authenticator, or
+    an unused recovery code. Wrong codes count as failed sign-ins (identity.throttling); five
+    void the challenge."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = AUTH_THROTTLES
+    throttle_scope = "auth"
+    refused_in_support_session = True
+
+    @extend_schema(
+        operation_id="auth_login_mfa",
+        request=s.CodeOrRecoveryCodeSerializer,
+        responses={200: s.ViewerSerializer},
+    )
+    def post(self, request: Request) -> Response:
+        if getattr(request, "support_session", None) is not None:
+            # Public, so the permission gates don't run: refused here like every other
+            # two-step endpoint (a support session's browser session holds no challenge).
+            raise SupportSessionActive()
+        data = _validated(s.CodeOrRecoveryCodeSerializer, request.data)
+        result = authentication.sign_in_second_step(
+            request._request, code=data.get("code"), recovery_code=data.get("recovery_code")
         )
-        return response
+        return _signed_in_response(result)
 
 
 class LogoutView(ApiView):
@@ -103,6 +164,7 @@ class LogoutView(ApiView):
 class MeView(ApiView):
     permission_classes = [IsActiveUser]
     allowed_before_password_change = True
+    allowed_before_mfa_enrollment = True
 
     @extend_schema(responses={200: s.ViewerSerializer})
     def get(self, request: Request) -> Response:
@@ -115,13 +177,156 @@ class PasswordChangeView(ApiView):
     throttle_classes = AUTH_THROTTLES
     throttle_scope = "auth"
     allowed_before_password_change = True
+    allowed_before_mfa_enrollment = True
     refused_in_support_session = True
 
     @extend_schema(request=s.PasswordChangeSerializer, responses={204: None})
     def post(self, request: Request) -> Response:
         data = _validated(s.PasswordChangeSerializer, request.data)
+        device = _trusted_device(request)
         authentication.change_password(
             request._request, data["current_password"], data["new_password"]
+        )
+        response = Response(status=status.HTTP_204_NO_CONTENT)
+        _keep_device_trusted(response, _actor(request).pk, device)
+        return response
+
+
+# --- two-step verification of one's own account (ADR-0033) -----------------------------------
+class MfaStatusView(ApiView):
+    permission_classes = [IsActiveUser]
+    allowed_before_mfa_enrollment = True
+    refused_in_support_session = True
+
+    @extend_schema(operation_id="auth_mfa_status", responses={200: s.MfaStatusSerializer})
+    def get(self, request: Request) -> Response:
+        found = mfa_services.status(_actor(request))
+        return Response(
+            s.MfaStatusSerializer(
+                {
+                    "enabled": found.enabled,
+                    "confirmed_at": found.confirmed_at,
+                    "recovery_codes_remaining": found.recovery_codes_remaining,
+                    "required": found.required,
+                    "can_disable": found.can_disable,
+                }
+            ).data
+        )
+
+
+class MfaSetupView(ApiView):
+    """Start (or restart) a setup after the current password: the secret, its otpauth://
+    URI and QR code, shown this once. 409 when two-step verification is already on."""
+
+    permission_classes = [IsActiveUser]
+    throttle_classes = AUTH_THROTTLES
+    throttle_scope = "auth"
+    allowed_before_mfa_enrollment = True
+    refused_in_support_session = True
+
+    @extend_schema(
+        operation_id="auth_mfa_setup",
+        request=s.MfaSetupStartSerializer,
+        responses={200: s.MfaSetupSerializer},
+    )
+    def post(self, request: Request) -> Response:
+        data = _validated(s.MfaSetupStartSerializer, request.data)
+        setup = authentication.begin_mfa_setup(request._request, data["current_password"])
+        return Response(
+            s.MfaSetupSerializer(
+                {"secret": setup.secret, "otpauth_uri": setup.otpauth_uri, "qr": setup.qr}
+            ).data
+        )
+
+
+class MfaConfirmView(ApiView):
+    """Turn two-step verification on with a code from the new device: ten recovery codes,
+    shown once; every other session of the account ends."""
+
+    permission_classes = [IsActiveUser]
+    throttle_classes = AUTH_THROTTLES
+    throttle_scope = "auth"
+    allowed_before_mfa_enrollment = True
+    refused_in_support_session = True
+
+    @extend_schema(
+        operation_id="auth_mfa_confirm",
+        request=s.MfaCodeSerializer,
+        responses={200: s.RecoveryCodesSerializer},
+    )
+    def post(self, request: Request) -> Response:
+        data = _validated(s.MfaCodeSerializer, request.data)
+        device = _trusted_device(request)
+        codes = mfa_services.confirm(request._request, _actor(request).pk, data["code"])
+        response = Response({"recovery_codes": codes})
+        _keep_device_trusted(response, _actor(request).pk, device)
+        return response
+
+
+class MfaRecoveryCodesView(ApiView):
+    """Replace the recovery codes (the old ones stop working; other sessions end)."""
+
+    permission_classes = [IsActiveUser]
+    throttle_classes = AUTH_THROTTLES
+    throttle_scope = "auth"
+    refused_in_support_session = True
+
+    @extend_schema(
+        operation_id="auth_mfa_recovery_codes",
+        request=s.MfaCodeSerializer,
+        responses={200: s.RecoveryCodesSerializer},
+    )
+    def post(self, request: Request) -> Response:
+        data = _validated(s.MfaCodeSerializer, request.data)
+        device = _trusted_device(request)
+        codes = mfa_services.replace_recovery_codes(request._request, _actor(request), data["code"])
+        response = Response({"recovery_codes": codes})
+        _keep_device_trusted(response, _actor(request).pk, device)
+        return response
+
+
+class MfaDisableView(ApiView):
+    """Turn two-step verification off (current password and a code): 422 where the role
+    requires it; other sessions end."""
+
+    permission_classes = [IsActiveUser]
+    throttle_classes = AUTH_THROTTLES
+    throttle_scope = "auth"
+    refused_in_support_session = True
+
+    @extend_schema(
+        operation_id="auth_mfa_disable", request=s.MfaDisableSerializer, responses={204: None}
+    )
+    def post(self, request: Request) -> Response:
+        data = _validated(s.MfaDisableSerializer, request.data)
+        device = _trusted_device(request)
+        authentication.disable_mfa(request._request, data["current_password"], data["code"])
+        response = Response(status=status.HTTP_204_NO_CONTENT)
+        _keep_device_trusted(response, _actor(request).pk, device)
+        return response
+
+
+class MfaVerifyView(ApiView):
+    """Step-up: a code renews this session's verification for MFA_STEP_UP_TTL_S, for the
+    operations that answer 403 `mfa_required`."""
+
+    permission_classes = [IsActiveUser]
+    throttle_classes = AUTH_THROTTLES
+    throttle_scope = "auth"
+    refused_in_support_session = True
+
+    @extend_schema(
+        operation_id="auth_mfa_verify",
+        request=s.CodeOrRecoveryCodeSerializer,
+        responses={204: None},
+    )
+    def post(self, request: Request) -> Response:
+        data = _validated(s.CodeOrRecoveryCodeSerializer, request.data)
+        mfa_services.step_up(
+            request._request,
+            _actor(request),
+            code=data.get("code"),
+            recovery_code=data.get("recovery_code"),
         )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -190,6 +395,7 @@ ADMIN_USER_PAGE_SIZE = 25
 class AdminUserListView(ApiView):
     permission_classes = [requires(Capability.USERS_MANAGE)]
     refused_in_support_session = True
+    requires_recent_mfa = frozenset({"POST"})  # creating a user; listing needs no code
     query_param_methods = frozenset({"GET"})
 
     @extend_schema(
@@ -230,6 +436,7 @@ class AdminUserListView(ApiView):
 class AdminUserDetailView(ApiView):
     permission_classes = [requires(Capability.USERS_MANAGE)]
     refused_in_support_session = True
+    requires_recent_mfa = frozenset({"PATCH"})
 
     @extend_schema(responses={200: s.AdminUserSerializer})
     def get(self, request: Request, user_id: UUID) -> Response:
@@ -248,6 +455,7 @@ class AdminUserDetailView(ApiView):
 class AdminUserEmailView(ApiView):
     permission_classes = [requires(Capability.USERS_MANAGE)]
     refused_in_support_session = True
+    requires_recent_mfa = True
 
     @extend_schema(request=s.EmailChangeSerializer, responses={200: s.AdminUserSerializer})
     def post(self, request: Request, user_id: UUID) -> Response:
@@ -261,6 +469,7 @@ class AdminUserEmailView(ApiView):
                 raise InvalidInputError(message, details={"current_password": [message]})
             authentication.verify_current_password(request._request, data["current_password"])
         own = user_id == actor.pk
+        device = _trusted_device(request) if own else ""
         user = services.change_user_email(
             actor_id=actor.pk,
             user_id=user_id,
@@ -273,15 +482,19 @@ class AdminUserEmailView(ApiView):
                 else None
             ),
         )
+        response = Response(s.AdminUserSerializer(user).data)
         if own:
-            # Changing your own email ends your other sessions but keeps this one.
+            # Changing your own email ends your other sessions but keeps this one, and this
+            # browser stays trusted for the new address.
             update_session_auth_hash(request._request, user)
-        return Response(s.AdminUserSerializer(user).data)
+            _keep_device_trusted(response, user.pk, device)
+        return response
 
 
 class AdminUserDeactivateView(ApiView):
     permission_classes = [requires(Capability.USERS_MANAGE)]
     refused_in_support_session = True
+    requires_recent_mfa = True
 
     @extend_schema(request=None, responses={200: s.AdminUserSerializer})
     def post(self, request: Request, user_id: UUID) -> Response:
@@ -292,6 +505,7 @@ class AdminUserDeactivateView(ApiView):
 class AdminUserActivateView(ApiView):
     permission_classes = [requires(Capability.USERS_MANAGE)]
     refused_in_support_session = True
+    requires_recent_mfa = True
 
     @extend_schema(request=None, responses={200: s.AdminUserSerializer})
     def post(self, request: Request, user_id: UUID) -> Response:
@@ -302,6 +516,7 @@ class AdminUserActivateView(ApiView):
 class AdminUserResendInvitationView(ApiView):
     permission_classes = [requires(Capability.USERS_MANAGE)]
     refused_in_support_session = True
+    requires_recent_mfa = True
 
     @extend_schema(request=None, responses={200: s.AdminUserSerializer})
     def post(self, request: Request, user_id: UUID) -> Response:
@@ -316,6 +531,7 @@ class AdminUserSetPasswordView(ApiView):
 
     permission_classes = [requires(Capability.USERS_MANAGE)]
     refused_in_support_session = True
+    requires_recent_mfa = True
     throttle_classes = AUTH_THROTTLES
     throttle_scope = "auth"
 
@@ -328,6 +544,23 @@ class AdminUserSetPasswordView(ApiView):
             version=data["version"],
             new_password=data["new_password"],
         )
+        return Response(s.AdminUserSerializer(user).data)
+
+
+class AdminUserMfaResetView(ApiView):
+    """Remove an ordinary user's second factor (they lost the device and the recovery codes):
+    their sessions end; they sign in with their password and may set up a new one. 422 for
+    an administrator, whoever asks (ADR-0033: an operator runs `manage.py reset_mfa`)."""
+
+    permission_classes = [requires(Capability.USERS_MANAGE)]
+    refused_in_support_session = True
+    requires_recent_mfa = True
+
+    @extend_schema(
+        operation_id="admin_users_mfa_reset", request=None, responses={200: s.AdminUserSerializer}
+    )
+    def post(self, request: Request, user_id: UUID) -> Response:
+        user = mfa_services.reset_for_user(actor_id=_actor(request).pk, user_id=user_id)
         return Response(s.AdminUserSerializer(user).data)
 
 
@@ -407,6 +640,7 @@ class SupportSessionStartView(ApiView):
 
     permission_classes = [requires(Capability.SUPPORT_ACCESS)]
     refused_in_support_session = True
+    requires_recent_mfa = True
 
     @extend_schema(
         operation_id="support_sessions_start",

@@ -42,8 +42,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -88,6 +90,19 @@ ACTIONS = [
     ("other", 5),
 ]
 ACTION_NAMES = [name for name, weight in ACTIONS for _ in range(weight)]
+
+
+TOTP_STEP_S = 30
+
+
+def totp(secret: str, at: float | None = None) -> str:
+    """RFC 6238 (SHA-1, 6 digits, 30 s): the code an authenticator app would show."""
+    key = base64.b32decode(secret.upper() + "=" * (-len(secret) % 8))
+    counter = int((time.time() if at is None else at) // TOTP_STEP_S)
+    digest = hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = int.from_bytes(digest[offset : offset + 4], "big") & 0x7FFFFFFF
+    return f"{value % 1_000_000:06d}"
 
 
 def percentile(ordered: list[float], q: float) -> float:
@@ -350,7 +365,7 @@ class VU:
                 f"{API}/auth/login",
                 body={"email": self.account["email"], "password": self.run.accounts["password"]},
                 scan=False,
-                expected=(200,),
+                expected=(200, 202),
             )
             if response is None:
                 await asyncio.sleep(2)
@@ -365,9 +380,75 @@ class VU:
                     "auth_csrf", "GET", f"{API}/auth/csrf", scan=False, expected=(200, 204)
                 )
                 continue
-            self.signed_in = response.status_code == 200
-            return self.signed_in
+            if response.status_code == 202:  # two-step verification (ADR-0033)
+                if not await self.second_factor():
+                    continue  # the challenge expired: sign in again
+            elif response.status_code != 200 or not await self.enrolled(response):
+                return False
+            self.signed_in = True
+            return True
         return False
+
+    async def enrolled(self, signed_in: httpx.Response) -> bool:
+        """An administrator who must still set up two-step verification does so now."""
+        return not signed_in.json().get("mfa_enrollment_required") or await self.enrol()
+
+    async def second_factor(self) -> bool:
+        """The second step of an enrolled administrator's sign-in. A code is accepted once
+        per 30-second step (replay prevention): a refused code waits for the next step."""
+        secret = self.account.get("mfa_secret")
+        if not secret:
+            self.errors["login_mfa:no_secret"] += 1
+            return False
+        for _ in range(3):
+            response = await self.call(
+                "login_mfa",
+                "POST",
+                f"{API}/auth/login/mfa",
+                body={"code": totp(secret)},
+                scan=False,
+                expected=(200, 400),
+            )
+            if response is None:
+                await asyncio.sleep(2)
+                continue
+            if response.status_code == 200:
+                return True
+            if response.status_code == 429:
+                await asyncio.sleep(float(response.headers.get("Retry-After", "20")))
+                continue
+            if response.json().get("error", {}).get("code") != "invalid_mfa_code":
+                return False
+            await asyncio.sleep(TOTP_STEP_S - time.time() % TOTP_STEP_S + 0.5)
+        return False
+
+    async def enrol(self) -> bool:
+        """Production requires administrators to set up two-step verification (ADR-0033):
+        enrol once, through the API, and keep the secret with the accounts (scratch file)."""
+        setup = await self.call(
+            "mfa_setup",
+            "POST",
+            f"{API}/auth/mfa/setup",
+            body={"current_password": self.run.accounts["password"]},
+            scan=False,
+        )
+        if setup is None or setup.status_code != 200:
+            return False
+        secret = setup.json()["secret"]
+        confirm = await self.call(
+            "mfa_confirm",
+            "POST",
+            f"{API}/auth/mfa/confirm",
+            body={"code": totp(secret)},
+            scan=False,
+        )
+        if confirm is None or confirm.status_code != 200:
+            return False
+        self.account["mfa_secret"] = secret
+        Path(self.run.args.users).write_text(
+            json.dumps(self.run.accounts, indent=1), encoding="utf-8"
+        )
+        return True
 
     def cookies(self) -> dict[str, str]:
         return {c.name: c.value for c in self.client.cookies.jar}

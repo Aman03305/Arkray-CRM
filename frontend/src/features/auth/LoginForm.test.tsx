@@ -181,3 +181,103 @@ describe("LoginForm", () => {
     expect(cached()).not.toContain("a secret passphrase");
   });
 });
+
+describe("LoginForm: two-step verification (ADR-0033)", () => {
+  const CHALLENGE = { status: 202, body: { mfa_required: true, expires_in: 300 } };
+
+  beforeEach(() => {
+    nav.search = "";
+    nav.hardNavigate.mockReset();
+  });
+
+  async function reachSecondStep(routes: Parameters<typeof mockApi>[0]) {
+    const api = mockApi({ "GET /api/v1/auth/me": NOT_SIGNED_IN, "POST /api/v1/auth/login": CHALLENGE, ...routes });
+    const rendered = renderWithProviders(<LoginForm />);
+    const user = await fillAndSubmit();
+    expect(await screen.findByRole("heading", { name: "Two-step verification" })).toBeInTheDocument();
+    return { api, user, ...rendered };
+  }
+
+  it("asks for the code after the password, then signs in exactly like a password sign-in", async () => {
+    const { api, user, client } = await reachSecondStep({ "POST /api/v1/auth/login/mfa": { status: 200, body: VIEWER } });
+    expect(nav.hardNavigate).not.toHaveBeenCalled(); // no session yet
+    const field = screen.getByLabelText("Authentication code");
+    expect(field).toHaveFocus();
+    expect(field).toHaveAttribute("autocomplete", "one-time-code");
+    expect(field).toHaveAttribute("inputmode", "numeric");
+    // The password is gone from the mutation cache once it has done its job.
+    expect(JSON.stringify(client.getMutationCache().getAll().map((m) => m.state.variables))).not.toContain("my passphrase");
+
+    await user.type(field, "123 456");
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+    await waitFor(() => expect(nav.hardNavigate).toHaveBeenCalledWith("/dashboard", "signed-in"));
+    const [call] = api.callsTo("POST", "/api/v1/auth/login/mfa");
+    expect(call!.body).toEqual({ code: "123456" });
+    expect(call!.headers["X-CSRFToken"]).toBe("test-csrf-token");
+  });
+
+  it("checks the code's shape before sending", async () => {
+    const { api, user } = await reachSecondStep({});
+    await user.type(screen.getByLabelText("Authentication code"), "12");
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+    expect(screen.getByLabelText("Authentication code")).toHaveAccessibleDescription(/Enter the 6-digit code/);
+    expect(api.callsTo("POST", "/api/v1/auth/login/mfa")).toHaveLength(0);
+  });
+
+  it("puts a wrong code on the field and stays on the second step", async () => {
+    const { user } = await reachSecondStep({
+      "POST /api/v1/auth/login/mfa": apiError(400, "invalid_mfa_code", "That code isn't right. Try again."),
+    });
+    await user.type(screen.getByLabelText("Authentication code"), "000000");
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+    const field = screen.getByLabelText("Authentication code");
+    await waitFor(() => expect(field).toHaveAccessibleDescription(/That code isn't right\. Try again\./));
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(field).toHaveFocus();
+    expect(nav.hardNavigate).not.toHaveBeenCalled();
+  });
+
+  it("goes back to the password with the server's explanation when the challenge expired", async () => {
+    const message = "Your sign-in took too long. Enter your password again.";
+    const { user } = await reachSecondStep({ "POST /api/v1/auth/login/mfa": apiError(400, "mfa_challenge_expired", message) });
+    await user.type(screen.getByLabelText("Authentication code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(message);
+    expect(screen.getByLabelText("Email")).toHaveValue("rahul@example.test");
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+    expect(screen.getByLabelText("Password")).toHaveFocus();
+  });
+
+  it("signs in with a recovery code instead", async () => {
+    const { api, user } = await reachSecondStep({ "POST /api/v1/auth/login/mfa": { status: 200, body: VIEWER } });
+    await user.click(screen.getByRole("button", { name: "Use a recovery code instead" }));
+    const field = screen.getByLabelText("Recovery code");
+    expect(field).toHaveFocus();
+    expect(screen.queryByLabelText("Authentication code")).not.toBeInTheDocument();
+    await user.type(field, " ABCD-EFGH-JKLM-NPQR ");
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+    await waitFor(() => expect(nav.hardNavigate).toHaveBeenCalledWith("/dashboard", "signed-in"));
+    expect(api.callsTo("POST", "/api/v1/auth/login/mfa")[0]!.body).toEqual({ recovery_code: "ABCD-EFGH-JKLM-NPQR" });
+  });
+
+  it("explains when too many codes were tried, as the password step does", async () => {
+    const { user } = await reachSecondStep({
+      "POST /api/v1/auth/login/mfa": { ...apiError(429, "rate_limited", "Request was throttled. Expected available in 60 seconds."), headers: { "Retry-After": "60" } },
+    });
+    await user.type(screen.getByLabelText("Authentication code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Too many sign-in attempts. Try again in about a minute.");
+    expect(alert).not.toHaveTextContent(/throttled/);
+    expect(screen.getByLabelText("Authentication code")).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("Back returns to the email and password", async () => {
+    const { api, user } = await reachSecondStep({});
+    await user.click(screen.getByRole("button", { name: "Back to sign in" }));
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(api.callsTo("POST", "/api/v1/auth/login/mfa")).toHaveLength(0);
+  });
+});

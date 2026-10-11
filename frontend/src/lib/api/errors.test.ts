@@ -42,6 +42,13 @@ describe("describeError", () => {
     );
   });
 
+  it("explains two-step refusals plainly (ADR-0033)", () => {
+    expect(describeError(new ApiError(403, "mfa_enrollment_required", "x")).message).toBe("Set up two-step verification to continue.");
+    expect(describeError(new ApiError(403, "mfa_required", "x")).message).toBe(
+      "Confirm it's you with a code from your authenticator app to do that.",
+    );
+  });
+
   it("passes safe envelope messages through", () => {
     const error = new ApiError(429, "rate_limited", "Too many sign-in attempts. Try again in 1 minute.");
     expect(describeError(error).message).toBe("Too many sign-in attempts. Try again in 1 minute.");

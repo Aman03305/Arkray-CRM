@@ -16,6 +16,8 @@ import { useSignOut } from "@/features/auth/useSignOut";
 import { describeError, fieldErrors } from "@/lib/api/errors";
 import { useViewer } from "@/lib/viewer-context";
 
+import { TwoStepSection } from "./TwoStepSection";
+
 function Section({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
   const headingId = useId();
   return (
@@ -122,6 +124,16 @@ export function ProfilePage() {
         <Section title="Password" description="Changing it signs you out on your other devices.">
           <ChangePasswordForm />
         </Section>
+
+        {/* Not inside a support session: the API refuses every two-step change there (ADR-0033). */}
+        {viewer && !viewer.supportSession ? (
+          <Section
+            title="Two-step verification"
+            description="A code from an app on your phone at sign-in, as well as your password."
+          >
+            <TwoStepSection />
+          </Section>
+        ) : null}
 
         <Section title="Session" description="Ends after 2 hours idle.">
           {signOutError ? (

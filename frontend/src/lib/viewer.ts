@@ -36,6 +36,10 @@ export interface Viewer {
   features: { ask: boolean };
   /** An administrator chose the password: only changing it (or signing out) works now. */
   passwordChangeRequired: boolean;
+  /** Two-step verification is set up (ADR-0033). */
+  mfaEnabled: boolean;
+  /** Required for this role but not set up yet: only setting it up (or signing out) works now. */
+  mfaEnrollmentRequired: boolean;
   /** An administrator's live support session in one user's CRM (never the user's login). */
   supportSession: SupportSession | null;
 }
@@ -75,6 +79,8 @@ export function toViewer(dto: ViewerDto): Viewer {
     // A response without the field (an older backend) offers no optional features.
     features: { ask: (dto.features as ViewerDto["features"] | undefined)?.ask === true },
     passwordChangeRequired: dto.password_change_required === true,
+    mfaEnabled: dto.mfa_enabled === true,
+    mfaEnrollmentRequired: dto.mfa_enrollment_required === true,
     supportSession: toSupportSession(dto.support_session),
   };
 }

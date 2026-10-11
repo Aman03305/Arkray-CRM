@@ -29,9 +29,12 @@ function copy(action: LifecycleAction, user: AdminUser) {
         confirm: "Reactivate",
         tone: "primary" as const,
         body: [
-          user.activated_at
-            ? "They'll be able to sign in again with their existing password."
-            : "They never set a password, so a new invitation will be emailed to them.",
+          !user.activated_at
+            ? "They never set a password, so a new invitation will be emailed to them."
+            : user.role === "admin"
+              ? // ADR-0033 (R126): an administrator's old password never works again.
+                `Their old password won't work again: a link to choose a new one will be emailed to ${user.email}.`
+              : "They'll be able to sign in again with their existing password.",
         ],
         done: (u: AdminUser) =>
           u.status === "invited" ? `${u.full_name} was reactivated and re-invited.` : `${u.full_name} was reactivated.`,

@@ -12,7 +12,7 @@ from django.utils import timezone
 
 from arkray.core import outbox
 
-from . import services, support, throttling, workspaces
+from . import mfa_services, services, support, throttling, workspaces
 
 # Outbox topics whose payload holds personal data (submitted or previous email addresses).
 PERSONAL_DATA_TOPICS = (services.TOPIC_PASSWORD_RESET_REQUESTED, services.TOPIC_EMAIL_CHANGED)
@@ -33,6 +33,7 @@ def housekeeping() -> dict[str, int]:
     windows = workspaces.purge_access_windows(now)
     expired_support = support.sweep_expired(now)
     forgotten_reasons = support.forget_reasons(now)
+    expired_setups = mfa_services.purge_expired_setups(now)
     result = {
         "throttle_events": purged_events,
         "sessions": purged_sessions,
@@ -40,6 +41,7 @@ def housekeeping() -> dict[str, int]:
         "access_windows": windows,
         "support_sessions_expired": expired_support,
         "redacted_reasons": forgotten_reasons,
+        "mfa_setups_expired": expired_setups,
     }
     if any(result.values()):
         logger.info("identity_housekeeping", extra=result)

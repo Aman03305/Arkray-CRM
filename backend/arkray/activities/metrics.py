@@ -40,7 +40,9 @@ def gauges() -> list[Gauge]:
     oldest = Gauge(
         "arkray_attachment_oldest_seconds",
         "Age of the oldest upload still in progress (state=uploading), and of the oldest failed"
-        " or deleted file whose object isn't removed yet (state=unpurged); 0 when none.",
+        " or deleted file whose object isn't removed yet (state=unpurged), and of the oldest"
+        " stored file still waiting for its malware scan (state=pending_scan: it doesn't"
+        " download until scanned); 0 when none.",
     )
     with connection.cursor() as cursor:
         cursor.execute(
@@ -51,13 +53,14 @@ def gauges() -> list[Gauge]:
             " AND (deleted_at IS NOT NULL OR state = 'failed' OR scan_status = 'rejected'))"
             " UNION ALL (SELECT 'failed', count(*), NULL FROM activities_attachment"
             " WHERE purged_at IS NULL AND state = 'failed')"
-            " UNION ALL (SELECT 'pending_scan', count(*), NULL FROM activities_attachment"
+            " UNION ALL (SELECT 'pending_scan', count(*),"
+            " EXTRACT(EPOCH FROM now() - min(stored_at)) FROM activities_attachment"
             " WHERE scan_status = 'pending' AND state = 'stored')"
         )
         found = {kind: (int(n), float(age or 0)) for kind, n, age in cursor.fetchall()}
     for kind in ("uploading", "failed", "pending_scan"):
         rows.add(found[kind][0], state=kind)
-    for kind in ("uploading", "unpurged"):
+    for kind in ("uploading", "unpurged", "pending_scan"):
         oldest.add(round(max(found[kind][1], 0.0), 1), state=kind)
     return [rows, oldest]
 

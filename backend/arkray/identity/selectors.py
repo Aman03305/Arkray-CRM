@@ -7,20 +7,24 @@ from collections.abc import Collection, Iterable
 from uuid import UUID
 
 from django.db import connection
-from django.db.models import F, FilteredRelation, Q, QuerySet
+from django.db.models import Exists, F, FilteredRelation, OuterRef, Q, QuerySet
 
 from arkray.audit.models import AuditEvent
 from arkray.core.access import AccessScope
 from arkray.core.errors import NotFoundError
 from arkray.core.text import search_terms
 
-from .models import Role, TokenPurpose, TokenStatus, User, UserStatus
+from .models import MfaDevice, Role, TokenPurpose, TokenStatus, User, UserStatus
 from .policy import Capability, roles_with
 
 
 def _with_pending_invitation(queryset: QuerySet[User]) -> QuerySet[User]:
-    """Annotate the live invitation (at most one per user: a DB constraint) in one join."""
+    """Annotate the live invitation (at most one per user: a DB constraint) in one join, and
+    whether the user has a confirmed second factor (ADR-0033), in the same query."""
     return queryset.annotate(
+        mfa_enabled=Exists(
+            MfaDevice.objects.filter(user=OuterRef("pk"), confirmed_at__isnull=False)
+        ),
         pending_invitation=FilteredRelation(
             "account_tokens",
             condition=Q(
@@ -116,16 +120,25 @@ def people(user_ids: Iterable[UUID]) -> dict[UUID, User]:
 # shown are allowlisted per action too.
 SECURITY_ACTIONS: dict[str, tuple[str, ...]] = {
     "auth.login_with_temporary_password": (),
+    # Failed sign-ins of existing accounts (ADR-0033): why, never what was typed.
+    "auth.login_failed": ("reason",),
     "auth.password_changed": (),
     "auth.password_reset_completed": (),
     "auth.password_set_by_admin": (),
     "user.created": ("role", "activation"),
-    "user.deactivated": (),
-    "user.reactivated": (),
+    "user.deactivated": ("role",),
+    # `reset_link`: an administrator reactivated by another must set a new password (R126).
+    "user.reactivated": ("reset_link",),
     "user.role_changed": ("from", "to"),
     "user.email_changed": (),
     "support_session.started": ("reason",),
     "support_session.ended": ("end",),
+    # Two-step verification (ADR-0033): never a secret, a code or a hash.
+    "mfa.enabled": (),
+    "mfa.disabled": (),
+    "mfa.reset": ("by", "reason"),
+    "mfa.recovery_codes_replaced": (),
+    "mfa.recovery_code_used": ("remaining",),
 }
 
 

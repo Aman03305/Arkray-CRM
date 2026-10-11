@@ -8,9 +8,18 @@ from . import views
 auth_urlpatterns = [
     path("csrf", views.CsrfCookieView.as_view(), name="auth-csrf"),
     path("login", views.LoginView.as_view(), name="auth-login"),
+    path("login/mfa", views.LoginMfaView.as_view(), name="auth-login-mfa"),
     path("logout", views.LogoutView.as_view(), name="auth-logout"),
     path("me", views.MeView.as_view(), name="auth-me"),
     path("password/change", views.PasswordChangeView.as_view(), name="auth-password-change"),
+    path("mfa", views.MfaStatusView.as_view(), name="auth-mfa"),
+    path("mfa/setup", views.MfaSetupView.as_view(), name="auth-mfa-setup"),
+    path("mfa/confirm", views.MfaConfirmView.as_view(), name="auth-mfa-confirm"),
+    path(
+        "mfa/recovery-codes", views.MfaRecoveryCodesView.as_view(), name="auth-mfa-recovery-codes"
+    ),
+    path("mfa/disable", views.MfaDisableView.as_view(), name="auth-mfa-disable"),
+    path("mfa/verify", views.MfaVerifyView.as_view(), name="auth-mfa-verify"),
     path("password-reset", views.PasswordResetRequestView.as_view(), name="auth-password-reset"),
     path(
         "password-reset/confirm",
@@ -48,6 +57,11 @@ admin_urlpatterns = [
         "users/<uuid:user_id>/set-password",
         views.AdminUserSetPasswordView.as_view(),
         name="admin-user-set-password",
+    ),
+    path(
+        "users/<uuid:user_id>/mfa/reset",
+        views.AdminUserMfaResetView.as_view(),
+        name="admin-user-mfa-reset",
     ),
     path("security-events", views.SecurityEventListView.as_view(), name="admin-security-events"),
     path("support-sessions", views.SupportSessionStartView.as_view(), name="support-sessions"),

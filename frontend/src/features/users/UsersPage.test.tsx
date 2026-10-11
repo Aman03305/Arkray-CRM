@@ -87,7 +87,7 @@ describe("UsersPage: states", () => {
     renderPage();
     await screen.findByRole("button", { name: "Rahul Sharma" });
     const headers = screen.getAllByRole("columnheader").map((h) => h.textContent);
-    expect(headers).toEqual(["Name", "Email", "Role", "Status", "Last login", "Created", "Actions"]);
+    expect(headers).toEqual(["Name", "Email", "Role", "Status", "Two-step", "Last login", "Created", "Actions"]);
     expect(screen.queryByText(/pipeline value|active leads/i)).not.toBeInTheDocument();
   });
 
@@ -774,5 +774,80 @@ describe("row action menu keyboard support", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
+  });
+});
+
+describe("UsersPage: two-step verification (ADR-0033)", () => {
+  const protectedRahul = makeAdminUser({ mfa_enabled: true });
+  const bina = makeAdminUser({
+    id: "3b2a1c0d-2222-4333-8444-555566667777",
+    email: "bina@example.test",
+    first_name: "Bina",
+    last_name: "Admin",
+    full_name: "Bina Admin",
+    role: "admin",
+    role_label: "Admin",
+    mfa_enabled: true,
+  });
+
+  it("shows whether each user has it on", async () => {
+    mockApi({ [LIST]: page([protectedRahul, invited]) });
+    renderPage();
+    const row = (await screen.findByRole("button", { name: "Rahul Sharma" })).closest("tr")!;
+    const column = screen.getAllByRole("columnheader").findIndex((h) => h.textContent === "Two-step");
+    expect(within(row).getAllByRole("cell")[column]).toHaveTextContent("On");
+    const invitedRow = screen.getByRole("button", { name: "Neha Verma" }).closest("tr")!;
+    expect(within(invitedRow).getAllByRole("cell")[column]).toHaveTextContent("Off");
+  });
+
+  it("resets an ordinary user's two-step verification after an explicit confirmation", async () => {
+    const path = `/api/v1/admin/users/${protectedRahul.id}/mfa/reset`;
+    const api = mockApi({
+      [LIST]: page([protectedRahul]),
+      [`POST ${path}`]: { status: 200, body: { ...protectedRahul, mfa_enabled: false, version: 2 } },
+    });
+    renderPage();
+    const user = await openActions("Rahul Sharma");
+    await user.click(screen.getByRole("menuitem", { name: "Reset two-step verification" }));
+    const dialog = screen.getByRole("alertdialog", { name: "Reset two-step verification for Rahul Sharma?" });
+    expect(dialog).toHaveAccessibleDescription(expect.stringContaining("signed out everywhere"));
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus(); // not the destructive one
+    expect(api.callsTo("POST", path)).toHaveLength(0);
+    await user.click(within(dialog).getByRole("button", { name: "Reset two-step verification" }));
+    expect(await screen.findByText("Two-step verification was reset for Rahul Sharma.")).toBeInTheDocument();
+    expect(api.callsTo("POST", path)).toHaveLength(1);
+  });
+
+  it("isn't offered for users without it, nor for any administrator", async () => {
+    mockApi({ [LIST]: page([makeAdminUser({ mfa_enabled: false }), bina, { ...self, mfa_enabled: true }]) });
+    renderPage();
+    let user = await openActions("Rahul Sharma");
+    expect(screen.queryByRole("menuitem", { name: "Reset two-step verification" })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    user = await openActions("Bina Admin");
+    expect(screen.queryByRole("menuitem", { name: "Reset two-step verification" })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await openActions("Anita Admin");
+    expect(screen.queryByRole("menuitem", { name: "Reset two-step verification" })).not.toBeInTheDocument();
+  });
+
+  it("shows it in the user's details", async () => {
+    mockApi({ [LIST]: page([protectedRahul]), [`GET /api/v1/admin/users/${protectedRahul.id}`]: { status: 200, body: protectedRahul } });
+    renderPage();
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Rahul Sharma" }));
+    const drawer = await screen.findByRole("dialog", { name: "Rahul Sharma" });
+    expect(within(drawer).getByText("Two-step").nextElementSibling).toHaveTextContent("On");
+  });
+
+  it("says a reactivated administrator must choose a new password (their old one never works again)", async () => {
+    const gone = { ...bina, status: "deactivated" as const, status_label: "Deactivated" };
+    mockApi({ [LIST]: page([gone]) });
+    renderPage();
+    const user = await openActions("Bina Admin");
+    await user.click(screen.getByRole("menuitem", { name: "Reactivate" }));
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog).toHaveTextContent("Their old password won't work again");
+    expect(dialog).toHaveTextContent("bina@example.test");
+    expect(dialog).not.toHaveTextContent("existing password");
   });
 });

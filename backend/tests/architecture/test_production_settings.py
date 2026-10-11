@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 BACKEND = Path(__file__).resolve().parents[2]
-STRONG_KEY = "k" * 64
+STRONG_KEY = "prod-test-" + "0123456789abcdefghijklmnopqrstuvwxyz" * 2
 BASE_ENV = {
     "DATABASE_URL": "postgres://u:p@localhost:5432/db",
     "CELERY_BROKER_URL": "rediss://:broker-secret@redis.internal:6380/0?ssl_cert_reqs=required",
@@ -18,10 +18,13 @@ BASE_ENV = {
     "DJANGO_ALLOWED_HOSTS": "crm.example.com",
     "DJANGO_SECRET_KEY": STRONG_KEY,
     "TRUSTED_PROXY_COUNT": "1",
+    "TRUSTED_PROXY_ADDRESSES": "10.252.17.10",
     "APP_BASE_URL": "https://crm.example.com",
     "EMAIL_URL": "smtp+tls://mailer:secret@smtp.example.com:587",
     "ERASURE_LEDGER_URL": "s3://arkray-erasure-ledger/production",
     "ERASURE_LEDGER_KEY": "l" * 48,
+    "DEFAULT_FROM_EMAIL": "Arkray CRM <no-reply@crm.example.com>",
+    "ATTACHMENT_SCANNER": "clamd://127.0.0.1:3310",
 }
 
 
@@ -47,7 +50,18 @@ def load_production_settings(
     env = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith(("DJANGO_", "DATABASE_", "TRUSTED_PROXY", "APP_BASE_URL", "EMAIL_"))
+        if not k.startswith(
+            (
+                "DJANGO_",
+                "DATABASE_",
+                "TRUSTED_PROXY",
+                "APP_BASE_URL",
+                "EMAIL_",
+                "DEFAULT_FROM_EMAIL",
+                "ATTACHMENT_SCANNER",
+                "MFA_",
+            )
+        )
     }
     env.update(BASE_ENV)
     for key, value in overrides.items():
@@ -76,7 +90,15 @@ def test_secure_defaults():
     assert result.stdout.split() == ["False", "True", "True", "True", "31536000"]
 
 
-@pytest.mark.parametrize("key", ["short", "dev-only-insecure-key-" + "0" * 60])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "short",
+        "dev-only-insecure-key-" + "0" * 60,
+        "k" * 64,  # long, but 1 distinct character (Django's W009)
+        "django-insecure-" + "0123456789abcdefghij" * 3,  # startproject's throwaway key
+    ],
+)
 def test_weak_or_dev_secret_key_is_rejected(key):
     result = load_production_settings(DJANGO_SECRET_KEY=key)
     assert result.returncode != 0
@@ -115,6 +137,9 @@ def test_app_base_url_must_be_stated_explicitly():
         {"DJANGO_SECURE_COOKIES": "false"},
         {"DJANGO_SECURE_SSL_REDIRECT": "false"},
         {"DJANGO_HSTS_SECONDS": "0"},
+        {"DJANGO_HSTS_SECONDS": "60"},  # production readiness review: a token lifetime
+        {"DJANGO_CSRF_TRUSTED_ORIGINS": "http://crm.example.com"},
+        {"DJANGO_CSRF_TRUSTED_ORIGINS": "https://*.example.com"},
         {"APP_BASE_URL": "http://crm.example.com"},  # account links over plain HTTP
         {"REDIS_CACHE_URL": "redis://redis.internal:6379/1"},  # Phase 9: no AUTH
         {"CELERY_BROKER_URL": "redis://redis.internal:6379/0"},  # Phase 9: no AUTH
@@ -252,7 +277,7 @@ def test_rate_limits_are_validated_at_startup(rate, accepted):
 def test_a_previous_secret_key_can_be_kept_for_a_rotation():
     """Phase 11: the code honoured SECRET_KEY_FALLBACKS since Phase 9, but no deployment
     could set it, so rotating the key signed everyone out at once."""
-    previous = "p" * 64
+    previous = "prev-" + "zyxwvutsrqponmlkjihgfedcba9876543210" * 2
     kept = load_production_settings(
         "settings.SECRET_KEY_FALLBACKS", DJANGO_SECRET_KEY_FALLBACKS=previous
     )
@@ -322,6 +347,31 @@ def test_switching_the_role_check_off_needs_the_insecure_opt_in():
     assert local.stdout.strip() == "False"
 
 
+def test_administrators_need_a_second_factor_by_default_in_production():
+    """ADR-0033 (R125)."""
+    printed = load_production_settings("settings.MFA_REQUIRED_FOR_ADMINS")
+    assert printed.returncode == 0, printed.stderr
+    assert printed.stdout.strip() == "True"
+
+
+def test_turning_the_second_factor_off_needs_the_insecure_opt_in():
+    off = load_production_settings(MFA_REQUIRED_FOR_ADMINS="false")
+    assert off.returncode != 0
+    assert "MFA_REQUIRED_FOR_ADMINS" in off.stderr
+    local = load_production_settings(
+        "settings.MFA_REQUIRED_FOR_ADMINS", MFA_REQUIRED_FOR_ADMINS="false", **LOCAL_OPT_IN
+    )
+    assert local.returncode == 0, local.stderr
+    assert local.stdout.strip() == "False"
+
+
+@pytest.mark.parametrize("value", ["", "ture", "off please"])
+def test_an_unrecognisable_second_factor_value_is_refused(value):
+    result = load_production_settings(MFA_REQUIRED_FOR_ADMINS=value)
+    assert result.returncode != 0
+    assert "MFA_REQUIRED_FOR_ADMINS" in result.stderr
+
+
 def test_wildcard_allowed_hosts_is_rejected():
     """'*' disables Host-header validation, which emailed links and redirects rely on."""
     result = load_production_settings(DJANGO_ALLOWED_HOSTS="*")
@@ -352,3 +402,74 @@ def test_s3_attachment_storage_has_bounded_client_timeouts():
     assert result.stdout.strip() == "3 10 {'total_max_attempts': 2, 'mode': 'standard'}"
     # (connect + read) x total attempts, for the one call that can stall: inside gunicorn's 30 s
     assert (3 + 10) * 2 < 30
+
+
+@pytest.mark.parametrize(
+    "sender",
+    [None, "Arkray CRM <no-reply@arkray.local>", "no-reply@crm.internal", "Arkray", "a@b"],
+)
+def test_an_unset_or_undeliverable_sender_is_refused(sender):
+    """Production readiness review: the base default (no-reply@arkray.local) was used
+    silently, so invitation and reset emails were rejected or spam-filtered."""
+    refused = load_production_settings(DEFAULT_FROM_EMAIL=sender)
+    assert refused.returncode != 0
+    assert "DEFAULT_FROM_EMAIL must be set" in refused.stderr
+    local = load_production_settings(DEFAULT_FROM_EMAIL=sender, **LOCAL_OPT_IN)
+    assert local.returncode == 0, local.stderr
+
+
+def test_a_real_sender_address_and_https_origins_are_accepted():
+    result = load_production_settings(
+        "settings.DEFAULT_FROM_EMAIL, settings.CSRF_TRUSTED_ORIGINS",
+        DEFAULT_FROM_EMAIL="no-reply@crm.example.com",
+        DJANGO_CSRF_TRUSTED_ORIGINS="https://crm.example.com",
+        DJANGO_HSTS_SECONDS="86400",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["no-reply@crm.example.com", "['https://crm.example.com']"]
+
+
+def test_attachments_need_a_scanner_or_an_explicit_waiver():
+    """Production readiness review (R94): with no scanner every upload is downloadable as
+    "not scanned"; that is the organisation's stated decision, never a forgotten setting."""
+    missing = load_production_settings(ATTACHMENT_SCANNER=None)
+    assert missing.returncode != 0
+    assert "ATTACHMENT_SCANNER" in missing.stderr
+    waived = load_production_settings(ATTACHMENT_SCANNER=None, ATTACHMENT_SCANNER_WAIVED="true")
+    assert waived.returncode == 0, waived.stderr
+    local = load_production_settings(ATTACHMENT_SCANNER=None, **LOCAL_OPT_IN)
+    assert local.returncode == 0, local.stderr
+    for unclear in ("yes", "1", ""):
+        refused = load_production_settings(ATTACHMENT_SCANNER_WAIVED=unclear)
+        assert refused.returncode != 0
+        assert "ATTACHMENT_SCANNER_WAIVED" in refused.stderr
+
+
+# --- the proxies X-Forwarded-For is believed from (adversarial review P2-2) --------------------
+def test_a_proxy_count_needs_the_proxies_addresses():
+    result = load_production_settings("settings.DEBUG", TRUSTED_PROXY_ADDRESSES=None)
+    assert result.returncode != 0
+    assert "TRUSTED_PROXY_ADDRESSES must name" in result.stderr
+
+
+@pytest.mark.parametrize("value", ["not-an-ip", "10.0.0.0/33", "0.0.0.0/0", "::/0"])
+def test_proxy_addresses_must_be_addresses_and_never_everyone(value):
+    result = load_production_settings("settings.DEBUG", TRUSTED_PROXY_ADDRESSES=value)
+    assert result.returncode != 0
+    assert "TRUSTED_PROXY_ADDRESSES:" in result.stderr
+
+
+def test_proxy_addresses_accept_addresses_and_ranges_of_both_families():
+    result = load_production_settings(
+        "settings.TRUSTED_PROXY_ADDRESSES",
+        TRUSTED_PROXY_ADDRESSES="10.252.17.10,10.0.0.0/24,2001:db8:aa::/64",
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "2001:db8:aa::/64" in result.stdout
+
+
+def test_no_proxy_needs_no_addresses():
+    result = load_production_settings(
+        "settings.DEBUG", TRUSTED_PROXY_COUNT="0", TRUSTED_PROXY_ADDRESSES=None
+    )
+    assert result.returncode == 0, result.stderr[-2000:]

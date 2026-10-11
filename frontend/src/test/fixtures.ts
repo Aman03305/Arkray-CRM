@@ -30,6 +30,8 @@ export function makeViewer(overrides: Partial<Viewer> = {}): Viewer {
     capabilities: ["crm.access_own", "ai.query"],
     features: { ask: false },
     passwordChangeRequired: false,
+    mfaEnabled: false,
+    mfaEnrollmentRequired: false,
     supportSession: null,
     ...overrides,
   };
@@ -64,6 +66,7 @@ export function makeAdminUser(overrides: Partial<AdminUser> = {}): AdminUser {
     invitation: null,
     password_change_required: false,
     password_changed_at: "2026-09-01T05:00:00Z",
+    mfa_enabled: false,
     version: 1,
   };
   return { ...base, ...overrides };

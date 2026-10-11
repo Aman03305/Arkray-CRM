@@ -247,7 +247,7 @@ hold, never one's own. Their name becomes "Former user <8 hex>", their email
 `former-<id>@pseudonymised.invalid`, their password unusable and their last sign-in
 forgotten; sessions, pending links and support sessions end; their Ask Arkray conversations,
 the audit details about them (addresses, emails, reasons), the reasons of support sessions
-involving them, failed-sign-in evidence and queued email payloads naming them are deleted.
+involving them, failed-sign-in evidence, queued email payloads naming them and their second factor (the encrypted TOTP secret and recovery-code hashes, ADR-0033) are deleted.
 Their id, role, dates, ownership, the append-only trail and every amount and negotiated
 price stay. Audited (`user.pseudonymised`, counts only), recorded in the erasure ledger,
 irreversible, idempotent. This is not lead erasure: their customers are untouched.

@@ -77,7 +77,7 @@ class TestSourceLimits:
     def test_an_unknown_source_shares_one_budget(self, user_a):
         """Review F6: an unparseable address used to disable source limits entirely."""
         seed_source_failures(None)
-        with override_settings(TRUSTED_PROXY_COUNT=1):
+        with override_settings(TRUSTED_PROXY_COUNT=1, TRUSTED_PROXY_ADDRESSES=["127.0.0.1"]):
             response = login(APIClient(), user_a.email, HTTP_X_FORWARDED_FOR="unknown")
         assert response.status_code == 429
 
@@ -91,7 +91,7 @@ class TestSourceLimits:
             ("[2001:db8::7", None),
         ],
     )
-    @override_settings(TRUSTED_PROXY_COUNT=1)
+    @override_settings(TRUSTED_PROXY_COUNT=1, TRUSTED_PROXY_ADDRESSES=["10.0.0.0/24"])
     def test_forwarded_addresses_with_ports_are_parsed(self, forwarded, expected):
         request = RequestFactory().get("/", REMOTE_ADDR="10.0.0.1", HTTP_X_FORWARDED_FOR=forwarded)
         assert client_ip(request) == expected

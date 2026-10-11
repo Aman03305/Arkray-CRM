@@ -67,6 +67,8 @@ export const usersApi = {
   /** The user must replace it at their next sign-in; their sessions end. Never returned. */
   setPassword: (id: string, body: SetPasswordRequest) =>
     apiFetch<AdminUser>(user(id, "set-password"), { method: "POST", body }),
+  /** Removes an ordinary user's two-step verification (ADR-0033; never an administrator's). */
+  resetMfa: (id: string) => apiFetch<AdminUser>(user(id, "mfa/reset"), { method: "POST" }),
 };
 
 const SUPPORT_SESSIONS = "/api/v1/admin/support-sessions";

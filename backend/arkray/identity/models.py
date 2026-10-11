@@ -478,3 +478,85 @@ class SupportSession(UUIDPrimaryKeyModel):
 
     def is_live(self, now: datetime) -> bool:
         return self.ended_at is None and now < self.expires_at
+
+
+class MfaDevice(UUIDPrimaryKeyModel, TimeStampedModel):
+    """A user's authenticator (TOTP, RFC 6238; identity.mfa, ADR-0033). At most one per user.
+
+    `secret` is the shared secret encrypted (Fernet, under a key derived from SECRET_KEY and
+    its fallbacks): never stored, logged or returned in clear after setup. The device counts
+    only once a code from it was confirmed (`confirmed_at`); an unconfirmed one is a setup in
+    progress. `last_used_step` is the last accepted 30-second step: a code for it or an
+    earlier one is refused (replay), checked and updated under this row's lock.
+
+    A setup in progress lasts until `pending_until` (MFA_SETUP_TTL_S) and allows
+    MFA_SETUP_MAX_ATTEMPTS wrong codes (`setup_attempts`); then it is deleted (also by the
+    hourly housekeeping) and must start again."""
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="mfa_device")
+    secret = models.TextField()
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    last_used_step = models.BigIntegerField(null=True, blank=True)
+    pending_until = models.DateTimeField(null=True, blank=True)
+    setup_attempts = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        db_table = "identity_mfa_device"
+        constraints = [
+            # A Fernet token (urlsafe base64, "gAAAAA..."), never a bare base32 secret.
+            models.CheckConstraint(
+                condition=Q(secret__startswith="gAAAAA"),  # noqa: S106 — a format rule
+                name="identity_mfa_secret_encrypted",
+            ),
+            models.CheckConstraint(
+                condition=Q(last_used_step__isnull=True) | Q(last_used_step__gte=0),
+                name="identity_mfa_step_nonnegative",
+            ),
+            # Codes are accepted only from a confirmed device.
+            models.CheckConstraint(
+                condition=Q(last_used_step__isnull=True) | Q(confirmed_at__isnull=False),
+                name="identity_mfa_step_after_confirmation",
+            ),
+            # A pending setup has a deadline; a confirmed device has none.
+            models.CheckConstraint(
+                condition=Q(confirmed_at__isnull=True, pending_until__isnull=False)
+                | Q(confirmed_at__isnull=False, pending_until__isnull=True),
+                name="identity_mfa_pending_has_deadline",
+            ),
+        ]
+        indexes = [
+            # Expired setups, purged hourly (identity.housekeeping).
+            models.Index(
+                fields=["pending_until"],
+                condition=Q(confirmed_at__isnull=True),
+                name="identity_mfa_pending_idx",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"MfaDevice({'confirmed' if self.confirmed_at else 'pending'})"
+
+
+class MfaRecoveryCode(UUIDPrimaryKeyModel):
+    """One single-use recovery code (ADR-0033): only its SHA-256 is stored. Ten are issued
+    when a device is confirmed or the codes are replaced; replacing deletes the old ones."""
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="mfa_recovery_codes")
+    code_hash = models.CharField(max_length=64)
+    created_at = models.DateTimeField(default=timezone.now)
+    used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "identity_mfa_recovery_code"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "code_hash"], name="identity_mfa_recovery_code_unique"
+            ),
+            models.CheckConstraint(
+                condition=Q(code_hash__regex=r"^[0-9a-f]{64}$"),
+                name="identity_mfa_recovery_code_hash_format",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"MfaRecoveryCode({'used' if self.used_at else 'unused'})"

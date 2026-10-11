@@ -12,7 +12,9 @@ and drops:
 1. seeds synthetic people: a customer with a deal, a note, a file and a custom value, a
    second customer, and a former staff member;
 2. backs the source database up with scripts/backup.sh, encrypted to a throwaway OpenPGP key
-   made for the drill (inside the PostgreSQL container: pg_dump and gpg);
+   made for the drill and signed with a second one (inside the PostgreSQL container: pg_dump
+   and gpg); a copy altered after the backup, with a fresh .sha256 beside it (what someone
+   with write access to the backup store could do), must be refused by restore.sh;
 3. after the backup: erases the customer, deletes the file and the custom field's values and
    pseudonymises the former staff member, each recorded in the erasure ledger (a temporary
    directory, as its own volume would be);
@@ -180,6 +182,23 @@ def main() -> int:
             "-c",
             "gpg --batch --armor --export arkray-drill@example.invalid > /tmp/drill/public.asc",
         )
+        # The backup host's signing key (R128): its secret half for backup.sh, its public
+        # half for restore.sh.
+        run(
+            "docker",
+            "exec",
+            "-e",
+            "GNUPGHOME=/tmp/drill/gnupg",
+            container,
+            "sh",
+            "-c",
+            "gpg --batch --passphrase '' --quick-generate-key arkray-drill-signing@example.invalid"
+            " ed25519 sign never"
+            " && gpg --batch --pinentry-mode loopback --passphrase '' --armor"
+            " --export-secret-keys arkray-drill-signing@example.invalid > /tmp/drill/signing.asc"
+            " && gpg --batch --armor --export arkray-drill-signing@example.invalid"
+            " > /tmp/drill/signing-public.asc",
+        )
         started = time.monotonic()
         backup_log = run(
             "docker",
@@ -188,6 +207,8 @@ def main() -> int:
             f"DATABASE_URL=postgres://{SUPERUSER}:{PASSWORD}@127.0.0.1:5432/{SOURCE_DB}",
             "-e",
             "BACKUP_GPG_RECIPIENT_FILE=/tmp/drill/public.asc",
+            "-e",
+            "BACKUP_GPG_SIGNING_KEY_FILE=/tmp/drill/signing.asc",
             container,
             "bash",
             "/tmp/drill/backup.sh",
@@ -210,6 +231,55 @@ def main() -> int:
         }
         if not report["backup"]["encrypted"]:
             raise SystemExit("FAILED: the backup is readable without the private key")
+        # A planted backup: the real one with a byte appended and its checksum remade; the
+        # signature no longer matches, and restore.sh must stop before touching a database.
+        tampered = run(
+            "docker",
+            "exec",
+            "-e",
+            "TARGET_DATABASE_URL=postgres://nobody@127.0.0.1:5432/never_used",
+            "-e",
+            "BACKUP_GNUPGHOME=/tmp/drill/gnupg",
+            "-e",
+            "BACKUP_SIGNER_KEY_FILE=/tmp/drill/signing-public.asc",
+            container,
+            "sh",
+            "-c",
+            f"mkdir /tmp/drill/planted && cp {dump} {dump}.sig /tmp/drill/planted/"
+            f" && cd /tmp/drill/planted && f=$(basename {dump}) && printf x >> $f"
+            " && sha256sum $f > $f.sha256 && bash /tmp/drill/restore.sh /tmp/drill/planted/$f",
+            check=False,
+        )
+        report["backup"]["altered_copy_refused"] = "is not signed by the backup signing key" in (
+            tampered
+        )
+        if not report["backup"]["altered_copy_refused"]:
+            raise SystemExit(f"FAILED: restore.sh accepted an altered backup\n{tampered}")
+        # A planted PLAIN dump, newer-looking, with its own .sha256 and no signature
+        # (adversarial review P1-1: the signature was checked only for .gpg files, so this
+        # was restored as the schema owner). It must be refused before any database is used.
+        planted = run(
+            "docker",
+            "exec",
+            "-e",
+            "TARGET_DATABASE_URL=postgres://nobody@127.0.0.1:5432/never_used",
+            "-e",
+            "BACKUP_SIGNER_KEY_FILE=/tmp/drill/signing-public.asc",
+            "-e",
+            f"PGPASSWORD={PASSWORD}",
+            container,
+            "sh",
+            "-c",
+            "mkdir /tmp/drill/plain && cd /tmp/drill/plain && f=arkray-29991231T000000Z.dump"
+            f" && pg_dump -U {SUPERUSER} -h 127.0.0.1 --format=custom --file=$f {SOURCE_DB}"
+            " && sha256sum $f > $f.sha256 && bash /tmp/drill/restore.sh /tmp/drill/plain/$f",
+            check=False,
+        )
+        report["backup"]["planted_plain_dump_refused"] = (
+            "has no verifiable signature" in planted and "restored in" not in planted
+        )
+        if not report["backup"]["planted_plain_dump_refused"]:
+            raise SystemExit(f"FAILED: restore.sh accepted an unsigned plain dump\n{planted}")
 
         # 3. Erasures after the backup, each in the ledger.
         report["erased"] = step(source, "erase_after_backup", json.dumps(seeded))
@@ -229,6 +299,8 @@ def main() -> int:
             f"TARGET_DATABASE_URL=postgres://{SUPERUSER}:{PASSWORD}@127.0.0.1:5432/{RESTORED_DB}",
             "-e",
             "BACKUP_GNUPGHOME=/tmp/drill/gnupg",
+            "-e",
+            "BACKUP_SIGNER_KEY_FILE=/tmp/drill/signing-public.asc",
             container,
             "bash",
             "/tmp/drill/restore.sh",
@@ -238,6 +310,7 @@ def main() -> int:
         report["restore"] = {
             "seconds": round(time.monotonic() - started, 1),
             "checksum_ok": "checksum: ok" in restore_log,
+            "signature_ok": "signature: ok" in restore_log,
             "decrypted": "decrypted: ok" in restore_log,
             "replay_reminder": "replay_erasures" in restore_log,
         }
@@ -275,6 +348,7 @@ def main() -> int:
                 ("staff pseudonymised", checks["staff_pseudonymised"]),
                 ("bystander untouched", checks["bystander_intact"]),
                 ("api reopened", checks["api_status"] in (200, 204)),
+                ("signature verified", report["restore"]["signature_ok"]),
             )
             if not ok
         ]

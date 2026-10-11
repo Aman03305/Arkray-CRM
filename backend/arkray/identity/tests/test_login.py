@@ -50,6 +50,8 @@ class TestSuccessfulSignIn:
             "features",
             "password_change_required",
             "support_session",
+            "mfa_enabled",  # ADR-0033
+            "mfa_enrollment_required",
         }
         assert body["full_name"] == "Rahul Sharma"
         assert body["capabilities"] == ["ai.query", "crm.access_own"]
@@ -189,9 +191,22 @@ class TestFailuresRevealNothing:
             login(APIClient(), email, password)
             assert len(calls) == 1, email
 
-    def test_failures_are_not_audited_one_by_one(self, api_client, user_a):
+    def test_failures_of_an_existing_account_are_audited_unknown_emails_are_not(
+        self, api_client, user_a
+    ):
+        """ADR-0033 (was: no failure audited one by one): administrators see failed sign-ins
+        of real accounts in the security events; an unknown email creates no audit row (an
+        anonymous caller can't fill the audit trail at will)."""
         fail(api_client, user_a.email, 2)
-        assert not AuditEvent.objects.exists()
+        fail(APIClient(), "nobody-here@example.test", 2)
+        events = list(AuditEvent.objects.order_by("id"))
+        assert [e.action for e in events] == ["auth.login_failed"] * 2
+        assert {(e.actor_id, e.target_id, e.subject_user_id) for e in events} == {
+            (None, str(user_a.pk), user_a.pk)
+        }
+        assert events[0].metadata == {"reason": "wrong_password", "trusted_device": False}
+        # What was typed is never recorded.
+        assert "wrong-password" not in str([e.metadata for e in events])
 
     def test_blank_fields_are_validation_errors(self, api_client):
         response = api_client.post(LOGIN, {"email": "", "password": ""}, format="json")

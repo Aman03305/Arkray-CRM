@@ -24,12 +24,13 @@ from rest_framework import status as http
 from rest_framework.permissions import SAFE_METHODS
 from rest_framework.request import Request
 from rest_framework.response import Response
-from rest_framework.throttling import BaseThrottle, ScopedRateThrottle, UserRateThrottle
+from rest_framework.throttling import BaseThrottle
 
 from arkray.core.access import AccessScope
 from arkray.core.api import ApiView, idempotency_key, validated
 from arkray.core.errors import InvalidInputError, PermissionDeniedError
 from arkray.core.keyset import CursorBinding, KeysetPaginator, page_links
+from arkray.core.throttling import ScopedRateThrottle, UserRateThrottle
 from arkray.identity.models import User
 from arkray.identity.permissions import IsActiveUser
 from arkray.identity.workspaces import authorize_write, resolve_workspace, workspace_segment

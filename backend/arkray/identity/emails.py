@@ -78,6 +78,44 @@ def send_password_reset(*, to: str, first_name: str, link: str, expires_at: date
     )
 
 
+_MFA_NOTICES = {
+    "enabled": (
+        "Two-step verification was turned on",
+        "Two-step verification was turned on for your account, with a new authenticator.",
+    ),
+    "disabled": (
+        "Two-step verification was turned off",
+        "Two-step verification was turned off for your account.",
+    ),
+    "reset": (
+        "Two-step verification was reset",
+        "An administrator or an operator removed the two-step verification of your account."
+        " You were signed out everywhere.",
+    ),
+    "recovery_codes_replaced": (
+        "New recovery codes",
+        "New two-step verification recovery codes were created for your account; the old"
+        " ones no longer work.",
+    ),
+    "recovery_code_used": (
+        "A recovery code was used",
+        "One of your two-step verification recovery codes was used on your account.",
+    ),
+}
+
+
+def send_mfa_notice(*, to: str, first_name: str, change: str) -> None:
+    """Tell the owner their second factor changed (ADR-0033). Never a code or a secret."""
+    subject, what = _MFA_NOTICES[change]
+    _send(
+        to,
+        f"{PRODUCT_NAME}: {subject}",
+        f"Hello {first_name},\n\n{what}\n\n"
+        "If this was you, there is nothing to do. If it wasn't, change your password now "
+        "and tell your administrator.\n",
+    )
+
+
 def send_email_changed_notice(*, to: str, first_name: str, new_email: str) -> None:
     _send(
         to,

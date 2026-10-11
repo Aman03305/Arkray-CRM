@@ -11,9 +11,10 @@
  *   page had a viewer, or when the browser sent a session cookie with the page itself: a
  *   session that ended while the tab was closed or before a reload (E2E-1) is still one
  *   that ended, not a first visit;
- * - a 403 saying a new password must be chosen, or that a support session limits what can be
- *   done, means the signed-in user's state changed: the viewer is fetched again, and the
- *   session gate / shell follow it (the password form, or the end of the support session).
+ * - a 403 saying a new password must be chosen, that two-step verification must be set up
+ *   first (ADR-0033), or that a support session limits what can be done, means the signed-in
+ *   user's state changed: the viewer is fetched again, and the session gate / shell follow it
+ *   (the password form, the two-step set-up, or the end of the support session).
  */
 import { MutationCache, QueryCache, QueryClient } from "@tanstack/react-query";
 
@@ -30,7 +31,7 @@ export function isPublicPath(pathname: string): boolean {
 }
 
 /** 403 codes that mean the viewer's own state changed (see above). */
-const VIEWER_STATE_CODES = new Set(["password_change_required", "support_session_active"]);
+const VIEWER_STATE_CODES = new Set(["password_change_required", "mfa_enrollment_required", "support_session_active"]);
 
 /** A server asking to be left alone longer than this isn't retried automatically. */
 const MAX_RETRY_AFTER_S = 4;

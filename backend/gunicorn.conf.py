@@ -58,6 +58,12 @@ def on_starting(server: object) -> None:
 
     _role_checked = enforce_at_startup()
 
+    # The erasure ledger's chain, verified once here: the workers fork with it, so a
+    # recycled worker's first request reads only the entries added since (core.ledger_gate).
+    from arkray.core.ledger_gate import prime
+
+    prime()
+
 
 def post_worker_init(worker: object) -> None:
     """If the database was unreachable when the master started, each worker checks before

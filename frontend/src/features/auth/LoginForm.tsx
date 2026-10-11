@@ -13,8 +13,9 @@ import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
 import { hardNavigate } from "@/lib/browser";
 import { safeNextPath } from "@/lib/safe-redirect";
 
-import { authApi, useViewerQuery } from "./api";
+import { authApi, type LoginResult, useViewerQuery } from "./api";
 import { AuthCard } from "./AuthCard";
+import { LoginMfaStep } from "./LoginMfaStep";
 
 const REASONS = new Map<string, { tone: "info" | "success"; text: string }>([
   ["expired", { tone: "info", text: "Your session has ended. Please sign in again." }],
@@ -34,15 +35,29 @@ export function LoginForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [missing, setMissing] = useState<Record<string, string[]> | null>(null);
+  // The password was right and the account has two-step verification (ADR-0033).
+  const [secondStep, setSecondStep] = useState(false);
+  // Why the second step sent the user back here (its challenge expired).
+  const [restarted, setRestarted] = useState<string | null>(null);
+
+  const signedIn = () => {
+    // A new identity: drop everything cached, tell other tabs, start afresh.
+    queryClient.clear();
+    hardNavigate(next, "signed-in");
+  };
 
   const login = useMutation({
     mutationFn: authApi.login,
     gcTime: 0, // its variables are the email and password: not kept once the form is gone
-    onSuccess: () => {
+    onSuccess: (result: LoginResult) => {
       setPassword("");
-      // A new identity: drop everything cached, tell other tabs, start afresh.
-      queryClient.clear();
-      hardNavigate(next, "signed-in");
+      if (result.kind === "signed-in") {
+        signedIn();
+        return;
+      }
+      login.reset(); // drops the email and password the mutation still held
+      setRestarted(null);
+      setSecondStep(true);
     },
   });
 
@@ -62,8 +77,21 @@ export function LoginForm() {
     if (!email.trim()) problems.email = ["Enter your email address."];
     if (!password) problems.password = ["Enter your password."];
     setMissing(Object.keys(problems).length ? problems : null);
+    setRestarted(null);
     if (Object.keys(problems).length === 0) login.mutate({ email: email.trim(), password });
   };
+
+  if (secondStep) {
+    return (
+      <LoginMfaStep
+        onSignedIn={signedIn}
+        onRestart={(message) => {
+          setSecondStep(false);
+          setRestarted(message ?? null);
+        }}
+      />
+    );
+  }
 
   // An administrator-set password that was never replaced in time: the server says what to do.
   const temporaryExpired = isApiError(login.error, 400, "temporary_password_expired");
@@ -75,7 +103,8 @@ export function LoginForm() {
   return (
     <AuthCard title="Sign in" subtitle="Use your work email and password.">
       <form ref={form} onSubmit={onSubmit} noValidate className="space-y-4">
-        {reason && !login.isError ? <Alert tone={reason.tone}>{reason.text}</Alert> : null}
+        {reason && !login.isError && !restarted ? <Alert tone={reason.tone}>{reason.text}</Alert> : null}
+        {restarted && !login.isError ? <Alert tone="error">{restarted}</Alert> : null}
         {otherSession ? (
           <Alert tone="info">
             This browser is still signed in as {otherSession.fullName}. Signing in below switches
@@ -93,7 +122,8 @@ export function LoginForm() {
           type="email"
           autoComplete="username"
           inputMode="email"
-          autoFocus
+          // Back from the second step with the email kept: the password is what's missing.
+          autoFocus={!email}
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           errors={errors.email}
@@ -102,6 +132,7 @@ export function LoginForm() {
           label="Password"
           name="password"
           autoComplete="current-password"
+          autoFocus={Boolean(email)}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           errors={errors.password}

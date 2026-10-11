@@ -1,5 +1,6 @@
 """Production settings: secure by default, every secret from the environment."""
 
+import ipaddress
 import os
 import re
 from urllib.parse import urlsplit
@@ -13,10 +14,20 @@ from .base import env
 
 DEBUG = False
 
-if len(SECRET_KEY) < 50 or SECRET_KEY.startswith(("dev-", "test-")):  # noqa: F405
+
+def _weak_secret(key: str) -> bool:
+    """Django's own rule (check --deploy W009: 50+ characters, 5+ distinct ones, not a
+    generated `django-insecure-` key), plus the local stacks' `dev-`/`test-` keys. Production
+    readiness review: a 60-character run of one letter passed the length check alone."""
+    return (
+        len(key) < 50 or len(set(key)) < 5 or key.startswith(("dev-", "test-", "django-insecure-"))
+    )
+
+
+if _weak_secret(SECRET_KEY):  # noqa: F405
     raise ImproperlyConfigured("DJANGO_SECRET_KEY must be a strong, production-only secret.")
 for _fallback in SECRET_KEY_FALLBACKS:  # noqa: F405
-    if len(_fallback) < 50 or _fallback.startswith(("dev-", "test-")) or _fallback == SECRET_KEY:  # noqa: F405
+    if _weak_secret(_fallback) or _fallback == SECRET_KEY:  # noqa: F405
         raise ImproperlyConfigured(
             "DJANGO_SECRET_KEY_FALLBACKS must hold only earlier strong, production-only keys."
         )
@@ -57,6 +68,25 @@ if "TRUSTED_PROXY_COUNT" not in os.environ:
     # Client IPs drive rate limits and audit records; the proxy topology must be stated,
     # not defaulted (see docs/deployment.md).
     raise ImproperlyConfigured("TRUSTED_PROXY_COUNT must be set explicitly in production.")
+if TRUSTED_PROXY_COUNT > 0:  # noqa: F405
+    # X-Forwarded-For is believed only from the proxies' own addresses; without them anything
+    # that reached the app server directly could name any client (adversarial review P2-2).
+    if not TRUSTED_PROXY_ADDRESSES:  # noqa: F405
+        raise ImproperlyConfigured(
+            "TRUSTED_PROXY_ADDRESSES must name the proxies' addresses or CIDR ranges when"
+            " TRUSTED_PROXY_COUNT > 0."
+        )
+    for _proxy in TRUSTED_PROXY_ADDRESSES:  # noqa: F405
+        try:
+            _proxy_network = ipaddress.ip_network(_proxy.strip(), strict=False)
+        except ValueError:
+            raise ImproperlyConfigured(
+                f"TRUSTED_PROXY_ADDRESSES: {_proxy!r} is not an IP address or CIDR range."
+            ) from None
+        if _proxy_network.prefixlen == 0:
+            raise ImproperlyConfigured(
+                "TRUSTED_PROXY_ADDRESSES: a range of every address trusts everyone."
+            )
 
 # Ask Arkray: no unsafe or silently degraded AI configuration (docs/rag-architecture.md).
 if AI_LLM_PROVIDER not in {"anthropic", "none"}:  # noqa: F405
@@ -98,6 +128,12 @@ _role_check = os.environ.get("DB_REQUIRE_RESTRICTED_ROLE")
 if _role_check is not None and _role_check.strip().lower() not in {"true", "false", "1", "0"}:
     raise ImproperlyConfigured("DB_REQUIRE_RESTRICTED_ROLE must be true or false.")
 DB_REQUIRE_RESTRICTED_ROLE = env.bool("DB_REQUIRE_RESTRICTED_ROLE", default=True)
+# Two-step verification for administrators (ADR-0033, R125): on by default here, off only
+# with the insecure opt-in below; an unrecognisable value is refused like the role check's.
+_mfa_required = os.environ.get("MFA_REQUIRED_FOR_ADMINS")
+if _mfa_required is not None and _mfa_required.strip().lower() not in {"true", "false", "1", "0"}:
+    raise ImproperlyConfigured("MFA_REQUIRED_FOR_ADMINS must be true or false.")
+MFA_REQUIRED_FOR_ADMINS = env.bool("MFA_REQUIRED_FOR_ADMINS", default=True)
 # Rate limits (R77): DRF parses them on the first request, so a typo would surface as
 # 500s there instead of here.
 _RATE = re.compile(r"[1-9][0-9]*/(s|sec|second|m|min|minute|h|hour|d|day)")
@@ -141,6 +177,20 @@ SECURE_REDIRECT_EXEMPT = [r"^health/"]  # probes speak plain HTTP inside the clu
 SECURE_HSTS_SECONDS = env.int("DJANGO_HSTS_SECONDS", default=31_536_000)
 SECURE_HSTS_INCLUDE_SUBDOMAINS = env.bool("DJANGO_HSTS_INCLUDE_SUBDOMAINS", default=False)
 SECURE_HSTS_PRELOAD = False
+
+_MIN_HSTS_SECONDS = 86_400
+
+_RESERVED_MAIL_DOMAINS = (".local", ".localhost", ".invalid", ".test", ".example", ".internal")
+_sender_domain = (
+    DEFAULT_FROM_EMAIL.rsplit("@", 1)[-1].strip().rstrip(">").strip().lower()  # noqa: F405
+    if "@" in DEFAULT_FROM_EMAIL  # noqa: F405
+    else ""
+)
+_undeliverable_sender = (
+    "DEFAULT_FROM_EMAIL" not in os.environ
+    or "." not in _sender_domain
+    or _sender_domain.endswith(_RESERVED_MAIL_DOMAINS)
+)
 
 _NON_DELIVERING_EMAIL = {"console", "filebased", "locmem", "dummy"}
 if EMAIL_BACKEND.rsplit(".", 2)[-2] in _NON_DELIVERING_EMAIL:  # noqa: F405
@@ -207,8 +257,22 @@ _insecure = [
         ("AI_LLM_BASE_URL", not AI_LLM_BASE_URL.startswith("https://")),  # noqa: F405
         # A runtime role that could rewrite the audit trail (R74).
         ("DB_REQUIRE_RESTRICTED_ROLE", not DB_REQUIRE_RESTRICTED_ROLE),
+        # Administrators without a second factor (ADR-0033, R125).
+        ("MFA_REQUIRED_FOR_ADMINS", not MFA_REQUIRED_FOR_ADMINS),
         # The local stack's published ledger key (privacy remediation P2-8).
         ("ERASURE_LEDGER_KEY", _ledger_dev_key),
+        # A minimum HSTS lifetime: a few seconds of HSTS protects nothing (production
+        # readiness review; the reference proxy sends a year itself).
+        ("DJANGO_HSTS_SECONDS", 0 < SECURE_HSTS_SECONDS < _MIN_HSTS_SECONDS),
+        # Only https origins may pass the CSRF origin check, and no subdomain wildcard: any
+        # subdomain's page could then post as a signed-in user (production readiness review).
+        (
+            "DJANGO_CSRF_TRUSTED_ORIGINS",
+            any(
+                not origin.startswith("https://") or "*" in origin
+                for origin in CSRF_TRUSTED_ORIGINS  # noqa: F405
+            ),
+        ),
     ]
     if weakened
 ]
@@ -217,6 +281,25 @@ if _insecure and not _insecure_opt_in:
     raise ImproperlyConfigured(
         f"{', '.join(_insecure)} weaken HTTPS protections; set "
         "DJANGO_ALLOW_INSECURE_LOCAL_HTTP=true only for local, non-public deployments."
+    )
+if _undeliverable_sender and not _insecure_opt_in:
+    # Invitation and reset emails from an unset or reserved domain (the base default is
+    # arkray.local) are rejected or spam-filtered: onboarding and resets fail silently
+    # (production readiness review).
+    raise ImproperlyConfigured(
+        "DEFAULT_FROM_EMAIL must be set in production, on a real domain with SPF, DKIM and"
+        f" DMARC (not {', '.join(_RESERVED_MAIL_DOMAINS)})."
+    )
+_scanner_waiver = os.environ.get("ATTACHMENT_SCANNER_WAIVED", "false").strip().lower()
+if _scanner_waiver not in {"true", "false"}:
+    raise ImproperlyConfigured("ATTACHMENT_SCANNER_WAIVED must be true or false.")
+if not ATTACHMENT_SCANNER and _scanner_waiver != "true" and not _insecure_opt_in:  # noqa: F405
+    # Without a scanner every upload is downloadable as "not scanned" (R94). Running without
+    # one is the organisation's decision, stated explicitly, never a forgotten setting
+    # (production readiness review).
+    raise ImproperlyConfigured(
+        "ATTACHMENT_SCANNER must name a ClamAV daemon (clamd://host:3310) in production, or"
+        " set ATTACHMENT_SCANNER_WAIVED=true to accept unscanned attachments (R94)."
     )
 if _transport_problems and not _insecure_opt_in:
     # Fail closed: no silent plain-text or unverified hop (the opt-in below is for local

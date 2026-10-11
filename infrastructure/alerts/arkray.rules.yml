@@ -92,11 +92,14 @@ groups:
           summary: "Ask Arkray's model provider failing: answers fall back to retrieval."
           runbook: docs/runbooks.md#ask-arkray-degraded
 
+      # A database-wide count that every API pod reports alike: one pod's figure (max over
+      # pods), or the 10-question floor would shrink with the number of pods (production
+      # readiness review).
       - alert: ArkrayAskFailing
         expr: >
-          sum(arkray_ai_questions_last_hour{error=~"ai_unavailable|timeout"})
-          / clamp_min(sum(arkray_ai_questions_last_hour), 1) > 0.2
-          and sum(arkray_ai_questions_last_hour) >= 10
+          max(sum by (instance) (arkray_ai_questions_last_hour{error=~"ai_unavailable|timeout"}))
+          / clamp_min(max(sum by (instance) (arkray_ai_questions_last_hour)), 1) > 0.2
+          and max(sum by (instance) (arkray_ai_questions_last_hour)) >= 10
         labels: {severity: ticket}
         annotations:
           summary: "Over 20 % of Ask Arkray questions failed or timed out in the last hour."
@@ -146,6 +149,17 @@ groups:
           summary: "An upload has been unfinished for over an hour: the hourly housekeeping isn't resolving it."
           runbook: docs/runbooks.md#attachment-reconciliation
 
+      # Fail-closed scanning (R94): a file waiting for its malware scan doesn't download. An
+      # hour means the scanner is down or misconfigured (clamd limits below the upload limit),
+      # or the scan jobs died; without this, users only see "Being checked" (final hardening).
+      - alert: ArkrayAttachmentScanOverdue
+        expr: max(arkray_attachment_oldest_seconds{state="pending_scan"}) > 3600
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Files have waited over an hour for a malware scan: they don't download (scanner down or misconfigured)."
+          runbook: docs/runbooks.md#attachment-reconciliation
+
       - alert: ArkrayAttachmentReconcileMismatch
         expr: max by (kind) (arkray_attachment_reconcile_mismatches) > 0
         labels: {severity: ticket}
@@ -176,3 +190,14 @@ groups:
         annotations:
           summary: "No attachment reconciliation result for 48 hours."
           runbook: docs/runbooks.md#attachment-reconciliation
+
+      # --- accounts (ADR-0033, R126) -----------------------------------------------------------
+      # One administrator can deactivate the others (only the last active one is protected):
+      # every deactivation of an administrator is worth a human look. A database-wide count
+      # every pod reports alike (max over pods); it stays above 0 for an hour after each one.
+      - alert: ArkrayAdministratorDeactivated
+        expr: max(arkray_administrator_deactivations_last_hour) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "An administrator account was deactivated in the last hour: confirm it was intended."
+          runbook: docs/runbooks.md#administrator-deactivated

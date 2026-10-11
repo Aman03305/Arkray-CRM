@@ -132,3 +132,15 @@ export type DataSubjectType = Schemas["SubjectTypeEnum"];
 export type ExportRequest = Schemas["ExportRequestRequest"];
 export type PseudonymiseRequest = Schemas["PseudonymiseRequest"];
 export type PseudonymiseResult = Schemas["PseudonymiseResult"];
+
+// --- Two-step verification (ADR-0033) -----------------------------------------------------------
+/** POST /auth/login answered 202: the password was right, a second step is needed. */
+export type MfaChallenge = Schemas["MfaChallenge"];
+/** A code from the authenticator app, or one of the single-use recovery codes (exactly one:
+ * stricter than the generated CodeOrRecoveryCodeRequest, whose fields are both optional). */
+export type MfaFactorRequest = { readonly code: string } | { readonly recovery_code: string };
+export type MfaStatus = Schemas["MfaStatus"];
+/** The QR code as a module matrix: `size` rows of `size` characters, "1" dark, "0" light. */
+export type MfaQrMatrix = Schemas["QrMatrix"];
+export type MfaSetup = Schemas["MfaSetup"];
+export type MfaRecoveryCodes = Schemas["RecoveryCodes"];
