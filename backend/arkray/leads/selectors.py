@@ -353,7 +353,7 @@ def lock_lead_by_id(lead_id: UUID) -> Lead:
     return Lead.objects.select_for_update(no_key=True).only(*_LOCKED_FIELDS).get(pk=lead_id)
 
 
-_LOCKED_FIELDS = ("id", "owner_id", "status_id", "archived_at", "version")
+_LOCKED_FIELDS = ("id", "owner_id", "status_id", "archived_at", "erased_at", "version")
 
 
 def hold_lead_key(lead_id: UUID) -> None:

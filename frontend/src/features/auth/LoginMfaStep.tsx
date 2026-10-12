@@ -10,7 +10,15 @@ import { describeError, isApiError } from "@/lib/api/errors";
 
 import { authApi } from "./api";
 import { AuthCard } from "./AuthCard";
-import { FactorField, type FactorKind, factorBody, factorProblem, serverCodeErrors } from "./FactorField";
+import {
+  FactorField,
+  type FactorKind,
+  factorBody,
+  factorProblem,
+  isMfaLocked,
+  MFA_LOCKED_MESSAGE,
+  serverCodeErrors,
+} from "./FactorField";
 
 const SUBTITLES: Record<FactorKind, string> = {
   code: "Enter the code from your authenticator app to finish signing in.",
@@ -39,6 +47,9 @@ export function LoginMfaStep({ onSignedIn, onRestart }: { onSignedIn: () => void
     onError: (error) => {
       // Too slow, too many wrong codes, or the password changed meanwhile: start again.
       if (isApiError(error, 400, "mfa_challenge_expired")) onRestart(error.message);
+      // Locked by wrong codes over many sign-ins: the challenge is over too, and the way out
+      // (Forgot password) is on the first step.
+      else if (isMfaLocked(error)) onRestart(MFA_LOCKED_MESSAGE);
     },
   });
 

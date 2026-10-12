@@ -202,6 +202,7 @@ reconciliation re-indexes any source whose chunks drifted.
    trail (`audit_event.support_session_id`): list a session's actions with
    `SELECT action, target_type, target_id, occurred_at FROM audit_event WHERE
    support_session_id = '<id>' ORDER BY occurred_at`.
+5. `mfa.locked` / `ArkrayMfaLocked`: see [Second factor locked](#second-factor-locked).
 
 ## Administrator deactivated
 
@@ -237,6 +238,37 @@ A user without their authenticator and without any recovery code.
 - **After a `DJANGO_SECRET_KEY` rotation**: run `manage.py mfa_reencrypt` before removing the
   old key from `DJANGO_SECRET_KEY_FALLBACKS`; it exits non-zero if a secret is under no
   configured key (put the old key back, or reset those accounts).
+
+## Second factor locked
+
+*Alert: `ArkrayMfaLocked` (a user's two-step verification was locked by too many wrong codes
+in the last hour; it stays raised for that hour).*
+
+Codes are asked for only after the right password (or in a signed-in session), so 20 wrong
+codes in a row mean someone else very probably has that user's password (deep security audit
+M-4, R133). The account's owner was emailed when it locked (and about the first wrong code).
+
+1. Security events (Admin home, *Security activity*): `mfa.locked` (whose), and the
+   `auth.login_failed` events before it (reasons `wrong_code`, `wrong_recovery_code`,
+   `mfa_locked`); the audit trail's expiring detail has the client addresses.
+2. Call the user on a known number. If the codes weren't theirs, treat it as a
+   [Security incident](#security-incident): their password is known to someone else.
+3. Unlock (any one of):
+   - the user resets their password with *Forgot password* (the emailed link unlocks it and
+     replaces the password the attacker knew): **preferred**;
+   - an administrator sets a temporary password for an ordinary user (Users page,
+     *Set password*): it unlocks it, the authenticator is kept;
+   - an administrator resets an ordinary user's two-step verification (Users page), or an
+     operator runs `manage.py reset_mfa` for an administrator (see
+     [Lost second factor](#lost-second-factor)): the authenticator is removed too.
+
+   Changing the password in a signed-in session does not unlock it (that session could be the
+   attacker's).
+4. Check the count (read only): `SELECT u.email, d.consecutive_failures,
+   d.failure_notified_at FROM identity_mfa_device d JOIN identity_user u ON u.id = d.user_id
+   WHERE d.consecutive_failures > 0 ORDER BY d.consecutive_failures DESC;`
+   Never set `consecutive_failures` by hand without one of the steps above: the lock exists
+   because the password is likely known.
 
 ## File storage
 
@@ -719,3 +751,6 @@ Record that it was done (who, when, the cut-off) outside the application.
   [Lost second factor](#lost-second-factor).
 - A user locked out by failed sign-ins waits the lockout (at most 15 minutes) or resets
   their password; an administrator can reactivate a deactivated user on the Users page.
+- A user whose two-step verification is locked (20 wrong codes in a row; they see "Too many
+  wrong codes...") resets their password with Forgot password, which unlocks it; see
+  [Second factor locked](#second-factor-locked).

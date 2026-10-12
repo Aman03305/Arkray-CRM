@@ -93,6 +93,39 @@ in the pinned nginx through `real_ip` with 3,226 addresses (0 mismatches). Behin
 proxy or load balancer, set nginx's `real_ip` module to take the client address from it,
 or the whole site shares one bucket.
 
+The same key also limits **requests in flight** (`limit_conn`, deep security audit H-1): 256
+per client in every location, 8 requests with a body, 4 attachment uploads per client (a zone
+of their own, so an office's page loads never count against its uploads), and 2 data-export
+downloads per client (4 in all), refused 429 in the API's JSON shape. Signs in the access
+log: bursts of 429 on `/api/v1/workspaces/*/activities/*/attachments`; a 429 on
+`/api/v1/admin/privacy/exports/*/download` means the export slots are busy. An upload
+without a session is answered 401 by the edge's session check (`auth_request` to
+`/api/v1/auth/me`) before its body is read; a 503 on every upload while the API is up
+points at that check (its timeout is 10 s). The upload area (`/var/cache/nginx`, 64 MB
+tmpfs) or the JSON-body area (`/var/cache/nginx-body`, 16 MB) full shows as 503
+`service_unavailable` from the edge on uploads or on large JSON writes, and as `No space
+left on device` lines in nginx's error log (it logs `crit`, so they appear). They empty
+themselves as the slow clients time out (15 s without a byte) or finish. The export spool
+volume `edge-export-spool` can be emptied at any time with nginx stopped (nothing in it
+outlives a request). If a legitimate office hits the per-client limits, raise them in
+`arkray.conf` together with the tmpfs sizes and the container's memory limit (the tests
+check they stay consistent).
+
+What remains possible without signing in (deep security audit H-1 and its review; R129):
+
+| What | Bound | Addresses to exhaust | Effect while it lasts |
+|---|---|---|---|
+| Upload area (64 MB) | not reachable: the body is read only for a confirmed session | cannot, without an account | none |
+| JSON-body area (16 MB), declared bodies | 8 x 1 MB per client | 2 | JSON writes over 16 KB get 503 |
+| JSON-body area, undeclared HTTP/2 bodies (not counted) | 256 x 1 MB per client, area capped | 1 | JSON writes over 16 KB get 503; uploads and downloads unaffected |
+| Export download slots (4 in all), held by trickling a chunked or undeclared body | 2 per client | 2 | administrators' export downloads get 429; nothing spooled |
+| Requests in flight / connections (memory) | 256 per client; `worker_connections` | many (a DDoS) | the platform's DDoS protection is the bound |
+| The address's own upload slots, held by refused bodies being discarded | about 30 s each (`lingering_time`) | none | only that address |
+
+With an account the per-client limits still apply: a signed-in user from 2 addresses can fill
+the upload area (4 x 11 MB each); their uploads are attributable (session, audit) and others'
+get 503 while it lasts.
+
 ## Production-shaped stack
 
 ```bash

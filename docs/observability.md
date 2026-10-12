@@ -88,10 +88,17 @@ Conventions:
   (`status`: 4xx other than 429), `ai_provider_configured` (once per process: the provider's
   host and the model, never the key), `ai_breaker_opened` (ERROR),
   `ai_grounding_failed` (`unsupported_numbers`: a count), `ai_tool_failed` (`tool`,
-  `exc_type`: the type only, never a traceback),
+  `exc_type`: the type only, never a traceback), `ai_routed_call_failed` (`kind`: the
+  routed intent; a routed question's tool call failed and it was queued for the model
+  instead, deep security audit L-10),
   `ai_retrieval_unavailable`, `ai_reconciliation_finished`, `embedding_model_loaded`. Audit:
   `ai.question` per answered question (actor, workspace, subject when delegated; metadata:
-  question id, mode, tool names, record count, outcome).
+  question id, mode, tool names, record count, outcome; `support_session_id` when it was
+  asked inside a support session, deep security audit L-13), and `ai.conversation_deleted`
+  when a user forgets a conversation (actor, conversation id, subject when delegated;
+  metadata: the number of questions; deep security audit M-5), and `ai.question_queued` per
+question handed to the ai workers (ids only: `question_id`; what the daily cap counts,
+deep security audit L-12).
 - Django's 4xx duplicates are suppressed (the access log has them); 5xx are logged with
   tracebacks and correlation ids. A database outage is answered 503 `service_unavailable`
   (Phase 10), so an outage and a bug are different status codes in the access log.
@@ -207,6 +214,7 @@ at scrape time in a bounded number of queries, `config/metrics.py`):
 | `arkray_ai_questions_pending` | — | questions waiting for an ai worker and not yet expired |
 | `arkray_ai_breaker_open` | — | the model provider's circuit breaker (its state is shared through the cache: no sample while the cache can't answer) |
 | `arkray_administrator_deactivations_last_hour` | — | administrator accounts deactivated in the last hour (`user.deactivated` audit events recording an administrator's role; one database count, no cache read; ADR-0033) |
+| `arkray_mfa_lockouts_last_hour` | — | second factors locked by too many wrong codes in the last hour (`mfa.locked` audit events; counted in the same database query as the administrator deactivations, no cache read; deep security audit M-4) |
 | `arkray_attachments` | `state` (uploading, failed, pending_scan) | attachment rows still in progress, failed with their object not yet removed, waiting for a malware scan |
 | `arkray_attachment_oldest_seconds` | `state` (uploading, unpurged, pending_scan) | age of the oldest unfinished upload; of the oldest failed or deleted file whose object isn't removed yet; of the oldest stored file still waiting for its malware scan |
 | `arkray_attachment_storage_up` | `backend` (filesystem, s3) | the store answered a liveness check (S3 `head_bucket`; a directory: a sentinel written, read back, deleted), at most every 30 s per process, within the 2 s probe deadline |
@@ -284,5 +292,6 @@ The metric-based rows are shipped as Prometheus rules in `infrastructure/alerts/
 | Attachment storage down | `arkray_attachment_storage_up` = 0 for 5 min (`ArkrayAttachmentStorageDown`); storage errors and timeouts above 20 % of uploads in an hour (`ArkrayAttachmentUploadsFailing`) | runbooks: attachment storage degraded |
 | Attachment object missing | `arkray_attachment_objects_missing_last_hour` > 0 (`ArkrayAttachmentObjectMissing`) | runbooks: attachment object missing |
 | Administrator deactivated | any administrator account deactivated in the last hour (`ArkrayAdministratorDeactivated`, ticket) | runbooks: administrator deactivated |
+| Second factor locked | any `mfa.locked` in the last hour (`ArkrayMfaLocked`, ticket): someone probably has that user's password | runbooks: second factor locked |
 | Attachment reconciliation | mismatches > 0, outcome 2, no whole pass for 48 h (`ArkrayAttachmentReconcile*`); an upload unfinished for over an hour (`ArkrayAttachmentUploadStuck`); a file waiting over an hour for its malware scan, so not downloadable (`ArkrayAttachmentScanOverdue`) | runbooks: attachment reconciliation |
 | Malware | any `attachment_malware_blocked`; `pending_scans` growing for an hour (scanner down: files don't download) | runbooks: file storage |

@@ -12,8 +12,8 @@ fails closed:
 1. PING and VERSION (the daemon answers; its engine and signature versions are reported);
 2. a clean file is clean; the EICAR test file (assembled here at run time: this repository
    never holds it, so antivirus on a developer machine has nothing to quarantine) is FOUND;
-3. a file of the application's largest size (ATTACHMENT_MAX_BYTES; 100 MiB by default, the
-   database's ceiling) is scanned whole: clean, and with a drill signature's marker in its
+3. a file of the application's largest size (ATTACHMENT_MAX_BYTES; 10 MiB by default, as in
+   config/settings/base.py) is scanned whole: clean, and with a drill signature's marker in its
    last bytes, FOUND. With `--container` the drill installs that signature (a one-line
    .ndb in the container's database directory, then RELOAD). This is what proves clamd's
    StreamMaxLength and MaxFileSize are at least the application's limit: a smaller
@@ -284,9 +284,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scanner", default="clamd://127.0.0.1:53310")
     parser.add_argument("--container", help="the clamd container (installs the drill signature)")
-    parser.add_argument("--max-bytes", type=int, default=100 * MIB, help="ATTACHMENT_MAX_BYTES")
     parser.add_argument(
-        "--stream-max-length", type=int, default=100 * MIB, help="clamd's StreamMaxLength"
+        "--max-bytes", type=int, default=10 * MIB, help="ATTACHMENT_MAX_BYTES (settings default)"
+    )
+    parser.add_argument(
+        "--stream-max-length",
+        type=int,
+        default=16 * MIB,
+        help="clamd's StreamMaxLength (infrastructure/clamav/clamd.conf)",
     )
     parser.add_argument("--report", required=True)
     parser.add_argument("--e2e", action="store_true")

@@ -119,19 +119,36 @@ Files on notes ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.
   enabled). A file must be what its extension says (magic bytes; OOXML packages with their
   main part and **no active content**: no macro project, OLE object (`*.bin` parts other
   than printer settings) or ActiveX control under any part name, no embedding other than
-  Office documents and pictures, no macro, OLE or ActiveX content type declared, no external
-  template; the zip directory plus its small XML parts are read, bounded; text is UTF-8
-  without NUL bytes). Everything else is refused: executables, scripts (`.exe .dll .bat .cmd .ps1 .sh
-  .js`), HTML, SVG, archives, macro documents, double extensions (`invoice.pdf.exe`).
+  Office documents and pictures, no macro, OLE, ActiveX, external-link or data-connection
+  content type declared, and no relationship that is an OLE object, a template, an ActiveX
+  control, a macro project, a subdocument, a frame, a link to another workbook or a data
+  connection, or that points outside the package (anything but a hyperlink, by its exact
+  Transitional or Strict Type URI, with `TargetMode` other than `Internal`, or a URL/UNC
+  target); no document Word imports (altChunk: an `aFChunk` relationship, an RTF, MHT or HTML
+  content type or part name) and no Office add-in (web extensions, task panes):
+  `[Content_Types].xml` and every `.rels` part are parsed as XML (defusedxml: no DTD or
+  entities; UTF-8, or UTF-16 with its byte-order mark, and a declared encoding that agrees),
+  never searched as bytes, and a part that doesn't parse refuses the file (deep security
+  audit M-3 and its review); the zip directory plus those small XML parts are read, bounded
+  (1 MiB each, 4 MiB in all); text is UTF-8 without NUL bytes). Everything else is refused:
+  executables, scripts (`.exe .dll .bat .cmd .ps1 .sh .js`), HTML, SVG, archives, macro documents, double extensions (`invoice.pdf.exe`).
 - **Names** are display text only: path components dropped, control and bidi characters
   refused, ≤ 200 characters. Objects live under generated keys (`YYYY/MM/<uuid>`), never the
   uploaded name.
 - **Limits**: `ATTACHMENT_MAX_BYTES` (10 MB; checked from Content-Length and again while
   reading: 413), `ATTACHMENT_MAX_PER_NOTE` (10; counted under the note's lock: 422), empty
-  files refused. The proxy allows 11 MB on the upload route only.
+  files refused. The proxy allows 11 MB on the upload route only (and 4 uploads in flight per
+  client, deep security audit H-1). `ATTACHMENT_MAX_BYTES_PER_USER` (2 GiB; 0 = no quota): the
+  total size of the files a person uploaded that are still in storage (stored, being
+  uploaded, and deleted or failed until the purge job removes their object); an administrator
+  adding a file in someone's workspace is charged for it. Checked under a per-person advisory
+  lock (`ARKQ`, taken first in the upload's transaction, before the lead and note locks), so
+  concurrent uploads can't overshoot it: 422 `attachment_quota_exceeded` (deep security audit
+  L-7).
 - **Upload** (`POST …/activities/{note}/attachments`, the raw file, `X-Filename`
   percent-encoded): streamed in 64 KB chunks, hashed (SHA-256), spooled to a temporary file
-  above 1 MB; then the note is locked (lead first: the lock order) and a row written
+  above 1 MB; then the uploader's quota is checked under their advisory lock, the note is
+  locked (lead first: the lock order) and a row written
   (`uploading`, generated key); then the object stored (no lock held); then the row marked
   `stored` and `attachment.uploaded` audited (extension and a size bucket, never the name).
   Storage down: 503 `storage_unavailable`, the row `failed`; a crash in between leaves an

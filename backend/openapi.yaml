@@ -1495,6 +1495,8 @@ paths:
           description: No response body
         '404':
           description: Not found, or outside this workspace.
+        '409':
+          description: A legal hold keeps it (`legal_hold`).
   /api/v1/workspaces/{workspace}/ask/questions/{question_id}:
     get:
       operationId: ask_question

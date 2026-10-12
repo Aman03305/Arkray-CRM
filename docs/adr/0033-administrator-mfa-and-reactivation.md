@@ -117,3 +117,42 @@ alert.
   the upgrade, each administrator enrols at their next sign-in.
 - WebAuthn/passkeys remain a possible later addition; neither the session design nor the
   capability model needs to change for it.
+
+## Addendum (deep security audit M-4, 2026-10-12): wrong codes accumulate until the factor locks
+
+The durable sign-in throttle only slows guessing down: its window slides, so someone with the
+password could try about 550 codes a day for as long as they liked (about a 5 % chance in 30
+days), and the owner was never told (R133). Now:
+
+- Every wrong code (authenticator or recovery code; at sign-in, step-up, replacing recovery
+  codes, disabling) increments `MfaDevice.consecutive_failures` under the device's row lock,
+  across sign-in attempts, browsers and sessions; a right code resets it to 0.
+- From `MFA_MAX_CONSECUTIVE_FAILURES` (20) on, **no code is accepted, the right one
+  included**: `403 mfa_locked` (the sign-in challenge ends; the web app goes back to the
+  password step with the explanation). Each guess matches at most 3 of 10^6 codes (one step of
+  drift either way), so 20 guesses leave a password thief about a 6 in 100,000 chance, for the
+  life of that password. 20 is four whole challenges (five codes each), comfortably beyond an
+  owner's typos (a right code in between resets the count), and well under NIST SP 800-63B's
+  ceiling of 100 consecutive failures. The audit suggested 50 (1.5 in 10,000); 20 is stricter
+  at no real cost.
+- **Unlocking** needs something a password thief doesn't have: a password reset through the
+  emailed link (`auth.password_reset_completed`), a password set by an administrator
+  (ordinary users only, as before), or an MFA reset (administrator for ordinary users,
+  `manage.py reset_mfa` for anyone; the device and its count are deleted). The first two
+  record `mfa.unlocked` (`by`: `password_reset` / `administrator`). A password change in a
+  signed-in session does **not** unlock: that session may be the thief's.
+- **Not a lever against owners whose password is safe**: the count only grows behind a
+  right password (a pending challenge) or a signed-in session (step-up), so nobody without
+  one of those can lock anyone out. Someone who has the password can lock the factor on
+  purpose; the owner then has to reset the password, which is exactly what they should do
+  when their password is known to someone else.
+- **The owner is told**: the first wrong code in `MFA_FAILURE_NOTICE_INTERVAL_S` (6 hours)
+  emails "A wrong verification code was entered" (a code is asked for only after the right
+  password, so if it wasn't them, reset the password); locking emails "Two-step verification
+  is locked". Neither contains a code. Outbox, in the transaction that counts the failure.
+- **Operators are told**: `mfa.locked` (ids and the count only) is audited and shown in the
+  security events; `arkray_mfa_lockouts_last_hour` raises `ArkrayMfaLocked` (ticket;
+  [runbooks](../runbooks.md#second-factor-locked)).
+- Migration `identity.0006_mfa_consecutive_failures` adds `consecutive_failures`
+  (`db_default=0`: the previous release still inserts) and `failure_notified_at`; it refuses to
+  reverse, like every post-RC migration.

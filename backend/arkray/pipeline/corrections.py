@@ -40,12 +40,13 @@ from arkray.audit import services as audit
 from arkray.core import holds
 from arkray.core.access import AccessScope
 from arkray.core.domain_events import publish
-from arkray.core.errors import BusinessRuleViolation, ConflictError, InvalidInputError
+from arkray.core.errors import ConflictError, InvalidInputError
 from arkray.core.models import HoldSubject
 from arkray.identity.models import User
 from arkray.identity.workspaces import authorize_write
 from arkray.leads import events as lead_events
 from arkray.leads import selectors as lead_selectors
+from arkray.leads import services as lead_services
 from arkray.leads import validation as lead_validation
 from arkray.leads.models import Lead
 from arkray.leads.phones import phone_key
@@ -155,8 +156,10 @@ def correct_customer(
     with transaction.atomic():
         lead_selectors.lock_lead(scope, lead_id, exclusive=True)
         lead = Lead.objects.get(pk=lead_id)
-        if lead.first_name == ERASED:
-            raise BusinessRuleViolation(ERASED_REFUSED)
+        # Erased: recorded by the erasure (deep security audit M-1), or (a lead erased by an
+        # earlier release and not yet marked) its placeholder name.
+        if lead.erased_at is not None or lead.first_name == ERASED:
+            raise lead_services.LeadErased(ERASED_REFUSED)
         # The held record is evidence: corrected only once the hold is released (checked
         # under the lead's lock and serialised with placing a hold: core.holds).
         holds.refuse_if_held(HoldSubject.LEAD, lead.pk)

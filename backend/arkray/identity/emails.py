@@ -101,19 +101,37 @@ _MFA_NOTICES = {
         "A recovery code was used",
         "One of your two-step verification recovery codes was used on your account.",
     ),
+    # Wrong codes (deep security audit M-4): a code is asked for only after the right
+    # password, or in a signed-in session.
+    "wrong_code": (
+        "A wrong verification code was entered",
+        "A wrong two-step verification code was just entered for your account. A code is"
+        " asked for only after the right password, or in a signed-in session.",
+    ),
+    "locked": (
+        "Two-step verification is locked",
+        "Too many wrong two-step verification codes were entered for your account, so it is"
+        " locked: no code is accepted, not even the right one. To unlock it, reset your"
+        " password (Forgot password on the sign-in page) or ask your administrator.",
+    ),
 }
+_MFA_ADVICE = (
+    "If this was you, there is nothing to do. If it wasn't, change your password now "
+    "and tell your administrator.\n"
+)
+# Someone else probably knows the password: it is what to replace.
+_MFA_FAILURE_ADVICE = (
+    "If this wasn't you, someone else probably knows your password: reset it now (Forgot "
+    "password on the sign-in page) and tell your administrator.\n"
+)
 
 
 def send_mfa_notice(*, to: str, first_name: str, change: str) -> None:
-    """Tell the owner their second factor changed (ADR-0033). Never a code or a secret."""
+    """Tell the owner their second factor changed, or that wrong codes were entered for it
+    (ADR-0033). Never a code or a secret."""
     subject, what = _MFA_NOTICES[change]
-    _send(
-        to,
-        f"{PRODUCT_NAME}: {subject}",
-        f"Hello {first_name},\n\n{what}\n\n"
-        "If this was you, there is nothing to do. If it wasn't, change your password now "
-        "and tell your administrator.\n",
-    )
+    advice = _MFA_FAILURE_ADVICE if change in ("wrong_code", "locked") else _MFA_ADVICE
+    _send(to, f"{PRODUCT_NAME}: {subject}", f"Hello {first_name},\n\n{what}\n\n{advice}")
 
 
 def send_email_changed_notice(*, to: str, first_name: str, new_email: str) -> None:

@@ -230,6 +230,12 @@ def _named_pipeline(ctx: ToolContext, name: str) -> Pipeline:
     if not matched:
         names = ", ".join(sorted({p.name for p in pipelines if p.is_active}))
         raise ToolError(f"No pipeline is called {name!r}. Pipelines: {names}.")
+    active = [p for p in matched if p.is_active]
+    if len(matched) > 1 and len(active) == 1:
+        # An archived pipeline that kept the name of the one in use: the one in use is meant
+        # (deep security audit L-10: the router, which knows active names only, routed the
+        # question here and the refusal below failed it with a 500).
+        return active[0]
     if len(matched) > 1:
         # Names are unique per owner only: never answer for an arbitrary one of them
         # (enhancement review: a ₹0 shared pipeline answered for the user's own).
@@ -1218,21 +1224,51 @@ def execute(ctx: ToolContext, name: str, arguments: Any) -> ToolOutcome:
     if ctx.result_chars >= settings.AI_TOOL_RESULTS_MAX_CHARS:
         return ToolOutcome(json.dumps({"error": BUDGET_SPENT}), True)
     ctx.tools_used.append(name)
+    # What the call adds to the answer (records it may cite, figures, quotes) counts only
+    # if its result reaches the model: a call that fails, or whose result the output budget
+    # drops, leaves the context as it was (deep security audit L-11: sources and quotes the
+    # model never saw were shown with the answer).
+    saved = _Saved.of(ctx)
     try:
         result = tool.run(ctx, arguments)
     except ToolError as exc:
+        saved.restore(ctx)
         return ToolOutcome(json.dumps({"error": str(exc)}), True)
     except Exception as exc:  # noqa: BLE001 — a failed tool must not fail the question
+        saved.restore(ctx)
         # By type only, like ai_answer_failed: the arguments come from the model and an
         # exception's text can quote them or CRM text (privacy remediation P2-2).
         logger.error("ai_tool_failed", extra={"tool": name, "exc_type": type(exc).__name__})
         return ToolOutcome(json.dumps({"error": "The tool failed. Try another approach."}), True)
     content = json.dumps(result, ensure_ascii=False, default=str)
     if ctx.result_chars + len(content) > settings.AI_TOOL_RESULTS_MAX_CHARS:
+        saved.restore(ctx)
         ctx.result_chars = settings.AI_TOOL_RESULTS_MAX_CHARS
         return ToolOutcome(json.dumps({"error": BUDGET_SPENT}), True)
     ctx.result_chars += len(content)
     return ToolOutcome(content, False)
+
+
+@dataclass(frozen=True, slots=True)
+class _Saved:
+    """The parts of a ToolContext a tool call adds to, as they were before it."""
+
+    records: dict[str, RecordRef]
+    facts: list[Fact]
+    citations: list[Citation]
+    retrieved_chars: int
+
+    @classmethod
+    def of(cls, ctx: ToolContext) -> _Saved:
+        return cls(dict(ctx.records), list(ctx.facts), list(ctx.citations), ctx.retrieved_chars)
+
+    def restore(self, ctx: ToolContext) -> None:
+        # In place: whoever holds the context's dict and lists sees them restored too.
+        ctx.records.clear()
+        ctx.records.update(self.records)
+        ctx.facts[:] = self.facts
+        ctx.citations[:] = self.citations
+        ctx.retrieved_chars = self.retrieved_chars
 
 
 BUDGET_SPENT = "This question has used its tool-output budget; answer with what you have."

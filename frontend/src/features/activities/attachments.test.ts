@@ -48,5 +48,8 @@ describe("note files", () => {
     expect(uploadProblem(new ApiError(422, "business_rule_violation", "A note can have at most 10 files."))).toBe(
       "A note can have at most 10 files.",
     );
+    // The per-person storage quota (deep security audit L-7): the server's sentence, as is.
+    const quota = "Your files can take up at most 2 GB in all, and this one would go over it.";
+    expect(uploadProblem(new ApiError(422, "attachment_quota_exceeded", quota))).toBe(quota);
   });
 });

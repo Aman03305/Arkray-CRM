@@ -11,7 +11,8 @@ unknown email is a log line only, so an anonymous caller can't create audit rows
 With a second factor (ADR-0033) the sign-in takes two requests: the right password gives a
 202 and a pending challenge in a fresh anonymous session (identity.mfa_services), and
 `sign_in_second_step` with a code completes it. The password alone forgives no earlier
-failure: only the second factor does.
+failure: only the second factor does. Wrong codes also accumulate on the device until it
+locks (deep security audit M-4, identity.mfa_services).
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ from arkray.core.errors import (
 )
 
 from . import mfa_services, support, throttling
-from .models import AccountToken, TokenPurpose, TokenStatus, User, normalize_email
+from .models import AccountToken, SupportEnd, TokenPurpose, TokenStatus, User, normalize_email
 from .passwords import check_new_password
 from .services import SESSION_ENDED
 from .sessions import end_session, session_matches, start_session
@@ -151,6 +152,11 @@ def sign_in(request: HttpRequest, email: str, password: str) -> SignIn | SecondF
         logger.info("login_temporary_password_expired", extra={"login": throttle.identifier[:12]})
         raise TemporaryPasswordExpiredError()
 
+    # This browser's session is about to be replaced (a new key, or a fresh challenge): a
+    # support session bound to it ends now, not when it expires (deep security audit I-1).
+    # After the password, so a mistyped one leaves a live support session alone.
+    support.end_on_sign_out(request, SupportEnd.SESSION_CHANGED)
+
     if mfa_services.has_confirmed_device(user):
         # Not a failure, but nothing is forgiven until the second factor is proved.
         throttle.release()
@@ -175,7 +181,16 @@ def sign_in_second_step(
             "login_throttled", extra={"reason": denied.reason, "login": throttle.identifier[:12]}
         )
         raise _throttled(denied)
-    factor = mfa_services.verify_factor(user, code=code, recovery_code=recovery_code)
+    try:
+        factor = mfa_services.verify_factor(user, code=code, recovery_code=recovery_code)
+    except mfa_services.MfaLockedError:
+        # Too many wrong codes in a row (deep security audit M-4): this challenge is over,
+        # and so is every later one until the password is reset or the factor is.
+        throttle.failed()
+        mfa_services.end_challenge(request)
+        logger.info("login_mfa_locked", extra={"login": throttle.identifier[:12]})
+        _audit_failure(user, "mfa_locked", throttle)
+        raise
     if factor is None:
         throttle.failed()
         mfa_services.record_wrong_code(request, challenge)

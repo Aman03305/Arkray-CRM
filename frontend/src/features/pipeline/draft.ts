@@ -107,6 +107,20 @@ export function changedFields(before: Draft, after: Draft): DraftField[] {
   return DRAFT_FIELDS.filter((f) => comparable(f, before[f]) !== comparable(f, after[f]));
 }
 
+/**
+ * What a viewer who may no longer see a deal's customer (`customer_restricted`) may still
+ * change: its value, probability and dates. Everything else may describe the customer (their
+ * details, the instrument, work load, Expected CPT, description, lost reason, custom values),
+ * and the server refuses a change to it (403 `customer_restricted`,
+ * docs/authorization.md#historical-deals).
+ */
+export const RESTRICTED_EDITABLE: ReadonlySet<DraftField> = new Set(["opportunity_date", "value", "probability", "expected_close_date"]);
+
+/** `draft` with every field such a viewer may not change put back as it was (`base`): never sent. */
+export function restrictedDraft(base: Draft, draft: Draft): Draft {
+  return Object.fromEntries(DRAFT_FIELDS.map((f) => [f, RESTRICTED_EDITABLE.has(f) ? draft[f] : base[f]])) as Draft;
+}
+
 export type Problems = Partial<
   Record<DraftField | "owner" | "pipeline" | "stage" | "negotiated_price" | "agreed_cpt" | `custom_fields.${string}`, string[]>
 >;

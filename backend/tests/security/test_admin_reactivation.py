@@ -114,9 +114,8 @@ def test_an_ordinary_user_comes_back_with_their_own_password(admin, user_a):
 
 def test_the_deactivation_gauge_counts_administrators_only(admin):
     def value():
-        (gauge,) = metrics.gauges()
-        assert gauge.name == "arkray_administrator_deactivations_last_hour"
-        return gauge.samples[0][1]
+        by_name = {gauge.name: gauge for gauge in metrics.gauges()}
+        return by_name["arkray_administrator_deactivations_last_hour"].samples[0][1]
 
     assert value() == 0
     services.deactivate_user(actor_id=admin.pk, user_id=UserFactory().pk)

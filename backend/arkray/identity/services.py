@@ -46,6 +46,7 @@ from arkray.core.text import TextRejected, clean_line
 from . import emails, selectors, throttling, tokens
 from .models import (
     AccountToken,
+    MfaDevice,
     Role,
     TokenPurpose,
     TokenStatus,
@@ -75,6 +76,8 @@ AUDIT_PASSWORD_RESET_ISSUED = "auth.password_reset_issued"  # noqa: S105
 AUDIT_PASSWORD_RESET_COMPLETED = "auth.password_reset_completed"  # noqa: S105
 AUDIT_PASSWORD_SET_BY_ADMIN = "auth.password_set_by_admin"  # noqa: S105
 AUDIT_PASSWORD_RESET_SUPPRESSED = "auth.password_reset_suppressed"  # noqa: S105
+# A locked second factor unlocked by a new password (deep security audit M-4).
+AUDIT_MFA_UNLOCKED = "mfa.unlocked"
 
 EDITABLE_FIELDS = frozenset({"first_name", "last_name", "role"})
 EMAIL_TAKEN = "A user with this email address already exists."
@@ -215,6 +218,34 @@ def _audit_user_sensitive(
     )
 
 
+def _forget_second_factor_failures(user: User, *, actor_id: UUID, by: str) -> None:
+    """A new password ends a second-factor lock and forgets the wrong codes counted toward one
+    (deep security audit M-4): whoever guessed codes did it with the old password, now gone.
+    Only a new password chosen through the emailed link or set by an administrator does: a
+    password change in a signed-in session doesn't (the session, possibly a stolen one, is
+    the attacker's too). Audited (`mfa.unlocked`) when it was locked. Called with the user's
+    row locked: user, then device, the order of every two-step operation."""
+    device = (
+        MfaDevice.objects.select_for_update()
+        .filter(user_id=user.pk, consecutive_failures__gt=0)
+        .first()
+    )
+    if device is None:
+        return
+    was_locked = device.locked
+    device.consecutive_failures = 0
+    device.save(update_fields=["consecutive_failures", "updated_at"])
+    if was_locked:
+        audit.record(
+            AUDIT_MFA_UNLOCKED,
+            actor_id=actor_id,
+            target_type="user",
+            target_id=user.pk,
+            subject_user_id=user.pk,
+            metadata={"by": by},
+        )
+
+
 # --- user administration --------------------------------------------------------------------
 def _clean_name(value: str, field: str) -> str:
     """A person's name, under the same text rules as every CRM field (Phase 9 review: names
@@ -349,8 +380,16 @@ def update_user(*, actor_id: UUID, user_id: UUID, version: int, changes: Mapping
             revoked_invitations = _revoke_invitations_sent_by(user, timezone.now())
         if not changed:
             return selectors.admin_user_detail(user.pk)
+        extra: list[str] = []
+        if "role" in changed:
+            # Signed out everywhere (deep security audit L-2): a session (and a trusted
+            # browser) that was signed in under the old role doesn't carry over into the new
+            # one, so a stale or stolen session can't become an administrator's without a
+            # sign-in (with the second factor the role may now require).
+            user.session_epoch += 1
+            extra.append("session_epoch")
         user.version += 1
-        user.save(update_fields=[*changed, "version", "updated_at"])
+        user.save(update_fields=[*changed, *extra, "version", "updated_at"])
         name_fields = [f for f in changed if f != "role"]
         if name_fields:
             _audit_user(AUDIT_PROFILE_UPDATED, actor.pk, user, fields=name_fields)
@@ -497,6 +536,7 @@ def set_user_password(*, actor_id: UUID, user_id: UUID, version: int, new_passwo
         )
         revoked = _revoke_pending(user, now, purposes=[TokenPurpose.PASSWORD_RESET])
         throttling.forget_account_failures(user.email)
+        _forget_second_factor_failures(user, actor_id=actor.pk, by="administrator")
         audit.record(
             AUDIT_PASSWORD_SET_BY_ADMIN,
             actor_id=actor.pk,
@@ -789,6 +829,7 @@ def confirm_password_reset(secret: str, new_password: str) -> None:
         )
         _consume(token, now)
         throttling.forget_account_failures(user.email)
+        _forget_second_factor_failures(user, actor_id=user.pk, by="password_reset")
         _audit_user(AUDIT_PASSWORD_RESET_COMPLETED, user.pk, user)
 
 

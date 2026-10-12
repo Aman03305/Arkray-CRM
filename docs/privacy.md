@@ -72,7 +72,7 @@ Verified against the code; contracts and regions are the operator's to put in pl
 | Account-email payloads (an email address, a requester's address) | 24 hours after the email is sent | hourly housekeeping blanks them |
 | Finished background work | 7 days (`OUTBOX_DONE_RETENTION_DAYS`) | hourly housekeeping; dead events until an operator resolves them |
 | Idempotency records, workspace access windows | 24 hours / 30 minutes | hourly housekeeping |
-| Ask Arkray questions and answers | 30 days after each answer (`AI_CONVERSATION_RETENTION_DAYS`), whatever happens in the conversation since | hourly housekeeping; a user can delete a conversation at any time |
+| Ask Arkray questions and answers | 30 days after each answer (`AI_CONVERSATION_RETENTION_DAYS`), whatever happens in the conversation since | hourly housekeeping; a user can delete a conversation at any time; both suspended by a legal hold ([below](#legal-holds)) |
 | Ask Arkray index chunks | as long as the text they were computed from | deleted with it and by an erasure |
 | Attachment files of deleted notes' files | removed by a job after deletion (with their name and content hash) | [attachments](#attachments) |
 | Data exports | 24 hours after being built (`EXPORT_TTL_HOURS`); the record of the export stays | `privacy.housekeeping`, hourly |
@@ -85,8 +85,8 @@ Verified against the code; contracts and regions are the operator's to put in pl
 A legal hold (`manage.py legal_hold place --lead|--user <id> --reference CASE-123 --by
 <admin>`; `release`; `list`) stops everything that would remove data about that person while
 it is active: lead erasure, staff pseudonymisation, audit-detail expiry for events about them,
-attachment purges on their notes, the deletion of their deals' custom values and the
-support-reason blanking. The reference names the matter, never describes it. Placing and
+attachment purges on their notes, the deletion of their deals' custom values, the
+support-reason blanking, and the deletion of Ask Arkray conversations about them (below). The reference names the matter, never describes it. Placing and
 releasing are audited (`privacy.legal_hold_placed` / `_released`). A backup directory is held
 by creating a file named `LEGAL_HOLD` in it.
 
@@ -97,7 +97,7 @@ anyone, through any path (the services check it, not the forms):
 | Frozen while held (409 `legal_hold`, nothing written, version unchanged) | Still allowed |
 |---|---|
 | the lead's name, organisation, job title, email, phones, address and description (an edit or a [correction](#correction)) | status, owner, source, rating, last contact; archiving and restoring (archiving hides, deletes nothing) |
-| its deals' customer, account, contact phone and email, address, instrument, work load, Expected CPT, description, lost reason and custom values (and so their derived name) | new deals; value, probability, dates; stage moves and agreed prices (the history is append-only) |
+| its deals' customer, account, contact phone and email, address, instrument, work load, Expected CPT, description, lost reason and custom values (and so their derived name) | new deals; value, probability, dates; stage moves and agreed prices (the history is append-only), except a move that sets or clears the lost reason (a move to a lost stage with a reason, or reopening a lost deal that has one), which is an edit of it (deep security audit L-9 and its review: a move that leaves the reason as it is goes on) |
 | its activities' subject and text, meeting place and link | new notes, tasks, meetings and files; times and priority; completing, cancelling, reopening, archiving |
 | deleting a file of its notes | uploading one |
 
@@ -108,6 +108,30 @@ edits in flight (`holds.place`): an edit already past its check commits first an
 waits for it; an edit arriving while a hold is being placed waits and is then refused. Holds
 on a user (staff) stop their pseudonymisation and the expiry of details about them; they
 don't freeze CRM records.
+
+**Ask Arkray conversations** (deep security audit M-5; `ai/subjects.py: held_conversations`).
+A hold keeps every conversation that concerns its subject, whole (every question and answer
+in it), until it is released:
+
+- a **user** hold: every conversation they asked, and every conversation an administrator
+  asked in their workspace;
+- a **lead** hold: every conversation one of whose questions or answers cites the customer's
+  lead, deals or activities, or names them (name, email, phone numbers), matched exactly as
+  an [erasure](#erasure) of that customer matches them.
+
+While a hold keeps it, the 30-day housekeeping skips the conversation (questions older than
+the retention in it too) and **deleting it is refused** (409 `legal_hold`, nothing deleted),
+for the person the hold targets as for anyone; staff pseudonymisation leaves it in place, and
+so does the erasure of another customer it touches ([erasure](#erasure)). Deleting a
+conversation is audited (`ai.conversation_deleted`: the conversation's id and a count of its
+questions, never text). Once the hold is released, the next hourly housekeeping deletes what
+is older than the retention. Hourly housekeeping excludes a held user's conversations
+without reading them, matches the rest against the held customers in batches that each
+commit, and remembers a conversation found held while the same holds are active, so long
+holds don't slow the deletion of everyone else's history. A user hold is checked under the same lock as placing it
+(`core.holds`); which customers a conversation touches is known only by matching it, so a lead
+hold is read when the deletion runs (as bulk jobs read holds): a conversation deleted at the
+very moment a lead hold is being placed may go.
 
 ## Audit trail
 
@@ -155,7 +179,11 @@ confirms the identity check, and is audited (`privacy.export_requested`). A job 
   in an answer shows as "[another record]"). Staff appear by role only;
 - for a **staff member**: their account, their sign-ins and the security events about them
   (with their own client address while the audit detail keeps it), the support sessions for
-  them, their own Ask Arkray conversations, and counts of the records they own.
+  them, their own Ask Arkray questions and the answers' text (every record an answer cited
+  shown as "[another record]", and email addresses, phone numbers and links in the text
+  masked: the customers their answers named are not their personal data; deep security audit
+  L-6), and counts of the records they own. An answer's narrative written by the model can
+  still mention a person in words: review before releasing, as for free text.
 
 Only the administrator who asked can download it (`privacy.export_downloaded`), for 24 hours;
 then the file is deleted (`privacy.export_expired`) and the record kept. At most 3 exports may
@@ -215,10 +243,31 @@ says which). Refused while a legal hold covers the lead. In one transaction it:
   names their colleagues too), in a question's text or an answer. Whole conversations,
   because a follow-up answer can be written from the earlier turns alone. Answers are
   serialised with the erasure: one being stored finishes before its sweep, and one composed
-  from data read before the erasure committed is discarded instead of stored;
+  from data read before the erasure committed is discarded instead of stored. A legal hold
+  on someone else wins (deep security audit M-5): a conversation that touches the erased
+  person but was asked by (or in the workspace of) a held user, or that also touches another
+  held customer, is kept (`ai.subjects.held_conversations`, the one hold rule for Ask
+  history), and `lead.erased` counts them (`conversations_held`). A hold on the erased lead
+  itself never keeps them: the erasure refuses a held lead, and a ledger replay re-applies an
+  erasure that was authorised (a hold restored with an older backup predates it), so a replay
+  counts only the holds on other subjects. A kept conversation is deleted by the 30-day
+  housekeeping once its hold is released (the erasure isn't re-run for it);
 - clears every personal field of the lead and names it `[erased]` (archived, with a
   `lead.archived` timeline entry like any archive), and redacts the text of its activities
   and opportunities;
+- **marks the lead as erased** (`erased_at`, the time of the first erasure; never cleared).
+  From then on the erasure can't be undone through the CRM (deep security audit M-1): the
+  lead can't be restored, edited or moved to another status; no deal, activity or file can be
+  added for it; and the personal text of its deals and activities can't be written again: the
+  deal's customer copy (customer, account, contact phone and email, address), instrument, work
+  load, Expected CPT, description, lost reason (also through a move to a lost stage) and
+  custom values, a new agreed CPT (a move into negotiation or a revised agreed price), and the
+  title, description, place and link of every task, meeting and note. Each is refused with
+  422 `lead_erased` and nothing is written. What isn't the person's data still changes: the
+  deal's value, probability, dates, stage moves without a lost reason, task priority and due
+  time, completing work, archiving. Sending a field with the value it already holds (an edit
+  form) is not a change. Customer corrections of an erased lead are refused the same way
+  (`lead_erased`);
 - blanks the opportunities' account, customer, contact and address fields, custom values,
   work load and Expected CPT and their derived names; a free-text instrument typed before the
   list existed is blanked too (one of the fixed list stays);
@@ -237,6 +286,17 @@ their shape without identifying anyone. **What it can't find:** the person named
 leads' notes, tasks or meetings (search for the name across the organisation and edit those by
 hand), and a conversation naming only the company of a person lead.
 
+**Erasing again.** The erasure tool runs again whenever anything of the person is still
+there: the lead's own fields, its deals' and activities' text, free text in the append-only
+history (lost reasons, agreed CPTs) or a file of its notes. Text typed back in before the
+marker existed (or by the previous release during a rolling deploy) is removed that way. It
+answers "already erased" only when the lead is marked and nothing is left. A ledger replay
+(`replay_erasures`) uses the same rule. Leads erased before this release were marked by the
+migration (`leads.0007`) with the time of their first `lead.erased` audit event, or failing that from the
+placeholder the erasure leaves. Run `erase_lead` with the new release's image during a rolling
+deploy; an erasure by the previous release isn't marked until the tool is run again (which
+marks it).
+
 ### Staff
 
 Users are never deleted: their id attributes the history they made. When the organisation no
@@ -246,11 +306,17 @@ longer needs to know who a former colleague was, an administrator pseudonymises 
 hold, never one's own. Their name becomes "Former user <8 hex>", their email
 `former-<id>@pseudonymised.invalid`, their password unusable and their last sign-in
 forgotten; sessions, pending links and support sessions end; their Ask Arkray conversations,
-the audit details about them (addresses, emails, reasons), the reasons of support sessions
+the conversations administrators asked in their workspace and every other conversation whose
+question or answer names them (full name or email, as whole words, ignoring case: "Anna
+Lee" doesn't match "Hanna Leeds"; deep security audit L-5), except those a
+legal hold keeps ([legal holds](#legal-holds)), the audit details about them (addresses, emails, reasons), the reasons of support sessions
 involving them, failed-sign-in evidence, queued email payloads naming them and their second factor (the encrypted TOTP secret and recovery-code hashes, ADR-0033) are deleted.
 Their id, role, dates, ownership, the append-only trail and every amount and negotiated
 price stay. Audited (`user.pseudonymised`, counts only), recorded in the erasure ledger,
-irreversible, idempotent. This is not lead erasure: their customers are untouched.
+irreversible, idempotent. This is not lead erasure: their customers are untouched. The
+matching reads every stored answer once, so the operation lifts the statement timeout to
+20 s (it runs inside a web request from the user's page: gunicorn allows 30 s, nginx 35 s;
+an erasure, which has no API path, allows 120 s).
 
 **Never another administrator's account through the API** (audit SEC-2,
 [ADR-0030](adr/0030-administrator-accounts-change-only-by-their-owner.md)): pseudonymising
@@ -281,8 +347,15 @@ SEC-1): a deal reassigned with its lead stays in its old owner's personal pipeli
 their sight. So outside the organization-wide workspace the deletion is refused as a whole
 (403, nothing removed, archived or queued) while any deal of another user holds a value, and
 the job and its ledger entry are limited to the workspace owner's deals: a deal reassigned
-between the request and the job keeps its value, after a restore too. An administrator
-deletes every deal's values from the organization-wide workspace.
+between the request and the job keeps its value, after a restore too. Removal hides the
+values from every deal of the pipeline, so it follows the same rule. Removing a field, or deleting its values, is refused (403) outside the organisation-wide
+workspace while a deal outside the caller's scope (one reassigned with its lead, still in
+the caller's pipeline), or a deal of theirs whose customer they no longer see (a closed deal
+kept after its lead was reassigned), holds a value of it (deep security audit L-4 and its
+review; final production audit SEC-1 already covered the deletion). The deletion job of a
+workspace touches only deals whose owner and whose lead's owner are that workspace's owner,
+so a deal whose customer moved elsewhere keeps its value. An administrator removes such a
+field, or deletes every deal's values, from the organisation-wide workspace.
 
 ### Attachments
 
@@ -310,10 +383,14 @@ its organisation and instrument. The same rule applies to the pipeline's lists a
 activity and timeline links and Ask Arkray's tools (its search names the deal the same way,
 in the answer and its citations, and its retrieval never returns such a deal's text); an
 administrator's support session sees
-what the user sees; the new owner and an administrator organisation-wide see everything
+what the user sees. Writes follow reads: what they can't see they can't write or probe
+either (403 `customer_restricted` whatever the value sent; deep security audit M-2). The new
+owner and an administrator organisation-wide see everything
 ([authorization.md](authorization.md#historical-deals)). Conservative by default: whether a
 previous owner should keep a customer's contact details is a product decision, and so is the
-deal's own description and lost reason, which stay visible to them (R122).
+deal's own description and lost reason, which stay visible to them (R122) but are
+read-only for them (a change is 403 `customer_restricted`, so it can't reveal an erasure or
+a hold of that customer; deep security audit review).
 
 ## Restore-safe erasure
 

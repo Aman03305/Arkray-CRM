@@ -249,6 +249,18 @@ describe("LoginForm: two-step verification (ADR-0033)", () => {
     expect(screen.getByLabelText("Password")).toHaveFocus();
   });
 
+  it("goes back to the password, pointing to Forgot password, when too many wrong codes locked it", async () => {
+    const { user } = await reachSecondStep({
+      "POST /api/v1/auth/login/mfa": apiError(403, "mfa_locked", "Locked."),
+    });
+    await user.type(screen.getByLabelText("Authentication code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(/Too many wrong codes were entered, so two-step verification is locked/);
+    expect(screen.getByRole("alert")).toHaveTextContent(/Reset your password/);
+    expect(screen.getByRole("link", { name: /Forgot password/ })).toBeInTheDocument();
+  });
+
   it("signs in with a recovery code instead", async () => {
     const { api, user } = await reachSecondStep({ "POST /api/v1/auth/login/mfa": { status: 200, body: VIEWER } });
     await user.click(screen.getByRole("button", { name: "Use a recovery code instead" }));

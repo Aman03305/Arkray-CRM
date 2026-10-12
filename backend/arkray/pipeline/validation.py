@@ -380,6 +380,7 @@ def clean_field_specs(raw: Sequence[Mapping[str, Any]]) -> list[FieldSpec]:
                 errors[f"{where}.options"] = [f"Add 1 to {m.MAX_FIELD_OPTIONS} choices."]
                 continue
             labels: set[str] = set()
+            option_ids: set[str] = set()
             for option in raw_options:
                 option_id = option.get("id")
                 try:
@@ -392,6 +393,13 @@ def clean_field_specs(raw: Sequence[Mapping[str, Any]]) -> list[FieldSpec]:
                 ):
                     errors[f"{where}.options"] = ["Unknown choice."]
                     break
+                if option_id is not None:
+                    # One id, one choice: a repeated id would show deals the wrong label
+                    # (deep security audit L-8).
+                    if option_id in option_ids:
+                        errors[f"{where}.options"] = ["This choice is listed twice."]
+                        break
+                    option_ids.add(option_id)
                 if label.casefold() in labels:
                     errors[f"{where}.options"] = ["Each choice needs a different label."]
                     break

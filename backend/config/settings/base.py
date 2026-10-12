@@ -254,6 +254,13 @@ MFA_STEP_UP_TTL_S = 15 * 60
 # void it.
 MFA_CHALLENGE_TTL_S = 5 * 60
 MFA_CHALLENGE_MAX_ATTEMPTS = 5
+# Wrong codes in a row (sign-in, step-up, recovery codes) after which the second factor is
+# locked, the right code included, until a password reset or an MFA reset (deep security
+# audit M-4). Each guess matches at most 3 of 10^6 codes (one step of drift either way), so 20
+# leave a password thief about a 6 in 100,000 chance, for the life of that password.
+MFA_MAX_CONSECUTIVE_FAILURES = 20
+# The owner is emailed about a wrong code at most this often (and always when it locks).
+MFA_FAILURE_NOTICE_INTERVAL_S = 6 * 60 * 60
 # How long a started setup may be confirmed, and how many wrong codes void it.
 MFA_SETUP_TTL_S = 10 * 60
 MFA_SETUP_MAX_ATTEMPTS = 5
@@ -534,6 +541,10 @@ OUTBOX_PURGE_MAX_BATCHES = 100  # per run: at most 500,000 rows an hour
 # authorization on every request; nothing is ever public.
 ATTACHMENT_MAX_BYTES = env.int("ATTACHMENT_MAX_BYTES", default=10 * 1024 * 1024)
 ATTACHMENT_MAX_PER_NOTE = env.int("ATTACHMENT_MAX_PER_NOTE", default=10)
+# Per-person storage quota (deep security audit L-7): the total size of the files someone
+# uploaded that are still in storage (deleted ones count until their object is purged).
+# 0 turns the quota off. A system check refuses a negative value.
+ATTACHMENT_MAX_BYTES_PER_USER = env.int("ATTACHMENT_MAX_BYTES_PER_USER", default=2 * 1024**3)
 # Extensions accepted, from the catalog of types the server can recognise by their content
 # (activities.storage.CATALOG: pdf png jpg jpeg webp gif docx xlsx pptx csv txt); anything
 # else (executables, scripts, HTML, SVG, archives, ...) is refused. A system check refuses
@@ -736,6 +747,9 @@ AI_QUESTION_TIMEOUT_S = env.int("AI_QUESTION_TIMEOUT_S", default=90)
 # when Redis is down).
 AI_MAX_PENDING_PER_USER = env.int("AI_MAX_PENDING_PER_USER", default=2)
 AI_MAX_PENDING_TOTAL = env.int("AI_MAX_PENDING_TOTAL", default=40)
+# Questions a worker answers (with the model, or retrieval) per person in any 24 hours; routed
+# questions never count. 0 turns the cap off (deep security audit L-12).
+AI_MAX_QUESTIONS_PER_USER_PER_DAY = env.int("AI_MAX_QUESTIONS_PER_USER_PER_DAY", default=200)
 AI_CONVERSATION_RETENTION_DAYS = env.int("AI_CONVERSATION_RETENTION_DAYS", default=30)
 
 # --- Erasure ledger (core.ledger, docs/privacy.md#restore-safe-erasure) ----------------------

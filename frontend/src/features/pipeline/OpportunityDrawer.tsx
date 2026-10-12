@@ -21,7 +21,7 @@ import type { Workspace } from "@/lib/workspace";
 
 import { AgreedTermsFields, parseAgreedTerms } from "./AgreedTerms";
 import { pipelineApi, pipelineKeys } from "./api";
-import { CustomFieldInputs } from "./CustomFields";
+import { CustomFieldInputs, formatCustomValue } from "./CustomFields";
 import {
   changedCustomValues,
   changedFields,
@@ -35,6 +35,7 @@ import {
   FIELD_LABELS,
   mergeConflict,
   type Problems,
+  restrictedDraft,
   updateRequest,
   validateCustom,
   validateDraft,
@@ -127,10 +128,14 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
   const lost = stage?.category === "lost";
   const fields = pipeline?.custom_fields ?? NO_FIELDS;
   // A closed deal whose customer moved to someone else: the customer's details (and free-text
-  // custom values) aren't sent to this viewer, so they aren't offered for editing either;
-  // left alone, they are never part of the update (only changed fields are sent).
+  // custom values) aren't sent to this viewer, and nothing else that may describe the customer
+  // (instrument, work load, Expected CPT, description, lost reason, custom values) can be
+  // changed: the server refuses it (403 `customer_restricted`). Shown read-only, and never part
+  // of the update; the value, probability and dates stay editable.
   const restricted = editing && opportunity.customer_restricted;
-  const editableFields = restricted ? fields.filter((f) => f.type !== "text" && f.type !== "long_text") : fields;
+  const editableFields = restricted ? NO_FIELDS : fields;
+  const shownFields = restricted ? fields.filter((f) => f.type !== "text" && f.type !== "long_text") : fields;
+  const storedCustom = (opportunity?.custom_fields ?? {}) as Record<string, unknown>;
 
   const [customBase, setCustomBase] = useState<Record<string, CustomValue>>({});
   const [custom, setCustom] = useState<Record<string, CustomValue>>({});
@@ -155,10 +160,11 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
     mutationFn: () => {
       const values = customRequest(fields, custom);
       if (opportunity) {
+        const before = customRequest(fields, customBase);
         return pipelineApi.update(
           workspace,
           opportunity.id,
-          updateRequest(base, manualDraft(), version, { before: customRequest(fields, customBase), after: values }),
+          updateRequest(base, editedDraft(), version, { before, after: restricted ? before : values }),
         );
       }
       const terms = parseAgreedTerms(negotiatedPrice, agreedCpt);
@@ -210,6 +216,12 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
     return editing && manualProbability && !closed ? draft : { ...draft, probability: "" };
   }
 
+  // What an edit sends: only what this viewer may change (a restricted deal: value,
+  // probability and dates; the rest as it was, so never sent).
+  function editedDraft(): Draft {
+    return restricted ? restrictedDraft(base, manualDraft()) : manualDraft();
+  }
+
   useEffect(() => {
     if (conflict) form.current?.querySelector<HTMLElement>("[data-conflict-apply]")?.focus();
   }, [conflict]);
@@ -257,7 +269,7 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
     }
     setClientErrors(problems);
     if (Object.keys(problems).length) return;
-    if (editing && changedFields(base, manualDraft()).length === 0 && Object.keys(changedCustomValues(customBase, custom)).length === 0) {
+    if (editing && changedFields(base, editedDraft()).length === 0 && (restricted || Object.keys(changedCustomValues(customBase, custom)).length === 0)) {
       onClose();
       return;
     }
@@ -399,7 +411,10 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
 
         <Group title="Customer">
           {restricted ? (
-            <RestrictedCustomerNote className="sm:col-span-2" />
+            <>
+              <RestrictedCustomerNote className="sm:col-span-2" />
+              <p className="text-sm text-slate-600 sm:col-span-2">{RESTRICTED_DETAILS_NOTE}</p>
+            </>
           ) : (
             <>
               <TextField
@@ -431,18 +446,22 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
         </Group>
 
         <Group title="Instrument">
-          <InstrumentPicker
-            instruments={instruments.names}
-            status={instruments.status}
-            onRetry={instruments.retry}
-            retrying={instruments.retrying}
-            value={draft.instrument_name}
-            onChange={set("instrument_name")}
-            errors={errors.instrument_name}
-          />
-          {text("work_load", 100, { optional: true, placeholder: "e.g. 300 tests/day" })}
+          {restricted ? (
+            <ReadOnly label={FIELD_LABELS.instrument_name} value={draft.instrument_name} />
+          ) : (
+            <InstrumentPicker
+              instruments={instruments.names}
+              status={instruments.status}
+              onRetry={instruments.retry}
+              retrying={instruments.retrying}
+              value={draft.instrument_name}
+              onChange={set("instrument_name")}
+              errors={errors.instrument_name}
+            />
+          )}
+          {restricted ? <ReadOnly label={FIELD_LABELS.work_load} value={draft.work_load} /> : text("work_load", 100, { optional: true, placeholder: "e.g. 300 tests/day" })}
           {text("value", 20, { label: `${FIELD_LABELS.value} (₹)`, inputMode: "decimal" })}
-          {text("expected_cpt", 100, { optional: true })}
+          {restricted ? <ReadOnly label={FIELD_LABELS.expected_cpt} value={draft.expected_cpt} /> : text("expected_cpt", 100, { optional: true })}
         </Group>
 
         <Group title="Timeline">
@@ -542,15 +561,23 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
               ) : null}
             </div>
           ) : null}
-          {lost ? (
+          {lost && restricted ? (
+            <ReadOnly wide label={FIELD_LABELS.lost_reason} value={draft.lost_reason} />
+          ) : lost ? (
             <TextAreaField className="sm:col-span-2" label="Lost reason" name="lost_reason" optional rows={2} maxLength={500} value={draft.lost_reason} onChange={(e) => set("lost_reason")(e.target.value)} errors={errors.lost_reason} />
           ) : null}
         </Group>
 
         {fields.length || editing ? (
           <Group title="Additional">
-            <CustomFieldInputs fields={editableFields} values={custom} onChange={(id, value) => setCustom((c) => ({ ...c, [id]: value }))} errors={errors} />
-            {editing ? (
+            {restricted ? (
+              shownFields.map((f) => <ReadOnly key={f.id} label={f.name} value={formatCustomValue(f, storedCustom[f.id])} />)
+            ) : (
+              <CustomFieldInputs fields={editableFields} values={custom} onChange={(id, value) => setCustom((c) => ({ ...c, [id]: value }))} errors={errors} />
+            )}
+            {restricted ? (
+              <ReadOnly wide label={FIELD_LABELS.description} value={draft.description} />
+            ) : editing ? (
               <TextAreaField className="sm:col-span-2" label="Description" name="description" optional rows={3} maxLength={5000} value={draft.description} onChange={(e) => set("description")(e.target.value)} errors={errors.description} />
             ) : null}
           </Group>
@@ -580,6 +607,19 @@ function keyRefused(error: unknown): boolean {
   return (isApiError(error, 400) && Boolean(fieldErrors(error).idempotency_key)) || isApiError(error, 422, "idempotency_key_reused");
 }
 const KEY_REFUSED = "This couldn't be sent. Please try again.";
+
+/** Under the restricted-customer note in the edit panel: why most details are read-only. */
+export const RESTRICTED_DETAILS_NOTE = "Only the value, probability and dates can be changed here: the other details may describe the customer.";
+
+/** A detail shown, not offered for editing (a restricted deal's). */
+function ReadOnly({ label, value, wide = false }: { label: string; value: string; wide?: boolean }) {
+  return (
+    <div className={wide ? "sm:col-span-2" : undefined} data-read-only>
+      <p className="text-sm font-medium text-slate-700">{label}</p>
+      <p className="mt-1 whitespace-pre-wrap text-sm text-slate-900">{value || "—"}</p>
+    </div>
+  );
+}
 
 function Group({ title, children }: { title: string; children: ReactNode }) {
   const id = useId();

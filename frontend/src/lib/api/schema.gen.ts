@@ -4699,6 +4699,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description A legal hold keeps it (`legal_hold`). */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     readonly ask_question: {

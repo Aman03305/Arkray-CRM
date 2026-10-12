@@ -9,7 +9,8 @@ API), on a deactivated account only:
 - name -> "Former user <8 hex>", email -> former-<id>@pseudonymised.invalid, password
   unusable, last sign-in forgotten; their sessions end (session epoch), pending invitation and
   reset links are revoked, and live support sessions for or by them end;
-- what only identifies them goes: their Ask Arkray conversations, the personal details of
+- what only identifies them goes: their Ask Arkray conversations, and those about them (asked
+  in their workspace, or naming them: deep security audit L-5), the personal details of
   audit events about them (client addresses, old and new emails, support reasons: the
   events themselves stay, with their id), the reasons typed for support sessions involving
   them, failed-sign-in evidence under their email, queued email payloads naming them, and
@@ -17,7 +18,9 @@ API), on a deactivated account only:
 - what stays: the id, role, status and dates; every record's ownership and attribution;
   the append-only audit trail, stage and price history (ids, amounts, never names).
 
-Refused while a legal hold covers them, while they still own work someone must take over
+A conversation a legal hold keeps (another held user's, or one touching a held customer:
+ai.subjects.held_conversations) is kept, as housekeeping keeps it. Refused while a legal hold
+covers them, while they still own work someone must take over
 (unarchived leads, open deals, open tasks, scheduled meetings: reassign first), for an active
 or invited account, and for the operator themselves. A dry run (`preview`) shows the counts.
 Idempotent: an account already pseudonymised is reported, never changed again. Audited
@@ -47,6 +50,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from arkray.activities.models import Activity, ActivityStatus
+from arkray.ai import subjects
 from arkray.ai.models import Conversation
 from arkray.audit import services as audit
 from arkray.audit.models import AuditDetail
@@ -72,6 +76,10 @@ from arkray.leads.models import Lead
 from arkray.pipeline.models import Opportunity, StageCategory
 
 PSEUDONYM_DOMAIN = "pseudonymised.invalid"
+# Matching their name reads every stored answer: more than a web request's 10 s, but within
+# the request's own budget (gunicorn ends it at 30 s, nginx at 35 s) while this holds its
+# locks (review P3-3; the API calls this too, not only the command).
+STATEMENT_TIMEOUT = "20s"
 AUDIT_PSEUDONYMISED = "user.pseudonymised"
 NOT_DEACTIVATED = "Deactivate the account first: only former staff are pseudonymised."
 OWNS_WORK = (
@@ -132,6 +140,27 @@ def _queued_payloads(user: User) -> Q:
     return Q(payload__user_id=str(user.pk)) | Q(payload__email=user.email)
 
 
+def _naming_terms(user: User) -> list[str]:
+    """What names them in a question or an answer: their full name and email, as whole words
+    (ai.subjects.naming_conversations; shorter ones would match unrelated conversations)."""
+    terms = {user.full_name.strip(), user.email.strip()}
+    return sorted(term for term in terms if len(term) >= subjects.MIN_TERM_LENGTH)
+
+
+def _conversations(user: User) -> list[UUID]:
+    """The Ask Arkray conversations that go: their own, those an administrator asked in their
+    workspace, and every other one whose question or answer names them (deep security audit
+    L-5: administrators' conversations about them kept their real name for up to 30 days),
+    except those a legal hold keeps."""
+    about = set(
+        Conversation.objects.filter(Q(actor_id=user.pk) | Q(subject_id=user.pk)).values_list(
+            "pk", flat=True
+        )
+    )
+    about.update(subjects.naming_conversations(_naming_terms(user)))
+    return sorted(about - subjects.held_conversations(among=about))
+
+
 def _require_operator(operator_id: UUID) -> None:
     """The operator, re-read (under the lock when pseudonymising): one who lost privacy.manage
     a moment ago, or a sales user calling the service, is refused."""
@@ -167,7 +196,7 @@ def preview(user_id: UUID, *, operator_id: UUID, allow_administrator: bool = Fal
     sessions = SupportSession.objects.filter(Q(admin=user) | Q(target=user))
     return StaffErasure(
         user_id=user.pk,
-        conversations=Conversation.objects.filter(actor_id=user.pk).count(),
+        conversations=len(_conversations(user)),
         audit_details=AuditDetail.objects.filter(_details_about(user.pk)).count(),
         support_reasons=sessions.exclude(reason="").count(),
         tokens_revoked=AccountToken.objects.filter(user=user, status=TokenStatus.PENDING).count(),
@@ -213,8 +242,18 @@ def pseudonymise(
         _check(user, operator_id, allow_administrator=allow_administrator)
     now = timezone.now()
     original_email = user.email
-    # What only identifies them, first (their email still finds it).
-    _, deleted = Conversation.objects.filter(actor_id=user.pk).delete()
+    with connection.cursor() as cursor:  # matching their name reads every stored answer
+        cursor.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
+    # What only identifies them, first (their name and email still find it). The
+    # conversations are locked before the delete collects their questions, as an erasure
+    # locks them (privacy.services): one being added meanwhile is collected too.
+    conversation_ids = list(
+        Conversation.objects.select_for_update()
+        .filter(pk__in=_conversations(user))
+        .order_by("pk")
+        .values_list("pk", flat=True)
+    )
+    _, deleted = Conversation.objects.filter(pk__in=conversation_ids).delete()
     conversations = deleted.get(Conversation._meta.label, 0)
     details, _ = AuditDetail.objects.filter(_details_about(user.pk)).delete()
     sessions = SupportSession.objects.filter(Q(admin=user) | Q(target=user))

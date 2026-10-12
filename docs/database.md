@@ -622,7 +622,13 @@ only once gone: deleted, failed or rejected). `activities_activity` gained `edit
   'pending' OR (purged_at IS NULL AND (deleted_at IS NOT NULL OR state = 'failed' OR
   scan_status = 'rejected'))`: the hourly housekeeping's three queries each imply one arm
   (0.01 ms each at 300,000 files; the first version lacked the blocked and pending arms and
-  the purge query read the whole table: 628 ms, enhancement review).
+  the purge query read the whole table: 628 ms, enhancement review);
+- `activities_attach_quota_idx (uploaded_by_id) INCLUDE (size) WHERE purged_at IS NULL`
+  (deep security audit L-7, `activities.0011`, built `CONCURRENTLY`): the uploader's
+  storage-quota sum on every upload (`attachments.stored_bytes`), an index-only scan (0 heap
+  fetches). On a copy of the benchmark's 300,021 attachment rows (61 uploaders, the busiest
+  with 21,384 files): 3 ms warm / 73 ms cold reading 110 index pages, against a 35-51 ms
+  parallel sequential scan of 10,700 heap pages without it; about 12 MB.
 
 ### `activities_timeline_entry` (built, Phase 4, append-only)
 

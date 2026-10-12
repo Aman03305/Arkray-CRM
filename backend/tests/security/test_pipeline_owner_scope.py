@@ -136,9 +136,11 @@ def test_the_old_owner_cannot_delete_values_of_a_deal_reassigned_away(tenders):
     _unchanged(tenders, version)
 
 
-def test_nor_later_through_the_confirmed_deletion_of_a_removed_field(tenders):
+def test_nor_later_through_the_confirmed_deletion_of_a_removed_field(tenders, admin):
     client, pipeline, field = tenders["client"], tenders["pipeline"], tenders["field"]
-    assert _remove_fields(client, pipeline).status_code == 200  # archived, values kept
+    # Removed organisation-wide (the old owner may not remove it: deep security audit L-4):
+    # archived, values kept.
+    assert _remove_fields(signed_in(admin), pipeline, workspace="all").status_code == 200
     response = client.post(
         f"/api/v1/workspaces/me/pipelines/{pipeline.pk}/fields/{field.pk}/delete-values",
         {"confirm_name": field.name},
@@ -173,7 +175,18 @@ def test_an_administrator_in_a_support_session_is_refused_too(tenders, admin, us
 
 
 # --- what stays allowed ---------------------------------------------------------------------
-def test_removing_without_deleting_stays_allowed_and_keeps_every_value(tenders):
+def test_removing_without_deleting_is_refused_too_while_a_deal_outside_holds_a_value(tenders):
+    """Deep security audit L-4: removing a field hides its values from everyone, Priya's
+    included (it used to be allowed here, without deleting them)."""
+    version = tenders["pipeline"].version
+    response = _remove_fields(tenders["client"], tenders["pipeline"])
+    assert response.status_code == 403, response.content
+    assert "would no longer see them" in response.json()["error"]["message"]
+    _unchanged(tenders, version)
+
+
+def test_removing_without_deleting_stays_allowed_and_keeps_every_value(tenders, admin, user_a):
+    _reassign(admin, tenders["moved"].lead, user_a)  # back to Rahul: nothing foreign left
     assert _remove_fields(tenders["client"], tenders["pipeline"]).status_code == 200
     drain_outbox()
     assert not CustomField.objects.get(pk=tenders["field"].pk).is_active

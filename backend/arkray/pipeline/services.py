@@ -54,7 +54,17 @@ archived opportunity) succeed without a new version, so retries are harmless.
 Legal holds (core.holds, docs/privacy.md#legal-holds): while one covers the lead, an edit
 of its deals' customer copy, text and custom values (HELD_FIELDS) is refused (409
 `legal_hold`, nothing written), checked under the lead's lock and serialised with placing a
-hold. Moves, agreed prices and new deals go on.
+hold. Moves, agreed prices and new deals go on; a move that writes a lost reason is an edit
+of it (deep security audit L-9).
+
+Erasure (docs/privacy.md#erasure): once its lead is erased (Lead.erased_at), the same fields
+of its deals, and the agreed CPT (which the erasure redacts in the price history), can't be
+written again (422 `lead_erased`, nothing written), and nothing new is added for it (deep
+security audit M-1). Value, probability, dates and stage moves without them go on.
+
+Customers a viewer may not see (customer.py, a closed deal kept by its closer after the lead
+was reassigned): their customer copy and free-text custom values can't be written either
+(403 `customer_restricted`), whatever the values sent (deep security audit M-2).
 """
 
 from __future__ import annotations
@@ -91,7 +101,7 @@ from arkray.leads import selectors as lead_selectors
 from arkray.leads import services as lead_services
 from arkray.leads.models import ADDRESS_LINE_MAX_LENGTH, NAME_MAX_LENGTH, Lead, StatusCategory
 
-from . import events, instruments, naming, selectors, validation
+from . import customer, events, instruments, naming, selectors, validation
 from .models import (
     NegotiationPrice,
     NegotiationSource,
@@ -200,6 +210,11 @@ HELD_FIELDS = frozenset(
         "custom_fields",
     }
 )
+# What an erasure of the deal's lead keeps from being written again (leads.services.
+# refuse_erased_changes): the same fields, and the agreed CPT, which the erasure redacts in
+# the price history too. (A hold lets agreed terms through: they only add to the history,
+# and the hold keeps the erasure from removing them.)
+ERASED_FROZEN = HELD_FIELDS | {"agreed_cpt"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,6 +516,7 @@ def _insert(
 ) -> Opportunity:
     """Create an opportunity for an already-locked lead (inside the caller's transaction).
     `lead_created`: the lead was made for it in this transaction (recorded in the audit)."""
+    lead_services.require_not_erased(lead, lead_services.ERASED_NO_NEW)
     if lead.archived_at is not None:
         raise BusinessRuleViolation(LEAD_ARCHIVED)
     pipeline = _pipeline(pipeline_id, lead.owner_id)
@@ -863,6 +879,7 @@ def convert_lead(
             lead = lead_selectors.lock_lead(scope, lead_id, exclusive=True)
             if lead.version != lead_version:
                 raise ConflictError()
+            lead_services.require_not_erased(lead, lead_services.ERASED_NO_NEW)
             if lead.archived_at is not None:
                 raise BusinessRuleViolation(LEAD_ARCHIVED)
             previous = lead_selectors.status_by_key(lead.status_id)
@@ -963,12 +980,18 @@ def update_opportunity(
     Only fields whose value actually changes are written and audited (by name, and custom
     fields by id: no values, no text). Never touches its lead: the opportunity keeps the same
     customer record, and no other is made. Refused (409 `legal_hold`) while a legal hold
-    covers its lead if a frozen field (HELD_FIELDS) would change."""
+    covers its lead, and (422 `lead_erased`) once its lead is erased, if a frozen field
+    (HELD_FIELDS) would change; refused (403 `customer_restricted`) if the request names a
+    customer field the viewer may not see (customer.refuse_hidden_writes), or would change
+    any of those frozen fields while the viewer may not see the customer."""
     authorize_write(actor, scope)
     cleaned = validation.clean_fields(changes)
     custom_changed: list[str] = []
     with transaction.atomic():
-        opportunity, _ = _lock(scope, opportunity_id)
+        opportunity, lead = _lock(scope, opportunity_id)
+        # First, before anything is compared with the stored values: a right guess of a hidden
+        # value and a wrong one get the same 403, and nothing is written (audit M-2).
+        customer.refuse_hidden_writes(scope, lead.owner_id, opportunity.pipeline_id, cleaned)
         _require_version(opportunity, version)
         _require_not_archived(opportunity)
         if problem := _known_instrument(cleaned, current=opportunity.instrument_name):
@@ -993,6 +1016,14 @@ def update_opportunity(
         if not changed:
             return selectors.opportunity_by_id(opportunity.pk)
         # Before anything is written (the lead's lock is held): a refusal changes nothing.
+        if not customer.visible(scope, lead.owner_id) and (frozen := HELD_FIELDS & set(changed)):
+            # A viewer who no longer sees the customer (customer.py) changes none of the text
+            # an erasure redacts or a hold freezes: one answer, before the erasure and hold
+            # checks, so it never reveals either about that customer (review P3-2).
+            raise customer.CustomerRestricted(
+                customer.RESTRICTED_TEXT, details={"fields": sorted(frozen)}
+            )
+        lead_services.refuse_erased_changes(lead, changed, ERASED_FROZEN)
         holds.refuse_frozen_changes(opportunity.lead_id, changed, HELD_FIELDS)
         for field in changed:
             setattr(opportunity, field, cleaned[field])
@@ -1110,6 +1141,21 @@ def move_opportunity(
                 raise BusinessRuleViolation(LEAD_ARCHIVED_REOPEN)
             _require_assignable(lead.owner_id)
             opportunity.owner_id = lead.owner_id
+        # The free text this move writes: a lost reason (set, or cleared by a reopen), an
+        # agreed CPT. Refused before anything is written for an erased customer (audit M-1)
+        # and, the lost reason, under a legal hold as an edit is (audit L-9; review P3-3: a
+        # reopen cleared it while the hold forbade it).
+        new_reason = reason if target.category == StageCategory.LOST else ""
+        writes = [
+            field
+            for field, sent in (
+                ("lost_reason", new_reason != opportunity.lost_reason),
+                ("agreed_cpt", terms is not None),
+            )
+            if sent
+        ]
+        lead_services.refuse_erased_changes(lead, writes, ERASED_FROZEN)
+        holds.refuse_frozen_changes(opportunity.lead_id, writes, HELD_FIELDS)
 
         now = timezone.now()
         opportunity.stage = target
@@ -1117,7 +1163,7 @@ def move_opportunity(
         opportunity.probability = target.probability
         opportunity.probability_overridden = False
         opportunity.closed_at = now if target.is_closed else None
-        opportunity.lost_reason = reason if target.category == StageCategory.LOST else ""
+        opportunity.lost_reason = new_reason
         if terms is not None:
             opportunity.negotiated_price = terms.price
             opportunity.negotiated_at = now
@@ -1224,7 +1270,7 @@ def record_negotiated_price(
         raise InvalidInputError(details=missing)
     terms = AgreedTerms(amount, cpt)
     with transaction.atomic():
-        opportunity, _ = _lock(scope, opportunity_id)
+        opportunity, lead = _lock(scope, opportunity_id)
         stage = opportunity.stage
         latest = (
             NegotiationPrice.objects.filter(opportunity_id=opportunity.pk)
@@ -1245,6 +1291,8 @@ def record_negotiated_price(
         _require_not_archived(opportunity)
         if not stage.is_negotiation or not opportunity.is_open:
             raise BusinessRuleViolation(NOT_IN_NEGOTIATION)
+        # The agreed CPT is free text an erasure redacts (audit M-1).
+        lead_services.refuse_erased_changes(lead, ["agreed_cpt"], ERASED_FROZEN)
         now = timezone.now()
         opportunity.negotiated_price = terms.price
         opportunity.negotiated_at = now

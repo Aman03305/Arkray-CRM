@@ -156,6 +156,21 @@ describe("step-up verification (ADR-0033)", () => {
     ]);
   });
 
+  it("explains a second factor locked by too many wrong codes", async () => {
+    mockApi({
+      [`POST ${DEACTIVATE}`]: guarded({ id: "u7" }, () => false),
+      [VERIFY]: apiError(403, "mfa_locked", "Locked."),
+    });
+    renderProvider();
+    void apiFetch(DEACTIVATE, { method: "POST" }).catch(() => undefined);
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText("Authentication code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+    const field = screen.getByLabelText("Authentication code");
+    await waitFor(() => expect(field).toHaveAccessibleDescription(/two-step verification is locked for your account/));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
   it("never asks on the sign-in and two-step endpoints themselves", async () => {
     mockApi({ "POST /api/v1/auth/mfa/recovery-codes": MFA_REQUIRED });
     renderProvider();

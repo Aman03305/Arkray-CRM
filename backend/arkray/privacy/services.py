@@ -6,15 +6,21 @@ administrator runs `manage.py erase_lead`, which in one transaction:
 - deletes every Ask Arkray conversation that touches the person: one whose questions or
   answers cite any of the records below, or name the person (their name, email or a phone
   number; the organisation's name only for a lead that is just an organisation, since it
-  would match every colleague's conversations), in a question's text or an answer. Whole
-  conversations, because a follow-up answer can be written from the earlier turns alone
-  (Phase 11 review). Answers are serialised with it (`ai.service.hold_erasure_lock`): one
-  being stored finishes before the sweep, and one read before the erasure committed is
-  discarded instead of stored (whole-software audit);
+  would match every colleague's conversations), in a question's text or an answer, except
+  one a legal hold on someone else keeps (`_erasable_conversations`; counted in the audit
+  event as `conversations_held`). Whole conversations, because a follow-up answer can be
+  written from the earlier turns alone (Phase 11 review). Answers are serialised with it
+  (`ai.service.hold_erasure_lock`): one being stored finishes before the sweep, and one read
+  before the erasure committed is discarded instead of stored (whole-software audit);
 - clears every personal field of the lead (names, organisation, job title, email, phones,
   address, description; the derived search text and phone keys follow), names it `[erased]`
   and archives it (a `lead.archived` timeline entry, like any archive), so figures, history
   and the audit trail keep their shape;
+- records when (`Lead.erased_at`, kept from the first erasure): from then on the lead can't be
+  restored or edited, nothing new is added for it, and the personal text of its deals and
+  activities can't be written again (leads.services.LeadErased, 422 `lead_erased`; deep
+  security audit M-1: "erased" used to be inferred from the placeholder text, which a
+  restore and an edit undid);
 - redacts the text of its activities (notes, task and meeting titles and descriptions,
   meeting places and links) and of its opportunities (titles, descriptions, lost reasons,
   account and customer names, contact phone and email, address, work load, expected CPT,
@@ -39,6 +45,11 @@ What stays: ids, dates, statuses, stage names, the instrument (one of a fixed li
 amounts and the audit trail, none of which identifies the person once the text is gone.
 What it can't find: the person named in other leads' notes. Backups keep the old data until
 they expire (docs/privacy.md#retention).
+
+Running it again: refused (AlreadyErased) only when the lead is erased and nothing of the
+person is left anywhere it reaches (`_left_to_erase`). Text typed back in before the rule
+above existed (or by a previous release during a rolling deploy) is removed by erasing again,
+and a ledger replay (privacy.replay) re-applies an erasure the same way.
 """
 
 from __future__ import annotations
@@ -55,6 +66,16 @@ from arkray.activities.models import Activity, ActivityType, Attachment
 from arkray.ai import indexing
 from arkray.ai import service as ai_service
 from arkray.ai.models import Conversation, KnowledgeChunk
+from arkray.ai.subjects import ERASED as ERASED  # re-exported: tests and drills use it
+from arkray.ai.subjects import (  # noqa: F401 — re-exported for tests
+    MIN_TERM_LENGTH,
+    UUID_IN_TEXT,
+    held_conversations,
+    identifying_terms,
+    lead_records,
+)
+from arkray.ai.subjects import like as _like  # noqa: F401
+from arkray.ai.subjects import touching_conversations as _touching_conversations
 from arkray.audit import services as audit
 from arkray.core import holds, ledger
 from arkray.core.domain_events import publish
@@ -64,7 +85,6 @@ from arkray.leads.models import PHONE_FIELDS, Lead
 from arkray.pipeline import instruments
 from arkray.pipeline.models import Opportunity
 
-ERASED = "[erased]"
 LEAD_TEXT_FIELDS = (
     "last_name",
     "organization_name",
@@ -87,8 +107,6 @@ HISTORY_COLUMNS = (
 )
 # An operator's command over every stored answer: not a web request's 10 s.
 STATEMENT_TIMEOUT = "120s"
-UUID_IN_TEXT = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-MIN_TERM_LENGTH = 4  # shorter names would match unrelated conversations
 
 
 class OwnerRequired(Exception):
@@ -97,15 +115,105 @@ class OwnerRequired(Exception):
 
 
 class AlreadyErased(Exception):
-    """Nothing of the person is left to erase. (Its placeholder name would otherwise be the
-    search term, and match every other erased lead's conversations: audit P3.)"""
+    """The lead was erased and nothing of the person is left to erase (audit P3: an
+    operator is told so, instead of a second, empty erasure being recorded)."""
 
     def __init__(self, lead_id: UUID) -> None:
         super().__init__(f"Lead {lead_id} has already been erased.")
 
 
+# What each record looks like once erased (erase() below): anything else is text the erasure
+# hasn't removed, or that was typed back in afterwards.
+_ERASED_NOTE = Q(title="", description=ERASED)
+_ERASED_WORK = Q(title=ERASED, description="", location="", meeting_url="")
+_ERASED_OPPORTUNITY = Q(
+    title=ERASED,
+    description="",
+    lost_reason="",
+    account_name=ERASED,
+    customer_name=ERASED,
+    contact_phone="",
+    contact_email="",
+    address="",
+    work_load="",
+    expected_cpt="",
+    custom_fields={},
+) & (Q(instrument_name="") | Q(instrument_name__in=instruments.INSTRUMENTS))
+
+
+def _left_to_erase(lead: Lead, opportunity_ids: list[UUID], activity_ids: list[UUID]) -> bool:
+    """Whether any of the person's data the erasure removes is still there: the lead's own
+    fields, its deals' and activities' text, free text in the append-only history, or a file
+    of its notes (deep security audit M-1: re-entered data must be erasable again)."""
+    if lead.first_name != ERASED or any(getattr(lead, f) for f in LEAD_TEXT_FIELDS):
+        return True
+    if Opportunity.objects.filter(pk__in=opportunity_ids).exclude(_ERASED_OPPORTUNITY).exists():
+        return True
+    activities = Activity.objects.filter(pk__in=activity_ids)
+    if (
+        activities.filter(type=ActivityType.NOTE).exclude(_ERASED_NOTE).exists()
+        or activities.exclude(type=ActivityType.NOTE).exclude(_ERASED_WORK).exists()
+    ):
+        return True
+    if _history_with_reasons(opportunity_ids):
+        return True
+    return (
+        Attachment.objects.filter(note_id__in=activity_ids)
+        .exclude(sha256=attachments.ERASED_SHA256)
+        .exists()
+    )
+
+
+def _erasable_conversations(
+    lead: Lead, records: set[UUID], *, replay: bool
+) -> tuple[list[UUID], int]:
+    """The conversations touching the person that the erasure deletes: all of them except
+    those a legal hold keeps (ai.subjects.held_conversations, the one hold rule for Ask
+    Arkray history: a held user's, or one that also touches another held customer). A hold
+    wins over an erasure for evidence that concerns someone else; the rest of the person's
+    data is erased all the same. The same in a ledger replay: holds restored with a backup
+    are the current state. A hold on this very lead never keeps them: an erasure refuses a
+    held lead, and a replay re-applies one that was authorised (a hold in the restored backup
+    predates it), so only the holds on other subjects count then. Returns them, and how many
+    a hold keeps (deep security audit M-5)."""
+    touching = _touching_conversations(records, identifying_terms(lead))
+    if not touching:
+        return [], 0
+    if not (replay and holds.is_held(HoldSubject.LEAD, lead.pk)):
+        kept = held_conversations(among=touching)
+    else:
+        kept = _held_by_others(lead.pk, touching)
+    erasable = [conversation for conversation in touching if conversation not in kept]
+    return erasable, len(touching) - len(erasable)
+
+
+def _held_by_others(lead_id: UUID, among: list[UUID]) -> set[UUID]:
+    """held_conversations(among), leaving out the hold on `lead_id` itself (a replay only)."""
+    held = holds.active()
+    users = held[HoldSubject.USER]
+    kept: set[UUID] = set()
+    if users:
+        kept |= set(
+            Conversation.objects.filter(Q(actor_id__in=users) | Q(subject_id__in=users))
+            .filter(pk__in=among)
+            .values_list("pk", flat=True)
+        )
+    records: set[UUID] = set()
+    terms: set[str] = set()
+    for other in Lead.objects.filter(pk__in=held[HoldSubject.LEAD] - {lead_id}):
+        records |= lead_records(other.pk)
+        terms.update(identifying_terms(other))
+    if records:
+        kept |= set(_touching_conversations(records, sorted(terms), among=among))
+    return kept
+
+
 def _already_erased(lead: Lead) -> bool:
-    return lead.first_name == ERASED and not any(getattr(lead, f) for f in LEAD_TEXT_FIELDS)
+    """Erased (`erased_at`), and nothing of the person left to erase. A lead an earlier
+    release erased that isn't marked yet is erased again (which marks it)."""
+    if lead.erased_at is None:
+        return False
+    return not _left_to_erase(lead, *_records(lead.pk))
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,45 +275,6 @@ def _redact_history(opportunity_ids: list[UUID]) -> int:
     return redacted
 
 
-def identifying_terms(lead: Lead) -> list[str]:
-    """What names the person in free text: their name, email and phone numbers as stored
-    and as digits (case is ignored when matching). The organisation's name only when the
-    lead is just an organisation: for a person, it names their colleagues too, and would
-    delete every user's conversations about the company (whole-software audit)."""
-    names = [
-        f"{lead.first_name} {lead.last_name}".strip(),
-        lead.email,
-        *(getattr(lead, field) for field in PHONE_FIELDS),
-        *lead.phone_keys,
-    ]
-    if not (lead.first_name or lead.last_name):
-        names.append(lead.organization_name)
-    if not lead.last_name:  # a one-word name only when it is the whole name
-        names.append(lead.first_name)
-    terms = {term.strip() for term in names if len(term.strip()) >= MIN_TERM_LENGTH}
-    return sorted(terms - {ERASED})
-
-
-def _like(term: str) -> str:
-    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"%{escaped}%"
-
-
-def _touching_conversations(record_ids: set[UUID], terms: list[str]) -> list[UUID]:
-    """Conversations with a question or answer that cites any of the records (one scan of
-    the ids written in each answer, however many records) or names the person."""
-    patterns = [_like(term) for term in terms]
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT DISTINCT q.conversation_id FROM ai_question q WHERE EXISTS ("
-            "  SELECT 1 FROM regexp_matches(q.answer::text, %s, 'g') AS m(found)"
-            "  WHERE m.found[1] = ANY(%s::text[]))"
-            " OR q.text ILIKE ANY(%s::text[]) OR q.answer::text ILIKE ANY(%s::text[])",
-            [UUID_IN_TEXT, [str(record_id) for record_id in record_ids], patterns, patterns],
-        )
-        return [row[0] for row in cursor.fetchall()]
-
-
 def _records(lead_id: UUID) -> tuple[list[UUID], list[UUID]]:
     opportunity_ids = list(Opportunity.objects.filter(lead_id=lead_id).values_list("pk", flat=True))
     activity_ids = list(
@@ -232,7 +301,7 @@ def preview(lead_id: UUID) -> Erasure:
         opportunities=len(opportunity_ids),
         history_rows=_history_with_reasons(opportunity_ids),
         chunks=KnowledgeChunk.objects.filter(Q(lead_id=lead_id) | Q(source_id__in=records)).count(),
-        conversations=len(_touching_conversations(records, identifying_terms(lead))),
+        conversations=len(_erasable_conversations(lead, records, replay=False)[0]),
         attachments=Attachment.objects.filter(
             note_id__in=activity_ids, purged_at__isnull=True
         ).count(),
@@ -275,9 +344,10 @@ def erase(lead_id: UUID, *, operator_id: UUID, replay: bool = False) -> Erasure:
     # are locked before the delete collects their questions: one being added meanwhile (its
     # writer holds the conversation's lock) is then committed and collected too, instead of
     # failing the whole erasure at commit (audit P3).
+    erasable, conversations_held = _erasable_conversations(lead, records, replay=replay)
     conversation_ids = list(
         Conversation.objects.select_for_update()
-        .filter(pk__in=_touching_conversations(records, identifying_terms(lead)))
+        .filter(pk__in=erasable)
         .order_by("pk")
         .values_list("pk", flat=True)
     )
@@ -319,6 +389,7 @@ def erase(lead_id: UUID, *, operator_id: UUID, replay: bool = False) -> Erasure:
     for field in LEAD_TEXT_FIELDS:
         setattr(lead, field, "")
     lead.first_name = ERASED
+    lead.erased_at = lead.erased_at or now  # the first erasure's time; never cleared
     archives = lead.archived_at is None
     lead.archived_at = lead.archived_at or now
     lead.version += 1
@@ -357,6 +428,7 @@ def erase(lead_id: UUID, *, operator_id: UUID, replay: bool = False) -> Erasure:
         metadata={
             **counts,
             **({"exports_withdrawn": withdrawn} if withdrawn else {}),
+            **({"conversations_held": conversations_held} if conversations_held else {}),
             **({"replay": True} if replay else {}),
         },
     )

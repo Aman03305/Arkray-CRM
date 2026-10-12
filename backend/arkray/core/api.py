@@ -27,7 +27,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .csrf import enforce_csrf
-from .errors import InvalidInputError
+from .errors import InvalidInputError, NotFoundError
 
 _MAX_REPORTED_KEYS = 10
 IDEMPOTENCY_HEADER = "Idempotency-Key"
@@ -45,6 +45,8 @@ class ApiView(APIView):
     def initial(self, request: Request, *args: Any, **kwargs: Any) -> None:
         if request.method not in SAFE_METHODS:
             enforce_csrf(request)
+        else:
+            refuse_foreign_site(request)
         super().initial(request, *args, **kwargs)
         method = "GET" if request.method == "HEAD" else request.method
         if request.query_params and method not in self.query_param_methods:
@@ -58,6 +60,28 @@ class ApiView(APIView):
         response = super().finalize_response(request, response, *args, **kwargs)
         add_never_cache_headers(response)
         return response
+
+
+# What a browser says (Sec-Fetch-Site) when another site, or another subdomain of this one,
+# made it send the request.
+_FOREIGN_SITES = frozenset({"cross-site", "same-site"})
+
+
+def refuse_foreign_site(request: Request) -> None:
+    """404 for a read another site made the browser send (deep security audit L-3; R37).
+
+    The session cookie is SameSite=Lax, so a link on another site opens an API URL with the
+    user's cookies: harmless to read (the page can't see the response), but a read can still
+    record something, such as the `workspace.accessed` audit event, in the user's name. The
+    API is only ever called by its own app, from its own origin (Next.js rewrites and nginx
+    serve both under one origin), so such a request is refused before anything runs, like
+    an unknown URL. `same-origin` (the app's fetches, its download links) and `none` (an
+    address typed or bookmarked) pass, and so does a request without the header: an API
+    client, a test or an older browser, none of which a link on another site can make send
+    this user's cookies. Unsafe methods need CSRF and Origin checks instead (core.csrf)."""
+    site = request.headers.get("Sec-Fetch-Site", "")
+    if site.strip().lower() in _FOREIGN_SITES:
+        raise NotFoundError()
 
 
 def _printable(key: object) -> str:

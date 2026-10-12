@@ -10,6 +10,7 @@ import {
   EMPTY_DRAFT,
   FIELD_LABELS,
   mergeConflict,
+  restrictedDraft,
   updateRequest,
   validateDraft,
 } from "./draft";
@@ -159,5 +160,28 @@ describe("editing", () => {
     const { merged, overlapping } = mergeConflict(base, mine, latest);
     expect(merged).toMatchObject({ value: "1500000", customer_name: "Mine", description: "Theirs" });
     expect(overlapping).toEqual(["value"]);
+  });
+});
+
+describe("a deal whose customer the viewer may no longer see", () => {
+  it("sends only its value, probability and dates, never what may describe the customer", () => {
+    // Review P3-2: the server refuses any other change from this viewer (403 customer_restricted).
+    const base = draftFromOpportunity(makeOpportunity());
+    const edited = {
+      ...base,
+      value: "950000",
+      expected_close_date: "2026-12-31",
+      work_load: "400 tests/day",
+      expected_cpt: "Rs 18",
+      description: "Rewritten",
+      lost_reason: "Rewritten",
+      instrument_name: "Another analyser",
+      customer_name: "Someone",
+    };
+    expect(updateRequest(base, restrictedDraft(base, edited), 4)).toEqual({
+      version: 4,
+      value: "950000",
+      expected_close_date: "2026-12-31",
+    });
   });
 });

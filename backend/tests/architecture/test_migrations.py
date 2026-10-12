@@ -37,6 +37,7 @@ TABLE_WIDE = [
     "activities.0006_review_performance",
     "activities.0007_current_work_indexes",
     "pipeline.0006_ownership_negotiation_fields",  # product enhancement phase
+    "leads.0007_lead_erased_at",  # deep security audit M-1
 ]
 CONCURRENT = [
     "leads.0005_owner_index_covers_archive",  # Phase 5
@@ -47,6 +48,7 @@ CONCURRENT = [
     "audit.0004_support_session_index",  # product enhancement phase
     "pipeline.0007_search_customer_names",  # ADR-0027: Leads left the UI
     "pipeline.0010_stage_reference_indexes",  # final audit DOMAIN-3
+    "activities.0011_attachment_quota_index",  # deep security audit L-7
 ]
 
 LIFT = "SET statement_timeout = 0; SET lock_timeout = 0;"
@@ -57,12 +59,15 @@ RESTORE = "RESET statement_timeout; RESET lock_timeout;"
 # is added here, with its guard, on purpose.
 REFUSE_REVERSE = {
     "activities.0010_note_edits_and_attachments",
+    "activities.0011_attachment_quota_index",  # deep security audit L-7
     "audit.0003_support_sessions",
     "audit.0004_support_session_index",
     "audit.0005_audit_details",  # privacy remediation
     "core.0006_privacy_remediation",  # privacy remediation
     "identity.0004_support_sessions",
     "identity.0005_mfa",  # ADR-0033: two-step verification
+    "identity.0006_mfa_consecutive_failures",  # deep security audit M-4
+    "leads.0007_lead_erased_at",  # deep security audit M-1
     "pipeline.0006_ownership_negotiation_fields",
     "pipeline.0007_search_customer_names",
     "pipeline.0008_opportunity_expected_cpt",

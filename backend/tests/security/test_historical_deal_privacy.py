@@ -18,11 +18,12 @@ import pytest
 from django.utils import timezone
 
 from arkray.ai import tools
+from arkray.audit.models import AuditEvent
 from arkray.core.access import AccessScope
 from arkray.leads import services as lead_services
 from arkray.pipeline.models import CustomField, FieldType, Opportunity
 from tests.factories import LeadFactory, OpportunityFactory, TaskFactory
-from tests.helpers import signed_in
+from tests.helpers import signed_in, without_request_id
 
 pytestmark = pytest.mark.django_db
 
@@ -226,3 +227,159 @@ def test_an_administrator_organisation_wide_sees_everything(admin, user_b, deal)
     )
     assert body["customer_restricted"] is False
     assert body["customer_name"] == PERSON
+
+
+# --- writes follow reads (deep security audit M-2) ------------------------------------------------
+def _text_field(deal: dict[str, Any]) -> str:
+    return str(
+        CustomField.objects.get(pipeline=deal["opportunity"].pipeline, name="Lab contact").pk
+    )
+
+
+# Each hidden field: the value it holds (a right guess) and another (a wrong one, or an
+# overwrite).
+HIDDEN = [
+    ("customer_name", PERSON, "Someone Else"),
+    ("contact_phone", PHONE, "+91 90000 00000"),
+    ("contact_email", EMAIL, "attacker@example.com"),
+    ("address", ADDRESS, "Nowhere"),
+    ("account_name", "Apollo Labs", "Other Labs"),
+    ("custom_fields", f"Ask for {PERSON}", "overwritten"),
+]
+
+
+def _state(deal: dict[str, Any]) -> tuple[Any, ...]:
+    row = Opportunity.objects.filter(pk=deal["opportunity"].pk).values().get()
+    return row, AuditEvent.objects.count()
+
+
+@pytest.mark.parametrize(("field", "right", "wrong"), HIDDEN, ids=[h[0] for h in HIDDEN])
+def test_the_previous_owner_cannot_write_or_probe_a_hidden_customer_field(
+    admin, user_a, user_b, deal, field, right, wrong
+):
+    """Right and wrong guesses get the same 403, and nothing is written, versioned or
+    audited: no tampering, and no oracle (a right guess used to answer 200 with the same
+    version, a wrong one a new version)."""
+    reassign(admin, deal, user_b)
+    client = signed_in(user_a)
+    url = f"/api/v1/workspaces/me/opportunities/{deal['opportunity'].pk}"
+    version = page(client, deal)["version"]
+    before = _state(deal)
+
+    def send(value: str) -> Any:
+        payload = {_text_field(deal): value} if field == "custom_fields" else value
+        return client.patch(url, {"version": version, field: payload}, format="json")
+
+    answers = []
+    for value in (right, wrong):
+        response = send(value)
+        assert response.status_code == 403, response.content
+        assert response.json()["error"]["code"] == "customer_restricted"
+        answers.append(without_request_id(response))
+        assert _state(deal) == before, value
+    assert answers[0] == answers[1]
+    assert page(client, deal)["version"] == version
+
+
+def test_the_previous_owner_still_edits_the_deals_value(admin, user_a, user_b, deal):
+    reassign(admin, deal, user_b)
+    client = signed_in(user_a)
+    url = f"/api/v1/workspaces/me/opportunities/{deal['opportunity'].pk}"
+    body = page(client, deal)
+    response = client.patch(
+        url,
+        {
+            "version": body["version"],
+            "value": "900000.00",
+            # What they see, sent back unchanged (an edit form): not a change.
+            "description": body["description"],
+            "custom_fields": {deal["volume"]: "300"},
+        },
+        format="json",
+    )
+    assert response.status_code == 200, response.content
+    stored = Opportunity.objects.get(pk=deal["opportunity"].pk)
+    assert stored.value == Decimal("900000.00")
+    assert stored.contact_email == EMAIL  # the hidden copy is untouched
+    assert stored.custom_fields[_text_field(deal)] == f"Ask for {PERSON}"
+
+
+def test_the_new_owner_and_an_administrator_still_edit_the_customer(admin, user_b, deal):
+    reassign(admin, deal, user_b)
+    client = signed_in(admin)
+    url = f"/api/v1/workspaces/all/opportunities/{deal['opportunity'].pk}"
+    version = client.get(url).json()["version"]
+    response = client.patch(
+        url, {"version": version, "contact_email": "ravi@new.example"}, format="json"
+    )
+    assert response.status_code == 200, response.content
+
+
+# Review P3-2: the deal's other text is read-only for the previous owner too, with one answer
+# whether the customer they no longer see is untouched, erased or under a legal hold.
+FROZEN_CHANGES = [
+    {"description": "Installed in March."},
+    {"work_load": "300 tests a day"},
+    {"expected_cpt": "Rs 18 per test"},
+    {"instrument_name": "Adams 8180 V"},
+    "volume",
+]
+
+
+@pytest.mark.parametrize(
+    "change", FROZEN_CHANGES, ids=lambda c: c if isinstance(c, str) else next(iter(c))
+)
+def test_a_frozen_field_gets_one_answer_whatever_became_of_the_customer(
+    admin, user_a, user_b, change
+):
+    from arkray.core.models import HoldSubject, LegalHold
+    from arkray.privacy import services as privacy
+
+    volume = None
+    deals = {}
+    for state in ("untouched", "erased", "held"):
+        lead = LeadFactory(owner=user_a, first_name="Ravi", last_name="Kumar")
+        opportunity = OpportunityFactory(
+            lead=lead, stage_key="won", customer_name=PERSON, description="Signed in May."
+        )
+        if volume is None:
+            volume = CustomField.objects.create(
+                pipeline=opportunity.pipeline,
+                name="Tests a day",
+                field_type=FieldType.NUMBER,
+                position=95,
+            )
+        Opportunity.objects.filter(pk=opportunity.pk).update(custom_fields={str(volume.pk): "300"})
+        reassign(admin, {"lead": lead}, user_b)
+        if state == "erased":
+            privacy.erase(lead.pk, operator_id=admin.pk)
+        if state == "held":
+            LegalHold.objects.create(
+                subject_type=HoldSubject.LEAD,
+                subject_id=lead.pk,
+                reference="C-1",
+                placed_by=admin.pk,
+            )
+        deals[state] = Opportunity.objects.get(pk=opportunity.pk)
+    payload = {"custom_fields": {str(volume.pk): "350"}} if change == "volume" else change
+    client = signed_in(user_a)
+    answers = []
+    for state, opportunity in deals.items():
+        before = (
+            Opportunity.objects.filter(pk=opportunity.pk).values().get(),
+            AuditEvent.objects.count(),
+        )
+        response = client.patch(
+            f"/api/v1/workspaces/me/opportunities/{opportunity.pk}",
+            {"version": opportunity.version, **payload},
+            format="json",
+        )
+        assert response.status_code == 403, (state, response.content)
+        assert response.json()["error"]["code"] == "customer_restricted"
+        answers.append(without_request_id(response))
+        after = (
+            Opportunity.objects.filter(pk=opportunity.pk).values().get(),
+            AuditEvent.objects.count(),
+        )
+        assert after == before, state
+    assert answers[0] == answers[1] == answers[2]

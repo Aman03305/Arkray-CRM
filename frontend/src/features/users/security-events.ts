@@ -50,6 +50,14 @@ export function describeSecurityEvent(event: SecurityEvent): string {
       const who = actor ? `${actor}'s support session for ${user}` : `Support session for ${user}`;
       return end ? `${who} ended (${end})` : `${who} ended`;
     }
+    // Too many wrong second-factor codes in a row (deep security audit M-4): someone else
+    // probably has the password.
+    case "mfa.locked":
+      return `Two-step verification was locked for ${user} after too many wrong codes`;
+    case "mfa.unlocked":
+      return event.details.by === "administrator" && actor
+        ? `${actor} unlocked ${user}'s two-step verification with a new password`
+        : `${user}'s two-step verification was unlocked by a password reset`;
     default:
       return `Account activity for ${user}`;
   }

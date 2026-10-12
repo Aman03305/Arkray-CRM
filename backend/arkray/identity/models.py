@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from django.conf import settings
 from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
 from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db import models
@@ -491,7 +492,12 @@ class MfaDevice(UUIDPrimaryKeyModel, TimeStampedModel):
 
     A setup in progress lasts until `pending_until` (MFA_SETUP_TTL_S) and allows
     MFA_SETUP_MAX_ATTEMPTS wrong codes (`setup_attempts`); then it is deleted (also by the
-    hourly housekeeping) and must start again."""
+    hourly housekeeping) and must start again.
+
+    `consecutive_failures` counts wrong codes (authenticator or recovery) since the last right
+    one, across sign-in attempts, browsers and step-ups (deep security audit M-4): from
+    MFA_MAX_CONSECUTIVE_FAILURES on, every code is refused until a password reset or an MFA
+    reset. `failure_notified_at`: when the owner was last emailed about a wrong code."""
 
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="mfa_device")
     secret = models.TextField()
@@ -499,6 +505,9 @@ class MfaDevice(UUIDPrimaryKeyModel, TimeStampedModel):
     last_used_step = models.BigIntegerField(null=True, blank=True)
     pending_until = models.DateTimeField(null=True, blank=True)
     setup_attempts = models.PositiveSmallIntegerField(default=0)
+    # db_default: the previous release (which never names the column) can still insert.
+    consecutive_failures = models.PositiveIntegerField(default=0, db_default=0)
+    failure_notified_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "identity_mfa_device"
@@ -535,6 +544,11 @@ class MfaDevice(UUIDPrimaryKeyModel, TimeStampedModel):
 
     def __str__(self) -> str:
         return f"MfaDevice({'confirmed' if self.confirmed_at else 'pending'})"
+
+    @property
+    def locked(self) -> bool:
+        """Too many wrong codes in a row: no code is accepted (deep security audit M-4)."""
+        return bool(self.consecutive_failures >= settings.MFA_MAX_CONSECUTIVE_FAILURES)
 
 
 class MfaRecoveryCode(UUIDPrimaryKeyModel):

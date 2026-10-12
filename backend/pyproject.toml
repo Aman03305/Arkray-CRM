@@ -23,6 +23,7 @@ dependencies = [
     "cryptography>=46",
     "django-storages[s3]>=1.14,<2",  # private S3-compatible storage for attachments
     "segno>=1.6,<2",
+    "defusedxml>=0.7.1,<0.8",       # Office uploads: their XML parsed without DTDs or entities
 ]
 
 [dependency-groups]
@@ -38,6 +39,7 @@ dev = [
     "celery-types>=0.22",
     "import-linter>=2.1",
     "pip-audit>=2.7",
+    "types-defusedxml>=0.7",
 ]
 
 [tool.uv]

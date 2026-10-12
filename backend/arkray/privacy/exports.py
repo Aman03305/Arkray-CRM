@@ -23,8 +23,10 @@ the administrator reviews the export before releasing it (a legal decision, not 
 
 **A staff member**: their account (name, email, role, status, dates), their sign-ins and the
 security events about them (with the client address while the audit detail keeps it), the
-support sessions for them, their own Ask Arkray conversations, and counts of the CRM records
-they own (the records themselves are the organisation's and its customers' data).
+support sessions for them, their own Ask Arkray conversations (every record an answer cited
+shown as "[another record]": the records, and the customers they name, are not their personal
+data; deep security audit L-6), and counts of the CRM records they own (the records themselves
+are the organisation's and its customers' data).
 
 Rules: only an administrator (privacy.manage), never in a support session; the subject must
 exist (an erased lead or a pseudonymised user has nothing left to export); at most
@@ -81,7 +83,8 @@ from django.utils import timezone
 
 from arkray.activities import attachments, storage
 from arkray.activities.models import Activity, Attachment, TimelineEntry
-from arkray.ai import answers
+from arkray.ai import subjects
+from arkray.ai.formatting import user_text
 from arkray.ai.models import Conversation, Question
 from arkray.audit import services as audit
 from arkray.audit.models import AuditDetail, AuditEvent
@@ -656,8 +659,8 @@ def lead_document(lead_id: UUID) -> tuple[dict[str, Any], list[Attachment]]:
     refs = {f"lead:{lead_id}", *(f"opportunity:{pk}" for pk in opportunity_ids)} | {
         f"{a.type}:{a.pk}" for a in activities
     }
-    terms = services.identifying_terms(lead)
-    conversation_ids = services._touching_conversations(records, terms)
+    terms = subjects.identifying_terms(lead)
+    conversation_ids = subjects.touching_conversations(records, terms)
     # Only the questions about this person, not every question of a conversation that once
     # touched them (backend review P2: a sibling question named other customers).
     questions = [
@@ -807,7 +810,9 @@ def user_document(user_id: UUID) -> dict[str, Any]:
             {
                 "asked_at": _value(q.created_at),
                 "question": q.text,
-                "answer": answers.plain_text(q.answer or {}),
+                # Cited records by placeholder, and contact details in the text masked: the
+                # customers their answers named are not theirs to receive (L-6).
+                "answer": user_text(_answer_text(q.answer or {}, own_refs=set())),
             }
             for q in questions
         ],

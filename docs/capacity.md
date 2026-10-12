@@ -234,6 +234,16 @@ One abusive user at a time, 8 parallel connections without pauses, while 50 norm
 
 No errors for the normal users in any phase; back to 74 ms p95 at once.
 
+Since these runs the reference edge also limits requests in flight to 256 per client address
+(deep security audit H-1, [deployment.md](deployment.md#reverse-proxy)). The capacity test
+drives 100 users from one address (up to 6 connections each): at the recorded 89 requests a
+second and 38 ms median it stays far below 256, but a stress run with the API saturated could
+reach it; a 429 from the edge there means the per-client limit, not the API. The edge's
+review added a limit of 8 requests with a body in flight per client address (an upload also
+waits for the edge's session check, one extra `GET /api/v1/auth/me`): the run's writes all
+come from one address, so a write-heavy stress run from one address can meet that limit
+before the API's. Not re-run with these limits.
+
 ### Failure drills
 
 50 users; the fault injected 40 s into a 200 s hold.

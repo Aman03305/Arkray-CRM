@@ -71,7 +71,9 @@ anyone learning, using or resetting the user's password and without impersonatio
   Nothing is ever recorded as the user's own act.
 - **Ending**: *Exit* (`DELETE /api/v1/admin/support-sessions/current`), signing out, expiry,
   the browser session changing (a new sign-in rotates its key: a copied marker in another
-  session is worthless), or conditions failing (the user deactivated or made an administrator,
+  session is worthless), and a new sign-in in the same browser ends it at once, once the
+  password is right (`session_changed`; deep security audit I-1: it used to show as active
+  until it expired), or conditions failing (the user deactivated or made an administrator,
   the administrator losing the capability) — checked on every request, so nothing outlives
   its conditions. An hourly sweep closes expired sessions nobody used again.
 - **Audit**: `support_session.started` (administrator, user, expiry; the reason in the

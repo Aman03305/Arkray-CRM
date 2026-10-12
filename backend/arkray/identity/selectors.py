@@ -139,6 +139,9 @@ SECURITY_ACTIONS: dict[str, tuple[str, ...]] = {
     "mfa.reset": ("by", "reason"),
     "mfa.recovery_codes_replaced": (),
     "mfa.recovery_code_used": ("remaining",),
+    # Too many wrong codes in a row, and the new password that ended it (security audit M-4).
+    "mfa.locked": ("failures",),
+    "mfa.unlocked": ("by",),
 }
 
 

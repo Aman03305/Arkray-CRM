@@ -23,26 +23,90 @@ retrieval (which never returns such a deal's text); a support session sees exact
 user sees. A product decision recorded as
 conservative by default (docs/adr/0032-privacy-remediation.md); an administrator can always
 see the full record.
+
+Writes follow reads (deep security audit M-2): a viewer who may not see the customer can't
+change it either. An edit that touches the customer copy (account, customer name, contact
+phone and email, address) or a free-text custom value is refused (403 `customer_restricted`)
+before anything is compared with what is stored, so a right guess and a wrong one get the
+same answer, and nothing is written, versioned or audited. Overwriting it would also tamper
+with what administrators, exports and Ask Arkray read, and slip past later corrections (which
+only follow copies still holding the old value). The deal's other text that may describe
+the customer (description, lost reason, work load, Expected CPT, instrument, custom values:
+what a legal hold freezes and an erasure redacts) is read-only for such a viewer too (403
+`customer_restricted` on a change), so no refusal reveals whether that customer was erased
+or is held (review P3-2). Its value, probability and dates stay editable. Deleting a custom
+field's values from such a deal (removing the field) is refused the same way
+(field_values.require_deletable).
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
 
 from arkray.core.access import AccessScope
+from arkray.core.errors import PermissionDeniedError
 
 from . import naming
-from .models import FieldType, Opportunity
+from .models import CustomField, FieldType, Opportunity
 
 RESTRICTED_CUSTOMER = "Customer restricted"
 CONTACT_FIELDS = ("customer_name", "contact_phone", "contact_email", "address")
 FREE_TEXT_TYPES = frozenset({FieldType.TEXT, FieldType.LONG_TEXT})
+# What a viewer who may not see the customer may not write either: the customer copy.
+CUSTOMER_FIELDS = ("account_name", *CONTACT_FIELDS)
+RESTRICTED_WRITE = (
+    "This deal's customer now belongs to someone else, so its customer details can't be"
+    " changed here."
+)
+
+
+# The deal's other text (description, lost reason, work load, Expected CPT, instrument, custom
+# values): what a legal hold freezes and an erasure redacts. Read-only for such a viewer too, so
+# a refusal never says whether the customer they no longer see was erased or is held (review
+# P3-2: an edit answered 422 `lead_erased`).
+RESTRICTED_TEXT = (
+    "This deal's customer now belongs to someone else, so its details that may describe the"
+    " customer can't be changed here."
+)
+
+
+class CustomerRestricted(PermissionDeniedError):
+    """A write to the customer details of a deal whose customer the viewer may not see
+    (403, nothing written; deep security audit M-2)."""
+
+    code = "customer_restricted"
+    default_message = RESTRICTED_WRITE
 
 
 def visible(scope: AccessScope, lead_owner_id: UUID) -> bool:
     """Whether the viewer may see the deal's customer: they can see its lead."""
     return scope.permits_owner(lead_owner_id)
+
+
+def refuse_hidden_writes(
+    scope: AccessScope, lead_owner_id: UUID, pipeline_id: UUID, requested: Mapping[str, Any]
+) -> None:
+    """CustomerRestricted if the viewer may not see the deal's customer and `requested` (the
+    edit's fields, before anything is compared with the stored values) names a customer field
+    or a free-text custom field (of any state: a removed field's values are hidden too). The
+    answer depends only on which fields were sent, never on their values."""
+    if visible(scope, lead_owner_id):
+        return
+    touched = [field for field in CUSTOMER_FIELDS if field in requested]
+    custom = requested.get("custom_fields")
+    if isinstance(custom, Mapping) and custom:
+        free_text = {
+            str(pk)
+            for pk in CustomField.objects.filter(
+                pipeline_id=pipeline_id, field_type__in=FREE_TEXT_TYPES
+            ).values_list("pk", flat=True)
+        }
+        if free_text & {str(key) for key in custom}:
+            touched.append("custom_fields")
+    if touched:
+        raise CustomerRestricted(details={"fields": touched})
 
 
 def shown_account(opportunity: Opportunity) -> str:

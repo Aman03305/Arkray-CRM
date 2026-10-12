@@ -238,6 +238,12 @@ class Lead(UUIDPrimaryKeyModel, TimeStampedModel):
     # --- lifecycle -------------------------------------------------------------------------
     # Leads are never deleted; archiving hides them from the default list (restorable).
     archived_at = models.DateTimeField(null=True, blank=True)
+    # When the person's data was erased on request (privacy.services.erase), or NULL. Set only
+    # by the erasure, never cleared: an erased lead can't be restored or edited, and its
+    # deals' and activities' personal text can't be written again (deep security audit M-1:
+    # "erased" used to be inferred from the placeholder text, which a restore and an edit
+    # undid). Nullable, so the previous release can still insert during a rolling deploy.
+    erased_at = models.DateTimeField(null=True, blank=True)
     # Optimistic concurrency: every change increments it; writes must present the current one.
     version = models.PositiveIntegerField(default=1)
 

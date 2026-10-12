@@ -19,11 +19,17 @@ read-only until restored (422).
 Legal holds (core.holds, docs/privacy.md#legal-holds): while one covers the lead, its
 personal fields (HELD_FIELDS) can't change (409 `legal_hold`, nothing written); the check
 runs under the lead's lock and is serialised with placing a hold.
+
+Erasure (privacy.services.erase, docs/privacy.md#erasure): an erased lead (`erased_at`) can't
+be restored, edited or moved to another status (422 `lead_erased`, nothing written), and the
+modules holding its deals and activities refuse to write their personal text again
+(`refuse_erased_changes`): otherwise the erasure could be undone (deep security audit M-1).
+It stays archived, so it takes no new deals or activities and can't be reassigned either.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -97,6 +103,43 @@ HELD_FIELDS = frozenset(
         "description",
     }
 )
+ERASED_READ_ONLY = "This customer's details were erased on request, so they can't be changed."
+ERASED_NO_RESTORE = "This customer's details were erased on request, so it can't be restored."
+ERASED_NO_NEW = (
+    "This customer's details were erased on request, so nothing new can be added for them."
+)
+ERASED_FIELDS = (
+    "This customer's details were erased on request, so these details can't be entered again"
+    " ({fields})."
+)
+
+
+class LeadErased(BusinessRuleViolation):
+    """The lead's personal data was erased on request (Lead.erased_at; privacy.services.erase):
+    422 `lead_erased`, nothing written. Its own record can't be restored or edited, and the
+    personal text of its deals and activities (each module's HELD_FIELDS, the same fields an
+    erasure redacts and a legal hold freezes) can't be written again, or the erasure would be
+    undone (deep security audit M-1)."""
+
+    code = "lead_erased"
+
+
+def refuse_erased_changes(lead: Lead, changed: Iterable[str], frozen: Collection[str]) -> None:
+    """For an edit of an erased lead's records (`lead` locked by the caller, its `erased_at`
+    loaded): refused if any of `changed` is one of the module's personal fields (`frozen`).
+    Value, stage, dates and status still change: they aren't the person's data."""
+    if lead.erased_at is None:
+        return
+    touched = sorted(set(changed) & set(frozen))
+    if touched:
+        raise LeadErased(
+            ERASED_FIELDS.format(fields=", ".join(touched)), details={"fields": touched}
+        )
+
+
+def require_not_erased(lead: Lead, message: str = ERASED_READ_ONLY) -> None:
+    if lead.erased_at is not None:
+        raise LeadErased(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,6 +314,7 @@ def update_lead(
     cleaned = validation.clean_fields(changes)
     with transaction.atomic():
         lead = _lock(scope, lead_id)
+        require_not_erased(lead)
         _require_version(lead, version)
         _require_not_archived(lead)
         changed: list[str] = []
@@ -314,6 +358,7 @@ def change_status(
         lead = _lock(scope, lead_id)
         if lead.status_id == status:
             return selectors.lead_by_id(lead.pk)
+        require_not_erased(lead)
         _require_version(lead, version)
         _require_not_archived(lead)
         target = _active_status(status)
@@ -481,6 +526,9 @@ def restore_lead(*, actor: User, scope: AccessScope, lead_id: UUID, version: int
         lead = _lock(scope, lead_id)
         if lead.archived_at is None:
             return selectors.lead_by_id(lead.pk)
+        # An erasure archives the lead; restoring it would make its record (and its deals'
+        # and activities') writable again (deep security audit M-1).
+        require_not_erased(lead, ERASED_NO_RESTORE)
         _require_version(lead, version)
         lead.archived_at = None
         lead.version += 1

@@ -12,6 +12,16 @@
 - **Guessing is throttled** by the durable sign-in throttle (identity.throttling): every
   wrong code at sign-in, at step-up, when replacing recovery codes or disabling counts as a
   failed sign-in of the account from that browser.
+- **Guessing is bounded** too (deep security audit M-4): the throttle's window only slows a
+  password thief down (about 550 codes a day), so wrong codes also accumulate on the device
+  (`consecutive_failures`, under its row lock, across sign-in attempts, browsers and
+  step-ups; a right code resets it). From MFA_MAX_CONSECUTIVE_FAILURES on, every code is
+  refused (`mfa_locked`), the right one included, until the password is reset by email or
+  set by an administrator (identity.services), or the factor is reset. Only someone past
+  the password (a challenge) or holding a signed-in session can add to it, so it is no lever
+  for locking out an account whose password is safe. The owner is emailed about a wrong
+  code at most once per MFA_FAILURE_NOTICE_INTERVAL_S, and when it locks (`mfa.locked`,
+  audited, alerted on: identity.metrics).
 - **Changes end other sessions**: confirming, disabling, resetting a device and replacing
   recovery codes increment `session_epoch`; the session making the change is kept, re-hashed.
 - **Setups expire**: a started setup must be confirmed within MFA_SETUP_TTL_S and with
@@ -19,8 +29,9 @@
   throttle); otherwise it is deleted and must start again. The hourly housekeeping deletes
   the ones nobody finished.
 - **Audit** (never a secret, a code or a hash): mfa.enabled, mfa.disabled, mfa.reset,
-  mfa.recovery_codes_replaced, mfa.recovery_code_used. Each also emails the account's own
-  address (no code, no secret): an owner learns of a change they didn't make.
+  mfa.recovery_codes_replaced, mfa.recovery_code_used, mfa.locked (and mfa.unlocked,
+  identity.services). Each change also emails the account's own address (no code, no
+  secret): an owner learns of a change they didn't make.
 """
 
 from __future__ import annotations
@@ -70,10 +81,19 @@ AUDIT_DISABLED = "mfa.disabled"
 AUDIT_RESET = "mfa.reset"
 AUDIT_CODES_REPLACED = "mfa.recovery_codes_replaced"
 AUDIT_CODE_USED = "mfa.recovery_code_used"
+AUDIT_LOCKED = "mfa.locked"
 
 TOPIC_MFA_CHANGED = "identity.notify_mfa_changed"
 # What the owner is told about (identity.emails.send_mfa_notice).
-NOTICES = ("enabled", "disabled", "reset", "recovery_codes_replaced", "recovery_code_used")
+NOTICES = (
+    "enabled",
+    "disabled",
+    "reset",
+    "recovery_codes_replaced",
+    "recovery_code_used",
+    "wrong_code",
+    "locked",
+)
 
 FACTOR_TOTP = "totp"
 FACTOR_RECOVERY_CODE = "recovery_code"
@@ -91,6 +111,19 @@ class InvalidMfaCodeError(DomainError):
     code = "invalid_mfa_code"
     http_status = 400
     default_message = "That code didn't work. Check your authenticator app and try again."
+
+
+class MfaLockedError(DomainError):
+    """MFA_MAX_CONSECUTIVE_FAILURES wrong codes in a row (deep security audit M-4): no code
+    is accepted, the right one included, until a password reset or an MFA reset."""
+
+    code = "mfa_locked"
+    http_status = 403
+    default_message = (
+        "Too many wrong codes were entered for your account, so two-step verification is"
+        " locked. Reset your password (Forgot password on the sign-in page) or ask an"
+        " administrator for help."
+    )
 
 
 class MfaChallengeExpiredError(DomainError):
@@ -188,44 +221,90 @@ def status(user: User) -> Status:
 
 
 # --- verifying a factor -------------------------------------------------------------------------
-def _verify_totp(user_id: UUID, code: str) -> bool:
-    """Check a code against the confirmed device under its row lock; accept each time step
-    once (replay prevention) and re-encrypt the secret under the current key."""
-    if mfa.normalise_code(code) is None:
-        return False
-    with transaction.atomic():
-        device = (
-            MfaDevice.objects.select_for_update()
-            .filter(user_id=user_id, confirmed_at__isnull=False)
-            .first()
+# What checking a code under the device's lock found.
+_RIGHT, _WRONG, _LOCKED = "right", "wrong", "locked"
+
+
+def _confirmed_device_locked(user_id: UUID) -> MfaDevice | None:
+    """The confirmed device under its row lock (inside the caller's transaction)."""
+    return (
+        MfaDevice.objects.select_for_update()
+        .filter(user_id=user_id, confirmed_at__isnull=False)
+        .first()
+    )
+
+
+def _count_failure(device: MfaDevice) -> str:
+    """A wrong code, under the device's row lock (deep security audit M-4). Counted across
+    sign-in attempts, browsers and step-ups; the MFA_MAX_CONSECUTIVE_FAILURES-th locks the
+    factor (audited, ids only; the owner is emailed). Otherwise the owner is emailed about
+    the first wrong code in MFA_FAILURE_NOTICE_INTERVAL_S: codes are asked for only after
+    the right password (or in a signed-in session), so one they didn't type means someone
+    else has it. _WRONG, or _LOCKED when this one locked it."""
+    device.consecutive_failures += 1
+    fields = ["consecutive_failures", "updated_at"]
+    outcome = _WRONG
+    now = timezone.now()
+    interval = timedelta(seconds=settings.MFA_FAILURE_NOTICE_INTERVAL_S)
+    if device.locked:
+        outcome = _LOCKED
+        audit.record(
+            AUDIT_LOCKED,
+            actor_id=None,
+            target_type="user",
+            target_id=device.user_id,
+            subject_user_id=device.user_id,
+            metadata={"failures": device.consecutive_failures},
         )
+        _notify_owner(device.user_id, "locked")
+    elif device.failure_notified_at is None or now - device.failure_notified_at >= interval:
+        device.failure_notified_at = now
+        fields.append("failure_notified_at")
+        _notify_owner(device.user_id, "wrong_code")
+    device.save(update_fields=fields)
+    return outcome
+
+
+def _verify_totp(user_id: UUID, code: str) -> str:
+    """Check a code against the confirmed device under its row lock; accept each time step
+    once (replay prevention), re-encrypt the secret under the current key, and count wrong
+    codes (a locked device checks nothing)."""
+    if mfa.normalise_code(code) is None:
+        return _WRONG  # can't be anyone's code: nothing was guessed
+    with transaction.atomic():
+        device = _confirmed_device_locked(user_id)
         if device is None:
-            return False
+            return _WRONG
+        if device.locked:
+            return _LOCKED
         try:
             secret = mfa.decrypt(device.secret)
         except InvalidToken:
-            return False  # encrypted under a key no longer configured: an operator resets it
+            return _WRONG  # encrypted under a key no longer configured: an operator resets it
         step = mfa.matching_step(secret, code, at=_now(), after_step=device.last_used_step)
         if step is None:
-            return False
+            return _count_failure(device)
         device.last_used_step = step
         device.secret = mfa.rotate(device.secret)
-        device.save(update_fields=["last_used_step", "secret", "updated_at"])
-    return True
+        device.consecutive_failures = 0
+        device.save(
+            update_fields=["last_used_step", "secret", "consecutive_failures", "updated_at"]
+        )
+    return _RIGHT
 
 
-def _use_recovery_code(user: User, raw: str) -> bool:
-    """Use up a recovery code (audited with how many remain)."""
+def _use_recovery_code(user: User, raw: str) -> str:
+    """Use up a recovery code (audited with how many remain). Wrong ones count like wrong
+    authenticator codes."""
     if mfa.normalise_recovery_code(raw) is None:
-        return False
+        return _WRONG
     with transaction.atomic():
-        # The device's lock serialises this with a replacement of the codes.
-        if not (
-            MfaDevice.objects.select_for_update()
-            .filter(user_id=user.pk, confirmed_at__isnull=False)
-            .exists()
-        ):
-            return False
+        # The device's lock serialises this with a replacement of the codes, and the count.
+        device = _confirmed_device_locked(user.pk)
+        if device is None:
+            return _WRONG
+        if device.locked:
+            return _LOCKED
         unused = dict(
             MfaRecoveryCode.objects.filter(user_id=user.pk, used_at__isnull=True).values_list(
                 "code_hash", "pk"
@@ -233,12 +312,15 @@ def _use_recovery_code(user: User, raw: str) -> bool:
         )
         found = mfa.matching_hash(raw, list(unused))
         if found is None:
-            return False
+            return _count_failure(device)
         used = MfaRecoveryCode.objects.filter(pk=unused[found], used_at__isnull=True).update(
             used_at=timezone.now()
         )
         if not used:
-            return False
+            return _WRONG
+        if device.consecutive_failures:
+            device.consecutive_failures = 0
+            device.save(update_fields=["consecutive_failures", "updated_at"])
         audit.record(
             AUDIT_CODE_USED,
             actor_id=user.pk,
@@ -248,18 +330,24 @@ def _use_recovery_code(user: User, raw: str) -> bool:
             metadata={"remaining": len(unused) - 1},
         )
         _notify(user, "recovery_code_used")
-    return True
+    return _RIGHT
 
 
 def verify_factor(
     user: User, *, code: str | None = None, recovery_code: str | None = None
 ) -> str | None:
-    """FACTOR_TOTP or FACTOR_RECOVERY_CODE when it is right (and now used), else None."""
+    """FACTOR_TOTP or FACTOR_RECOVERY_CODE when it is right (and now used), else None (a
+    wrong code: counted). MfaLockedError when the factor is locked, or this wrong code
+    locked it (M-4): the caller counts it as a failure, like a wrong code."""
     if code is not None:
-        return FACTOR_TOTP if _verify_totp(user.pk, code) else None
-    if recovery_code is not None:
-        return FACTOR_RECOVERY_CODE if _use_recovery_code(user, recovery_code) else None
-    return None
+        factor, outcome = FACTOR_TOTP, _verify_totp(user.pk, code)
+    elif recovery_code is not None:
+        factor, outcome = FACTOR_RECOVERY_CODE, _use_recovery_code(user, recovery_code)
+    else:
+        return None
+    if outcome == _LOCKED:
+        raise MfaLockedError()
+    return factor if outcome == _RIGHT else None
 
 
 def _either(code: str) -> dict[str, str]:
@@ -276,7 +364,11 @@ def _throttled_verify(
     denied = throttle.reserve()
     if denied is not None:
         raise throttling.rate_limited(denied)
-    factor = verify_factor(user, code=code, recovery_code=recovery_code)
+    try:
+        factor = verify_factor(user, code=code, recovery_code=recovery_code)
+    except MfaLockedError:
+        throttle.failed()
+        raise
     if factor is None:
         throttle.failed()
         raise InvalidMfaCodeError()
@@ -316,7 +408,11 @@ def _issue_recovery_codes(user: User) -> list[str]:
 def _notify(user: User, change: str) -> None:
     """Email the account's own address about a change to its second factor (outbox, in the
     caller's transaction: no change without its notice, no notice without its change)."""
-    outbox.enqueue(TOPIC_MFA_CHANGED, {"user_id": str(user.pk), "change": change})
+    _notify_owner(user.pk, change)
+
+
+def _notify_owner(user_id: UUID, change: str) -> None:
+    outbox.enqueue(TOPIC_MFA_CHANGED, {"user_id": str(user_id), "change": change})
 
 
 def notify_change(user_id: UUID, change: str) -> None:

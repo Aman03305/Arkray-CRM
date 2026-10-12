@@ -46,6 +46,9 @@ describe("describeSecurityEvent", () => {
     [event("support_session.ended", { details: { end: "expired" } }), "Anita Rao's support session for Rahul Sharma ended (expired)"],
     [event("support_session.ended", { details: { end: "exited" } }), "Anita Rao's support session for Rahul Sharma ended"],
     [event("support_session.ended", { actor: null, details: { end: "expired" } }), "Support session for Rahul Sharma ended (expired)"],
+    [event("mfa.locked", { actor: null, details: { failures: "20" } }), "Two-step verification was locked for Rahul Sharma after too many wrong codes"],
+    [event("mfa.unlocked", { details: { by: "administrator" } }), "Anita Rao unlocked Rahul Sharma's two-step verification with a new password"],
+    [event("mfa.unlocked", { actor: RAHUL, details: { by: "password_reset" } }), "Rahul Sharma's two-step verification was unlocked by a password reset"],
     [event("something.new"), "Account activity for Rahul Sharma"],
   ])("%#: %s", (input, sentence) => {
     expect(describeSecurityEvent(input)).toBe(sentence);

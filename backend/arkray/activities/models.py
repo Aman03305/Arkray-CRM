@@ -665,6 +665,14 @@ class Attachment(UUIDPrimaryKeyModel):
                     & (Q(deleted_at__isnull=False) | Q(state="failed") | Q(scan_status="rejected"))
                 ),
             ),
+            # The uploader's storage quota (deep security audit L-7): the sum of their files
+            # still in storage, read from the index alone (attachments.stored_bytes).
+            models.Index(
+                F("uploaded_by"),
+                name="activities_attach_quota_idx",
+                include=["size"],
+                condition=Q(purged_at__isnull=True),
+            ),
         ]
         constraints = [
             models.CheckConstraint(

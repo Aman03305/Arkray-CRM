@@ -557,8 +557,18 @@ def replace_fields(
         listed = {spec.id for spec in specs if spec.id is not None}
         originals = {pk: (f.name, f.required, f.options, f.position) for pk, f in current.items()}
         removed = [field for pk, field in current.items() if pk not in listed]
-        if delete_removed_values:  # before anything changes: refused as a whole
-            field_values.require_deletable(scope, pipeline.pk, [field.pk for field in removed])
+        # Before anything changes: refused as a whole. Removing a field hides its values from
+        # everyone, so it is refused while a deal outside the caller's scope (a deal reassigned
+        # with its lead, still in this pipeline) holds one, whether or not they are deleted too
+        # (deep security audit L-4; final production audit SEC-1 for the deletion).
+        field_values.require_deletable(
+            scope,
+            pipeline.pk,
+            [field.pk for field in removed],
+            field_values.OTHERS_VALUES
+            if delete_removed_values
+            else field_values.OTHERS_VALUES_HIDDEN,
+        )
         for field in removed:
             field.is_active = False
             field.save(update_fields=["is_active", "updated_at"])

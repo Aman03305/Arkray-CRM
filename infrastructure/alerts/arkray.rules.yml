@@ -201,3 +201,13 @@ groups:
         annotations:
           summary: "An administrator account was deactivated in the last hour: confirm it was intended."
           runbook: docs/runbooks.md#administrator-deactivated
+
+      # Too many wrong second-factor codes in a row locked an account (deep security audit
+      # M-4). Codes are asked for only after the right password, so someone else very
+      # probably has it. The owner is emailed too; it stays raised for an hour after each one.
+      - alert: ArkrayMfaLocked
+        expr: max(arkray_mfa_lockouts_last_hour) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "A user's two-step verification was locked by too many wrong codes in the last hour: their password is probably known to someone else."
+          runbook: docs/runbooks.md#second-factor-locked

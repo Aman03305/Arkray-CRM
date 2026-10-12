@@ -25,7 +25,7 @@ No bearer token is ever exposed to JavaScript, localStorage or sessionStorage.
 | Absolute lifetime | 12 h (`SESSION_COOKIE_AGE_S`); the row's expiry is pinned at sign-in, activity never extends it, and the middleware enforces it whatever the browser does | bounds the value of a stolen session |
 | Idle timeout | 2 h (`SESSION_IDLE_TIMEOUT_S`); activity is recorded at most every 5 min | same, without a database write per request |
 | Session key | always new on sign-in, including when the same user signs in again | no session fixation |
-| Revocation | the session auth hash covers the password hash **and** `User.session_epoch`; Django re-checks it, and rejects inactive users, on every request | deactivation, password change and email change end sessions on the very next request, and they stay dead after reactivation |
+| Revocation | the session auth hash covers the password hash **and** `User.session_epoch`; Django re-checks it, and rejects inactive users, on every request | deactivation, password change, email change and a role change end sessions on the very next request, and they stay dead after reactivation |
 | CSRF | the readable `arkray_csrftoken` cookie is echoed in `X-CSRFToken` (double submit), and `Origin` is checked against `CSRF_TRUSTED_ORIGINS`. `ApiView` enforces this on **every** unsafe request, signed in or not (DRF alone skips anonymous requests). | login CSRF and cross-site actions are refused |
 | Unauthenticated | `401 not_authenticated` with `WWW-Authenticate: Session realm="arkray"` | clients can tell "sign in" (401) from "not allowed" (403) |
 | Caching | every API response is `Cache-Control: no-store` | personal data is never cached |
@@ -73,8 +73,8 @@ working during a Redis outage (tested). DRF's Redis-backed limits (`anon` 60/min
 | Resets | a successful sign-in clears that browser's bucket; a completed reset or activation clears the account's buckets |
 | Password-reset requests | 20 per source per hour (durable, reserved atomically like sign-in); at most 3 reset emails per account per hour (in the job; suppression is audited) |
 | Key rotation | identifiers and trusted-browser cookies made with a key in `SECRET_KEY_FALLBACKS` still count and still match, so rotating the key neither lifts lockouts nor untrusts browsers |
-| Audit | crossing a threshold is audited once (`auth.login_throttled`, target = identifier prefix, never the email). Each failed sign-in of an **existing** account is audited too (`auth.login_failed`, reason `wrong_password`, `account_inactive`, `wrong_code` or `wrong_recovery_code`; shown in the security events; bounded by this throttle, since refused attempts aren't recorded). An unknown email is a log line only. |
-| Second factor | every wrong code (sign-in, step-up, replacing recovery codes, disabling) counts as a failed sign-in of the account from that browser. A right password with a second factor still to come withdraws only its own reservation: earlier failures stand until the code is right. |
+| Audit | crossing a threshold is audited once (`auth.login_throttled`, target = identifier prefix, never the email). Each failed sign-in of an **existing** account is audited too (`auth.login_failed`, reason `wrong_password`, `account_inactive`, `wrong_code`, `wrong_recovery_code` or `mfa_locked`; shown in the security events; bounded by this throttle, since refused attempts aren't recorded). An unknown email is a log line only. |
+| Second factor | every wrong code (sign-in, step-up, replacing recovery codes, disabling) counts as a failed sign-in of the account from that browser. A right password with a second factor still to come withdraws only its own reservation: earlier failures stand until the code is right. Beyond the throttle's window, wrong codes also accumulate on the device and lock it at 20 (see [Two-step verification](#two-step-verification)). |
 | Housekeeping | evidence older than 24 h is purged hourly (`identity.housekeeping`, which also clears expired sessions) |
 
 ### Account lifecycle
@@ -213,7 +213,9 @@ administrator.
   Anything else, including `email`, `status`, `is_active`, `password`, `is_superuser` and
   `capabilities`, is rejected with 400 (unknown field). Role changes are audited with
   before and after values, admins can't change their own role, **nor another
-  administrator's** (422, below), and a role change takes effect on the next request.
+  administrator's** (422, below), and a role change signs the user out everywhere
+  (`session_epoch`; deep security audit L-2), so it applies to a fresh sign-in, with the
+  second factor the new role may require.
 - **Email change** is its own action (`POST /admin/users/{id}/change-email`, with the
   version): uniqueness is checked (409), `session_epoch` is incremented (the user is signed
   out everywhere), pending reset links are revoked, invited users get a fresh invitation at
@@ -292,6 +294,16 @@ changes an administrator when the policy is in the way: [security.md](security.m
 - **Replay**: the last accepted time step is stored on the device and updated under its row
   lock: the same code, or an older one, is refused afterwards on any server. A recovery code
   is used up by a conditional update (`mfa.recovery_code_used`, with how many remain).
+- **Lock after repeated wrong codes** (deep security audit M-4): wrong codes (authenticator
+  or recovery; sign-in, step-up, new recovery codes, disabling) increment
+  `MfaDevice.consecutive_failures` under the device's row lock; a right one resets it. From
+  `MFA_MAX_CONSECUTIVE_FAILURES` (20) every code is refused, the right one included: `403
+  mfa_locked` (at sign-in the challenge ends and the failure is audited as
+  `auth.login_failed` with reason `mfa_locked`). Unlocked by a password reset through the
+  emailed link or a password set by an administrator (`mfa.unlocked`), or by an MFA reset;
+  not by a password change in a signed-in session. The owner is emailed about the first
+  wrong code in 6 hours (`MFA_FAILURE_NOTICE_INTERVAL_S`) and when it locks
+  ([ADR-0033 addendum](adr/0033-administrator-mfa-and-reactivation.md#addendum-deep-security-audit-m-4-2026-10-12-wrong-codes-accumulate-until-the-factor-locks)).
 - **Step-up**: the session records when a code was last verified (at sign-in, confirmation or
   `POST /auth/mfa/verify`). Views marked `requires_recent_mfa` answer `403 mfa_required` when
   the caller has a confirmed device and that is older than `MFA_STEP_UP_TTL_S` (15 minutes):
@@ -317,8 +329,9 @@ changes an administrator when the policy is in the way: [security.md](security.m
   ([runbooks](runbooks.md#lost-second-factor)).
 - **Audit**: `mfa.enabled`, `mfa.disabled`, `mfa.reset` (by `administrator` or `operator`,
   the operator's reason as an expiring detail), `mfa.recovery_codes_replaced`,
-  `mfa.recovery_code_used`; all in the security events, and each emailed to the account's
-  own address. Never a secret, a code or a hash. Accepted (ADR-0033): an administrator can
+  `mfa.recovery_code_used`, `mfa.locked` (with the count) and `mfa.unlocked` (by
+  `password_reset` or `administrator`); all in the security events, and the changes, wrong
+  codes and the lock emailed to the account's own address. Never a secret, a code or a hash. Accepted (ADR-0033): an administrator can
   reset an ordinary user's factor, set a temporary password and promote the account; that
   gives nothing an invitation wouldn't, and every step is in the security events.
 
@@ -543,6 +556,26 @@ administrator's support session (which sees what the user sees).
 The new owner and an administrator organisation-wide see everything. Tested before and after
 the reassignment in `tests/security/test_historical_deal_privacy.py`. Conservative by
 default; whether a previous owner should keep the contact details is a product decision.
+
+**Writes follow reads** (deep security audit M-2). A viewer who may not see a deal's
+customer can't write it either: an edit of such a deal that names the account, customer
+name, contact phone, contact email, address, or a free-text custom field (text or long text,
+active or removed) is refused with 403 `customer_restricted`, before anything is compared
+with the stored values. A right guess of a hidden value and a wrong one get the same answer
+(same status and body), and nothing is written, versioned or audited. The deal's other text
+that may describe the customer (description, lost reason, work load, Expected CPT,
+instrument, custom values) is read-only for them too (403 `customer_restricted` on a
+change, checked before the erasure and legal-hold checks), so no answer reveals whether that
+customer was erased or is under a legal hold; sending the value they already see is not a
+change, so edit forms keep working. Value, probability and dates stay editable (this
+narrows the audit's M-2 note, which kept the description editable; independent review).
+The web app's deal drawer shows those fields read-only on such a deal, saying only the value,
+probability and dates can be changed there, and never sends them.
+The other write paths such a viewer has don't touch the
+customer: a closed deal can't be moved (reopening a deal whose customer lives elsewhere is
+refused) or take agreed prices, activities can't be added to it, and corrections are a 404.
+Removing a custom field, or deleting its values, is refused while such a deal holds a value
+([pipeline.md](pipeline.md#custom-fields)).
 
 ### Correcting a customer's details
 

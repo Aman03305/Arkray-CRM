@@ -165,14 +165,18 @@ def exit_session(request: HttpRequest) -> None:
     request.support_session = None  # type: ignore[attr-defined]
 
 
-def end_on_sign_out(request: HttpRequest) -> None:
+def end_on_sign_out(request: HttpRequest, reason: SupportEnd = SupportEnd.SIGNED_OUT) -> None:
+    """End this browser session's support session: at sign-out, and at a new sign-in in the
+    same browser (SESSION_CHANGED: the session it was bound to is replaced; deep security
+    audit I-1). No-op without one."""
     raw = request.session.get(SESSION_KEY)
-    user = request.user
+    user = getattr(request, "user", None)
     if not raw or not isinstance(user, User):
         return
+    request.session.pop(SESSION_KEY, None)
     session = SupportSession.objects.filter(pk=raw, admin=user, ended_at__isnull=True).first()
     if session is not None:
-        _end(session, SupportEnd.SIGNED_OUT, actor_id=user.pk)
+        _end(session, reason, actor_id=user.pk)
 
 
 def resolve(request: HttpRequest, now: datetime) -> SupportSession | None:

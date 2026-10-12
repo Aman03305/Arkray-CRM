@@ -150,12 +150,55 @@ application depends on, whatever proxy or load balancer is used:
   429 in the API's JSON shape with `Retry-After`), so a flood from one address is refused before
   it takes a gunicorn worker: in the capacity test it had raised every other user's p99 to 3.2 s
   ([capacity.md](capacity.md#abuse)). Django's own limits stay the authority. There is
-  deliberately **no** global per-address limit: an office shares one address. A platform edge
+  deliberately **no** global per-address *rate* limit: an office shares one address (the limit
+  on requests *in flight* below is far above what an office reaches). A platform edge
   without nginx needs an equivalent rule. **An IPv6 client counts as its /64** (R127), like
   in Django: the `$arkray_client_key` map turns nginx's text of the address into its first
   four groups (an IPv4 address stays as it is), so one host can't rotate through its /64
   for fresh budgets ([operations.md](operations.md#edge-rate-limits)). The limit lives in
   nginx's shared memory: it holds whatever happens to Redis.
+- **Memory is bounded before anyone signs in** (deep security audit H-1, R129). nginx writes
+  every request body over 16 KB, and every response its client reads slowly, to a temp area
+  before Django has seen the request; in the container that is a tmpfs, and a tmpfs is memory
+  charged to the container. Uncapped, 24 slow 10 MB uploads from one address got the edge
+  OOM-killed (256 MB) and cut every user off. Now:
+  - **Every tmpfs of the edge has a size**: uploads and slowly read responses in
+    `/var/cache/nginx` (64 MB), JSON bodies over 16 KB in an area of their own
+    (`/var/cache/nginx-body`, 16 MB), `/var/run` and `/tmp` 1 MB (82 MB in all, at most half
+    the memory limit). A full area refuses only what needs it (503 in the API's JSON shape).
+  - **An attachment upload's body is read only after Django confirms the request's
+    session**: nginx's `auth_request` asks `GET /api/v1/auth/me` (an internal subrequest with
+    the browser's headers and no body) in its access phase, before the body is read. Without
+    a session the upload gets 401 in the API's envelope (with `WWW-Authenticate` and the
+    request id) and its body is discarded, never spooled; a failed check fails closed (503).
+    The check is one extra cheap request per upload (3 SELECTs, no write, no audit event),
+    counted against the user's API rate.
+  - **Per client** (`$arkray_client_key`, the sign-in limit's key): at most **256 requests in
+    flight** anywhere, **8 requests with a body** (a GET, HEAD or OPTIONS without a declared
+    body doesn't count; uploads count too) and **4 attachment uploads** (a zone of their
+    own), refused 429 in the API's JSON shape with `Retry-After` (a page: a minimal HTML 429
+    with the request id).
+  - Headers and bodies that stall for **15 s**, and clients that stop reading for **30 s**,
+    are dropped.
+  - No one API response is spooled beyond **16 MB** (`proxy_max_temp_file_size`: every 10 MB
+    attachment still fits whole, so a slow download frees its gunicorn worker at once; 0
+    would hold a sync worker for every slow download). **Data-export downloads** (up to
+    100 MB) have a location of their own and are spooled whole on a disk volume
+    (`edge-export-spool`, `/var/cache/nginx-exports`; 112 MB each): 2 per client and 4 in
+    all, at most 448 MB on disk, written only after Django answered; a request declaring a
+    body there gets 413. A slow line gets the whole ZIP and never holds a gunicorn worker
+    (with the 16 MB cap, gunicorn's 30 s timeout cut a slow export short behind a 200).
+    Spool writes are charged to the container as reclaimable page cache: four parallel
+    80 MB downloads reached the 256 MB limit without an OOM kill, and it fell back to 24 MB.
+
+  Keep the sizes consistent if you change them: uploads-per-client x the upload body limit
+  must fit three quarters of the upload area, bodies-per-client x the JSON body limit half
+  of the JSON area, and `proxy_max_temp_file_size` must be between `ATTACHMENT_MAX_BYTES` and
+  a quarter of the upload area (`tests/architecture/test_edge_limits.py`). A platform edge
+  without nginx needs the equivalent (bounded request buffering, per-client concurrency,
+  short body/header timeouts, and an upload body read only for a confirmed session, or the
+  acceptance that anonymous clients can spool upload bodies). What remains possible without
+  signing in: [operations.md](operations.md#edge-rate-limits).
 - **Errors nginx answers itself name the request**: on API routes the API's JSON envelope
   (502/504 become 503 `service_unavailable`, 413, 429) with `request_id`; on pages (the web
   tier, Next.js, unreachable or too slow) a minimal HTML page with the request id as a
@@ -164,8 +207,9 @@ application depends on, whatever proxy or load balancer is used:
   `X-Request-ID` and HSTS.
 - **The container's health check** is `GET /edge-health` on the plain-HTTP port, answered by
   nginx itself to loopback only (404 to anyone else).
-- Request bodies are JSON only: 1 MB at the proxy (Django refuses more than 2.5 MB anyway);
-  the proxy's read timeout (35 s) is longer than gunicorn's (30 s).
+- Request bodies are JSON only: 1 MB at the proxy (Django refuses more than 2.5 MB anyway),
+  11 MB on the attachment upload route; the proxy's read timeout (35 s) is longer than
+  gunicorn's (30 s).
 
 ## Release process
 
@@ -314,7 +358,7 @@ is a failed deploy, not a weakened service.
 | `DJANGO_SETTINGS_MODULE` | yes | `config.settings.production` (the image's default) |
 | `DJANGO_SECRET_KEY` | yes | at least 50 characters with at least 5 distinct ones, production-only (not `dev-`, `test-` or `django-insecure-`); startup fails otherwise. Rotation: [runbooks.md](runbooks.md#rotate-a-secret) |
 | `DJANGO_SECRET_KEY_FALLBACKS` | no | comma-separated earlier keys, during a rotation only: sessions, sealed page links and trusted-browser cookies signed with them keep working until they're removed; each must be as strong as the key |
-| `MFA_REQUIRED_FOR_ADMINS` | no | `true` in production: administrators must set up two-step verification (TOTP, [ADR-0033](adr/0033-administrator-mfa-and-reactivation.md)) at their next sign-in and give a code again (step-up) for user administration, support sessions, export requests and pseudonymisation; `false` is refused unless `DJANGO_ALLOW_INSECURE_LOCAL_HTTP=true`. The authenticator secrets are encrypted with a key derived from `DJANGO_SECRET_KEY`: before retiring a key from `DJANGO_SECRET_KEY_FALLBACKS`, run `manage.py mfa_reencrypt` ([runbooks.md](runbooks.md#lost-second-factor)) |
+| `MFA_REQUIRED_FOR_ADMINS` | no | `true` in production: administrators must set up two-step verification (TOTP, [ADR-0033](adr/0033-administrator-mfa-and-reactivation.md)) at their next sign-in and give a code again (step-up) for user administration, support sessions, export requests and pseudonymisation; `false` is refused unless `DJANGO_ALLOW_INSECURE_LOCAL_HTTP=true`. The authenticator secrets are encrypted with a key derived from `DJANGO_SECRET_KEY`: before retiring a key from `DJANGO_SECRET_KEY_FALLBACKS`, run `manage.py mfa_reencrypt` ([runbooks.md](runbooks.md#lost-second-factor)). Wrong codes lock the factor at `MFA_MAX_CONSECUTIVE_FAILURES` (20 in a row) and the owner is emailed about a wrong code at most every `MFA_FAILURE_NOTICE_INTERVAL_S` (6 hours) and when it locks: both fixed in `config/settings/base.py`, not environment variables (deep security audit M-4, [runbooks.md](runbooks.md#second-factor-locked)) |
 | `DJANGO_ALLOWED_HOSTS` | yes | the public host(s) **and** the probes' host |
 | `DJANGO_CSRF_TRUSTED_ORIGINS` | yes | `https://crm.example.com`; production refuses `http://` origins and wildcards (`https://*.example.com`) |
 | `APP_BASE_URL` | **yes** | the public web URL for emailed links, `https://crm.example.com`; startup fails if unset or not `https://` |
@@ -385,6 +429,7 @@ PostgreSQL: a database backup is not a backup of the files ([below](#attachments
 | `ATTACHMENT_RECONCILE_DAILY` | no | `true`: the daily read-only `reconcile_attachments --check` (22:10 UTC), its outcome on the metrics endpoint ([runbooks.md](runbooks.md#attachment-reconciliation)) |
 | `ATTACHMENT_MAX_BYTES` | no | 10 MB per file; the proxy's body limit on the upload route must be a little above it ([below](#reverse-proxy)) |
 | `ATTACHMENT_MAX_PER_NOTE` | no | 10 |
+| `ATTACHMENT_MAX_BYTES_PER_USER` | no | 2 GiB (`2147483648`): the most storage one person's files may take (deleted files count until purged; 422 `attachment_quota_exceeded` beyond it, deep security audit L-7); `0` turns the quota off; a negative value fails startup (`arkray.E023`) |
 | `ATTACHMENT_ALLOWED_EXTENSIONS` | no | `pdf,png,jpg,jpeg,webp,docx,xlsx,csv,txt`; only from the catalog the server can recognise by content (adds: `gif`, `pptx`); anything else fails startup |
 | `ATTACHMENT_SCANNER` | **yes** (or the waiver) | `clamd://host:3310`; production refuses to start without it unless `ATTACHMENT_SCANNER_WAIVED=true` states that the organisation accepts unscanned attachments (R94: files are then "not scanned" and downloadable). With `clamd://host:3310` (a ClamAV daemon: files stay "being checked" until clean; infected ones are blocked and deleted). clamd has no TLS: its host must be loopback or listed in `BACKEND_TLS_PRIVATE_HOSTS` (a sidecar or a container on the private network); startup fails otherwise |
 | `ATTACHMENT_SCANNER_WAIVED` | no | `false`; `true` only when the organisation accepts unscanned attachments (R94) and runs without `ATTACHMENT_SCANNER`; any value other than `true` or `false` is refused at startup |
@@ -437,6 +482,7 @@ therefore reach the rate times the number of API processes its requests land on
 | `AI_RETRIEVAL_TOP_K`, `AI_RETRIEVAL_MIN_SIMILARITY` | 8, 0.55 | note search |
 | `AI_QUESTION_TIMEOUT_S` | 90 s | a question nobody answers fails `timeout` |
 | `AI_MAX_PENDING_PER_USER`, `AI_MAX_PENDING_TOTAL` | 2, 40 | bulkheads |
+| `AI_MAX_QUESTIONS_PER_USER_PER_DAY` | 200 | questions handed to the ai workers (model or retrieval) per person in any 24 hours, counted from the append-only `ai.question_queued` audit events (deleting conversations doesn't reset it; a question whose hand-off failed still counts); routed questions never count; `0` turns the cap off; over it, 429 `rate_limited` with `Retry-After` (deep security audit L-12) |
 | `AI_CONVERSATION_RETENTION_DAYS` | 30 | conversations idle longer are deleted ([privacy.md](privacy.md)) |
 | `AI_EMBEDDING_PROVIDER`, `AI_EMBEDDING_MODEL_DIR`, `AI_EMBEDDING_THREADS` | `local`, the image's `/opt/models/bge-small-en-v1.5`, 2 | production accepts only `local` |
 
@@ -699,7 +745,19 @@ The kill switch is `AI_ENABLED=false` (it also stops queued questions).
   the start, so they need no capability at all; only nginx (`CHOWN`, `SETGID`, `SETUID`: its
   master switches to its worker user) and the one-shot TLS job (`CHOWN`: it hands each
   server its key) add any back. Each long-running service has memory, CPU and process limits
-  and a health check. Verified by starting the whole stack with them.
+  and a health check. Verified by starting the whole stack with them. **Every tmpfs has a
+  size** (deep security audit H-1): a tmpfs is memory charged to its container, and without
+  `size=` it may grow to half the host's memory whatever the container's limit, so a full one
+  became an OOM kill rather than a refused write. Sizes follow what is written there: the
+  API's `/tmp` 256 MB (an upload spooled per gunicorn worker plus storage fetches), the
+  default worker's 256 MB (two export ZIPs of up to 100 MB), clamd's 512 MB (4 threads x
+  128 MB), the edge's upload area 64 MB and JSON-body area 16 MB (its export spool is a disk
+  volume); the rest 1-64 MB, each service's total at most half its
+  memory limit. Services whose tmpfs comes from `docker-compose.yml` replace it in the
+  overlay (`tmpfs: !override`), so `/tmp` isn't mounted twice. If you raise
+  `ATTACHMENT_MAX_BYTES`, `EXPORT_MAX_BYTES`, the worker concurrency or clamd's limits, raise
+  the matching tmpfs (and the memory limit); `tests/architecture/test_compose_production.py`
+  fails until they agree.
 - The application code is owned by root and read-only to the runtime user (uid 10001); only
   Next.js's `.next/cache` is writable. Run every container with a **read-only root
   filesystem** (a tmpfs `/tmp`, and `/app/.next/cache` for the web image), **no Linux

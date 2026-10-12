@@ -22,14 +22,20 @@ def _https_server() -> str:
 
 
 def _blocks(server: str) -> dict[str, str]:
-    """location name -> its body. Braces inside quoted strings (the JSON bodies) don't count."""
+    """location name -> its body. Braces inside quoted strings (the JSON bodies) don't count.
+    Only a directive starts a block: the word in a comment ("their own location below") made
+    the attachments location's name a run of comment text, so no check saw it. A comment
+    inside a block runs to the end of its line (an apostrophe there is not a quote)."""
     blocks = {}
-    for match in re.finditer(r"location\s+([^{]+)\{", server):
+    for match in re.finditer(r"^\s*location\s+([^{]+)\{", server, re.M):
         depth, quote, i = 1, "", match.end()
         while depth:
             char = server[i]
             if quote:
                 quote = "" if char == quote else quote
+            elif char == "#":
+                i = server.index("\n", i)
+                continue
             elif char in "'\"":
                 quote = char
             elif char in "{}":
@@ -62,28 +68,35 @@ def test_the_edges_own_api_errors_are_the_apis_envelope_with_the_id():
         assert "default_type application/json;" in body, name
     for name, body in blocks.items():
         if name.startswith("~* ^/api"):
-            assert "error_page 502 504 = @arkray_api_unavailable;" in body, name
+            # 500: nginx's own, when its capped temp area is full (deep security audit H-1);
+            # 429: the per-client limits (limit_req, limit_conn).
+            assert "error_page 500 502 504 = @arkray_api_unavailable;" in body, name
             assert "error_page 413 = @arkray_too_large;" in body, name
+            assert "error_page 429 = @arkray_rate_limited;" in body, name
 
 
 def test_the_web_tiers_own_errors_are_a_minimal_page_with_the_id():
     """R128: the web tier (Next.js) down answered with nginx's own 502 page, without the id
     or the security headers."""
     blocks = _blocks(_https_server())
-    assert "error_page 502 504 = @arkray_web_unavailable;" in blocks["/"]
-    body = blocks["@arkray_web_unavailable"]
-    assert "default_type text/html;" in body
-    (page,) = re.findall(r"return 503 '([^']*)';", body)
-    assert "$request_id" in page
-    for loads_something in ("<script", "style", "http"):
-        assert loads_something not in page, loads_something
-    for header in (
-        "Content-Security-Policy \"default-src 'none'",
-        "X-Content-Type-Options nosniff",
-        "X-Frame-Options DENY",
-        "Cache-Control no-store",
-    ):
-        assert f"add_header {header}" in body, header
+    assert "error_page 500 502 504 = @arkray_web_unavailable;" in blocks["/"]
+    # The per-client limit on requests in flight (H-1) refuses a page with the same kind.
+    assert "error_page 429 = @arkray_web_rate_limited;" in blocks["/"]
+    for name, status in (("@arkray_web_unavailable", 503), ("@arkray_web_rate_limited", 429)):
+        body = blocks[name]
+        assert "default_type text/html;" in body, name
+        (page,) = re.findall(rf"return {status} '([^']*)';", body)
+        assert "$request_id" in page, name
+        for loads_something in ("<script", "style", "http"):
+            assert loads_something not in page, (name, loads_something)
+        for header in (
+            "Content-Security-Policy \"default-src 'none'",
+            "X-Content-Type-Options nosniff",
+            "X-Frame-Options DENY",
+            "Cache-Control no-store",
+            "Retry-After",
+        ):
+            assert f"add_header {header}" in body, (name, header)
 
 
 def test_the_health_probe_answers_loopback_only():

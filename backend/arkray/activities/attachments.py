@@ -25,6 +25,7 @@ daily reconciliation flags the row, and `reconcile_attachments --repair` marks i
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 import uuid
@@ -34,8 +35,8 @@ from typing import IO
 from uuid import UUID
 
 from django.conf import settings
-from django.db import transaction
-from django.db.models import Q, QuerySet
+from django.db import connection, transaction
+from django.db.models import Q, QuerySet, Sum
 from django.utils import timezone
 
 from arkray.audit import services as audit
@@ -75,6 +76,10 @@ AUDIT_RECONCILED = "attachment.reconciled"
 NOTES_ONLY = "Files can be attached to notes."
 ARCHIVED_NOTE = "This note is archived. Restore it to change its files."
 TOO_MANY = "A note can have at most {limit} files."
+OVER_QUOTA = (
+    "Your files can take up at most {limit} in all, and this one would go over it. Delete files"
+    " you no longer need, or ask an administrator."
+)
 EDIT_ONLY = "Only the note's author (or an administrator) can change its files."
 STORAGE_DOWN = "File storage is unavailable right now. Try again in a few minutes."
 SCANNING = "This file is still being checked for viruses. Try again in a minute."
@@ -114,6 +119,18 @@ class StorageDown(ServiceUnavailableError):
 
 class NoteFull(BusinessRuleViolation):
     """The note already has ATTACHMENT_MAX_PER_NOTE files."""
+
+
+class QuotaExceeded(BusinessRuleViolation):
+    """The uploader's files would take more than ATTACHMENT_MAX_BYTES_PER_USER (deep security
+    audit L-7)."""
+
+    code = "attachment_quota_exceeded"
+
+
+# Advisory-lock namespace ("ARKQ"): one person's uploads are checked against their quota one
+# at a time (core.idempotency's and identity.throttling's two-key form).
+_QUOTA_LOCK = 0x41524B51
 
 
 class AttachmentUnavailable(DomainError):
@@ -194,7 +211,7 @@ def _upload_failure(exc: Exception) -> str:
     if isinstance(exc, FileTooLarge):
         return "too_large"
     if isinstance(exc, InvalidInputError | BusinessRuleViolation):
-        return "quota" if isinstance(exc, NoteFull) else "rejected"
+        return "quota" if isinstance(exc, NoteFull | QuotaExceeded) else "rejected"
     if isinstance(exc, StorageDown):
         return "timeout" if exc.error_class == "timeout" else "storage_error"
     return "other"
@@ -254,10 +271,12 @@ def _reserve(
     kind: storage.FileKind,
     received: storage.Received,
 ) -> Attachment:
-    """Step 2: under the note's lock (lead first), check it and the limit, write the row."""
+    """Step 2: under the uploader's quota lock, then the note's lock (lead first), check
+    the quota, the note and its limit, write the row."""
     from .services import lock_note  # the activities lock order lives there
 
     with transaction.atomic():
+        _charge_quota(actor, received.size)
         note = lock_note(scope, note_id, adding=True)
         if note.archived_at is not None:
             raise BusinessRuleViolation(ARCHIVED_NOTE)
@@ -283,6 +302,43 @@ def _reserve(
             uploaded_by=actor,
             created_at=now,
         )
+
+
+def _charge_quota(actor: User, size: int) -> None:
+    """Refuse a file that would take the uploader past ATTACHMENT_MAX_BYTES_PER_USER (0: no
+    quota; deep security audit L-7: without one, an account could fill the volume or the
+    bucket at about 300 MB a minute). What counts is every file of theirs still in storage:
+    stored, being uploaded, and deleted or failed until its object is purged. The uploader is
+    who pays, also for a file added in someone else's workspace. Checked under a per-person
+    advisory lock held until the row is written, so two uploads at once can't both fit in
+    the same room. Taken first, before the lead and the note: only uploads take it, and each
+    takes it before any other lock, so no cycle is possible, and the sum (one person's rows)
+    is never computed while the lead's and the note's rows are locked."""
+    limit = settings.ATTACHMENT_MAX_BYTES_PER_USER
+    if limit <= 0:
+        return
+    digest = int.from_bytes(hashlib.sha256(str(actor.pk).encode()).digest()[:4], "big", signed=True)
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [_QUOTA_LOCK, digest])
+    if stored_bytes(actor.pk) + size > limit:
+        raise QuotaExceeded(OVER_QUOTA.format(limit=_human_size(limit)))
+
+
+def stored_bytes(user_id: UUID) -> int:
+    """How much storage a person's files take now (the quota's measure)."""
+    total = Attachment.objects.filter(uploaded_by_id=user_id, purged_at__isnull=True).aggregate(
+        total=Sum("size")
+    )["total"]
+    return int(total or 0)
+
+
+def _human_size(size: int) -> str:
+    """A limit as people read it: "2 GB", "500 MB" (binary units, as ATTACHMENT_MAX_BYTES is
+    shown)."""
+    for unit, label in ((1024**3, "GB"), (1024**2, "MB"), (1024, "KB")):
+        if size >= unit:
+            return f"{size / unit:.1f}".rstrip("0").rstrip(".") + f" {label}"
+    return f"{size} bytes"
 
 
 def _finish(actor: User, scope: AccessScope, attachment: Attachment) -> Attachment:

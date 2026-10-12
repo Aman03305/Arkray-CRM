@@ -119,7 +119,7 @@ the system can't verify them.
       every change to their two-step verification, the rollout's check against someone with
       a phished password enrolling first.
 - [ ] The ClamAV container's health (it also fails on signatures older than 3 days),
-      `ArkrayAdministratorDeactivated`, `ArkrayAttachmentScanOverdue` and `ArkrayCacheDown`
+      `ArkrayAdministratorDeactivated`, `ArkrayMfaLocked`, `ArkrayAttachmentScanOverdue` and `ArkrayCacheDown`
       routed to people who act on them (while Redis is down, request limits are counted per
       process: R127).
 - [ ] Retention periods agreed: audit trail, audit details (90 days default), backups
@@ -159,5 +159,5 @@ the system can't verify them.
       (`scripts/restore.sh`), within the first month, then quarterly.
 - [ ] Dead outbox events reviewed weekly (`manage.py outbox_requeue` lists them).
 - [ ] Dependency updates: `pip-audit` and `pnpm audit` in CI; base-image digests moved
-      deliberately ([deployment.md](deployment.md#images-phase-9)).
+      deliberately ([deployment.md](deployment.md#images)).
 - [ ] Open risks reviewed against [risk-register.md](risk-register.md).

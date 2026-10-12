@@ -41,6 +41,12 @@ Legal holds (core.holds, docs/privacy.md#legal-holds): while one covers the lead
 activities' text (HELD_FIELDS) can't change and its notes' files can't be deleted (409
 `legal_hold`, nothing written); checked under the lead's lock, serialised with placing a
 hold. Adding work and moving it on stay allowed.
+
+Erasure (docs/privacy.md#erasure): once the lead is erased (Lead.erased_at), the same text of
+every one of its activities (tasks and meetings as well as notes) can't be written again, and
+no activity or file can be added for it (422 `lead_erased`, nothing written): otherwise the
+erasure could be undone (deep security audit M-1). Times, priority, completing, cancelling
+and archiving go on.
 """
 
 from __future__ import annotations
@@ -206,6 +212,8 @@ def lock_note(scope: AccessScope, note_id: UUID, *, adding: bool = False) -> Act
     note, lead = _lock(scope, note_id)
     if note.type != ActivityType.NOTE:
         raise NotFoundError()
+    if adding:
+        lead_services.require_not_erased(lead, lead_services.ERASED_NO_NEW)
     if adding and lead.archived_at is not None:
         raise BusinessRuleViolation(NOTE_LEAD_ARCHIVED)
     return note
@@ -322,6 +330,7 @@ def create_activity(
     try:
         with transaction.atomic():
             lead, opportunity = _lock_link(scope, lead_id, opportunity_id)
+            lead_services.require_not_erased(lead, lead_services.ERASED_NO_NEW)
             if lead.archived_at is not None:
                 raise BusinessRuleViolation(LEAD_ARCHIVED)
             if opportunity is not None and opportunity.archived_at is not None:
@@ -387,7 +396,8 @@ def update_activity(
     and due time; a meeting's subject, agenda, times, location and link; a note's text).
     Completed and cancelled work is history: reopen it first. Only fields whose value
     actually changes are written and audited (by name: no text). Refused (409 `legal_hold`)
-    while a legal hold covers the lead if its text (HELD_FIELDS) would change."""
+    while a legal hold covers the lead, and (422 `lead_erased`) once the lead is erased, if
+    its text (HELD_FIELDS) would change."""
     authorize_write(actor, scope)
     cleaned = validation.clean_fields(changes)
     with transaction.atomic():
@@ -417,6 +427,7 @@ def update_activity(
         if not changed:
             return selectors.activity_by_id(activity.pk)
         # Before anything is written (the lead's lock is held): a refusal changes nothing.
+        lead_services.refuse_erased_changes(lead, changed, HELD_FIELDS)
         holds.refuse_frozen_changes(lead.pk, changed, HELD_FIELDS)
         previous_start = activity.starts_at
         for field in changed:

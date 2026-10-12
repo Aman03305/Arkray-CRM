@@ -30,15 +30,25 @@ export function factorBody(kind: FactorKind, value: string): MfaFactorRequest {
   return kind === "recovery" ? { recovery_code: normalizeRecoveryCode(value) } : { code: normalizeCode(value) };
 }
 
+/** Too many wrong codes in a row (403 `mfa_locked`, deep security audit M-4): no code works,
+ * not even the right one, until the password is reset or an administrator helps. */
+export const MFA_LOCKED_MESSAGE =
+  "Too many wrong codes were entered, so two-step verification is locked for your account. Reset your password (Forgot password on the sign-in page) or ask an administrator for help.";
+
+export function isMfaLocked(error: unknown): boolean {
+  return isApiError(error, 403, "mfa_locked");
+}
+
 /**
  * The server's refusal of a code, for the code field: its validation details for the field,
- * or the message of a wrong code (400 `invalid_mfa_code`). Undefined for anything else
- * (shown as a banner instead).
+ * the message of a wrong code (400 `invalid_mfa_code`), or the locked factor's explanation.
+ * Undefined for anything else (shown as a banner instead).
  */
 export function serverCodeErrors(error: unknown, field: "code" | "recovery_code" = "code"): string[] | undefined {
   const own = fieldErrors(error)[field];
   if (own?.length) return own;
   if (isApiError(error, 400, "invalid_mfa_code")) return [error.message || "That code didn't work. Try again."];
+  if (isMfaLocked(error)) return [MFA_LOCKED_MESSAGE];
   return undefined;
 }
 

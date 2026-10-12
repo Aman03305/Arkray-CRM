@@ -99,9 +99,14 @@ services:
     # needs no capability to change owners or switch users (R128).
     user: "999:999"
     read_only: true
+    # Every tmpfs in this file has a size (deep security audit H-1): a tmpfs is memory charged
+    # to the container, and without `size=` it may grow to half the HOST's memory, whatever
+    # the limit below. Sized to what the process writes there, with headroom; at most half of
+    # the container's limit together (tests/architecture/test_compose_production.py).
+    # PostgreSQL's own temporary files are in its data directory; here only its socket/lock.
     tmpfs:
-      - /tmp
-      - /var/run/postgresql:uid=999,gid=999,mode=3775
+      - /tmp:size=16m
+      - /var/run/postgresql:uid=999,gid=999,mode=3775,size=1m
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
@@ -123,7 +128,7 @@ services:
     user: "999:1000"  # redis:redis; /data and the TLS key are theirs
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:size=8m
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
@@ -150,9 +155,10 @@ services:
     command: ["sh", "-c", "exec redis-server --port 0 --tls-port 6379 --tls-cert-file /tls/server.crt --tls-key-file /tls/server.key --tls-ca-cert-file /tls/ca.crt --tls-auth-clients no --save '' --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass \"$$REDIS_PASSWORD\""]
     user: "999:1000"
     read_only: true
+    # Nothing is saved (--save '', no AOF): /data is only its working directory.
     tmpfs:
-      - /tmp
-      - /data:uid=999,gid=1000
+      - /tmp:size=8m
+      - /data:uid=999,gid=1000,size=8m
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
@@ -179,8 +185,9 @@ services:
       MP_SMTP_REQUIRE_STARTTLS: "true"
     user: "65534:65534"  # nobody; backend-tls gives it its key
     read_only: true
+    # Its message store (no MP_DATABASE: a SQLite file in /tmp; 500 messages kept at most).
     tmpfs:
-      - /tmp
+      - /tmp:size=48m
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
@@ -211,7 +218,7 @@ services:
     user: "0:0"
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:size=8m
     cap_drop: [ALL]
     cap_add: [CHOWN]  # hands each key to its server's user
     security_opt:
@@ -236,7 +243,7 @@ services:
     user: "999:999"
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:size=8m
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
@@ -266,6 +273,8 @@ services:
     deploy:
       resources:
         limits: {cpus: "1.0", memory: 512m, pids: 64}
+    tmpfs: !override
+      - /tmp:size=16m
     volumes:
       - tls-ca:/tls:ro
     command: ["sh", "-c", "python manage.py migrate --noinput && python manage.py grant_app_privileges arkray_app"]
@@ -283,6 +292,12 @@ services:
     deploy:
       resources:
         limits: {cpus: "2.0", memory: 1536m, pids: 256}
+    # An upload is read from the request stream into a spool that moves to /tmp past 1 MB
+    # (ATTACHMENT_SPOOL_MEMORY_BYTES), up to ATTACHMENT_MAX_BYTES (10 MB): one per gunicorn
+    # worker (8, sync), plus a download's copy fetched from object storage (at most 3 storage
+    # calls in flight, 4 per process without Redis): about 120 MB at worst; 256 MB.
+    tmpfs: !override
+      - /tmp:size=256m
     volumes:
       - tls-ca:/tls:ro
     networks:
@@ -298,6 +313,10 @@ services:
     deploy:
       resources:
         limits: {cpus: "1.0", memory: 1g, pids: 128}
+    # A data export is built as a ZIP in /tmp (up to EXPORT_MAX_BYTES, 100 MB) beside a file
+    # fetched from storage (10 MB), on each of its 2 Celery processes: 220 MB; 256 MB.
+    tmpfs: !override
+      - /tmp:size=256m
     networks:
       - default
       - scanner
@@ -311,6 +330,8 @@ services:
     deploy:
       resources:
         limits: {cpus: "1.0", memory: 768m, pids: 128}
+    tmpfs: !override
+      - /tmp:size=32m
     volumes:
       - tls-ca:/tls:ro
 
@@ -322,6 +343,8 @@ services:
     deploy:
       resources:
         limits: {cpus: "2.0", memory: 1536m, pids: 128}
+    tmpfs: !override
+      - /tmp:size=64m
     volumes:
       - tls-ca:/tls:ro
 
@@ -332,6 +355,8 @@ services:
     deploy:
       resources:
         limits: {cpus: "1.0", memory: 1g, pids: 128}
+    tmpfs: !override
+      - /tmp:size=32m
     volumes:
       - tls-ca:/tls:ro
 
@@ -341,6 +366,9 @@ services:
     deploy:
       resources:
         limits: {cpus: "0.5", memory: 384m, pids: 64}
+    # Its schedule file (--schedule /tmp/celerybeat-schedule): a few KB.
+    tmpfs: !override
+      - /tmp:size=8m
     volumes:
       - tls-ca:/tls:ro
 
@@ -348,6 +376,11 @@ services:
     deploy:
       resources:
         limits: {cpus: "1.0", memory: 768m, pids: 128}
+    # Next.js's cache: no next/image, no ISR or fetch cache (every page is rendered per
+    # request for its CSP nonce), so it stays nearly empty; 64 MB bounds it anyway.
+    tmpfs: !override
+      - /tmp:size=16m
+      - /app/.next/cache:uid=10001,gid=10001,size=64m
     # Pages only: the browser fetches every record from /api, which nginx routes to Django
     # itself, so the web tier needs no way to the API (its /api rewrite is development's).
     networks:
@@ -376,9 +409,9 @@ services:
       # clamd's temporary files while it unpacks documents: up to MaxThreads (4) scans at
       # once, each spooling its stream and unpacked members (MaxScanSize, clamd.conf).
       - /tmp:size=512m
-      - /run:uid=100,gid=101
-      - /run/clamav:uid=100,gid=101,mode=775
-      - /var/lock:uid=100,gid=101
+      - /run:uid=100,gid=101,size=1m
+      - /run/clamav:uid=100,gid=101,mode=775,size=1m
+      - /var/lock:uid=100,gid=101,size=1m
       # clamd's log (clamd.conf: a symlink such as /dev/stdout is refused), rotated at 2 MB.
       - /var/log/clamav:uid=100,gid=101,size=16m
     cap_drop: [ALL]
@@ -415,7 +448,7 @@ services:
     user: "0:0"
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:size=8m
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
@@ -435,10 +468,21 @@ services:
     logging: *logging
     # Read-only like the rest; nginx's master switches to its worker user.
     read_only: true
+    # Every tmpfs is capped (deep security audit H-1): a tmpfs is memory, charged to the 256 MB
+    # below, and nginx writes request bodies over 16 KB and slowly read responses under
+    # /var/cache/nginx before anything is authenticated. Uncapped, 24 slow 10 MB uploads from
+    # one address got nginx OOM-killed. 64 MB holds every per-client limit in arkray.conf
+    # (4 uploads of 11 MB, one 16 MB response) with room for others; when it is full nginx
+    # refuses what needs it (503 JSON) and the rest keeps working. /var/run holds the pid
+    # file, /tmp nothing nginx writes.
+    # JSON request bodies over 16 KB have an area of their own (/var/cache/nginx-body, 16 MB:
+    # 8 per client x 1 MB is half of it), so a flood of them never takes the uploads' area
+    # (independent review of H-1, P2-2).
     tmpfs:
-      - /var/cache/nginx
-      - /var/run
-      - /tmp
+      - /var/cache/nginx:size=64m
+      - /var/cache/nginx-body:size=16m
+      - /var/run:size=1m
+      - /tmp:size=1m
     cap_drop: [ALL]
     cap_add: [CHOWN, SETGID, SETUID]
     security_opt:
@@ -449,6 +493,11 @@ services:
     volumes:
       - ./infrastructure/nginx/arkray.conf:/etc/nginx/conf.d/default.conf:ro
       - certs:/etc/nginx/certs:ro
+      # Data-export downloads spooled whole (independent review of H-1, P2-1): disk, not
+      # memory, written only after Django answered for a signed-in administrator, at most
+      # 4 x 112 MB at a time (arkray.conf). nginx unlinks each spool file as it opens it, so
+      # nothing is left here after a crash; the volume holds no data worth keeping.
+      - edge-export-spool:/var/cache/nginx-exports
     # Published on `edge` (its alone); the API over `api` from a fixed address (the one
     # TRUSTED_PROXY_ADDRESSES names), the web tier over `web`. Never on `default`: there the
     # API's name would resolve to its other address and the source would be a different one.
@@ -502,3 +551,4 @@ volumes:
   tls-redis:
   tls-mailpit:
   clamav-db:
+  edge-export-spool:

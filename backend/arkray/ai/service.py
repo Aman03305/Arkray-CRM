@@ -22,6 +22,7 @@ mode, tool names, counts, timings and token usage.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -32,16 +33,19 @@ from typing import Any
 from uuid import UUID
 
 from django.conf import settings
-from django.db import OperationalError, connection, transaction
+from django.core.cache import cache
+from django.db import DatabaseError, OperationalError, connection, transaction
 from django.utils import timezone
 
 from arkray.activities import selectors as activity_selectors
 from arkray.audit import services as audit
+from arkray.audit.models import AuditEvent
 from arkray.core import holds
 from arkray.core.access import AccessScope, ScopeKind
 from arkray.core.business_time import business_date
-from arkray.core.context import current_correlation_id
+from arkray.core.context import current_correlation_id, current_support_session_id
 from arkray.core.errors import (
+    ConflictError,
     DomainError,
     InvalidInputError,
     NotFoundError,
@@ -50,6 +54,7 @@ from arkray.core.errors import (
     ServiceUnavailableError,
 )
 from arkray.core.knowledge import SourceType
+from arkray.core.models import HoldSubject
 from arkray.core.redis import CircuitBreaker
 from arkray.core.text import TextRejected, clean_multiline
 from arkray.identity.models import User
@@ -59,7 +64,7 @@ from arkray.leads import selectors as lead_selectors
 from arkray.pipeline import customer
 from arkray.pipeline import selectors as pipeline_selectors
 
-from . import answers, breaker, prompts, router, tools
+from . import answers, breaker, prompts, router, subjects, tools
 from .formatting import day, user_text
 from .llm import Completion, ProviderError, get_provider
 from .models import QUESTION_MAX_LENGTH, Conversation, Question, QuestionStatus, WorkspaceKind
@@ -68,9 +73,11 @@ from .sources import live_documents
 logger = logging.getLogger(__name__)
 
 AUDIT_ACTION = "ai.question"
+QUEUED_ACTION = "ai.question_queued"  # a question handed to the ai workers
 DASH = chr(0x2014)
 CONVERSATION_LIST_LIMIT = 20
 CONVERSATION_QUESTION_LIMIT = 50
+DAY = timedelta(days=1)
 
 
 class AiDisabledError(DomainError):
@@ -136,6 +143,56 @@ def conversations_in(actor: User, scope: AccessScope) -> Any:
     )
 
 
+CONVERSATION_DELETED = "ai.conversation_deleted"
+
+
+class ConversationHeld(ConflictError):
+    """409 `legal_hold`, as every edit a legal hold refuses (core.holds.UnderLegalHold), worded
+    for the person deleting their own conversation."""
+
+    code = "legal_hold"
+    default_message = (
+        "This conversation is kept under a legal hold, so it can't be deleted until an"
+        " administrator releases the hold."
+    )
+
+
+def forget_conversation(actor: User, scope: AccessScope, conversation_id: UUID) -> None:
+    """Delete one of the actor's conversations in this workspace, with its questions and
+    answers (404 for any other). Refused (409 `legal_hold`, nothing deleted) while a legal hold
+    keeps it: its asker or the user whose workspace it is in is held, or it touches a held
+    customer (deep security audit M-5: the person a hold targets could destroy the evidence,
+    without a trace). Audited with ids only, like every deletion."""
+    with transaction.atomic():
+        conversation = (
+            conversations_in(actor, scope).select_for_update().filter(pk=conversation_id).first()
+        )
+        if conversation is None:
+            raise NotFoundError()
+        # Under the conversation's row lock, serialised with placing a user hold (core.holds).
+        users = dict.fromkeys([conversation.actor_id, conversation.subject_id])
+        try:
+            for user_id in users:
+                if user_id is not None:
+                    holds.refuse_if_held(HoldSubject.USER, user_id)
+        except holds.UnderLegalHold:
+            raise ConversationHeld() from None
+        # A customer's holds are read (as bulk jobs read them, core.holds): which customers
+        # a conversation touches is only known by matching it.
+        if subjects.held_conversations(among=[conversation.pk]):
+            raise ConversationHeld()
+        questions = conversation.questions.count()
+        conversation.delete()
+        audit.record(
+            CONVERSATION_DELETED,
+            actor_id=actor.pk,
+            target_type="ai_conversation",
+            target_id=conversation_id,
+            subject_user_id=scope.subject_user_id if scope.is_delegated else None,
+            metadata={"questions": questions},
+        )
+
+
 def _segment(conversation: Conversation) -> str:
     if conversation.workspace_kind == WorkspaceKind.ORGANIZATION:
         return "all"
@@ -173,8 +230,47 @@ def _check_bulkheads(actor: User) -> None:
     pending = Question.objects.filter(status=QuestionStatus.PENDING, expires_at__gt=now)
     if pending.filter(actor_id=actor.pk).count() >= settings.AI_MAX_PENDING_PER_USER:
         raise RateLimitedError("Wait for your previous question to be answered.", retry_after=5)
+    _check_daily_cap(actor, now)
     if pending.count() >= settings.AI_MAX_PENDING_TOTAL:
         raise AiBusyError()
+
+
+DAILY_CAP_REACHED = (
+    "You've asked as many questions as Ask Arkray answers for one person in a day. "
+    "Questions such as “What is my pipeline value?” are still answered."
+)
+
+
+def _check_daily_cap(actor: User, now: datetime) -> None:
+    """At most AI_MAX_QUESTIONS_PER_USER_PER_DAY questions handed to the ai workers (answered
+    with the model, or retrieval without it) per person in any 24 hours; 0 turns the cap off
+    (deep security audit L-12: about 20 accounts could keep the queue full, and the
+    provider's bill grows with them). Routed questions never count (answered at once,
+    without the model). Under the bulkheads' per-person lock, which is held until the
+    question and its `ai.question_queued` event commit, so concurrent questions can't all
+    pass.
+
+    Counted from the append-only audit trail (through the actor's index, the last day only),
+    which deleting a conversation doesn't touch (review P3-1: forgetting the conversations
+    reset the cap). A question whose hand-off then failed still counts: the cap is
+    generous, and the asker can't tell the two apart anyway."""
+    cap = settings.AI_MAX_QUESTIONS_PER_USER_PER_DAY
+    if cap <= 0:
+        return
+    asked = list(
+        AuditEvent.objects.filter(
+            actor_id=actor.pk, occurred_at__gt=now - DAY, action=QUEUED_ACTION
+        )
+        .order_by("occurred_at")
+        .values_list("occurred_at", flat=True)
+    )
+    if len(asked) < cap:
+        return
+    # Asking is possible again once enough of them are older than a day.
+    oldest = asked[len(asked) - cap]
+    raise RateLimitedError(
+        DAILY_CAP_REACHED, retry_after=max(60, int((oldest + DAY - now).total_seconds()))
+    )
 
 
 def submit(actor: User, scope: AccessScope, text: Any, conversation_id: UUID | None) -> Question:
@@ -210,14 +306,26 @@ def submit(actor: User, scope: AccessScope, text: Any, conversation_id: UUID | N
             )
         routed = _route(question_text, scope)
         erasures = 0
-        if routed is not None:
-            # A routed answer is read and stored in this transaction, holding the erasure
-            # lock shared throughout. While an erasure runs, the question is queued instead.
-            if _try_erasure_lock_shared():
-                erasures = erasures_committed()
-            else:
-                routed = None
-        if routed is None:
+        started = time.monotonic()
+        ctx = tools.ToolContext(scope=scope, now=now)
+        routed_answer: dict[str, Any] | None = None
+        # A routed answer is read and stored in this transaction, holding the erasure lock
+        # shared throughout. While an erasure runs, the question is queued instead; and if
+        # the routed call fails, too (deep security audit L-10: an HTTP 500 for every user
+        # asking), so the model, which can ask which record is meant, answers it.
+        if routed is not None and _try_erasure_lock_shared():
+            erasures = erasures_committed()
+            try:
+                # A savepoint: a database error in the routed call (a statement timeout)
+                # leaves this transaction usable for queueing the question (review P3-2).
+                with transaction.atomic():
+                    routed_answer = answer_routed(
+                        ctx, routed, workspace=_workspace_words(scope, actor)
+                    )
+            except (RoutedCallFailed, DatabaseError):
+                logger.warning("ai_routed_call_failed", extra={"kind": routed.intent})
+                ctx = tools.ToolContext(scope=scope, now=now)
+        if routed_answer is None:
             _check_bulkheads(actor)  # the router never queues: its answers are never refused
         question = Question.objects.create(
             conversation=conversation,
@@ -227,18 +335,26 @@ def submit(actor: User, scope: AccessScope, text: Any, conversation_id: UUID | N
             expires_at=now + timedelta(seconds=settings.AI_QUESTION_TIMEOUT_S),
         )
         Conversation.objects.filter(pk=conversation.pk).update(updated_at=now)
-        if routed is not None:
-            started = time.monotonic()
-            ctx = tools.ToolContext(scope=scope, now=now)
-            answer = answer_routed(ctx, routed, workspace=_workspace_words(scope, actor))
+        if routed_answer is not None:
             _finish(
                 question,
                 QuestionStatus.ANSWERED,
-                answer=answer,
+                answer=routed_answer,
                 mode="router",
                 erasures_seen=erasures,
             )
             _record(question, scope, ctx, outcome="answered", mode="router", started=started)
+        else:
+            # What the daily cap counts: in the trail, which deleting the conversation
+            # doesn't touch (review P3-1). Ids only.
+            audit.record(
+                QUEUED_ACTION,
+                actor_id=actor.pk,
+                target_type="workspace",
+                target_id=workspace_segment(scope) if scope.kind is not ScopeKind.SELF else "me",
+                subject_user_id=scope.subject_user_id if scope.is_delegated else None,
+                metadata={"question_id": str(question.pk)},
+            )
     return question
 
 
@@ -262,11 +378,19 @@ def dispatch(question: Question) -> Question:
         logger.warning("ai_dispatch_skipped", extra={"question_id": str(question.pk)})
         _finish(question, QuestionStatus.FAILED, error_code="ai_unavailable")
         return question
+    # The asking request's id: the worker's lines for this question carry it too. And the
+    # support session it was asked in, if any: the worker's audit event carries it like the
+    # request's own events (deep security audit L-13). Sent only when there is one, so a
+    # worker of the previous release (no such argument) still takes every other question
+    # during a rolling deploy.
+    kwargs = {"correlation_id": current_correlation_id()[:64]}
+    support_session = current_support_session_id()
+    if support_session is not None:
+        kwargs["support_session_id"] = str(support_session)
     try:
         answer_question.apply_async(
             args=(str(question.pk),),
-            # The asking request's id: the worker's lines for this question carry it too.
-            kwargs={"correlation_id": current_correlation_id()[:64]},
+            kwargs=kwargs,
             retry=False,
             expires=settings.AI_QUESTION_TIMEOUT_S,
         )
@@ -393,9 +517,14 @@ def answer(question_id: UUID) -> None:
     routed = _route(question.text, scope)
     if routed is not None:
         # A routed question queued instead of answered at once (an erasure was running):
-        # the same answer it would have had.
-        result, mode = answer_routed(ctx, routed, workspace=workspace), "router"
-    elif provider is not None and not breaker.is_open():
+        # the same answer it would have had. One whose routed call failed (L-10) goes to
+        # the model like any other.
+        try:
+            result, mode = answer_routed(ctx, routed, workspace=workspace), "router"
+        except RoutedCallFailed:
+            logger.warning("ai_routed_call_failed", extra={"kind": routed.intent})
+            ctx = tools.ToolContext(scope=scope, now=now)
+    if result is None and provider is not None and not breaker.is_open():
         try:
             result = answer_with_model(
                 ctx, question, provider, workspace=workspace, time_left=time_left
@@ -495,10 +624,14 @@ def _workspace_words(scope: AccessScope, actor: User) -> WorkspaceWords:
     )
 
 
+class RoutedCallFailed(RuntimeError):
+    """A routed question's tool call failed: the question goes to the model instead."""
+
+
 def _run(ctx: tools.ToolContext, name: str, args: dict[str, Any]) -> dict[str, Any]:
     outcome = tools.execute(ctx, name, args)
     if outcome.is_error:
-        raise RuntimeError(f"Routed tool {name} failed.")
+        raise RoutedCallFailed(f"Routed tool {name} failed.")
     result: dict[str, Any] = json.loads(outcome.content)
     return result
 
@@ -1112,18 +1245,77 @@ def housekeeping(now: datetime | None = None) -> dict[str, int]:
         status=QuestionStatus.FAILED, error_code="timeout", finished_at=now
     )
     cutoff = now - timedelta(days=settings.AI_CONVERSATION_RETENTION_DAYS)
-    # A user under a legal hold keeps their conversations until it is released (backend
-    # review P3; core.holds).
-    held = list(holds.held_users())
-    old_questions, _ = (
-        Question.objects.filter(finished_at__lt=cutoff).exclude(actor_id__in=held).delete()
+    # What a legal hold covers is kept until it is released (core.holds): the conversations of
+    # a held user (backend review P3) and, matched as an erasure matches them, those touching
+    # a held customer (deep security audit M-5), every question in them.
+    #
+    # Bounded however long holds last (review P2-3: a held user's whole history came back
+    # every hour and was matched against every held customer until the run hit the
+    # statement timeout and deleted nothing, for anyone): a user hold is excluded in SQL,
+    # before any matching; the rest is matched against held customers in batches, each
+    # committed on its own; and a conversation found held is remembered for as long as the
+    # same holds are active (it can only gain questions meanwhile, so it stays held), so it
+    # is not matched again every hour.
+    users = holds.held_users()
+    due = set(
+        subjects.user_held(
+            Conversation.objects.filter(questions__finished_at__lt=cutoff), users
+        ).values_list("pk", flat=True)
+    ) | set(
+        subjects.user_held(Conversation.objects.filter(updated_at__lt=cutoff), users).values_list(
+            "pk", flat=True
+        )
     )
-    _, per_model = (
-        Conversation.objects.filter(updated_at__lt=cutoff).exclude(actor_id__in=held).delete()
-    )
-    deleted = per_model.get(Conversation._meta.label, 0)
+    customers = subjects.HeldCustomers.now()
+    memo_key = _held_memo_key(customers)
+    remembered = _remembered(memo_key) & due if customers else set()
+    still_held: set[UUID] = set(remembered)
+    old_questions = deleted = 0
+    batch_size = HOUSEKEEPING_BATCH
+    pending = sorted(due - remembered)
+    for start in range(0, len(pending), batch_size):
+        batch = pending[start : start + batch_size]
+        with transaction.atomic():
+            held = customers.touching(batch)
+            gone = [pk for pk in batch if pk not in held]
+            removed, _ = Question.objects.filter(
+                conversation_id__in=gone, finished_at__lt=cutoff
+            ).delete()
+            _, per_model = Conversation.objects.filter(pk__in=gone, updated_at__lt=cutoff).delete()
+        still_held |= held
+        old_questions += removed
+        deleted += per_model.get(Conversation._meta.label, 0)
+    if customers:
+        _remember(memo_key, still_held)
     return {
         "expired_questions": expired,
         "deleted_questions": old_questions,
         "deleted_conversations": deleted,
     }
+
+
+# Conversations matched against held customers (and deleted) per committed batch.
+HOUSEKEEPING_BATCH = 500
+HELD_MEMO_TTL_S = 6 * 3600  # matched again from scratch at least this often
+
+
+def _held_memo_key(customers: subjects.HeldCustomers) -> str:
+    holds_now = ",".join(sorted(str(pk) for pk in customers.hold_ids))
+    return "ai:held-conversations:" + hashlib.sha256(holds_now.encode()).hexdigest()
+
+
+def _remembered(key: str) -> set[UUID]:
+    """The conversations found to touch a held customer under exactly these holds (a hold
+    placed or released is a new key). Only an optimisation: without the cache, everything
+    is matched again."""
+    try:
+        return {UUID(pk) for pk in cache.get(key) or []}
+    except Exception:  # noqa: BLE001 — the cache is optional here
+        return set()
+
+
+def _remember(key: str, conversation_ids: set[UUID]) -> None:
+    try:
+        cache.set(key, sorted(str(pk) for pk in conversation_ids), HELD_MEMO_TTL_S)
+    except Exception:  # noqa: BLE001 — the cache is optional here
+        logger.info("ai_held_memo_unavailable")

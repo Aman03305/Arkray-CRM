@@ -155,8 +155,9 @@ Per pipeline (`pipeline_custom_field`): `name` (≤ 60, plain text, unique among
 pipeline's active fields), `type` (text, long text, number, currency, date, yes/no, single
 choice, multiple choice; **fixed after creation**: remove the field and add another),
 `required`, `options` (choices: `[{id, label}]`, ≤ 50, plain text; values store the ids, so
-renaming a choice never rewrites deals), `position`, `is_active`. Configured with the
-pipeline (`PUT …/fields`, versioned), by whoever may configure the pipeline.
+renaming a choice never rewrites deals; an option id listed twice is refused, 400, deep
+security audit L-8), `position`, `is_active`. Configured with the pipeline (`PUT …/fields`,
+versioned), by whoever may configure the pipeline.
 
 Values live in `pipeline_opportunity.custom_fields` (JSONB, a CHECK keeps it an object):
 `{field id: value}` in canonical form (strings for text, numbers, money and dates; booleans;
@@ -175,6 +176,15 @@ LOCKED`, so a concurrent edit of the deal's other values is kept and a row anoth
 holds is taken in a later batch), skips deals whose lead is under a legal hold, and audits the
 counts. Audit records the ids of changed fields, never values. Defining a field never changes
 the database schema.
+
+Removing a custom field hides its values from every deal of the pipeline. Removing a field, or deleting its values, is refused (403) outside the organisation-wide
+workspace while a deal outside the caller's scope (one reassigned with its lead, still in
+the caller's pipeline), or a deal of theirs whose customer they no longer see (a closed deal
+kept after its lead was reassigned), holds a value of it (deep security audit L-4 and its
+review; final production audit SEC-1 already covered the deletion). The deletion job of a
+workspace touches only deals whose owner and whose lead's owner are that workspace's owner,
+so a deal whose customer moved elsewhere keeps its value. An administrator removes such a
+field, or deletes every deal's values, from the organisation-wide workspace.
 
 ### Stages
 

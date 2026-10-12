@@ -81,10 +81,13 @@ business logic.
 | 403 `permission_denied` / `csrf_failed` | authenticated but lacking a capability; CSRF failure |
 | 403 `password_change_required` / `support_session_active` | choose your own password first / not inside a support session |
 | 403 `mfa_enrollment_required` / `mfa_required` | set up two-step verification first / verify a code (`POST /auth/mfa/verify`) and repeat the request |
+| 403 `mfa_locked` | too many wrong second-factor codes in a row: no code is accepted until a password reset by email, a password set by an administrator or an MFA reset (deep security audit M-4) |
+| 403 `customer_restricted` | the edit names a customer field of a deal whose customer the caller may not see; the same answer whatever the value (deep security audit M-2) |
 | 404 `not_found` | does not exist **or is outside your scope** (deliberately indistinguishable) |
 | 405, 406, 415 | method / accept / media type |
 | 409 `conflict` / `mfa_already_enabled` | stale `version` or uniqueness conflict: reload and retry / two-step verification is already on |
 | 422 `business_rule_violation` | valid shape, but not allowed (for example, moving a won deal without reopening) |
+| 422 `lead_erased` / `attachment_quota_exceeded` | the lead was erased: its personal text can't be written again and nothing can be added for it (deep security audit M-1) / the uploader's storage quota is used up (`ATTACHMENT_MAX_BYTES_PER_USER`, L-7) |
 | 429 `rate_limited` | throttled; `Retry-After` header |
 | 500 `server_error` | unexpected; never contains internals |
 | 503 `service_unavailable` / `ai_unavailable` | optional dependency down |

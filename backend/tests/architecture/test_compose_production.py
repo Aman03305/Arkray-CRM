@@ -74,3 +74,105 @@ def test_the_scan_sees_the_settings_that_were_inherited():
     production = environment(load(PRODUCTION)["services"]["backend"])
     assert production["AI_ENABLED"] == "true"
     assert production["METRICS_TOKEN"].startswith("${METRICS_TOKEN:?")
+
+
+TMPFS_SIZE = re.compile(r"(?:^|,)size=(\d+)([kmg])(?:,|$)")
+UNITS = {"k": 1024, "m": 1024**2, "g": 1024**3}
+TMP = "/tmp"  # noqa: S108 — a mount point inside the containers, not a file used here
+
+
+def tmpfs_sizes(service: dict[str, Any]) -> dict[str, int | None]:
+    """Each tmpfs mount's path -> its size in bytes (None: no `size=`, i.e. half the host's
+    memory, whatever the container's own limit)."""
+    sizes: dict[str, int | None] = {}
+    for entry in service.get("tmpfs") or []:
+        assert isinstance(entry, str), entry  # the short syntax, "path[:options]"
+        path, _, options = entry.partition(":")
+        found = TMPFS_SIZE.search(options)
+        sizes[path] = int(found.group(1)) * UNITS[found.group(2)] if found else None
+    return sizes
+
+
+def memory_limit(service: dict[str, Any]) -> int:
+    value = str(service["deploy"]["resources"]["limits"]["memory"])
+    return int(value[:-1]) * UNITS[value[-1]]
+
+
+def production_services() -> dict[str, dict[str, Any]]:
+    """Each production service's tmpfs and resource limits as Compose merges the two files:
+    the overlay's `tmpfs` replaces the development one (`!override`), otherwise it's inherited."""
+    base, production = load(BASE)["services"], load(PRODUCTION)["services"]
+    merged = {}
+    for name in base.keys() | production.keys():
+        service = {**base.get(name, {}), **production.get(name, {})}
+        merged[name] = service
+    return merged
+
+
+def test_every_tmpfs_is_capped():
+    """Deep security audit H-1 (follow-up): a tmpfs is memory charged to its container, and
+    without `size=` it may grow to half the host's memory whatever the container's limit, so
+    whatever fills it (uploads spooled by the API, export ZIPs, clamd's unpacked documents)
+    ends in an OOM kill instead of a refused write. Every mount in every production service
+    has a size, and together they take at most half the container's memory limit."""
+    services = production_services()
+    uncapped, too_big = [], []
+    for name, service in sorted(services.items()):
+        sizes = tmpfs_sizes(service)
+        uncapped += [(name, path) for path, size in sizes.items() if size is None]
+        if sizes:
+            total = sum(size or 0 for size in sizes.values())
+            if total > memory_limit(service) // 2:
+                too_big.append((name, total, memory_limit(service)))
+    assert not uncapped, uncapped
+    assert not too_big, too_big
+    # The overlay's own sizes are what runs: the development `/tmp` is replaced, not doubled.
+    assert services["backend"]["tmpfs"] == [f"{TMP}:size=256m"]
+
+
+def test_every_tmpfs_holds_what_is_written_there():
+    """Capped, not starved: each size covers its worst legitimate case."""
+    from django.conf import settings
+
+    services = production_services()
+    mb = UNITS["m"]
+
+    def size(name: str, path: str) -> int:
+        value = tmpfs_sizes(services[name])[path]
+        assert value is not None, (name, path)
+        return value
+
+    # The API: an upload spooled per gunicorn worker (at most 8, sync; gunicorn.conf.py) up to
+    # ATTACHMENT_MAX_BYTES, plus the storage fetches in flight (a download's copy).
+    gunicorn = (ROOT / "backend" / "gunicorn.conf.py").read_text(encoding="utf-8")
+    assert "multiprocessing.cpu_count() * 2 + 1, 8)" in gunicorn
+    fetches = settings.ATTACHMENT_STORAGE_MAX_IN_FLIGHT_SHARED
+    assert size("backend", TMP) >= (8 + fetches) * settings.ATTACHMENT_MAX_BYTES
+    # The default worker: per Celery process, an export ZIP (EXPORT_MAX_BYTES) built beside a
+    # file fetched from storage.
+    (concurrency,) = re.findall(
+        r'"--queues", "default", "--concurrency", "(\d+)"', BASE.read_text(encoding="utf-8")
+    )
+    per_task = settings.EXPORT_MAX_BYTES + settings.ATTACHMENT_MAX_BYTES
+    assert size("worker", TMP) >= int(concurrency) * per_task
+    # clamd: up to MaxThreads scans at once, each up to MaxScanSize unpacked.
+    clamd = (ROOT / "infrastructure" / "clamav" / "clamd.conf").read_text(encoding="utf-8")
+    (threads,) = re.findall(r"^MaxThreads (\d+)$", clamd, re.M)
+    (scan,) = re.findall(r"^MaxScanSize (\d+)M$", clamd, re.M)
+    assert size("clamav", TMP) >= int(threads) * int(scan) * mb
+    # nginx: see test_edge_limits.py (uploads per client x body size, the response cap).
+    assert size("nginx", "/var/cache/nginx") >= 64 * mb
+
+
+def test_every_edge_tmpfs_is_capped():
+    """Deep security audit H-1: nginx writes request bodies (and slowly read responses) to
+    /var/cache/nginx before anything is authenticated, and a tmpfs is memory charged to the
+    container. Uncapped, 24 slow 10 MB uploads from one address got the edge OOM-killed and
+    cut every user off; capped, a full temp area refuses what needs it and nothing grows."""
+    nginx = load(PRODUCTION)["services"]["nginx"]
+    sizes = tmpfs_sizes(nginx)
+    assert "/var/cache/nginx" in sizes
+    assert not [path for path, size in sizes.items() if size is None], sizes
+    # Together at most half the memory limit: the rest is nginx's own (its workers, TLS and
+    # the requests in flight; about 30 MB idle, under 100 MB under the attack, measured).
+    assert sum(size or 0 for size in sizes.values()) <= memory_limit(nginx) // 2

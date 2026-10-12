@@ -6,7 +6,8 @@ scanned (docs/activities.md#attachments).
   anything outside the catalog). Executables, scripts, HTML, SVG, archives and everything
   else are refused, whatever their name or declared type. A file must be what its extension
   says: a PDF starts like a PDF, an image is that image format, Office files are the right
-  OOXML package (without macros), text is UTF-8 without NUL bytes.
+  OOXML package (without macros, ActiveX, OLE objects or anything fetched from elsewhere when
+  opened: its XML parsed, never searched as bytes), text is UTF-8 without NUL bytes.
 - **Names**: the uploaded name is display text only. It is cleaned (no path, no control or
   bidi characters, bounded) and never used for storage: objects live under generated keys.
 - **Receiving**: the body is read from the request stream in chunks, hashed (SHA-256) and
@@ -50,8 +51,11 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from typing import IO, Any, Protocol, cast
 from urllib.parse import unquote, urlsplit
+from xml.etree.ElementTree import Element, ParseError
 
+import defusedxml.ElementTree
 from botocore import exceptions as _boto
+from defusedxml import DefusedXmlException
 from django.conf import settings
 from django.core.cache import cache
 from django.core.checks import Error, register
@@ -75,8 +79,65 @@ LARGEST_FILE_BYTES = 100 * 1024 * 1024  # the activities_attachment_size CHECK
 # controls or macro projects, whatever their part is called), and the small XML parts read
 # to find active content declared by type or relationship (bounded: a zip bomb stays cheap).
 SAFE_EMBEDDINGS = (".xlsx", ".docx", ".pptx", ".png", ".jpeg", ".jpg", ".gif", ".emf", ".wmf")
-ACTIVE_CONTENT_TYPES = (b"vbaproject", b"macroenabled", b"activex", b"oleobject", b"vbadata")
-OOXML_XML_PART_BYTES = 256 * 1024
+# Declared content types (and part names in [Content_Types].xml) that mean active content or
+# something fetched from elsewhere when the file opens: macros, ActiveX, OLE objects, a
+# workbook's links to other workbooks and its data connections, documents Word imports when it
+# opens the file (an altChunk's RTF, which can carry OLE objects and self-updating links, or
+# MHT/HTML, which can fetch remote pictures), Office add-ins (deep security audit review).
+ACTIVE_CONTENT_TYPES = (
+    "vbaproject",
+    "macroenabled",
+    "activex",
+    "oleobject",
+    "vbadata",
+    "externallink",
+    "spreadsheetml.connections",
+    "application/rtf",
+    "text/rtf",
+    "message/rfc822",
+    "text/html",
+    "xhtml",
+    "webextension",
+    "taskpane",
+)
+# Part names, by their ending, of documents Word would import (an altChunk's RTF, MHT, HTML).
+IMPORTED_DOCUMENTS = (".rtf", ".mht", ".mhtml", ".htm", ".html", ".xhtml")
+# Relationship types (anywhere in the Type URI, case ignored) refused whatever their target
+# mode: OLE objects (CVE-2017-0199, "Follina"), remote templates, ActiveX, macro projects,
+# master-document subdocuments, frames, links to other workbooks, data connections, imported
+# documents (aFChunk: Word's altChunk), Office add-ins (webextension, webextensionTaskpanes:
+# an add-in loads from its web address when the file opens).
+REFUSED_RELATIONSHIPS = (
+    "oleobject",
+    "attachedtemplate",
+    "activex",
+    "vbaproject",
+    "vbadata",
+    "subdocument",
+    "frame",
+    "externallink",
+    "connections",
+    "afchunk",
+    "webextension",
+    "taskpane",
+)
+# By the Type URI's last segment: an ActiveX control.
+REFUSED_RELATIONSHIP_NAMES = frozenset({"control"})
+# The one relationship that may point outside the package: a hyperlink, which Office only
+# follows when someone clicks it (with a prompt). Anything else external is fetched on open.
+# Its exact Type URI (Transitional or Strict), case ignored: never any URI that merely ends in
+# "/hyperlink" (deep security audit review).
+EXTERNAL_ALLOWED = frozenset(
+    {
+        "http://schemas.openxmlformats.org/officedocument/2006/relationships/hyperlink",
+        "http://purl.oclc.org/ooxml/officedocument/relationships/hyperlink",
+    }
+)
+# A relationship target that names another place (a URL, a UNC path) rather than a part.
+_ELSEWHERE = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|[\\/]{2})", re.IGNORECASE)
+_XML_DECLARATION = re.compile(r"<\?xml[^>]{0,200}?\?>")
+_DECLARED_ENCODING = re.compile(r"""encoding\s*=\s*(["'])(?P<name>[^"']{0,40})\1""")
+OOXML_XML_PART_BYTES = 1024 * 1024
 OOXML_XML_TOTAL_BYTES = 4 * 1024 * 1024
 
 
@@ -122,11 +183,13 @@ def _webp(head: bytes, _file: IO[bytes]) -> bool:
 
 def _ooxml(main_part: str) -> Callable[[bytes, IO[bytes]], bool]:
     """An Office Open XML package with its main part and no active content: no macro project,
-    OLE object or ActiveX control (by part name, embedded file type, declared content type),
-    no external template. The zip's central directory, then only its small XML parts
-    ([Content_Types].xml, relationships; each and in total bounded) are read, so a zip bomb
-    costs little here (enhancement security review: a renamed VBA part, an OLE package
-    wrapping an executable, ActiveX all passed a name-only check)."""
+    OLE object or ActiveX control (by part name, embedded file type, declared content type,
+    relationship type), nothing fetched from elsewhere when it opens (a remote template, a
+    linked picture or object, a link to another workbook, a data connection). The zip's
+    central directory, then only its small XML parts ([Content_Types].xml, relationships;
+    each and in total bounded) are read, so a zip bomb costs little here (enhancement security
+    review: a renamed VBA part, an OLE package wrapping an executable, ActiveX all passed a
+    name-only check). Anything that can't be read or parsed is refused (fail closed)."""
 
     def check(head: bytes, file: IO[bytes]) -> bool:
         if not head.startswith(b"PK\x03\x04"):
@@ -141,32 +204,119 @@ def _ooxml(main_part: str) -> Callable[[bytes, IO[bytes]], bool]:
                 if "[content_types].xml" not in lowered or main_part not in lowered:
                     return False
                 return not _active_content(package, infos)
-        except (zipfile.BadZipFile, OSError, ValueError, EOFError, RuntimeError):
-            return False
+        except Exception:  # noqa: BLE001 — a corrupt stream (zlib.error, ...), an encrypted
+            return False  # entry, an unsupported compression: not a package we can vouch for
 
     return check
 
 
 def _active_content(package: zipfile.ZipFile, infos: list[zipfile.ZipInfo]) -> bool:
+    """Whether the package holds, declares or links to active or external content. The XML
+    is parsed, never searched as bytes (deep security audit M-3: single quotes, spaces around
+    "=", a character reference such as attached&#84;emplate, or a UTF-16 part all got past a
+    byte search)."""
     budget = OOXML_XML_TOTAL_BYTES
     for info in infos:
-        name = info.filename.lower()
+        # Office matches part names ignoring case; a percent-encoded name is matched decoded.
+        name = unquote(info.filename).lower().lstrip("/")
         if name.endswith(".bin") and "/printersettings/" not in name:
             return True  # vbaProject.bin (under any name), oleObject*.bin, activeX*.bin
-        if "/activex/" in name:
+        if "/activex/" in name or "/externallinks/" in name or "/webextensions/" in name:
             return True
+        if name.endswith(IMPORTED_DOCUMENTS):
+            return True  # an altChunk's RTF, MHT or HTML, imported when Word opens the file
         if "/embeddings/" in name and not name.endswith(SAFE_EMBEDDINGS):
             return True
         declares = name == "[content_types].xml"
         if declares or name.endswith(".rels"):
             if info.file_size > OOXML_XML_PART_BYTES or info.file_size > budget:
                 return True  # no real package has XML parts this large: refuse, unread
-            budget -= info.file_size
-            text = package.read(info).lower()
-            if declares and any(kind in text for kind in ACTIVE_CONTENT_TYPES):
+            with package.open(info) as part:
+                raw = part.read(OOXML_XML_PART_BYTES + 1)  # bounded whatever the header says
+            budget -= len(raw)
+            if len(raw) > OOXML_XML_PART_BYTES or budget < 0:
                 return True
-            if not declares and b"attachedtemplate" in text and b'targetmode="external"' in text:
-                return True  # a remote template: fetched (macros and all) when opened
+            root = _parse_part(raw)
+            if root is None:
+                return True  # not well-formed, a DTD or entity, or an encoding not allowed
+            if _declares_active(root) if declares else _links_active(root):
+                return True
+    return False
+
+
+def _parse_part(raw: bytes) -> Element | None:
+    """The part's XML, or None. OPC parts are UTF-8 or UTF-16 (ECMA-376 Part 2, M1.17): the
+    bytes are decoded here (UTF-16 needs its byte-order mark), a declared encoding must agree,
+    and the parser is given the decoded text, so what is checked is exactly what Office
+    reads. No DTD, entity or external reference is allowed (defusedxml)."""
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        encoding, allowed = "utf-16", {"utf-16"}
+    else:
+        encoding, allowed = "utf-8", {"utf-8"}
+        raw = raw.removeprefix(codecs.BOM_UTF8)
+    try:
+        text = raw.decode(encoding)
+    except UnicodeDecodeError:
+        return None
+    if "\x00" in text:
+        # Never XML, and it would let the parser guess another encoding: expat reads bytes
+        # starting "<\x00" as UTF-16, whatever it was told.
+        return None
+    if text.startswith("<?xml"):
+        declaration = _XML_DECLARATION.match(text)
+        if declaration is None:
+            return None
+        if "encoding" in declaration[0]:
+            declared = _DECLARED_ENCODING.search(declaration[0])
+            if declared is None or declared["name"].strip().casefold() not in allowed:
+                return None
+    try:
+        return defusedxml.ElementTree.fromstring(text, forbid_dtd=True, forbid_entities=True)
+    except (ParseError, DefusedXmlException, ValueError):
+        return None
+
+
+def _local(name: str) -> str:
+    """An element's or attribute's name without its namespace, case ignored."""
+    return name.rpartition("}")[2].casefold()
+
+
+def _declares_active(root: Element) -> bool:
+    """[Content_Types].xml: any declared type (or part name) that is active content."""
+    for element in root.iter():
+        for value in (*element.attrib.values(), element.text or ""):
+            folded = value.casefold()
+            if any(kind in folded for kind in ACTIVE_CONTENT_TYPES):
+                return True
+    return False
+
+
+def _links_active(root: Element) -> bool:
+    """A relationships part: any relationship of a refused type, or pointing outside the
+    package (TargetMode not "Internal", or a target that is a URL or a UNC path) unless it is
+    a hyperlink. Every element and attribute is looked at, namespaced or not, so a variant
+    Office might honour can't slip past by its spelling."""
+    for element in root.iter():
+        types: list[str] = []
+        modes: list[str] = []
+        targets: list[str] = []
+        for key, value in element.attrib.items():
+            found = {"type": types, "targetmode": modes, "target": targets}.get(_local(key))
+            if found is not None:
+                found.append(value.strip().casefold())
+        if not (types or modes or targets):
+            continue
+        if any(word in kind for kind in types for word in REFUSED_RELATIONSHIPS):
+            return True
+        names = {kind.rstrip("/").rpartition("/")[2] for kind in types}
+        if names & REFUSED_RELATIONSHIP_NAMES:
+            return True
+        if types and set(types) <= EXTERNAL_ALLOWED:
+            continue  # a hyperlink, wherever it points
+        if any(mode != "internal" for mode in modes):
+            return True  # "External" (an image, a video, an object or a data source)
+        if any(_ELSEWHERE.match(target) for target in targets):
+            return True
     return False
 
 
@@ -244,6 +394,13 @@ def check_allowed_extensions(**_: Any) -> list[Error]:
             Error(
                 f"ATTACHMENT_MAX_BYTES must be between 1 and {LARGEST_FILE_BYTES} (100 MB).",
                 id="arkray.E022",
+            )
+        ]
+    if settings.ATTACHMENT_MAX_BYTES_PER_USER < 0:
+        return [
+            Error(
+                "ATTACHMENT_MAX_BYTES_PER_USER must be 0 (no quota) or a number of bytes.",
+                id="arkray.E023",
             )
         ]
     return []

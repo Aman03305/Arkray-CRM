@@ -64,20 +64,34 @@ OTHERS_VALUES = (
     "deleted from here. Remove the field without deleting its values, or ask an "
     "administrator to delete them from the organization-wide workspace."
 )
+# Removing a field hides its values on every deal of the pipeline (deep security audit L-4).
+OTHERS_VALUES_HIDDEN = (
+    "Some opportunities in this pipeline belong to other users and hold values of this field, "
+    "so it can't be removed from here: they would no longer see them. Ask an administrator to "
+    "remove it from the organization-wide workspace."
+)
 
 
-def require_deletable(scope: AccessScope, pipeline_id: UUID, field_ids: list[UUID]) -> None:
+def require_deletable(
+    scope: AccessScope, pipeline_id: UUID, field_ids: list[UUID], message: str = OTHERS_VALUES
+) -> None:
     """Refuse (403) while a deal outside `scope` holds a value of these fields. Called with
     the pipeline locked FOR NO KEY UPDATE, which every writer of custom values waits for:
     no value appears meanwhile. Reassignments don't take that lock: the job's owner filter
-    covers a deal that leaves the workspace after this check."""
+    covers a deal that leaves the workspace after this check. Also for removing fields
+    (`message`: OTHERS_VALUES_HIDDEN): a removed field's values are hidden from everyone.
+
+    Outside the scope also means a deal the caller still owns whose customer they may not
+    see (a closed deal kept after its lead was reassigned: pipeline.customer). Its values are
+    the customer's, which they can't write either (deep security audit M-2; review P3-1)."""
     if scope.is_organization_wide or not field_ids:
         return
     holding = m.Opportunity.objects.filter(
         pipeline_id=pipeline_id, custom_fields__has_any_keys=[str(pk) for pk in field_ids]
     )
-    if holding.exclude(owner_id=scope.subject_user_id).exists():
-        raise PermissionDeniedError(OTHERS_VALUES)
+    subject = scope.subject_user_id
+    if holding.exclude(owner_id=subject, lead__owner_id=subject).exists():
+        raise PermissionDeniedError(message)
 
 
 def request_for(actor_id: UUID, field: m.CustomField, scope: AccessScope) -> None:
@@ -145,9 +159,11 @@ def purge(field_id: UUID, *, owner_id: UUID | None = None, replay: bool = False)
                 " WHERE id IN ("
                 "  SELECT id FROM pipeline_opportunity"
                 "  WHERE pipeline_id = %s AND custom_fields ? %s AND NOT (lead_id = ANY(%s))"
-                "  AND (%s::uuid[] IS NULL OR owner_id = ANY(%s::uuid[]))"
+                "  AND (%s::uuid[] IS NULL OR (owner_id = ANY(%s::uuid[]) AND EXISTS ("
+                "   SELECT 1 FROM leads_lead l WHERE l.id = lead_id"
+                "   AND l.owner_id = ANY(%s::uuid[]))))"
                 "  ORDER BY id LIMIT %s FOR UPDATE SKIP LOCKED)",
-                [key, field.pipeline_id, key, held_leads, owners, owners, BATCH],
+                [key, field.pipeline_id, key, held_leads, owners, owners, owners, BATCH],
             )
             done = cursor.rowcount
         removed += done
@@ -175,11 +191,15 @@ def purge(field_id: UUID, *, owner_id: UUID | None = None, replay: bool = False)
 
 def holding(field: m.CustomField, owner_id: UUID | None) -> Any:
     """The deals of the field's pipeline that still hold a value for it (only `owner_id`'s
-    when given)."""
+    when given, and of those only the ones whose customer is theirs too: a closed deal they
+    kept after its lead was reassigned holds the new owner's customer's value, which the
+    workspace's request may not delete; review P3-1)."""
     deals = m.Opportunity.objects.filter(
         pipeline_id=field.pipeline_id, custom_fields__has_key=str(field.pk)
     )
-    return deals if owner_id is None else deals.filter(owner_id=owner_id)
+    if owner_id is None:
+        return deals
+    return deals.filter(owner_id=owner_id, lead__owner_id=owner_id)
 
 
 @outbox.handler(TOPIC_PURGE_VALUES, queue="default")

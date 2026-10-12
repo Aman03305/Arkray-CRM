@@ -16,6 +16,7 @@ import { makeBoard, makeCard, makeOpportunity, OPPORTUNITY_ID, PIPELINE, STAGES 
 import { mockApi, renderWithProviders, type RecordedCall } from "@/test/render";
 
 import { forgetBoardState } from "./hooks";
+import { RESTRICTED_DETAILS_NOTE } from "./OpportunityDrawer";
 import { RESTRICTED_CUSTOMER_NOTE } from "./PipelineBits";
 
 const nav = vi.hoisted(() => ({ pathname: "/pipeline/x", push: vi.fn(), replace: vi.fn() }));
@@ -94,23 +95,54 @@ describe("a deal whose customer the viewer may no longer see", () => {
     const api = mockApi({
       ...CONFIG,
       [`GET ${ME}`]: { status: 200, body: RESTRICTED },
-      [`PATCH ${ME}`]: (call: RecordedCall) => ({ status: 200, body: { ...RESTRICTED, version: 3, work_load: (call.body as { work_load: string }).work_load } }),
+      [`PATCH ${ME}`]: (call: RecordedCall) => ({ status: 200, body: { ...RESTRICTED, version: 3, value: (call.body as { value: string }).value } }),
     });
     renderWithProviders(<EditOpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
     const user = userEvent.setup();
     const drawer = await screen.findByRole("dialog", { name: "Edit opportunity" });
     const customer = within(drawer).getByRole("region", { name: "Customer" });
     expect(customer).toHaveTextContent(RESTRICTED_CUSTOMER_NOTE);
+    expect(customer).toHaveTextContent(RESTRICTED_DETAILS_NOTE);
     expect(within(customer).queryByRole("textbox")).not.toBeInTheDocument();
-    // The hidden free-text field isn't offered (nor required); the number field is.
+    // The hidden free-text field isn't offered (nor required).
     expect(within(drawer).queryByLabelText(/Lab contact notes/)).not.toBeInTheDocument();
-    expect(within(drawer).getByLabelText(/^Units/)).toBeInTheDocument();
-    const workLoad = within(drawer).getByLabelText(/^Work load/);
-    await user.clear(workLoad);
-    await user.type(workLoad, "400 tests/day");
+    const value = within(drawer).getByLabelText(/^Installation price/);
+    await user.clear(value);
+    await user.type(value, "950000");
     await user.click(within(drawer).getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(api.callsTo("PATCH", ME)).toHaveLength(1));
-    expect(api.callsTo("PATCH", ME)[0]!.body).toEqual({ version: 2, work_load: "400 tests/day" });
+    expect(api.callsTo("PATCH", ME)[0]!.body).toEqual({ version: 2, value: "950000" });
+  });
+
+  it("its edit panel shows what may describe the customer read-only (the server refuses a change)", async () => {
+    // Review P3-2 (docs/authorization.md#historical-deals): instrument, work load, Expected
+    // CPT, lost reason, description and custom values can't be changed by this viewer.
+    nav.pathname = `/pipeline/${OPPORTUNITY_ID}/edit`;
+    const lostDeal = { ...RESTRICTED, status: "lost" as const, stage: STAGES.lost, probability: "0.00", lost_reason: "Chose a rival", expected_cpt: "Rs 18" };
+    mockApi({ ...CONFIG, [`GET ${ME}`]: { status: 200, body: lostDeal } });
+    renderWithProviders(<EditOpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
+    const drawer = await screen.findByRole("dialog", { name: "Edit opportunity" });
+    for (const label of [/^Instrument name/, /^Work load/, /^Expected CPT/, /^Lost reason/, /^Description/, /^Units/]) {
+      expect(within(drawer).queryByLabelText(label)).not.toBeInTheDocument();
+    }
+    // Shown as they are, not as inputs.
+    for (const text of ["HbA1c analyser", "300 tests/day", "Rs 18", "Chose a rival", "Two analysers for the central lab.", "4"]) {
+      expect(within(drawer).getByText(text)).toBeInTheDocument();
+    }
+    // The value, probability and dates stay editable.
+    expect(within(drawer).getByLabelText(/^Installation price/)).toBeInTheDocument();
+    expect(within(drawer).getByLabelText(/^Opportunity date/)).toBeInTheDocument();
+  });
+
+  it("a deal whose customer is visible offers them all for editing", async () => {
+    nav.pathname = `/pipeline/${OPPORTUNITY_ID}/edit`;
+    mockApi({ ...CONFIG, [`GET ${ME}`]: { status: 200, body: makeOpportunity({ custom_fields: { "f-units": "4" } }) } });
+    renderWithProviders(<EditOpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
+    const drawer = await screen.findByRole("dialog", { name: "Edit opportunity" });
+    for (const label of [/^Work load/, /^Expected CPT/, /^Description/, /^Units/, /Lab contact notes/]) {
+      expect(within(drawer).getByLabelText(label)).toBeInTheDocument();
+    }
+    expect(within(drawer).queryByText(RESTRICTED_DETAILS_NOTE)).not.toBeInTheDocument();
   });
 
   it("its card on the board names no one when there is no organisation", async () => {

@@ -23,9 +23,17 @@ from . import indexing, service
     soft_time_limit=int(settings.AI_QUESTION_BUDGET_S) + 30,
     time_limit=int(settings.AI_QUESTION_BUDGET_S) + 45,
 )
-def answer_question(question_id: str, correlation_id: str = "") -> None:
+def answer_question(
+    question_id: str, correlation_id: str = "", support_session_id: str | None = None
+) -> None:
+    """`support_session_id`: the support session the question was asked in (deep security
+    audit L-13); defaulted, so a message queued by the previous release is still answered."""
     if correlation_id:
         update_context(correlation_id=correlation_id)  # the asking request's id
+    if support_session_id:
+        # Recorded with the audit event and log lines the answer writes, nothing more: the
+        # worker re-authorises the asker and the workspace itself (ai.service.answer).
+        update_context(support_session_id=str(UUID(support_session_id)))
     service.answer(UUID(question_id))
 
 
