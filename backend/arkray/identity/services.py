@@ -224,13 +224,18 @@ def _forget_second_factor_failures(user: User, *, actor_id: UUID, by: str) -> No
     Only a new password chosen through the emailed link or set by an administrator does: a
     password change in a signed-in session doesn't (the session, possibly a stolen one, is
     the attacker's too). Audited (`mfa.unlocked`) when it was locked. Called with the user's
-    row locked: user, then device, the order of every two-step operation."""
+    row locked: user, then device, the order of every two-step operation.
+
+    Not past MFA_MAX_FAILURES_BEFORE_RESET wrong codes since the last right one (R133): a
+    new password forgets nothing of those (`cumulative_failures`), and a factor locked by
+    them stays locked until an MFA reset. Otherwise whoever holds the password and the
+    mailbox could buy MFA_MAX_CONSECUTIVE_FAILURES more guesses with each emailed reset."""
     device = (
         MfaDevice.objects.select_for_update()
         .filter(user_id=user.pk, consecutive_failures__gt=0)
         .first()
     )
-    if device is None:
+    if device is None or device.locked_until_reset:
         return
     was_locked = device.locked
     device.consecutive_failures = 0

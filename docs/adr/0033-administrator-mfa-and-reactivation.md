@@ -156,3 +156,47 @@ days), and the owner was never told (R133). Now:
 - Migration `identity.0006_mfa_consecutive_failures` adds `consecutive_failures`
   (`db_default=0`: the previous release still inserts) and `failure_notified_at`; it refuses to
   reverse, like every post-RC migration.
+
+## Addendum (R133 residual, 2026-10-12): a long-window cap only an MFA reset lifts
+
+The first addendum lets a new password unlock the factor, so someone holding both the password
+and the mailbox could unlock it with each emailed reset: about 19 more guesses per reset, 3
+resets an hour, roughly 0.4 % a day (independent review). That residual wasn't accepted for
+production. Now:
+
+- Every wrong code also increments `MfaDevice.cumulative_failures`, under the same row lock
+  and on every path that counts `consecutive_failures` (authenticator and recovery codes; at
+  sign-in, step-up, replacing recovery codes, disabling). Only a right code resets it (codes
+  are checked only while the factor isn't locked), or an MFA reset, which deletes the device
+  (an administrator for an ordinary user, `manage.py reset_mfa` for anyone; a new setup
+  starts from 0). A new password, emailed or set by an administrator, clears
+  `consecutive_failures` only.
+- From `MFA_MAX_FAILURES_BEFORE_RESET` (60: three whole locks) on, **no code is accepted and
+  no new password unlocks it**: `403 mfa_locked_until_reset`, until an MFA reset. Between
+  two right codes, the password and the mailbox together buy at most 60 guesses (about 2 in
+  10,000), however many resets come between.
+- **Its own error code**, a subclass of the `mfa_locked` error: the server handles it alike
+  (a failure in the durable throttle; the sign-in challenge ends; `auth.login_failed` with
+  reason `mfa_locked`). The web app replaces `mfa_locked`'s message with its own, which
+  sends the user to *Forgot password*; for any other code it shows the server's message
+  ("Resetting your password won't unlock it: ask an administrator to reset your two-step
+  verification"), so this needed no frontend change. (It stays on the code step with that
+  message instead of returning to the password step.)
+- **No new lever**: as before, the counts grow only behind a right password (a pending
+  challenge) or a signed-in session. Someone holding the password and the mailbox can lock
+  the factor until an MFA reset on purpose; the way back then goes through an administrator
+  or an operator, who has the owner secure the mailbox and replace the password before the
+  reset ([runbooks](../runbooks.md#second-factor-locked)), which is what has to happen when
+  both are compromised.
+- **Told and shown**: `mfa.locked` with `until: mfa_reset` (ids and the count only; in the
+  security events), the owner's email "Two-step verification is locked until it is reset"
+  (secure your email account first), `arkray_mfa_locked_until_reset_last_hour` raising
+  `ArkrayMfaLockedUntilReset` (ticket; counted in the same audit query as the other identity
+  gauges), and the lock itself on the API (R133: it was in the security events only): `lock`
+  on `GET /auth/mfa` and `mfa_lock` on the administrators' user list and detail (`null`,
+  `password_reset` or `mfa_reset`).
+- `MFA_MAX_FAILURES_BEFORE_RESET` must be more than `MFA_MAX_CONSECUTIVE_FAILURES` (system
+  check `arkray.E030`): otherwise every lock would need an MFA reset.
+- Migration `identity.0007_mfa_cumulative_failures` adds `cumulative_failures`
+  (`db_default=0`) and refuses to reverse. Wrong codes counted before the upgrade aren't in
+  it: each device starts the long window at 0.

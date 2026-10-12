@@ -216,7 +216,9 @@ password never forgives them); wrong codes also accumulate on the device across 
 row lock the factor (the right code included) until the password is reset by email or set by
 an administrator, or the factor is reset, with the owner emailed about the first wrong code
 (at most every 6 hours) and the lock, and an alert (`ArkrayMfaLocked`; deep security audit
-M-4, R133); a setup expires after 10 minutes or five wrong codes; the owner
+M-4, R133); 60 wrong codes since the last right one (`MFA_MAX_FAILURES_BEFORE_RESET`) lock
+it until an MFA reset, which no new password lifts (`ArkrayMfaLockedUntilReset`; R133: the
+password and the mailbox together no longer buy more guesses with each reset); a setup expires after 10 minutes or five wrong codes; the owner
 is emailed about every change to their second factor; the browser making a change keeps its
 trusted-device cookie, so nobody can lock its owner out by guessing; a code is accepted once
 (replay); the secret is encrypted at rest under a key derived from `SECRET_KEY` and survives a
@@ -298,6 +300,9 @@ CSRF and the Origin check.
 ## Secrets management
 
 - Local: `.env` from `scripts/init-env.sh` (generates a strong key). Never committed.
+- The template `infrastructure/env/production.env.example` names every secret and the only
+  processes that hold it (the provider key in worker-ai, the owner's password in the migrate
+  job and restores, the backup keys on the backup host; the web tier and the edge hold none).
 - Production: injected by the platform's secret manager as environment variables. Rotation
   is a restart. `DJANGO_SECRET_KEY` rotates without signing anyone out when the previous key
   stays in `DJANGO_SECRET_KEY_FALLBACKS` for a day (Phase 11; tested both ways); a leaked key

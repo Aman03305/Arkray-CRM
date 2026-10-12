@@ -481,6 +481,17 @@ class SupportSession(UUIDPrimaryKeyModel):
         return self.ended_at is None and now < self.expires_at
 
 
+class MfaLock(models.TextChoices):
+    """What unlocks a second factor locked by wrong codes (deep security audit M-4, R133)."""
+
+    # MFA_MAX_CONSECUTIVE_FAILURES in a row: a password reset by email, a password set by an
+    # administrator, or an MFA reset.
+    PASSWORD_RESET = "password_reset", "A new password"
+    # MFA_MAX_FAILURES_BEFORE_RESET since the last right code, new passwords notwithstanding:
+    # only an MFA reset (an administrator for an ordinary user, `reset_mfa` for anyone).
+    MFA_RESET = "mfa_reset", "An MFA reset"
+
+
 class MfaDevice(UUIDPrimaryKeyModel, TimeStampedModel):
     """A user's authenticator (TOTP, RFC 6238; identity.mfa, ADR-0033). At most one per user.
 
@@ -497,7 +508,12 @@ class MfaDevice(UUIDPrimaryKeyModel, TimeStampedModel):
     `consecutive_failures` counts wrong codes (authenticator or recovery) since the last right
     one, across sign-in attempts, browsers and step-ups (deep security audit M-4): from
     MFA_MAX_CONSECUTIVE_FAILURES on, every code is refused until a password reset or an MFA
-    reset. `failure_notified_at`: when the owner was last emailed about a wrong code."""
+    reset. `failure_notified_at`: when the owner was last emailed about a wrong code.
+
+    `cumulative_failures` counts the same wrong codes, but only a right code forgets them (or
+    an MFA reset, which deletes the device): a new password doesn't (R133). From
+    MFA_MAX_FAILURES_BEFORE_RESET on, every code is refused until an MFA reset, so someone
+    holding the password and the mailbox can't buy more guesses with each emailed reset."""
 
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="mfa_device")
     secret = models.TextField()
@@ -508,6 +524,8 @@ class MfaDevice(UUIDPrimaryKeyModel, TimeStampedModel):
     # db_default: the previous release (which never names the column) can still insert.
     consecutive_failures = models.PositiveIntegerField(default=0, db_default=0)
     failure_notified_at = models.DateTimeField(null=True, blank=True)
+    # db_default likewise (identity.0007, R133).
+    cumulative_failures = models.PositiveIntegerField(default=0, db_default=0)
 
     class Meta:
         db_table = "identity_mfa_device"
@@ -545,10 +563,29 @@ class MfaDevice(UUIDPrimaryKeyModel, TimeStampedModel):
     def __str__(self) -> str:
         return f"MfaDevice({'confirmed' if self.confirmed_at else 'pending'})"
 
+    @staticmethod
+    def lock_for(consecutive: int | None, cumulative: int | None) -> MfaLock | None:
+        """What unlocks a factor with these counts, or None when codes are accepted. The one
+        rule, for a device and for counts read alongside a user (selectors.admin_user_*)."""
+        if (cumulative or 0) >= settings.MFA_MAX_FAILURES_BEFORE_RESET:
+            return MfaLock.MFA_RESET
+        if (consecutive or 0) >= settings.MFA_MAX_CONSECUTIVE_FAILURES:
+            return MfaLock.PASSWORD_RESET
+        return None
+
+    @property
+    def lock(self) -> MfaLock | None:
+        return self.lock_for(self.consecutive_failures, self.cumulative_failures)
+
     @property
     def locked(self) -> bool:
-        """Too many wrong codes in a row: no code is accepted (deep security audit M-4)."""
-        return bool(self.consecutive_failures >= settings.MFA_MAX_CONSECUTIVE_FAILURES)
+        """Too many wrong codes: no code is accepted (deep security audit M-4, R133)."""
+        return self.lock is not None
+
+    @property
+    def locked_until_reset(self) -> bool:
+        """Locked past what a new password unlocks: only an MFA reset does (R133)."""
+        return self.lock == MfaLock.MFA_RESET
 
 
 class MfaRecoveryCode(UUIDPrimaryKeyModel):

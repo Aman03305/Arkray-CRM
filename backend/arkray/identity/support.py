@@ -232,15 +232,19 @@ def forget_reasons(now: datetime) -> int:
     """Blank the free-text reason of ended sessions started more than
     AUDIT_DETAIL_RETENTION_DAYS ago (hourly; the audit event's copy expires with its detail),
     except where a legal hold covers the administrator or the user. The session itself (who,
-    for whom, when, how it ended) stays. Idempotent."""
+    for whom, when, how it ended) stays. Idempotent. The holds are read under the hold
+    barrier, its transaction's first lock (core.holds; R134): a hold placed at the same
+    moment has committed before they are read, or waits until the reasons are blanked."""
     cutoff = now - timedelta(days=settings.AUDIT_DETAIL_RETENTION_DAYS)
-    held = holds.held_users()
-    old = SupportSession.objects.filter(started_at__lt=cutoff, ended_at__isnull=False).exclude(
-        reason=""
-    )
-    if held:
-        old = old.exclude(admin_id__in=held).exclude(target_id__in=held)
-    return old.update(reason="")
+    with transaction.atomic():
+        holds.barrier()
+        held = holds.held_users()
+        old = SupportSession.objects.filter(started_at__lt=cutoff, ended_at__isnull=False).exclude(
+            reason=""
+        )
+        if held:
+            old = old.exclude(admin_id__in=held).exclude(target_id__in=held)
+        return old.update(reason="")
 
 
 class SupportSessionMiddleware:

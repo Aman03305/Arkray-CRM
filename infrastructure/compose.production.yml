@@ -498,6 +498,11 @@ services:
       # 4 x 112 MB at a time (arkray.conf). nginx unlinks each spool file as it opens it, so
       # nothing is left here after a crash; the volume holds no data worth keeping.
       - edge-export-spool:/var/cache/nginx-exports
+      # Emergency maintenance (arkray.conf, docs/runbooks.md#emergency-maintenance):
+      # `touch infrastructure/nginx/maintenance/on` on the host closes the site at the edge
+      # (503: the API's envelope, a minimal page; the health check still answers), removing
+      # it reopens; no reload. Read-only: nginx only looks for the file.
+      - ./infrastructure/nginx/maintenance:/etc/nginx/maintenance:ro
     # Published on `edge` (its alone); the API over `api` from a fixed address (the one
     # TRUSTED_PROXY_ADDRESSES names), the web tier over `web`. Never on `default`: there the
     # API's name would resolve to its other address and the source would be a different one.

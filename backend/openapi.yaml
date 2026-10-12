@@ -3754,6 +3754,18 @@ components:
           type: boolean
           readOnly: true
           description: The user has a confirmed second factor.
+        mfa_lock:
+          nullable: true
+          description: 'Null while codes are accepted. Otherwise too many wrong codes
+            locked the second factor (no code is accepted, the right one included)
+            and this says what unlocks it: `password_reset` (a password reset by email,
+            a password set by an administrator, or an MFA reset) or `mfa_reset` (only
+            an MFA reset: too many wrong codes since the last right one, across new
+            passwords; R133).'
+          readOnly: true
+          oneOf:
+          - $ref: '#/components/schemas/MfaLockEnum'
+          - $ref: '#/components/schemas/NullEnum'
         version:
           type: integer
           readOnly: true
@@ -3769,6 +3781,7 @@ components:
       - last_login
       - last_name
       - mfa_enabled
+      - mfa_lock
       - password_change_required
       - password_changed_at
       - role
@@ -5420,6 +5433,11 @@ components:
       required:
       - code
       - current_password
+    MfaLockEnum:
+      enum:
+      - password_reset
+      - mfa_reset
+      type: string
     MfaSetup:
       type: object
       description: 'Shown once, at setup: the secret is never returned again.'
@@ -5461,10 +5479,21 @@ components:
           description: Required for this account's role.
         can_disable:
           type: boolean
+        lock:
+          nullable: true
+          description: |-
+            Null while codes are accepted. Otherwise too many wrong codes locked the second factor (no code is accepted, the right one included) and this says what unlocks it: `password_reset` (a password reset by email, a password set by an administrator, or an MFA reset) or `mfa_reset` (only an MFA reset: too many wrong codes since the last right one, across new passwords; R133).
+
+            * `password_reset` - A new password
+            * `mfa_reset` - An MFA reset
+          oneOf:
+          - $ref: '#/components/schemas/MfaLockEnum'
+          - $ref: '#/components/schemas/NullEnum'
       required:
       - can_disable
       - confirmed_at
       - enabled
+      - lock
       - recovery_codes_remaining
       - required
     NegotiatedPriceInputRequest:

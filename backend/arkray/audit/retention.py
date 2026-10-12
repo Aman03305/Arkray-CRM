@@ -7,8 +7,9 @@ AuditDetail, never in the event row, and are deleted AUDIT_DETAIL_RETENTION_DAYS
 event (90 by default: a starting policy, configurable, not a legal duration):
 
 - `expire_details()` (the hourly `audit.housekeeping`): deletes expired details in batches,
-  except those of events whose actor, subject or target is under a legal hold; idempotent,
-  and records one `audit.details_expired` event per run that removed any (counts only);
+  except those of events whose actor, subject or target is under a legal hold (read again
+  in every batch, under the hold barrier: core.holds); idempotent, and records one
+  `audit.details_expired` event per run that removed any (counts only);
 - `verify()`: whether a detail still matches the digest its event sealed;
 - `minimise_legacy()` (`manage.py audit_minimise_legacy`): events written before this
   existed kept these details in the append-only row itself. The schema owner moves them into
@@ -74,15 +75,21 @@ def _held() -> Q | None:
 def expire_details(now: datetime | None = None) -> dict[str, int]:
     now = now or timezone.now()
     expired = AuditDetail.objects.filter(expires_at__lte=now)
-    held = _held()
-    due = expired if held is None else expired.exclude(held)
     removed = 0
     for _ in range(MAX_BATCHES):
         with transaction.atomic():
+            # Serialised with placing a hold (core.holds.barrier, this batch's first lock;
+            # R134): the holds are read again in every batch, so a hold placed while the
+            # expiry runs counts from the next batch, and one placed during a batch waits
+            # for it to commit.
+            holds.barrier()
+            held = _held()
+            due = expired if held is None else expired.exclude(held)
             batch = list(due.order_by("expires_at").values_list("pk", flat=True)[:BATCH])
             if not batch:
                 break
             removed += AuditDetail.objects.filter(pk__in=batch).delete()[0]
+    held = _held()
     kept = 0 if held is None else expired.filter(held).count()
     if removed:
         services.record(

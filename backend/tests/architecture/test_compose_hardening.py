@@ -75,6 +75,10 @@ def test_every_third_party_image_is_pinned_by_digest():
             # `FROM <image> [AS name]`; `FROM <earlier stage>` names no image.
             if parts[:1] == ["FROM"] and ":" in parts[1]:
                 images.append(parts[1])
+            # The BuildKit frontend is an image too, pulled and run by every build (CI review
+            # C14, deployment preparation): `# syntax=<image>`.
+            if line.startswith("# syntax="):
+                images.append(line.removeprefix("# syntax="))
     assert len(images) >= 10
     unpinned = sorted({image for image in images if not DIGEST.fullmatch(image)})
     assert unpinned == []

@@ -7,7 +7,9 @@
 
 While a hold is active nothing about that lead or user is erased, pseudonymised, purged or
 expired. The reference names the matter (a ticket or case number), never describes it.
-Placing and releasing are audited (privacy.legal_hold_placed / _released).
+Placing and releasing are audited (privacy.legal_hold_placed / _released). Placing waits for
+the erasures, purges and deletions already running (core.holds); one that keeps it waiting
+past the database's lock timeout leaves nothing placed, and the command says to run it again.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from typing import Any
 from uuid import UUID
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, OperationalError, transaction
 from django.utils import timezone
 
 from arkray.audit import services as audit
@@ -31,6 +33,12 @@ REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/#-]{0,63}")
 REFERENCE_RULE = (
     "--reference must be a case or ticket reference (letters, digits and . _ / # -, at most"
     " 64), never a description."
+)
+# Placing waits for erasures, purges and deletions in flight (core.holds); past the
+# database's lock timeout (or chosen as a deadlock's victim) nothing is placed.
+WAITED_TOO_LONG = frozenset({"55P03", "40P01"})  # lock_not_available, deadlock_detected
+BUSY = (
+    "An erasure, purge or deletion was still running, so nothing was placed. Run the command again."
 )
 
 
@@ -70,13 +78,18 @@ class Command(BaseCommand):
                     raise CommandError(REFERENCE_RULE)
                 try:
                     with transaction.atomic():
-                        # Waits for edits of the subject already past their hold check
-                        # (core.holds; final production audit PRIV-2).
+                        # Waits for the edits of the subject and the readers of the holds
+                        # (erasures, purges, deletions) already past their check (core.holds;
+                        # final production audit PRIV-2, R134).
                         holds.place(
                             subject_type, subject_id, reference=reference, placed_by=operator.pk
                         )
                 except IntegrityError:
                     raise CommandError("There is already an active hold on it.") from None
+                except OperationalError as exc:
+                    if getattr(exc.__cause__, "sqlstate", None) not in WAITED_TOO_LONG:
+                        raise
+                    raise CommandError(BUSY) from None
                 verb = "placed"
             else:
                 released = LegalHold.objects.filter(

@@ -67,6 +67,7 @@ export function makeAdminUser(overrides: Partial<AdminUser> = {}): AdminUser {
     password_change_required: false,
     password_changed_at: "2026-09-01T05:00:00Z",
     mfa_enabled: false,
+    mfa_lock: null,
     version: 1,
   };
   return { ...base, ...overrides };

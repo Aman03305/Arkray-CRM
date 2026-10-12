@@ -1,0 +1,329 @@
+name: Release
+
+# Publishes one commit's images for deployment, behind two approvals
+# (docs/deployment.md#release-process). Started by hand only, on main (or a v* tag on main)
+# with that branch's or tag's commit SHA as the input:
+#
+#   verify              CI concluded `success` for exactly this commit on main, the commit is
+#                       the one the run was started on, and both environments below require
+#                       a reviewer (read-only API calls with this run's token).
+#   publish             (environment `staging`: its reviewers approve publishing) builds both
+#                       images from the commit, runs CI's own scan and smoke-test steps on them
+#                       unchanged, pushes them to GHCR as ghcr.io/<owner>/arkray-<name>:<sha>,
+#                       and attests their digests: build provenance and a CycloneDX SBOM,
+#                       signed through Sigstore.
+#   promote-production  (environment `production`: its own reviewers) deploys nothing (there
+#                       is no target yet): it verifies both attestations of exactly those
+#                       digests and writes them, with `docker pull ...@sha256:` lines, to the
+#                       run's summary for the deploy runbook. Deploy by digest, never by tag.
+#
+# The images are built again here, not taken from CI (CI publishes nothing): the build
+# upgrades OS packages, so this build is the one scanned, smoke-tested and attested. Nothing
+# from the input reaches a shell except through the environment, after it is checked.
+# Only the run's own GITHUB_TOKEN is used, with each job's permissions below.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: >-
+          Full 40-character SHA of the commit to release: the head of the branch or tag this
+          run is started on (main, or a v* tag on main), whose CI run on main passed.
+        required: true
+        type: string
+
+permissions: {}
+
+# One release at a time; a release in progress is never cancelled half-published.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: CI passed for exactly this commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read  # the CI workflow's runs
+      contents: read  # whether main contains the commit
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - id: check
+        name: Refuse anything but a commit on main whose CI run passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          refuse() { echo "::error::$*"; exit 1; }
+          [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]] || refuse "the input must be a full 40-character commit SHA"
+          # The workflow, its provenance and the image names all describe the commit this run
+          # was started on; the input confirms it is the one meant (a commit that reached
+          # main since is never released by surprise).
+          [[ "$REQUESTED_SHA" == "$GITHUB_SHA" ]] ||
+            refuse "this run was started on $GITHUB_REF at $GITHUB_SHA, not the requested commit: start it on main, or on a v* tag, pointing at the commit to release"
+          case "$GITHUB_REF" in
+            refs/heads/main | refs/tags/v*) ;;
+            *) refuse "releases start on main or a v* tag, not $GITHUB_REF" ;;
+          esac
+          # A tag can point anywhere: the commit must be on main's history.
+          position="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" --jq .status)"
+          [[ "$position" == ahead || "$position" == identical ]] ||
+            refuse "$GITHUB_SHA is not on main (main is $position of it)"
+          # CI's verdict on exactly this commit, from a push to main. GitHub runs CI for the
+          # newest commit of each push, so only those commits can be released.
+          gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f head_sha="$GITHUB_SHA" -f event=push -f branch=main -f per_page=100 > "$RUNNER_TEMP/ci-runs.json"
+          ci_run="$(jq -r --arg sha "$GITHUB_SHA" '
+            [.workflow_runs[]
+              | select(.head_sha == $sha and .path == ".github/workflows/ci.yml"
+                       and .status == "completed" and .conclusion == "success")]
+            | first | .html_url // empty' "$RUNNER_TEMP/ci-runs.json")"
+          [[ -n "$ci_run" ]] ||
+            refuse "CI has not concluded success for $GITHUB_SHA on main: wait for it, or re-run it"
+          # The approvals are the environments' required reviewers. GitHub creates a missing
+          # environment when a job names it, without any reviewer: refuse instead.
+          for environment in staging production; do
+            reviewers="$(gh api "repos/$GITHUB_REPOSITORY/environments/$environment" \
+              --jq '[.protection_rules[]? | select(.type == "required_reviewers")] | length')" ||
+              refuse "the $environment environment does not exist: create it with required reviewers first"
+            [[ "$reviewers" -ge 1 ]] ||
+              refuse "the $environment environment has no required reviewers: add them first"
+          done
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "CI passed for \`$GITHUB_SHA\`: $ci_run" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Build, scan, smoke-test, publish and attest the images
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: staging
+    permissions:
+      contents: read  # the checkout
+      packages: write  # push to GHCR
+      id-token: write  # the Sigstore certificate that signs the attestations
+      attestations: write  # store the attestations
+    env:
+      RELEASE_SHA: ${{ needs.verify.outputs.sha }}
+    outputs:
+      backend_name: ${{ steps.push.outputs.backend_name }}
+      backend_digest: ${{ steps.push.outputs.backend_digest }}
+      frontend_name: ${{ steps.push.outputs.frontend_name }}
+      frontend_digest: ${{ steps.push.outputs.frontend_digest }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
+      # CI's builds (no cache: a fresh runner), labelled with the commit they come from.
+      - run: >-
+          docker build --label "org.opencontainers.image.revision=$RELEASE_SHA"
+          --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          -t arkray-backend:ci backend
+      - run: >-
+          docker build --label "org.opencontainers.image.revision=$RELEASE_SHA"
+          --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          --build-arg API_ORIGIN=http://backend:8000 -t arkray-frontend:ci frontend
+      # CI's gates, unchanged (tests/architecture/test_ci_workflow.py compares the scripts):
+      # nothing is pushed unless the images pass them.
+      - name: Scan the images for known vulnerabilities and secrets
+        run: |
+          set -euo pipefail
+          trivy=aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e
+          scan=(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache "$trivy" image --skip-version-check)
+          for image in arkray-backend:ci arkray-frontend:ci; do
+            echo "== $image: everything HIGH or CRITICAL (informational)"
+            "${scan[@]}" --scanners vuln --severity HIGH,CRITICAL "$image"
+            echo "== $image: fixable HIGH or CRITICAL (blocking)"
+            "${scan[@]}" --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$image"
+            echo "== $image: secrets, any severity (blocking)"
+            "${scan[@]}" --scanners secret --exit-code 1 "$image"
+          done
+      - name: Smoke-test the images
+        run: |
+          set -euo pipefail
+          prod_env=(
+            -e DJANGO_SECRET_KEY="ci-image-smoke-$(openssl rand -hex 32)"
+            -e DJANGO_ALLOWED_HOSTS=localhost
+            -e DATABASE_URL=postgres://arkray_app:x@127.0.0.1:5432/arkray
+            -e CELERY_BROKER_URL=redis://:x@127.0.0.1:6379/0
+            -e REDIS_CACHE_URL=redis://:x@127.0.0.1:6379/1
+            -e TRUSTED_PROXY_COUNT=1 -e TRUSTED_PROXY_ADDRESSES=10.0.0.10
+            -e APP_BASE_URL=https://crm.example.com
+            -e EMAIL_URL=smtp+tls://user:x@smtp.example.com:587
+            -e ERASURE_LEDGER_URL=file:///tmp/erasure-ledger
+            -e ERASURE_LEDGER_KEY="ci-image-smoke-ledger-$(openssl rand -hex 32)"
+            -e DEFAULT_FROM_EMAIL=no-reply@crm.example.com
+            -e ATTACHMENT_SCANNER_WAIVED=true
+          )
+          hardened=(--read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true)
+          docker run --rm "${prod_env[@]}" "${hardened[@]}" arkray-backend:ci python manage.py check --deploy
+          docker run -d --name api "${prod_env[@]}" "${hardened[@]}" -p 8000:8000 arkray-backend:ci
+          docker run -d --name web "${hardened[@]}" --tmpfs /app/.next/cache:uid=10001,gid=10001 -p 3000:3000 arkray-frontend:ci
+          for _ in $(seq 1 30); do curl -fsS http://localhost:8000/health/live && break; sleep 2; done
+          # Outside the loop, whose own status is always the last sleep's: the API is up.
+          curl -fsS http://localhost:8000/health/live
+          curl -fsS -o /dev/null http://localhost:3000/login
+          docker logs api 2>&1 | tail -20
+          # A crash prints a traceback; structured lines carry their level.
+          if docker logs api 2>&1 | grep -E '\[ERROR\]|Traceback|Read-only file system|"level": "(ERROR|CRITICAL)"'; then
+            echo "the API logged errors" >&2
+            exit 1
+          fi
+          # A release on a new database (docs/deployment.md#release-process, steps 2-4) with
+          # this image: infrastructure/postgres/roles.sql as the superuser, every migration
+          # from nothing as arkray_owner (no superuser: a migration that needs more fails here,
+          # not in production; the test suite migrates as a superuser), the grant, nothing left
+          # unapplied, and the release check as arkray_app. The passwords are random and reach
+          # the containers through the environment, never a command line; DATABASE_URL given
+          # last replaces prod_env's.
+          export POSTGRES_PASSWORD OWNER_PASSWORD APP_PASSWORD
+          POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+          OWNER_PASSWORD="$(openssl rand -hex 24)"
+          APP_PASSWORD="$(openssl rand -hex 24)"
+          docker run -d --name db -e POSTGRES_USER=arkray -e POSTGRES_DB=postgres -e POSTGRES_PASSWORD \
+            pgvector/pgvector:0.8.7-pg16-trixie@sha256:40d828eda66737aaacb934387a337babf1455ebd56e9bdd13fc08e211257c972
+          # TCP answers only once the image's first-start initialisation is over.
+          for _ in $(seq 1 30); do docker exec db pg_isready -q -h 127.0.0.1 -U arkray && break; sleep 2; done
+          docker exec -i -e OWNER_PASSWORD -e APP_PASSWORD db \
+            psql -q -U arkray -d postgres -v database=arkray -f - < infrastructure/postgres/roles.sql
+          on_db=(--network container:db)
+          DATABASE_URL="postgres://arkray_owner:${OWNER_PASSWORD}@127.0.0.1:5432/arkray" \
+            docker run --rm "${prod_env[@]}" -e DATABASE_URL "${hardened[@]}" "${on_db[@]}" arkray-backend:ci \
+            sh -c 'python manage.py migrate --noinput && python manage.py grant_app_privileges arkray_app && python manage.py migrate --check'
+          DATABASE_URL="postgres://arkray_app:${APP_PASSWORD}@127.0.0.1:5432/arkray" \
+            docker run --rm "${prod_env[@]}" -e DATABASE_URL "${hardened[@]}" "${on_db[@]}" arkray-backend:ci \
+            python manage.py check --deploy --database default
+      # What each image contains (OS and language packages), by the same pinned scanner, as
+      # CycloneDX: attested to the image's digest below, so it travels with the image.
+      - name: Generate the SBOMs
+        run: |
+          set -euo pipefail
+          trivy=aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e
+          mkdir -p "$RUNNER_TEMP/sbom"
+          for name in backend frontend; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache \
+              -v "$RUNNER_TEMP/sbom:/sbom" "$trivy" image --skip-version-check \
+              --format cyclonedx --output "/sbom/arkray-$name.cdx.json" "arkray-$name:ci"
+          done
+      # A tag that exists is never pushed again: its digest may be attested and deployed
+      # already. (A release that failed after pushing is finished by deleting that package
+      # version in GHCR and starting again.)
+      - id: push
+        name: Push the images to GHCR and record their digests
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          for name in backend frontend; do
+            if answer="$(docker buildx imagetools inspect "ghcr.io/$owner/arkray-$name:$RELEASE_SHA" 2>&1)"; then
+              echo "::error::ghcr.io/$owner/arkray-$name:$RELEASE_SHA is published already"
+              exit 1
+            fi
+            # Only the registry saying "not found" means the tag is free: an authentication
+            # failure or a 5xx must never read as "absent" and let a push replace a release
+            # (infrastructure review).
+            if ! grep -qiE 'not found|manifest unknown|name unknown' <<< "$answer"; then
+              echo "::error::couldn't tell whether ghcr.io/$owner/arkray-$name:$RELEASE_SHA exists: $answer"
+              exit 1
+            fi
+          done
+          for name in backend frontend; do
+            repository="ghcr.io/$owner/arkray-$name"
+            docker tag "arkray-$name:ci" "$repository:$RELEASE_SHA"
+            docker push "$repository:$RELEASE_SHA"
+            # The registry's digest of what the tag names now: the immutable reference.
+            digest="$(docker buildx imagetools inspect "$repository:$RELEASE_SHA" --format '{{json .Manifest}}' | jq -r .digest)"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest for $repository"; exit 1; }
+            echo "${name}_name=$repository" >> "$GITHUB_OUTPUT"
+            echo "${name}_digest=$digest" >> "$GITHUB_OUTPUT"
+            echo "- \`$repository@$digest\` (\`:$RELEASE_SHA\`)" >> "$GITHUB_STEP_SUMMARY"
+          done
+      # Signed statements, stored with GitHub and pushed next to the images: this workflow
+      # built these digests from this commit, and this is what they contain.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.backend_name }}
+          subject-digest: ${{ steps.push.outputs.backend_digest }}
+          push-to-registry: true
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.frontend_name }}
+          subject-digest: ${{ steps.push.outputs.frontend_digest }}
+          push-to-registry: true
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ steps.push.outputs.backend_name }}
+          subject-digest: ${{ steps.push.outputs.backend_digest }}
+          sbom-path: ${{ runner.temp }}/sbom/arkray-backend.cdx.json
+          push-to-registry: true
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ steps.push.outputs.frontend_name }}
+          subject-digest: ${{ steps.push.outputs.frontend_digest }}
+          sbom-path: ${{ runner.temp }}/sbom/arkray-frontend.cdx.json
+          push-to-registry: true
+      - name: Forget the registry login
+        if: always()
+        run: docker logout ghcr.io
+
+  promote-production:
+    name: Verify the attested digests for production
+    needs: [verify, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    permissions:
+      contents: read  # the attestations API reads through the repository
+      packages: read  # the images' manifests in GHCR
+      attestations: read  # the attestations
+    steps:
+      - name: Verify the provenance and SBOM attestations of the published digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.verify.outputs.sha }}
+          BACKEND_NAME: ${{ needs.publish.outputs.backend_name }}
+          BACKEND_DIGEST: ${{ needs.publish.outputs.backend_digest }}
+          FRONTEND_NAME: ${{ needs.publish.outputs.frontend_name }}
+          FRONTEND_DIGEST: ${{ needs.publish.outputs.frontend_digest }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          images=()
+          for pair in "$BACKEND_NAME@$BACKEND_DIGEST" "$FRONTEND_NAME@$FRONTEND_DIGEST"; do
+            [[ "$pair" =~ ^ghcr\.io/$owner/arkray-(backend|frontend)@sha256:[0-9a-f]{64}$ ]] ||
+              { echo "::error::unexpected image reference from publish: $pair"; exit 1; }
+            images+=("$pair")
+          done
+          # Signed by this workflow, from this commit, on a GitHub-hosted runner: provenance,
+          # then the SBOM.
+          verify=(--repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+            --source-digest "$RELEASE_SHA" --deny-self-hosted-runners)
+          for image in "${images[@]}"; do
+            gh attestation verify "oci://$image" "${verify[@]}"
+            gh attestation verify "oci://$image" "${verify[@]}" --predicate-type https://cyclonedx.org/bom
+          done
+          docker logout ghcr.io
+          {
+            echo "## Arkray CRM \`$RELEASE_SHA\`: approved for production"
+            echo
+            echo "Deploy these digests, never the tags (docs/deployment.md#release-process):"
+            echo
+            echo '```'
+            for image in "${images[@]}"; do echo "docker pull $image"; done
+            echo '```'
+            echo
+            echo "Check them again where they are deployed:"
+            echo
+            echo '```'
+            for image in "${images[@]}"; do
+              echo "gh attestation verify oci://$image ${verify[*]}"
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

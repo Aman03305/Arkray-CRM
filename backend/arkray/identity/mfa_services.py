@@ -22,6 +22,12 @@
   for locking out an account whose password is safe. The owner is emailed about a wrong
   code at most once per MFA_FAILURE_NOTICE_INTERVAL_S, and when it locks (`mfa.locked`,
   audited, alerted on: identity.metrics).
+- **Over a long window too** (R133): the same wrong codes accumulate in
+  `cumulative_failures`, which only a right code (or an MFA reset, which deletes the device)
+  forgets; a new password doesn't. From MFA_MAX_FAILURES_BEFORE_RESET on, every code is
+  refused (`mfa_locked_until_reset`) until an MFA reset: someone holding the password and the
+  mailbox can't buy more guesses with each emailed reset. Audited as `mfa.locked` with
+  `until: mfa_reset`, emailed, alerted on (identity.metrics).
 - **Changes end other sessions**: confirming, disabling, resetting a device and replacing
   recovery codes increment `session_epoch`; the session making the change is kept, re-hashed.
 - **Setups expire**: a started setup must be confirmed within MFA_SETUP_TTL_S and with
@@ -46,6 +52,7 @@ from cryptography.fernet import InvalidToken
 from django.conf import settings
 from django.contrib.auth import update_session_auth_hash
 from django.contrib.sessions.backends.base import SessionBase
+from django.core.checks import Error, register
 from django.db import transaction
 from django.http import HttpRequest
 from django.utils import timezone
@@ -61,7 +68,7 @@ from arkray.core.errors import (
 )
 
 from . import emails, mfa, selectors, throttling
-from .models import MfaDevice, MfaRecoveryCode, User, normalize_email
+from .models import MfaDevice, MfaLock, MfaRecoveryCode, User, normalize_email
 from .policy import Capability, roles_with
 from .services import (
     SESSION_ENDED,
@@ -93,6 +100,7 @@ NOTICES = (
     "recovery_code_used",
     "wrong_code",
     "locked",
+    "locked_until_reset",
 )
 
 FACTOR_TOTP = "totp"
@@ -126,6 +134,20 @@ class MfaLockedError(DomainError):
     )
 
 
+class MfaLockedUntilResetError(MfaLockedError):
+    """MFA_MAX_FAILURES_BEFORE_RESET wrong codes since the last right one, new passwords
+    notwithstanding (R133): no code is accepted until an MFA reset. Handled wherever
+    MfaLockedError is (a failure; the sign-in challenge ends). Its own code, so clients show
+    this message: `mfa_locked`'s advice (reset your password) no longer helps."""
+
+    code = "mfa_locked_until_reset"
+    default_message = (
+        "Too many wrong codes were entered for your account, so two-step verification is"
+        " locked until it is reset. Resetting your password won't unlock it: ask an"
+        " administrator to reset your two-step verification."
+    )
+
+
 class MfaChallengeExpiredError(DomainError):
     code = "mfa_challenge_expired"
     http_status = 400
@@ -142,6 +164,24 @@ class MfaAlreadyEnabledError(DomainError):
     code = "mfa_already_enabled"
     http_status = 409
     default_message = "Two-step verification is already on for your account."
+
+
+# --- configuration ----------------------------------------------------------------------------
+@register()
+def check_failure_limits(**_: Any) -> list[Error]:
+    """The cap a new password doesn't clear (R133) must leave room for the lock a new
+    password does: at or below MFA_MAX_CONSECUTIVE_FAILURES, every lock would need an MFA
+    reset. (Registered from IdentityConfig.ready, which imports the handlers.)"""
+    consecutive = settings.MFA_MAX_CONSECUTIVE_FAILURES
+    if 0 < consecutive < settings.MFA_MAX_FAILURES_BEFORE_RESET:
+        return []
+    return [
+        Error(
+            "MFA_MAX_FAILURES_BEFORE_RESET must be more than MFA_MAX_CONSECUTIVE_FAILURES,"
+            " and both positive (R133).",
+            id="arkray.E030",
+        )
+    ]
 
 
 def _now() -> float:
@@ -201,6 +241,8 @@ class Status:
     recovery_codes_remaining: int
     required: bool
     can_disable: bool
+    # What unlocks it when wrong codes locked it (R133: was in security events only).
+    lock: MfaLock | None
 
 
 def status(user: User) -> Status:
@@ -217,12 +259,14 @@ def status(user: User) -> Status:
         recovery_codes_remaining=remaining,
         required=required,
         can_disable=device is not None and not required,
+        lock=device.lock if device else None,
     )
 
 
 # --- verifying a factor -------------------------------------------------------------------------
 # What checking a code under the device's lock found.
 _RIGHT, _WRONG, _LOCKED = "right", "wrong", "locked"
+_LOCKED_UNTIL_RESET = "locked_until_reset"  # R133: past what a new password unlocks
 
 
 def _confirmed_device_locked(user_id: UUID) -> MfaDevice | None:
@@ -234,19 +278,40 @@ def _confirmed_device_locked(user_id: UUID) -> MfaDevice | None:
     )
 
 
+def _lock_outcome(device: MfaDevice) -> str:
+    return _LOCKED_UNTIL_RESET if device.locked_until_reset else _LOCKED
+
+
 def _count_failure(device: MfaDevice) -> str:
-    """A wrong code, under the device's row lock (deep security audit M-4). Counted across
-    sign-in attempts, browsers and step-ups; the MFA_MAX_CONSECUTIVE_FAILURES-th locks the
-    factor (audited, ids only; the owner is emailed). Otherwise the owner is emailed about
-    the first wrong code in MFA_FAILURE_NOTICE_INTERVAL_S: codes are asked for only after
-    the right password (or in a signed-in session), so one they didn't type means someone
-    else has it. _WRONG, or _LOCKED when this one locked it."""
+    """A wrong code, under the device's row lock (deep security audit M-4), on a device that
+    isn't locked. Counted across sign-in attempts, browsers and step-ups, twice: in a row
+    (`consecutive_failures`, which a new password forgets) and since the last right code
+    (`cumulative_failures`, which it doesn't: R133). The MFA_MAX_FAILURES_BEFORE_RESET-th of
+    the latter locks the factor until an MFA reset, else the MFA_MAX_CONSECUTIVE_FAILURES-th
+    in a row locks it until a new password: either is audited (`mfa.locked`, ids and counts
+    only) and emailed to the owner, once, since a locked device counts nothing more.
+    Otherwise the owner is emailed about the first wrong code in
+    MFA_FAILURE_NOTICE_INTERVAL_S: codes are asked for only after the right password (or in
+    a signed-in session), so one they didn't type means someone else has it. _WRONG, or
+    the lock this one caused."""
     device.consecutive_failures += 1
-    fields = ["consecutive_failures", "updated_at"]
+    device.cumulative_failures += 1
+    fields = ["consecutive_failures", "cumulative_failures", "updated_at"]
     outcome = _WRONG
     now = timezone.now()
     interval = timedelta(seconds=settings.MFA_FAILURE_NOTICE_INTERVAL_S)
-    if device.locked:
+    if device.locked_until_reset:
+        outcome = _LOCKED_UNTIL_RESET
+        audit.record(
+            AUDIT_LOCKED,
+            actor_id=None,
+            target_type="user",
+            target_id=device.user_id,
+            subject_user_id=device.user_id,
+            metadata={"failures": device.cumulative_failures, "until": MfaLock.MFA_RESET.value},
+        )
+        _notify_owner(device.user_id, "locked_until_reset")
+    elif device.locked:
         outcome = _LOCKED
         audit.record(
             AUDIT_LOCKED,
@@ -276,7 +341,7 @@ def _verify_totp(user_id: UUID, code: str) -> str:
         if device is None:
             return _WRONG
         if device.locked:
-            return _LOCKED
+            return _lock_outcome(device)
         try:
             secret = mfa.decrypt(device.secret)
         except InvalidToken:
@@ -286,9 +351,15 @@ def _verify_totp(user_id: UUID, code: str) -> str:
             return _count_failure(device)
         device.last_used_step = step
         device.secret = mfa.rotate(device.secret)
-        device.consecutive_failures = 0
+        device.consecutive_failures = device.cumulative_failures = 0
         device.save(
-            update_fields=["last_used_step", "secret", "consecutive_failures", "updated_at"]
+            update_fields=[
+                "last_used_step",
+                "secret",
+                "consecutive_failures",
+                "cumulative_failures",
+                "updated_at",
+            ]
         )
     return _RIGHT
 
@@ -304,7 +375,7 @@ def _use_recovery_code(user: User, raw: str) -> str:
         if device is None:
             return _WRONG
         if device.locked:
-            return _LOCKED
+            return _lock_outcome(device)
         unused = dict(
             MfaRecoveryCode.objects.filter(user_id=user.pk, used_at__isnull=True).values_list(
                 "code_hash", "pk"
@@ -318,9 +389,9 @@ def _use_recovery_code(user: User, raw: str) -> str:
         )
         if not used:
             return _WRONG
-        if device.consecutive_failures:
-            device.consecutive_failures = 0
-            device.save(update_fields=["consecutive_failures", "updated_at"])
+        if device.consecutive_failures or device.cumulative_failures:
+            device.consecutive_failures = device.cumulative_failures = 0
+            device.save(update_fields=["consecutive_failures", "cumulative_failures", "updated_at"])
         audit.record(
             AUDIT_CODE_USED,
             actor_id=user.pk,
@@ -338,13 +409,16 @@ def verify_factor(
 ) -> str | None:
     """FACTOR_TOTP or FACTOR_RECOVERY_CODE when it is right (and now used), else None (a
     wrong code: counted). MfaLockedError when the factor is locked, or this wrong code
-    locked it (M-4): the caller counts it as a failure, like a wrong code."""
+    locked it (M-4): the caller counts it as a failure, like a wrong code. Its subclass
+    MfaLockedUntilResetError when only an MFA reset unlocks it (R133)."""
     if code is not None:
         factor, outcome = FACTOR_TOTP, _verify_totp(user.pk, code)
     elif recovery_code is not None:
         factor, outcome = FACTOR_RECOVERY_CODE, _use_recovery_code(user, recovery_code)
     else:
         return None
+    if outcome == _LOCKED_UNTIL_RESET:
+        raise MfaLockedUntilResetError()
     if outcome == _LOCKED:
         raise MfaLockedError()
     return factor if outcome == _RIGHT else None

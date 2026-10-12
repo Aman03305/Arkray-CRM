@@ -234,7 +234,12 @@ _transport_problems = [
             BACKEND_TLS_PRIVATE_HOSTS,  # noqa: F405
         ),
         transport.scanner_problem(ATTACHMENT_SCANNER, BACKEND_TLS_PRIVATE_HOSTS),  # noqa: F405
-        transport.s3_problem(ERASURE_LEDGER_S3_ENDPOINT_URL, BACKEND_TLS_PRIVATE_HOSTS),  # noqa: F405
+        transport.s3_problem(
+            ERASURE_LEDGER_S3_ENDPOINT_URL,  # noqa: F405
+            BACKEND_TLS_PRIVATE_HOSTS,  # noqa: F405
+            setting="ERASURE_LEDGER_S3_ENDPOINT_URL",
+            carries="erasure ledger entries",
+        ),
     )
     if problem
 ]

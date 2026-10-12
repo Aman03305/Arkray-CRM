@@ -202,7 +202,8 @@ reconciliation re-indexes any source whose chunks drifted.
    trail (`audit_event.support_session_id`): list a session's actions with
    `SELECT action, target_type, target_id, occurred_at FROM audit_event WHERE
    support_session_id = '<id>' ORDER BY occurred_at`.
-5. `mfa.locked` / `ArkrayMfaLocked`: see [Second factor locked](#second-factor-locked).
+5. `mfa.locked` / `ArkrayMfaLocked` / `ArkrayMfaLockedUntilReset`: see
+   [Second factor locked](#second-factor-locked).
 
 ## Administrator deactivated
 
@@ -235,25 +236,39 @@ A user without their authenticator and without any recovery code.
   themselves). Audited as `mfa.reset` (by `operator`, that administrator as the actor, the
   reason kept as an expiring detail); the owner is emailed; their sessions end; they sign in with their password and must set up a new authenticator before
   anything else.
+- **Locked until an MFA reset** (they see "Resetting your password won't unlock it";
+  `mfa_locked_until_reset`, R133): the same two resets are the only way out, but only after
+  the steps in [Second factor locked](#second-factor-locked): the mailbox secured and the
+  password the guesser knew replaced first, or the reset hands them the account.
 - **After a `DJANGO_SECRET_KEY` rotation**: run `manage.py mfa_reencrypt` before removing the
   old key from `DJANGO_SECRET_KEY_FALLBACKS`; it exits non-zero if a secret is under no
   configured key (put the old key back, or reset those accounts).
 
 ## Second factor locked
 
-*Alert: `ArkrayMfaLocked` (a user's two-step verification was locked by too many wrong codes
-in the last hour; it stays raised for that hour).*
+*Alerts: `ArkrayMfaLocked` (a user's two-step verification was locked by too many wrong codes
+in the last hour) and `ArkrayMfaLockedUntilReset` (one was locked past what a new password
+unlocks); each stays raised for that hour.*
 
 Codes are asked for only after the right password (or in a signed-in session), so 20 wrong
 codes in a row mean someone else very probably has that user's password (deep security audit
-M-4, R133). The account's owner was emailed when it locked (and about the first wrong code).
+M-4, R133); a new password unlocks that lock. The wrong codes since the last right one also
+add up across new passwords: at 60 (`MFA_MAX_FAILURES_BEFORE_RESET`, three whole locks) the
+factor is locked **until an MFA reset**, and no new password unlocks it (R133). Whoever typed
+those codes got hold of each new password, so very probably reads the owner's mailbox too.
+The account's owner was emailed when it locked (and about the first wrong code).
 
-1. Security events (Admin home, *Security activity*): `mfa.locked` (whose), and the
-   `auth.login_failed` events before it (reasons `wrong_code`, `wrong_recovery_code`,
-   `mfa_locked`); the audit trail's expiring detail has the client addresses.
+1. Security events (Admin home, *Security activity*): `mfa.locked` (whose; with `until:
+   mfa_reset` for a lock until an MFA reset), and the `auth.login_failed` events before it
+   (reasons `wrong_code`, `wrong_recovery_code`, `mfa_locked`); the audit trail's expiring
+   detail has the client addresses. Which lock it is now: `mfa_lock` (`password_reset` or
+   `mfa_reset`) on `GET /api/v1/admin/users/{id}`, or the counts in step 5. The user sees
+   "Reset your password" for the first kind, "Resetting your password won't unlock it"
+   (`mfa_locked_until_reset`) for the second.
 2. Call the user on a known number. If the codes weren't theirs, treat it as a
-   [Security incident](#security-incident): their password is known to someone else.
-3. Unlock (any one of):
+   [Security incident](#security-incident): their password is known to someone else (and,
+   locked until an MFA reset, very probably their mailbox).
+3. Unlock a lock that a new password lifts (`mfa_lock` `password_reset`), any one of:
    - the user resets their password with *Forgot password* (the emailed link unlocks it and
      replaces the password the attacker knew): **preferred**;
    - an administrator sets a temporary password for an ordinary user (Users page,
@@ -264,11 +279,27 @@ M-4, R133). The account's owner was emailed when it locked (and about the first 
 
    Changing the password in a signed-in session does not unlock it (that session could be the
    attacker's).
-4. Check the count (read only): `SELECT u.email, d.consecutive_failures,
-   d.failure_notified_at FROM identity_mfa_device d JOIN identity_user u ON u.id = d.user_id
-   WHERE d.consecutive_failures > 0 ORDER BY d.consecutive_failures DESC;`
-   Never set `consecutive_failures` by hand without one of the steps above: the lock exists
-   because the password is likely known.
+4. Unlock a lock until an MFA reset (`mfa_lock` `mfa_reset`), in this order (a new password
+   alone leaves it locked; resetting the factor first would let whoever has the old password
+   sign in without a second factor, or set up their own as an administrator):
+   1. On the call, the owner secures their mailbox first (its password, forwarding rules,
+      other signed-in sessions).
+   2. Replace the password the guesser knew: for an ordinary user an administrator sets a
+      temporary one (Users page, *Set password*) and gives it on that call; an administrator
+      resets their own with *Forgot password* once the mailbox is safe (a reset works while
+      the factor is locked).
+   3. Reset the second factor: an administrator for an ordinary user (Users page,
+      *Reset two-step verification*), an operator with `manage.py reset_mfa` for an
+      administrator ([Lost second factor](#lost-second-factor)). The owner then signs in with
+      the new password and sets up a new authenticator (an administrator before anything
+      else); its counts start from nothing.
+5. Check the counts (read only): `SELECT u.email, d.consecutive_failures,
+   d.cumulative_failures, d.failure_notified_at FROM identity_mfa_device d JOIN identity_user
+   u ON u.id = d.user_id WHERE d.consecutive_failures > 0 OR d.cumulative_failures > 0 ORDER
+   BY d.cumulative_failures DESC;` (`cumulative_failures`: wrong codes since the last right
+   one, which only a right code or an MFA reset forgets.) Never set either count by hand
+   without one of the steps above: the lock exists because the password (and, at the cap,
+   probably the mailbox) is known.
 
 ## File storage
 
@@ -447,9 +478,318 @@ only while it can still write to the new schema (additive migrations since it; n
 ways back are the pre-upgrade backup or a forward fix
 ([deployment.md](deployment.md#rollback)).
 
+**Back to before the migrate job** (the release can't be fixed forward and the previous
+images can't run on the new schema): [Emergency maintenance](#emergency-maintenance) on; stop
+web, workers and beat; [Point-in-time recovery](#point-in-time-recovery) to T0 (noted just
+before the migrate job: [Schema migration for a release](#schema-migration-for-a-release)), or
+[Restore from backup](#restore-from-backup) with the dump taken before the upgrade; deploy the
+**previous** images against it; the ledger replay and the
+[Recovery validation checklist](#recovery-validation-checklist); maintenance off. Everything
+recorded after T0 is lost; files uploaded since are orphans (R93).
+
+## Emergency maintenance
+
+*When: a restore or recovery, a stopped-deploy migration, an incident that needs the site
+closed now.* The reference edge closes the site itself (`infrastructure/nginx/arkray.conf`);
+nothing reaches Django or Next.js.
+
+1. **On**: on the edge host, `touch infrastructure/nginx/maintenance/on` (the directory is
+   mounted read-only at `/etc/nginx/maintenance`). No reload: from the next request every
+   HTTPS request gets 503 with `Retry-After: 60` and `Cache-Control: no-store`; on `/api/*`
+   the API's envelope (`service_unavailable`, "Arkray CRM is down for maintenance", the
+   request id), elsewhere a minimal page with the request id. Open pages show "Arkray is
+   temporarily unavailable" and don't retry by themselves. The container's health check
+   (`/edge-health`, plain-HTTP port) keeps answering, so nothing restarts the edge.
+2. **Check**: `curl -sI https://<host>/` → 503, `retry-after: 60`; the access log shows
+   `upstream=-` for these requests.
+3. **The switch doesn't stop background work**: stop workers and beat yourself when the
+   database must not be written.
+4. **Try the application behind it** (optional): add one address to `geo
+   $arkray_maintenance_hold` in arkray.conf (`203.0.113.7/32 0;`) and reload (`docker compose
+   ... exec nginx nginx -s reload`); remove it and reload afterwards. One host only: never an
+   office's shared address or a proxy's (everyone behind it gets in). Behind Cloudflare or a
+   load balancer it works only when nginx's `real_ip` takes the client address from the
+   proxy's own ranges; otherwise every client has the proxy's address: don't. Alternatively
+   test the API pods directly (a port-forward): the switch is the edge's only.
+5. **Off**: `rm infrastructure/nginx/maintenance/on`; a page loads, `/api/v1/auth/csrf` 204.
+
+Never commit the flag (the directory's `.gitignore` keeps it out): every deployment of that
+commit would start closed. **Kubernetes**: mount a ConfigMap (the whole directory, not a
+`subPath`, or updates never arrive) at `/etc/nginx/maintenance`; add the key `on` to close
+(`kubectl patch configmap arkray-maintenance -p '{"data":{"on":""}}'`), remove it to reopen;
+the kubelet syncs within about a minute, no restart. **A platform edge without nginx** (ALB,
+Cloudflare): prepare the equivalent rule beforehand: a fixed 503 response for every path
+except the health checks (the JSON body above for `/api/*`), `Retry-After`, `no-store`.
+
+Verified live in the pinned nginx (2026-10-12): flag created and removed on the host through
+the read-only mount, no reload; every route (the API in any case, pages, `/health/*`,
+sign-in, an upload before its session check, HEAD) answered by the maintenance response,
+the health check 200 and plain HTTP 308 throughout; an allowlisted address reached the
+upstreams, a client sending `X-Forwarded-For` with that address did not
+(`tests/architecture/test_edge_maintenance.py`).
+
+## Fresh database provisioning
+
+Once per environment, before the first release ([deployment.md](deployment.md#release-process)).
+
+**Managed (RDS or equivalent)**
+
+1. Create the instance: PostgreSQL 16, encrypted storage, not publicly accessible, deletion
+   protection, automated backups with point-in-time recovery (retention 30 days: the dumps'
+   and [privacy.md](privacy.md#retention)'s; RDS allows up to 35), a parameter group with the
+   settings in [deployment.md](deployment.md#database) (`shared_preload_libraries =
+   pg_stat_statements`, `log_min_error_statement = panic`, `log_error_verbosity = terse`,
+   `log_min_duration_statement = -1`, memory, `max_connections`) and TLS required
+   (`rds.force_ssl = 1`). Keep the provider's CA bundle for `sslrootcert`.
+2. From a host inside the network, as the administrator (the master user): read the two
+   passwords from the secret manager without echo or history (`read -rs OWNER_PASSWORD;
+   read -rs APP_PASSWORD; export OWNER_PASSWORD APP_PASSWORD`), then `psql
+   "$ADMIN_DATABASE_URL" -v database=arkray -f infrastructure/postgres/roles.sql` (psql 15
+   or newer; never the passwords on the command line). On RDS the master user isn't a
+   superuser: grant it membership of `arkray_owner` before the database is created
+   (`GRANT arkray_owner TO <master user>`, after the role exists), and the per-database
+   logging settings need `rds_superuser`'s rights (or the parameter group). It creates `arkray_owner`,
+   `arkray_app`, the database owned by the owner, the four extensions, revokes `PUBLIC` and
+   sets R63's logging per database. A platform with one fixed database (Supabase): run its
+   role and privilege statements by hand ([hosting-compatibility.md](hosting-compatibility.md#supabase-checklist-database-only)).
+   *roles.sql has been run against self-hosted PostgreSQL only; check its output on the
+   managed service the first time.*
+3. The first release's migrate job, as the **owner** over a direct connection:
+   `manage.py migrate --noinput && manage.py grant_app_privileges arkray_app`, then with the
+   application's credentials `manage.py check --deploy --database default` and
+   `manage.py migrate --check` ([Schema migration for a release](#schema-migration-for-a-release)).
+4. Record the instance, its backup window and retention, and confirm the latest restorable
+   time moves (within 5 minutes) before any real data arrives.
+
+**Self-hosted (one VM, PostgreSQL in a container or from packages)**
+
+1. PostgreSQL 16 with pgvector 0.8 (the production stack's image:
+   `pgvector/pgvector:0.8.7-pg16-trixie@sha256:40d828ed...`), the data directory on a volume of
+   its own (encrypted), `--shm-size` of at least 256 MB under Docker, the settings table of
+   [deployment.md](deployment.md#database), TLS with a certificate for its host name.
+2. **WAL archiving before any data** ([Database backup](#database-backup)): `pgbackrest
+   stanza-create` and `pgbackrest check` (or WAL-G's `wal-g wal-push` working), then the first
+   full base backup.
+3. roles.sql as the superuser, then step 3 above.
+
+Drilled: `tests/drills/pitr_drill.py` provisions its database exactly this way (roles.sql with
+the roles renamed, migrate as the owner, the grant: 10 statements, `check`, `migrate --check`
+as the application role) before taking its base backup.
+
+## Schema migration for a release
+
+The migrate job runs the new image as the **owner** (never through a transaction pooler:
+[deployment.md](deployment.md#database-poolers)).
+
+1. **Rolling or stopped?** The release notes and
+   [deployment.md](deployment.md#which-previous-release-can-run-beside-the-new-schema): a
+   rolling deploy only when the previous release can insert into the new schema (every new
+   NOT NULL column has a database default). From the v1.0 RC: stopped deploy only.
+2. **Before** ([deployment.md](deployment.md#before-an-upgrade)): `scripts/backup.sh` (checked,
+   encrypted, signed); `manage.py showmigrations > pre-upgrade-migrations.txt`; `manage.py
+   migrate --plan` with the new image; the previous images kept by SHA; on a managed service,
+   the latest restorable time noted.
+3. **Rolling deploy**: migrate job `manage.py migrate --noinput && manage.py
+   grant_app_privileges arkray_app`; release check with the application's credentials
+   `manage.py check --deploy --database default`; `manage.py preflight`
+   ([deployment.md](deployment.md#preflight)); roll out api, workers and web; beat last.
+4. **Stopped deploy**:
+   1. [Emergency maintenance](#emergency-maintenance) on.
+   2. Stop web, workers and beat (each worker finishes its task: up to 130 s, the default
+      queue's worker up to 18 minutes when the nightly attachment check is running; plan
+      the window outside 22:10 UTC). Check nothing
+      of the application is connected: `SELECT count(*) FROM pg_stat_activity WHERE usename
+      = 'arkray_app';` → 0.
+   3. **Note T0**, the time now in UTC (`SELECT now();` on the database): the point-in-time
+      recovery target if the release has to be undone ([Deploy and roll back](#deploy-and-roll-back)).
+   4. The migrate job and the grant as in 3; the release check; `manage.py preflight` with
+      the new image ([deployment.md](deployment.md#preflight)).
+   5. Start the new release (api, workers, web, beat last); sign in from the allowlisted
+      address and open a deal; then maintenance off.
+5. A failed migration: each one runs in its own transaction (`CREATE INDEX CONCURRENTLY` ones
+   don't: look for invalid indexes, `SELECT indexrelid::regclass FROM pg_index WHERE NOT
+   indisvalid;`). Fix forward, or [Deploy and roll back](#deploy-and-roll-back). Down-migrations past the RC are
+   refused before anything changes.
+
+Measured (2026-10-06): RC → current at 200,000 leads, 8.6 s of migrations (`pipeline.0006`
+7.0 s). The window is backup + migrations + smoke test.
+
+## Database backup
+
+Two layers ([deployment.md](deployment.md#backup-restore-and-disaster-recovery)): continuous
+WAL archiving for point-in-time recovery (RPO ≤ 5 minutes), and daily encrypted, signed
+logical dumps (`scripts/backup.sh`) in another region. Neither holds the attachment files
+(R93: back the bucket up on the same schedule) or the erasure ledger (by design).
+
+**Managed**: point-in-time recovery on, retention 30 days, cross-region copies of the
+automated backups (RDS: cross-Region automated backup replication) or daily snapshot copies;
+check the latest restorable time daily (RDS: `aws rds describe-db-instances --query
+'DBInstances[0].LatestRestorableTime'`) and alert when it is more than 10 minutes old (RDS
+uploads the transaction log every 5 minutes; a lag beyond 10 breaks the 5-minute RPO).
+Logical dumps daily and before every release.
+
+**Self-hosted: WAL archiving to object storage** with pgBackRest or WAL-G (both stream WAL
+segments and base backups to S3 and restore to a point in time). The bucket: in another
+region, private, versioned, SSE-KMS, lifecycle expiring noncurrent versions after 7 days; the
+VM's IAM role may write and delete only under its prefix (expiry needs delete). Never the
+attachments or ledger bucket.
+
+The stock `pgvector/pgvector` image has neither tool: build a small image from it (pinned by
+digest like the others) that adds `pgbackrest` (Debian package) or the `wal-g` binary, since
+`archive_command` runs inside the PostgreSQL server's own container. Never put a comment after
+a value in the files below: neither pgBackRest's configuration nor an environment file strips
+it (the whole rest of the line becomes the value).
+
+`postgresql.conf` (both; `archive_command` from the tool's section below):
+
+    wal_level = replica
+    archive_mode = on
+    # a quiet database still ships its WAL every minute (RPO)
+    archive_timeout = 60
+    max_wal_senders = 3
+
+pgBackRest (`/etc/pgbackrest/pgbackrest.conf`, owner postgres, mode 600; credentials from the
+instance's IAM role: `repo1-s3-key-type=auto`; retention in days):
+
+    [global]
+    repo1-type=s3
+    repo1-s3-bucket=arkray-pg-backups-<env>
+    repo1-s3-region=ap-south-2
+    repo1-s3-endpoint=s3.ap-south-2.amazonaws.com
+    repo1-s3-key-type=auto
+    repo1-path=/pgbackrest
+    repo1-cipher-type=aes-256-cbc
+    repo1-cipher-pass=<from the secret manager; also kept offline with the backup keys>
+    repo1-retention-full-type=time
+    repo1-retention-full=30
+    compress-type=zst
+    start-fast=y
+    archive-async=y
+    spool-path=/var/spool/pgbackrest
+    process-max=2
+
+    [arkray]
+    pg1-path=/var/lib/postgresql/data
+
+  In `postgresql.conf`: `archive_command = 'pgbackrest --stanza=arkray archive-push %p'`.
+  Once: `pgbackrest --stanza=arkray stanza-create`, `pgbackrest --stanza=arkray check`.
+  Schedule (cron or a systemd timer, as postgres): Sunday `pgbackrest --stanza=arkray
+  --type=full backup`, other days `--type=diff`. Status: `pgbackrest info` (alert when the
+  newest backup is older than 26 hours).
+
+WAL-G (a configuration file the PostgreSQL server reads through `--config`, because
+`archive_command` runs as the server's process and doesn't see a login shell's environment:
+`/etc/wal-g/walg.json`, owner postgres, mode 600; credentials from the instance's IAM role):
+
+    {
+      "WALG_S3_PREFIX": "s3://arkray-pg-backups-<env>/wal-g",
+      "AWS_REGION": "ap-south-2",
+      "WALG_S3_SSE": "aws:kms",
+      "WALG_COMPRESSION_METHOD": "zstd",
+      "WALG_LIBSODIUM_KEY": "<32 random bytes, hex; from the secret manager, also kept offline>",
+      "WALG_LIBSODIUM_KEY_TRANSFORM": "hex",
+      "PGHOST": "/var/run/postgresql"
+    }
+
+  In `postgresql.conf`: `archive_command = 'wal-g --config /etc/wal-g/walg.json wal-push %p'`
+  (and, for a recovery, `restore_command = 'wal-g --config /etc/wal-g/walg.json wal-fetch %f
+  %p'`). Daily: `wal-g --config /etc/wal-g/walg.json backup-push $PGDATA`, then `wal-g
+  --config /etc/wal-g/walg.json delete retain FULL 30 --confirm` (30 daily full backups and the
+  WAL they need). Status: `wal-g --config /etc/wal-g/walg.json backup-list --detail`.
+
+Monitoring (both): `pg_stat_archiver` (alert when `failed_count` grows or `last_archived_time`
+is more than 5 minutes behind while there are writes: WAL then piles up in `pg_wal` and the
+RPO grows); the newest base backup's age; disk space of `pg_wal`. Lose the encryption
+passphrase/key and the archive is unreadable: keep it with the backup key holders
+([Backup encryption keys](#backup-encryption-keys)).
+
+**Logical dumps** (both): `scripts/backup.sh` daily and before every release
+([Backup encryption keys](#backup-encryption-keys)); `--prune` 30 days honouring
+`LEGAL_HOLD`. A dump restores into any PostgreSQL 16 ([Restore from backup](#restore-from-backup));
+it is also the copy that survives a broken WAL archive.
+
+Drill: `tests/drills/pitr_drill.py` archives with a plain `archive_command` to a volume (the
+same mechanics: base backup, archived segments, `restore_command`).
+
+## Point-in-time recovery
+
+*When: data damaged or deleted by mistake, a bad release after the migrate job, a lost
+database. A dump restore is the same with T = the dump's time ([Restore from backup](#restore-from-backup)).*
+
+Everything committed after T is lost (re-entered by people, or recovered by hand from the
+old database). Erasures after T come back and are re-applied by the ledger. **Security
+changes after T are undone too**: sessions that ended, deactivations, password, role and MFA
+changes, ended support sessions, used or revoked one-time links (step 7).
+
+1. **Choose T** (UTC, with its offset): just before the damage, from the log line or audit
+   event that shows it, or T0 noted before a migrate job. Recovery stops before the first
+   transaction that committed after T.
+2. **Stop traffic and writes**: [Emergency maintenance](#emergency-maintenance) on; stop
+   web, workers and beat. Leave the old database untouched (forensics).
+3. **Keep what will be lost**, if the old database is readable (owner):
+   `\copy (SELECT id, occurred_at, action, actor_id, target_type, target_id, subject_user_id
+   FROM audit_event WHERE occurred_at > '<T>' ORDER BY id) TO 'after-T-events.csv' CSV HEADER`
+   (ids only), and note the deals and activities created or changed after T if they must be
+   re-entered.
+4. **Recover into a new database**:
+   - *Managed (RDS)*: `aws rds restore-db-instance-to-point-in-time
+     --source-db-instance-identifier arkray-prod --target-db-instance-identifier
+     arkray-prod-<YYYYMMDDHHMM> --restore-time <T as 2026-10-12T05:56:05Z>
+     --db-parameter-group-name <arkray-pg16> --db-subnet-group-name <...>
+     --vpc-security-group-ids <...> --no-publicly-accessible [--multi-az]`, then `aws rds
+     wait db-instance-available ...`. Name the parameter group (else R63's logging settings
+     and `pg_stat_statements` are missing); set backup retention, deletion protection and
+     monitoring as on the original. The new instance has a new endpoint. (Platforms that
+     restore in place, such as Supabase's PITR, overwrite the database: do step 3 first.)
+   - *Self-hosted (pgBackRest)*: on a new volume or host, PostgreSQL stopped:
+     `pgbackrest --stanza=arkray --type=time "--target=<T>" --target-action=promote restore`
+     (it picks the newest backup before T, writes `restore_command`, the target and
+     `recovery.signal`); start PostgreSQL.
+   - *Self-hosted (WAL-G)*: `wal-g backup-list --detail` → the newest backup that finished
+     before T; `wal-g backup-fetch $PGDATA <that backup>`; `touch $PGDATA/recovery.signal`;
+     in `postgresql.auto.conf`: `restore_command = 'wal-g --config /etc/wal-g/walg.json
+     wal-fetch %f %p'`,
+     `recovery_target_time = '<T>'`, `recovery_target_action = 'promote'`; start.
+   - Either: PostgreSQL's log must show `recovery stopping before commit of transaction ...,
+     time <after T>`, `selected new timeline ID`, `archive recovery complete`, and `SELECT
+     pg_is_in_recovery();` must be `f`. `recovery ended before configured recovery target was
+     reached` means the archive lacks WAL up to T: choose an earlier T or find the segments.
+     Archive the new timeline (pgBackRest: the same stanza once the old server is stopped;
+     WAL-G: a new `WALG_S3_PREFIX`) and take a full base backup now.
+5. **End every session** (owner): `DELETE FROM django_session;`. A dump leaves sessions out; a
+   point-in-time recovery brings back every session as at T, including ones signed out,
+   deactivated or ended by a password or role change since (drilled). Everyone signs in
+   again.
+6. **Credentials and privileges**: role passwords are as at T; if `arkray_app` or
+   `arkray_owner` was rotated after T, set it again (`\password`). Point the migrate job's
+   `DATABASE_URL` at the new database; `manage.py grant_app_privileges arkray_app` (owner);
+   `manage.py check --deploy --database default` (application credentials).
+7. **Re-apply the erasures** ([Restore from backup, step 4](#restore-from-backup)): the API stays
+   closed (503 `erasure_reconciliation_required`) until it has run.
+8. **Redo the security changes after T** from step 3's list: deactivate again, reset MFA
+   again, change roles again, end support sessions; resend invitations created after T (they
+   are gone). One-time links used or revoked after T work again until they expire
+   (invitations and temporary passwords 72 h, resets 1 h): revoke them if that matters.
+9. **Validate** ([Recovery validation checklist](#recovery-validation-checklist)), point the
+   application's `DATABASE_URL` at the new database, start api, workers, web, beat last;
+   check from the allowlisted address; maintenance off.
+10. Keep the old database until the recovery is accepted; then delete it (it holds the data
+    erased since T until then).
+
+Measured (2026-10-12, `tests/drills/pitr_drill.py`, development machine, PostgreSQL 16 in
+Docker): a base backup of the schema-only cluster (41 MB) 1.9 s; restore of the base backup
+0.8 s; WAL replay to T and promotion 1.6 s for 32 MB of WAL, **11-24 s for 1,040 MB** (redo
+8-19 s; 45-95 MB/s with the archive copies, two runs); ledger replay 1.8-2.2 s; `VACUUM
+(ANALYZE)` 0.3 s; recovery to the API reopening 10.7 s, with the whole validation 27.8 s.
+Estimate a real one as: fetching the base backup (its size over the storage's throughput) +
+the WAL since it (up to about 25 s per GB here; R64: 50,000 note edits wrote 3.2 GB) +
+vacuum (13-21 s at a million leads) + the validation and cutover (allow 15-30 minutes of
+people's time).
+
 ## Restore from backup
 
-1. Prefer point-in-time recovery on the managed service into a **new** instance.
+1. Prefer [point-in-time recovery](#point-in-time-recovery) into a **new** instance; the
+   steps below are for a dump.
 2. From a dump: prepare the target with `infrastructure/postgres/roles.sql`
    (`-v database=<new name>`, as the administrator: the database, the roles, the
    extensions), bring in the backup private key ([Backup encryption keys](#backup-encryption-keys)),
@@ -482,7 +822,10 @@ ways back are the pre-upgrade backup or a forward fix
    it from its bucket's versions or Object Lock copies; reopening without it would serve
    people who asked to be erased.
 5. Point the deployment at it; readiness `ok`; sign in; spot-check the dashboard's figures.
-6. Sessions aren't in backups: everyone signs in again.
+6. Sessions aren't in dumps: everyone signs in again (a point-in-time recovery brings them
+   back: [empty them](#point-in-time-recovery), step 5). Any restore undoes the security
+   changes made after the backup (deactivations, password, role and MFA changes, revoked
+   links): redo them from the security events after T (R140).
 7. **The database backup is not a backup of the files** (product enhancement phase, R93): it
    holds pipelines, stages, custom field definitions and values, negotiated price history and
    attachment *metadata*, but the attachment bytes live in object storage. Restore the bucket
@@ -491,6 +834,47 @@ ways back are the pre-upgrade backup or a forward fix
    downloads as 410 `attachment_unavailable`. Then run `manage.py reconcile_attachments`
    and follow [Attachment bucket lost or restored](#attachment-bucket-lost-or-restored). Support sessions in the backup end at
    once: their browser sessions are gone.
+
+## Recovery validation checklist
+
+After any restore or recovery, before maintenance is switched off. Keep the results with the
+restore's record.
+
+- [ ] **The database**: point-in-time: PostgreSQL's log shows `recovery stopping before
+      commit ..., time ...` later than T and `archive recovery complete`;
+      `pg_is_in_recovery()` is `f`. Dump: `restore.sh` printed `checksum: ok`, `signature: ok`.
+- [ ] **Row counts**: `restore.sh` prints them (compare with the source's counts noted at the
+      backup); for a recovery, `SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY
+      1;` after the vacuum below, and the leads, deals and activities counts against the last
+      known dashboard figures.
+- [ ] **Schema**: `manage.py migrate --check` exits 0 and `manage.py showmigrations`' last
+      `[X]` per app are the deployed release's leaf nodes (the images match the database).
+- [ ] **Privileges and the release check**: `manage.py grant_app_privileges arkray_app`
+      (owner); `manage.py check --deploy --database default` (application credentials): no
+      `arkray.E001` (the runtime role could rewrite the audit trail) or `arkray.W002`
+      (statement logging, R63).
+- [ ] **Sessions** (point-in-time only): `DELETE FROM django_session;` done.
+- [ ] **Erasure ledger**: `replay_erasures` exit 0, report kept; `manage.py ledger_status`
+      ok; `arkray_erasure_ledger_gate_open` 1 on every process.
+- [ ] **Vacuum**: `VACUUM (ANALYZE);` (owner; `restore.sh` did it for a dump): a restored
+      copy's dashboards are about three times slower until vacuumed (R55).
+- [ ] **Outbox**: `SELECT status, count(*) FROM core_outbox_event GROUP BY 1;` pending drains
+      once the workers run (the replay queues purges); `in_flight` rows from before the
+      restore are re-run after their 5-minute lease; dead ones: [Dead events](#dead-events).
+- [ ] **Attachments** (R93): `manage.py reconcile_attachments`: objects uploaded after T are
+      `orphaned` (keep them 30 days: [Orphaned attachment objects](#orphaned-attachment-objects));
+      rows whose objects were deleted after T are `missing` (restore the versions, or
+      `--repair` marks them unavailable): [Attachment bucket lost or restored](#attachment-bucket-lost-or-restored).
+- [ ] **Search and Ask Arkray's index**: no chunks for the erased (the replay deletes them);
+      `manage.py ai_reindex` only if the index is suspect ([Re-indexing](#re-indexing)).
+- [ ] **Smoke test** from the allowlisted address ([Emergency maintenance](#emergency-maintenance)):
+      sign in as an administrator (two-step), `/api/v1/auth/me` 200, the organisation
+      dashboard's figures plausible, a deal and its negotiated price history, a note's file
+      downloads.
+- [ ] **Monitoring**: `arkray_db_up` 1, readiness ok, error rate at baseline, the outbox's
+      oldest due falling, no `erasure_ledger_gate_closed` lines.
+- [ ] **Record**: T, the start and end times, the replay and reconciliation reports, who
+      approved reopening.
 
 ## Erasure ledger behind
 
@@ -553,32 +937,80 @@ restore.sh` does it; otherwise: `VACUUM (ANALYZE);` (minutes at a million leads)
 
 ## Rotate a secret
 
-- **`DJANGO_SECRET_KEY`**: set the new key and put the old one in
-  `DJANGO_SECRET_KEY_FALLBACKS` for at least a day (the 12-hour session lifetime): sessions,
-  sealed page links and trusted-browser cookies keep working; then remove it. A leaked key is
-  rotated without the fallback: everyone signs in again.
-- **Database passwords**: as an administrator, in `psql`, `\password arkray_app` (it prompts
-  and sends only the hash: an `ALTER ROLE ... PASSWORD '...'` statement would land in
-  `~/.psql_history` and, where `log_statement` is `ddl`, in the server log). Update
-  `DATABASE_URL` in the secret manager, roll the pods.
-- **The owner role (`arkray_owner`)**: `\password arkray_owner` the same way; update the
-  migration job's `DATABASE_URL` (and `ARKRAY_OWNER_PASSWORD` where the deployment keeps it).
-  Nothing long-running uses it, so nothing needs rolling.
-- **The database superuser / administrator**: through the managed service's console (or
-  `\password` on self-hosted PostgreSQL); update `POSTGRES_PASSWORD`/the administrator
-  secret. The application never uses it.
-- **SMTP (`EMAIL_URL`)**: create a new credential at the mail provider, update `EMAIL_URL`,
-  roll the web tier and the `email` worker, check an invitation arrives, then revoke the old
-  credential.
-- **Attachment storage (S3)**: preferably an IAM role (nothing to rotate). With static keys
-  (`ATTACHMENT_S3_ACCESS_KEY_ID`/`ATTACHMENT_S3_SECRET_ACCESS_KEY`): create a second access
-  key, update both values, roll the web tier and the workers, check an upload and a
-  download, then deactivate and delete the old key.
-- **Redis password**: Redis supports two passwords during a change (ACL users); update
-  `CELERY_BROKER_URL` and `REDIS_CACHE_URL`, roll everything, remove the old password.
-- **`ANTHROPIC_API_KEY`**: create a new key, update the ai worker's secret, roll it, revoke
-  the old key.
-- **`METRICS_TOKEN`**: update the scraper and the deployment together.
+When: on the schedule your security policy sets, when someone who knew a secret leaves, and
+**at once** when one may have leaked (then skip the grace steps marked *grace*, and treat the
+leak as a [security incident](#security-incident)). Which process holds which secret is
+`infrastructure/env/production.env.example`; give a new secret to exactly those. After every
+rotation run `manage.py preflight` ([deployment.md](deployment.md#preflight)) in the scanning
+worker's container: it proves each new credential works without printing one. Keep retired
+secrets in the secret manager's history (versioned) until nothing can need them, then destroy
+them.
+
+| Secret | Lives in | Used by | Rotated wrongly |
+|---|---|---|---|
+| `DJANGO_SECRET_KEY` (+ `DJANGO_SECRET_KEY_FALLBACKS`) | secret manager | every backend process | without the old key in the fallbacks: everyone signed out, sealed page links and trusted-browser cookies void; old key removed before `mfa_reencrypt`: administrators' authenticators unreadable (`reset_mfa` each) |
+| `arkray_app` password (`DATABASE_URL`) | secret manager | api, workers, beat | processes not yet rolled can't open connections: errors, readiness 503 |
+| `arkray_owner` password | secret manager | the migrate job, restores, `replay_erasures` | the next migrate (the release) or restore fails |
+| database administrator (`POSTGRES_PASSWORD`, `ADMIN_DATABASE_URL`) | managed service / secret manager | provisioning (`roles.sql`) only | nothing running |
+| backup role's password | backup host | `scripts/backup.sh` | the nightly backup fails |
+| Redis broker password (`CELERY_BROKER_URL`) | secret manager | every backend process | background work waits (durable in PostgreSQL); questions in flight fail |
+| Redis cache password (`REDIS_CACHE_URL`) | secret manager | every backend process | the cache is skipped: slower, rate limits per process (R127) |
+| SMTP credential (`EMAIL_URL`) | secret manager | every backend process (worker-outbox sends) | emails retry, then go dead: invitations and resets don't arrive |
+| attachments' S3 keys (`ATTACHMENT_S3_*`), if not a workload identity | secret manager | api, workers | uploads and downloads 503, scans wait |
+| the S3 ledger's credentials (AWS's default chain: the workload identity, or `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`) | secret manager | every backend process | the ledger unreadable: each process closes the API after `ERASURE_LEDGER_MAX_STALE_S` (1 h) |
+| `ERASURE_LEDGER_KEY` (+ `ERASURE_LEDGER_VERIFY_KEYS`) | secret manager, with the ledger's own secrets | every backend process | swapped alone: entries read as tampered, the API closes ([its runbook](#rotate-the-erasure-ledger-key)) |
+| `METRICS_TOKEN` | secret manager | api (checks it), the scraper | scrapes 404: the metric alerts go blind |
+| `ANTHROPIC_API_KEY` | secret manager | worker-ai only | answers fall back to retrieval (the breaker opens) |
+| backup encryption key pair | public: backup host; private: offline, two people | backup.sh / restore.sh | dumps encrypted to a key nobody holds are unrecoverable |
+| backup signing key | secret: backup host; public: where restores happen | backup.sh / restore.sh | restores refuse new dumps until the public half arrives |
+| the edge's TLS key | the edge only | nginx | browsers refuse the site (HSTS: no click-through) |
+
+- **`DJANGO_SECRET_KEY`**: (1) generate a new key (50+ characters). (2) Deploy
+  `DJANGO_SECRET_KEY=<new>` and `DJANGO_SECRET_KEY_FALLBACKS=<old>` to every backend process
+  in one roll (a process still on the old key alone rejects what the new ones signed: keep the
+  roll short). (3) `manage.py mfa_reencrypt` once, from any backend container (it exits
+  non-zero if a secret is under no configured key: put the old key back and run it again).
+  (4) *grace*: after at least 12 hours (the absolute session lifetime; a day is safer), remove
+  the fallback and roll. **Leaked**: the same steps with no grace: remove the fallback right
+  after `mfa_reencrypt` (minutes); everyone signs in again.
+- **`arkray_app`'s password**: as the administrator, `\password arkray_app` in `psql` (it sends
+  only the hash: `ALTER ROLE ... PASSWORD '...'` lands in `~/.psql_history` and, with
+  `log_statement = ddl`, the server log); update `DATABASE_URL` in the secret manager; roll
+  api, workers and beat at once. Open connections keep working; a process that opens a new one
+  before it is rolled fails until it is (a minute or so with `DB_CONN_MAX_AGE_S` 60). For no
+  error at all, alternate two login roles that are members of `arkray_app` (switch
+  `DATABASE_URL` to the other, roll, then change the first one's password): not verified
+  here; check `database.role` in preflight before relying on it.
+- **`arkray_owner`**: `\password arkray_owner` the same way; update the migrate job's and the
+  restore operator's copies (`ARKRAY_OWNER_PASSWORD` where the deployment keeps it). Nothing
+  long-running uses it.
+- **The database administrator**: the managed service's console (`\password` when
+  self-hosted); update `POSTGRES_PASSWORD` / `ADMIN_DATABASE_URL`. The application never uses it.
+- **The backup role**: `\password` it; update the backup host's `DATABASE_URL`; run
+  `scripts/backup.sh` once by hand.
+- **Redis**: with ACLs, add the new password beside the old (`ACL SETUSER <user> >new`),
+  update `CELERY_BROKER_URL` and `REDIS_CACHE_URL`, roll every backend process, check
+  preflight's `redis.*`, then remove the old (`ACL SETUSER <user> <old`). A managed service's
+  token rotation that keeps both for a while (ElastiCache `ROTATE`, then `SET`) works the same.
+  With `requirepass` alone (one password) there is a window: change it and roll at once.
+- **SMTP**: create a second credential at the provider, update `EMAIL_URL`, roll, `manage.py
+  preflight --only smtp --send-test-email <you>`, then revoke the old one.
+- **S3 keys** (attachments, and the ledger's when it isn't a workload identity): create a second
+  access key, update the values, roll the web tier and every worker (every backend process for
+  the ledger's), `manage.py preflight --only storage,ledger` (the probe uploads, reads and
+  removes; the ledger is read), then deactivate the old key, wait a day, delete it. Never leave
+  the ledger unreadable for an hour: every process would close the API.
+- **`ERASURE_LEDGER_KEY`**: [Rotate the erasure ledger key](#rotate-the-erasure-ledger-key);
+  never by swapping the key alone.
+- **`METRICS_TOKEN`**: the API accepts one token: update the scraper's secret and the
+  deployment together and silence the absent-metrics alerts for the minute in between.
+- **`ANTHROPIC_API_KEY`**: create a new key, update worker-ai's secret (and only its), roll it,
+  ask one question that needs the model, revoke the old key.
+- **Backup keys**: [Backup encryption keys](#backup-encryption-keys). After a new signing key,
+  hand its public half to every place restores happen **before** the next backup, and keep the
+  old public half to verify older dumps until they expire.
+- **The edge's certificate and key**: renew (ACME or the CA), install, `nginx -s reload` (no
+  connection is dropped); the key never leaves the edge.
 
 ## Restore drill
 
@@ -590,7 +1022,25 @@ with a throwaway key, erases a lead, deletes a file and a custom field's values 
 pseudonymises a former user (ledgered), restores with `restore.sh`, checks the API is refused
 while the database is behind and while the ledger is unavailable, replays, checks every
 erasure holds again and a bystander is untouched, and replays once more (all already
-applied). Keep `drill.json` (ids and counts only). Last run: 2026-10-10, PASS.
+applied). Keep `drill.json` (ids and counts only). Last run: 2026-10-12, PASS (backup
+0.7 s, restore 0.9-1.1 s, 5 entries re-applied, then all already applied).
+
+**Point-in-time recovery**: `python tests/drills/pitr_drill.py --report pitr-drill.json`
+(backend directory; Docker and the development Redis; it starts its own throwaway
+PostgreSQL containers from the production image and removes them). It provisions a
+database with roles.sql, archives its WAL, takes a base backup, writes through the
+application before and after a target time T (an erasure each side, a signed-in browser
+that signs out after T, rows and a file after T), recovers into a new server to T, and
+checks: every table exactly as at T, the rows after T absent, the API closed until
+`replay_erasures`, the erasures re-applied, sessions emptied, the grant, `migrate --check`,
+the release check, the attachment reconciliation and the vacuum; it prints the timings.
+`--wal-load-mb 1024` adds a gigabyte of WAL before T to time the replay. Last run:
+2026-10-12, PASS (database steps 4.9 s; 1 GB of WAL replayed in 11-24 s).
+
+**On the real platform**: a provider point-in-time recovery into a new instance (never the
+production one) and steps 5-9 of [Point-in-time recovery](#point-in-time-recovery)
+against it, once before go-live and then quarterly: the drills above prove the
+application's side, not the provider's.
 
 ## Backup encryption keys
 

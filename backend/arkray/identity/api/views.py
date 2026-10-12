@@ -209,6 +209,7 @@ class MfaStatusView(ApiView):
                     "recovery_codes_remaining": found.recovery_codes_remaining,
                     "required": found.required,
                     "can_disable": found.can_disable,
+                    "lock": None if found.lock is None else found.lock.value,
                 }
             ).data
         )

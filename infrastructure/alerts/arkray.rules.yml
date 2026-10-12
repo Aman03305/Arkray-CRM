@@ -31,6 +31,19 @@ groups:
           summary: "An API pod's metrics scrape fails or times out: a stalled database, a hung web tier or a pod that is down."
           runbook: docs/runbooks.md#database-stalled
 
+      # The erasure-ledger gate closes the API (every request and readiness 503) while the
+      # database is behind the ledger (a restore not yet replayed), ahead of it or diverged
+      # (the ledger was rolled back or replaced), tampered, or unreadable for over an hour
+      # (R116). Before deployment preparation the probes saw only "not ready". The status
+      # label names the case; the runbook says which command fixes which.
+      - alert: ArkrayErasureLedgerGateClosed
+        expr: min by (status) (arkray_erasure_ledger_gate_open) == 0
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "The erasure-ledger gate is closed ({{ $labels.status }}): the API answers 503 until the ledger and the database agree."
+          runbook: docs/runbooks.md#erasure-ledger-behind
+
       - alert: ArkrayDatabaseSaturated
         expr: arkray_db_server_connections / arkray_db_max_connections > 0.8
         for: 5m
@@ -210,4 +223,14 @@ groups:
         labels: {severity: ticket}
         annotations:
           summary: "A user's two-step verification was locked by too many wrong codes in the last hour: their password is probably known to someone else."
+          runbook: docs/runbooks.md#second-factor-locked
+
+      # Past the cap a new password doesn't clear (R133): the wrong codes went on across new
+      # passwords chosen through the emailed link, so whoever typed them very probably reads
+      # the owner's mailbox too. Only an MFA reset unlocks it; it stays raised for an hour.
+      - alert: ArkrayMfaLockedUntilReset
+        expr: max(arkray_mfa_locked_until_reset_last_hour) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "A user's two-step verification was locked until an MFA reset in the last hour: their password and probably their mailbox are known to someone else."
           runbook: docs/runbooks.md#second-factor-locked

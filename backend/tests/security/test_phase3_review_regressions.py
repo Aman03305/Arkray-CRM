@@ -265,8 +265,10 @@ def test_reassignment_query_count_is_constant(n):
     # savepoint, lead lock, user share lock, lead update, lead audit, opportunities lock,
     # opportunities update, one audit insert for all of them, release, reload; since Phase 4
     # also the activities' lock query (no current work here) and the timeline entry
-    # (arkray/activities/tests/test_reassignment.py pins the count with activities moving)
-    assert len(queries) == 12
+    # (arkray/activities/tests/test_reassignment.py pins the count with activities moving);
+    # since the deep security audit also the share lock on the personal pipelines holding
+    # the lead's deals (L-4, R137: pipeline/tests/test_field_removal_races.py)
+    assert len(queries) == 13
 
 
 # --- P3: a Phase 2 "Converted" lead without an opportunity can be converted properly ---------

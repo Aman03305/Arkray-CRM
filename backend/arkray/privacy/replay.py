@@ -33,7 +33,11 @@ the schema owner's credentials before traffic resumes:
 
 `dry_run` checks every entry against the database and reports what would be done, changing
 nothing (and leaving the API closed). Without an operator (`operator=None`) the work is
-recorded as the system's: the automatic reconciliation (privacy.reconcile).
+recorded as the system's: the automatic reconciliation (privacy.reconcile). That one leaves
+a held subject to an operator: an entry whose lead or user, or whose file's lead, is under a
+legal hold fails (`UnderLegalHold`, the API stays closed), checked in the transaction that
+applies it under the hold locks (core.holds), so a hold placed after the reconciliation
+looked still counts.
 """
 
 from __future__ import annotations
@@ -51,7 +55,8 @@ from arkray.activities import attachments
 from arkray.activities.models import Activity, ActivityType, Attachment
 from arkray.ai.models import KnowledgeChunk
 from arkray.audit import services as audit
-from arkray.core import ledger
+from arkray.core import holds, ledger
+from arkray.core.models import HoldSubject
 from arkray.identity.models import User
 from arkray.leads.models import Lead
 from arkray.pipeline import field_values
@@ -121,10 +126,16 @@ def _lead(entry: ledger.Entry, operator: User | None, dry_run: bool) -> str:
     lead = Lead.objects.filter(pk=lead_id).first()
     if lead is None:
         return MISSING
+    # Without an operator (the automatic reconciliation) a held subject is an operator's
+    # decision (privacy.reconcile): checked again in the transaction that applies the entry,
+    # serialised with placing a hold, so one placed since the reconciliation looked counts.
+    automatic = operator is None
     if not services._already_erased(lead):
         if dry_run:
             return WOULD
-        services.erase(lead_id, operator_id=_operator_id(operator), replay=True)
+        services.erase(
+            lead_id, operator_id=_operator_id(operator), replay=True, unless_held=automatic
+        )
         return REAPPLIED
     # Still erased: nothing a re-index or a restored bucket brought back may stay.
     records = _lead_records(lead_id)
@@ -140,6 +151,10 @@ def _lead(entry: ledger.Entry, operator: User | None, dry_run: bool) -> str:
     if dry_run:
         return WOULD
     with transaction.atomic():
+        if automatic:
+            holds.barrier()
+            if holds.is_held(HoldSubject.LEAD, lead_id):
+                raise holds.UnderLegalHold(HoldSubject.LEAD.value, lead_id)
         chunks.delete()
         attachments.erase_for_notes(note_ids, timezone.now())
     return CLEANED
@@ -153,7 +168,9 @@ def _user(entry: ledger.Entry, operator: User | None, dry_run: bool) -> str:
         return ALREADY
     if dry_run:
         return WOULD
-    staff.pseudonymise(user.pk, operator_id=_operator_id(operator), replay=True)
+    staff.pseudonymise(
+        user.pk, operator_id=_operator_id(operator), replay=True, unless_held=operator is None
+    )
     return REAPPLIED
 
 
@@ -189,12 +206,21 @@ def _attachment(entry: ledger.Entry, operator: User | None, dry_run: bool) -> st
         return ALREADY
     if dry_run:
         return WOULD
+    # Without an operator, a file of a held lead (its name and hash are the lead's data too)
+    # is an operator's decision, as for `_lead` (review P3-5): checked under the hold barrier
+    # before the row changes, and again by the purge under the lead's hold lock.
+    automatic = operator is None
     with transaction.atomic():
+        if automatic:
+            holds.barrier()
+            lead_id = Activity.objects.filter(pk=row.note_id).values_list("lead_id", flat=True)[0]
+            if holds.is_held(HoldSubject.LEAD, lead_id):
+                raise holds.UnderLegalHold(HoldSubject.LEAD.value, lead_id)
         Attachment.objects.filter(pk=row.pk).update(
             deleted_at=row.deleted_at or timezone.now(), purged_at=None
         )
     # The object (probably already gone from storage) and the name, as the purge does.
-    attachments.purge(row.pk, replaying=True)
+    attachments.purge(row.pk, replaying=True, unless_held=automatic)
     return REAPPLIED
 
 

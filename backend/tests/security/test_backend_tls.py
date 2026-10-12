@@ -112,6 +112,13 @@ def test_smtp_s3_and_scanner_rules():
     assert transport.s3_problem("http://minio.example.com:9000")
     assert transport.s3_problem("https://minio.example.com:9000") is None
     assert transport.s3_problem("") is None
+    ledger = transport.s3_problem(
+        "http://minio.example.com:9000",
+        setting="ERASURE_LEDGER_S3_ENDPOINT_URL",
+        carries="erasure ledger entries",
+    )
+    assert ledger is not None
+    assert ledger.startswith("ERASURE_LEDGER_S3_ENDPOINT_URL")
     assert transport.scanner_problem("clamd://clamav.example.com:3310")
     assert transport.scanner_problem("clamd://clamav:3310", ["clamav"]) is None
     assert transport.scanner_problem("clamd://127.0.0.1:3310") is None

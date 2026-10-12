@@ -185,7 +185,8 @@ def sign_in_second_step(
         factor = mfa_services.verify_factor(user, code=code, recovery_code=recovery_code)
     except mfa_services.MfaLockedError:
         # Too many wrong codes in a row (deep security audit M-4): this challenge is over,
-        # and so is every later one until the password is reset or the factor is.
+        # and so is every later one until the password is reset or the factor is (only the
+        # factor, past MFA_MAX_FAILURES_BEFORE_RESET: MfaLockedUntilResetError, R133).
         throttle.failed()
         mfa_services.end_challenge(request)
         logger.info("login_mfa_locked", extra={"login": throttle.identifier[:12]})

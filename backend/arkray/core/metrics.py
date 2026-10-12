@@ -20,6 +20,8 @@ from django.conf import settings
 from django.core.cache import cache
 from django.db import connection
 
+from . import ledger_gate
+
 logger = logging.getLogger(__name__)
 
 # Celery queues (config/settings: CELERY_TASK_ROUTES and the workers' --queues).
@@ -171,6 +173,32 @@ def cache_up() -> list[Gauge]:
         gauge.add(1 if bounded(answered) else 0)
     except Exception:  # noqa: BLE001
         gauge.add(0)
+    return [gauge]
+
+
+def erasure_ledger_gate() -> list[Gauge]:
+    """Whether this process's erasure-ledger gate lets the API serve (core.ledger_gate).
+    While it is closed every API request and readiness answer 503, which the platform's
+    probes saw only as "not ready" (deployment preparation): this names the cause, so the
+    alert can point at the right runbook. Checked as the readiness probe and every API request
+    check it (at most every ERASURE_LEDGER_CHECK_INTERVAL_S, one small query and one ledger
+    read, each bounded by its client's timeouts), in the scrape's own thread: a probe thread
+    would open a database connection that nothing ever closes. The label is the gate's
+    status word only (ok, disabled, settling, behind, ahead, diverged, tampered,
+    unavailable)."""
+    gauge = Gauge(
+        "arkray_erasure_ledger_gate_open",
+        "1 while this process's erasure-ledger gate is open; 0 while it closes the API"
+        " (docs/runbooks.md#erasure-ledger-behind). The status label says why.",
+    )
+    try:
+        status = ledger_gate.GATE.status()
+    except Exception as exc:  # noqa: BLE001 — the gate maps every ledger and database failure
+        logger.warning(
+            "metrics_gauge_failed", extra={"gauge": gauge.name, "exc_type": type(exc).__name__}
+        )
+        return [gauge]
+    gauge.add(1 if status in ledger_gate.OPEN else 0, status=status)
     return [gauge]
 
 

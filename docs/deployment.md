@@ -109,6 +109,14 @@ The WSGI entry point defaults to production settings, so a deployment that forge
   `DJANGO_ALLOWED_HOSTS` entry is local (localhost, a loopback address or a single-label
   container name). An email backend that doesn't deliver (console, file, memory) is
   refused even with it.
+- **An emergency maintenance switch**: with a file `on` in `/etc/nginx/maintenance` (a
+  read-only mount; `infrastructure/nginx/maintenance/` in the reference stack) nginx answers
+  every HTTPS request itself, before any location, limit or upstream: 503, `Retry-After: 60`,
+  `no-store`, the API's envelope (`service_unavailable`) with the request id on `/api/*`, a
+  minimal page with the request id elsewhere. No reload (nginx tests for the file per
+  request); the plain-HTTP health check is outside it. Single addresses can be let through
+  (`geo $arkray_maintenance_hold`, empty) to try the application first
+  ([runbooks.md](runbooks.md#emergency-maintenance); `tests/architecture/test_edge_maintenance.py`).
 - **Don't log the paths `/activate/*` and `/reset-password/*`** at the proxy (or redact
   their last segment). They carry one-time secrets until used. The pages themselves send
   `Referrer-Policy: no-referrer` and `Cache-Control: no-store`, and Django never sees
@@ -213,8 +221,31 @@ application depends on, whatever proxy or load balancer is used:
 
 ## Release process
 
-1. CI builds both images once per commit, runs all gates, and pushes images tagged with the
-   commit SHA.
+1. **CI passes on the commit** (`.github/workflows/ci.yml`, on every push to main and every
+   pull request): backend and frontend gates, the secret scan of the whole history, the
+   workflows' lint (actionlint with shellcheck), both image builds with Trivy's gates, the
+   hardened smoke test and a release on a new database (`roles.sql`, `migrate` as
+   `arkray_owner`, `migrate --check`, the release check as `arkray_app`). Every commit pushed
+   to main gets its own run to the end; GitHub runs CI for the newest commit of each push, so
+   release the commit a push ended on. `scripts/ci-local.sh` runs the same jobs locally
+   (`--only images --ref HEAD` for the images of a commit). CI publishes nothing.
+
+   **1a. Publish with the release workflow** (`.github/workflows/release.yml`, Actions -> Release
+   -> Run workflow, on `main` or a `v*` tag on main, with that commit's full SHA). It refuses
+   unless CI concluded `success` for exactly that commit and both environments below require
+   reviewers. After the **staging** environment's reviewers approve, it builds both images
+   from the commit, reruns CI's scan, smoke and fresh-database steps on them unchanged,
+   pushes `ghcr.io/<owner>/arkray-backend:<sha>` and `arkray-frontend:<sha>`, and attests
+   their digests (build provenance and a CycloneDX SBOM, signed through Sigstore; the
+   repository is public, so the attestations are in the public transparency log). After the
+   **production** environment's reviewers approve, it verifies both attestations of exactly
+   those digests and lists them, with `docker pull ...@sha256:` lines, in the run's summary.
+   It deploys nothing: deploy those digests (never the tags) with the steps below, and check
+   them again where they run:
+   `gh attestation verify oci://ghcr.io/<owner>/arkray-backend@sha256:<digest> --repo <owner>/Arkray-CRM --signer-workflow <owner>/Arkray-CRM/.github/workflows/release.yml --source-digest <sha>`
+   (add `--predicate-type https://cyclonedx.org/bom` for the SBOM). A published tag is never
+   overwritten; a release that failed after pushing is finished by deleting that package
+   version in GHCR and starting again.
 2. **Once per environment**, a database administrator runs `infrastructure/postgres/roles.sql`
    (the database, `arkray_owner`, `arkray_app`, the extensions, R63's logging settings).
 3. Run the **migrate job** with the new image, as `arkray_owner`, after the
@@ -229,6 +260,11 @@ application depends on, whatever proxy or load balancer is used:
    rewrite the audit trail (R74) and warns when PostgreSQL would log failing statements or rows (R63).
    Django's HSTS notes (`security.W005`, `security.W021`) are policy choices: include
    subdomains and preload only when every subdomain is HTTPS.
+
+   **4a. Preflight** the environment with the new image, in the scanning worker's container
+   (worker-default: it alone reaches ClamAV) and with the application's credentials:
+   `manage.py preflight --base-url https://crm.example.com`. Any FAIL stops the rollout
+   ([Preflight](#preflight)).
 5. Roll out api, workers and web (rolling update; readiness gates traffic). The web server
    and the workers check their database role at start and refuse to run as a superuser or a
    role that owns the append-only tables (`DB_REQUIRE_RESTRICTED_ROLE`, on in production).
@@ -343,13 +379,57 @@ cookies, no horizontal overflow), a lead created through the UI, a note indexed 
 answered by Ask Arkray in 5.4 s, the database role refused for the owner (web server and
 worker), the proxy's logging and forwarding rules, and zero error lines in every container.
 
+## Preflight
+
+Production settings refuse an unsafe *configuration* at startup; `manage.py preflight` checks,
+live and read-only, that what the configuration points at is really there and really as safe.
+Run it before a new environment takes traffic, at every release (step 4a), and after any change
+to its infrastructure or secrets (a rotation included, [runbooks.md](runbooks.md#rotate-a-secret)):
+
+    docker compose exec worker python manage.py preflight --base-url https://crm.example.com
+    kubectl exec deploy/worker-default -- python manage.py preflight --json
+
+It prints one line per check, PASS, WARN, FAIL or SKIP, and exits 1 on any FAIL (`--json`: the
+same as JSON). WARN is a recommended setting to confirm, or something it couldn't read: a
+managed Redis that forbids `CONFIG`, a bucket configuration the application's least-privilege
+credentials can't read. SKIP says why the check doesn't apply (a loopback hop needs no TLS).
+
+| Group | Checks |
+|---|---|
+| `database` | connects; **TLS actually in use** (libpq's own state; `pg_stat_ssl` names the protocol) unless every host is loopback, a socket or a listed private name, and `sslmode=verify-full` when required; PostgreSQL 16; `vector`, `pg_trgm`, `btree_gin`; the runtime role restricted (R74, the release check's rule); no migration unapplied (and none the image doesn't know); R63's logging; statement, lock and idle timeouts set; `max_connections` against the [connection budget](reliability.md#connection-budget) (`--connections N`: the planned total; 16, the documented starting topology, by default) |
+| `redis` | broker and cache: `PING` over the configured URL (TLS verified as the application connects); a `PING` **without** the password must be refused; `maxmemory-policy` `noeviction` (broker) and an evicting one (cache), the broker's AOF and the cache's lack of persistence, where `CONFIG` is allowed; two separate instances (by `run_id`) |
+| `smtp` | connect, STARTTLS or implicit TLS with the certificate and host name verified (the application's own backend), EHLO, AUTH; sends nothing unless `--send-test-email <address>` |
+| `storage` | attachments and exports: the bucket reachable, Block Public Access and no public policy, versioning, default encryption, a lifecycle rule for earlier versions (versioned, without `ATTACHMENT_S3_PURGE_VERSIONS`), and a probe written, read back and removed under `.arkray-probe-preflight-*` (with every version; the reconciliation ignores the prefix). A filesystem store: the directory there, writable, mode 0700, the app user's. The erasure ledger's bucket: the same checks plus Object Lock (compliance mode), **read only, never a probe** (Object Lock could make it undeletable); a file ledger: its directory |
+| `scanner` | clamd `PING`, the signatures' age from `VERSION` (WARN over 3 days), the EICAR test file found and an ordinary file clean, through the application's own client |
+| `ledger` | the erasure ledger read and every entry verified with the configured keys, the gate open (as `ledger_status`), no key rotation left half done |
+| `celery` | each documented worker (`outbox@`, `celery@`, `index@` and `ai@` while Ask Arkray needs them) answers a ping and consumes exactly its queues; beat can't be asked: WARN when an outbox event is overdue by more than a minute |
+| `edge` | with `--base-url https://...` only: `/login` 200 over verified TLS (`--edge-ca-file` for a private CA), HSTS of at least a year on pages and API, the security headers, no version in `Server`, `/api` reaching Django, `/health/*` not routed (WARN if it is), `http://` redirecting to `https://` (`--http-url` for a non-standard port) |
+
+- **Where**: in the scanning worker's container, with the deployment's own environment and
+  the application role: the role check fails with the owner's credentials by design, and
+  only that worker reaches ClamAV (elsewhere `--skip scanner`). `--only`, `--skip` choose
+  groups.
+- **Bounded**: every call has a timeout and each group a deadline (`--timeout`, 30 s): a
+  dependency that hangs costs one FAIL.
+- **Writes** only the storage probes (removed again) and, when asked, one email. **Prints no
+  secret**: URLs without their password, every line redacted against every secret the
+  settings hold.
+- **Not covered**: SPF, DKIM and DMARC (send a test email and read its headers), the edge's
+  TLS versions and ciphers (an external TLS scanner), account-level S3 Block Public Access,
+  restores (the [restore drill](runbooks.md#restore-drill)), DNS and certificate expiry dates.
+
 ## Configuration
 
 All configuration is environment variables; secrets come from the platform's secret
 manager ([security.md](security.md#secrets-management)). Every variable the backend reads is
 listed here by name (`tests/architecture/test_configuration_documented.py` fails otherwise).
 Production settings refuse to start on the unsafe values named below, so a misconfiguration
-is a failed deploy, not a weakened service.
+is a failed deploy, not a weakened service. A template of every variable a deployment sets,
+with the safe values written out, placeholders for the rest and which service gets which
+secret, is `infrastructure/env/production.env.example` (staging: the same file with its own
+values); `tests/architecture/test_env_templates.py` keeps it complete and proves production
+starts with it filled in and refuses each security setting weakened. `manage.py preflight`
+then checks the live environment it describes ([Preflight](#preflight)).
 
 **Core and HTTP**
 
@@ -571,7 +651,10 @@ statement timeout with `SET LOCAL`). Platform notes: [hosting-compatibility.md](
 
 ## Backup, restore and disaster recovery
 
-- **Primary backup: point-in-time recovery** on the managed service (RPO: minutes).
+- **Primary backup: point-in-time recovery** (RPO: minutes): the managed service's, or on a
+  self-hosted PostgreSQL continuous WAL archiving to object storage in another region with
+  pgBackRest or WAL-G ([runbooks.md](runbooks.md#database-backup): configuration, retention
+  30 days, monitoring).
   **Secondary: a logical dump** (`scripts/backup.sh`: `pg_dump` custom format, checked to
   read back, **encrypted** to the backup public key (`BACKUP_GPG_RECIPIENT_FILE`; the private
   key offline, [runbooks.md](runbooks.md#backup-encryption-keys)), **signed** by the backup
@@ -652,9 +735,39 @@ statement timeout with `SET LOCAL`). Platform notes: [hosting-compatibility.md](
   values deleted, the user pseudonymised, a bystander untouched) and the API reopened; a
   second replay found all 5 already applied. A dump without encryption was refused unless
   `BACKUP_ALLOW_UNENCRYPTED=1`.
-- **Targets: RPO ≤ 5 minutes** (point-in-time recovery), **RTO ≤ 1 hour**: a restore at this
-  size takes about 7 minutes of database time, leaving the rest for provisioning, DNS and
-  the release check. Confirm both with the business, and drill quarterly
+- **A point-in-time recovery restores the whole database as at T, sessions included** (a dump
+  leaves them out): sessions ended since, deactivations and password, role or MFA changes
+  after T are undone. The recovery runbook empties `django_session` before reopening and
+  has the operator redo the security changes after T
+  ([runbooks.md](runbooks.md#point-in-time-recovery)); database role passwords are also as
+  at T.
+- **Verified 2026-10-12** (`tests/drills/pitr_drill.py`, development machine, the production
+  image `pgvector/pgvector:0.8.7-pg16-trixie` in throwaway containers): a database
+  provisioned with roles.sql (roles renamed), migrated as the owner and granted; WAL
+  archived; a base backup of the schema only (41 MB, 1.9 s, `pg_verifybackup` clean); data
+  written as the application role, a lead erased, then T, then the customer erased, a user,
+  a deal, a note and a file added and a browser signed out. Recovered into a new server to T
+  (`restore_command` from the archive, `recovery_target_action = promote`: "recovery
+  stopping before commit" of the first transaction after T, timeline 2): every one of the
+  database's tables identical to T by count and checksum, the rows after T absent, the lead
+  erased before T still erased, the customer back; the API 503 `erasure_reconciliation_required`
+  (and 503 with the ledger unavailable) until `replay_erasures` (1 entry already applied, 2
+  re-applied), then the customer erased again with their index chunks, a bystander
+  untouched, the API open, a second replay all applied; the signed-out browser's session
+  valid again until `django_session` was emptied; `grant_app_privileges`, `migrate
+  --check`, the release check (the application role passes, the owner is refused); the
+  attachment reconciliation found the file uploaded after T as the one orphan. Timings: base
+  backup restored 0.8 s, WAL replay to promotion 1.6 s (32 MB), ledger replay 2.2 s, vacuum
+  0.3 s; with 1,040 MB of WAL before T the replay took 11-24 s in two runs (redo 8-19 s,
+  45-95 MB/s including the archive copies).
+- **Emergency maintenance**: the edge's switch closes the site with a 503 (the API's
+  envelope, a minimal page) while a restore or a stopped deploy runs, its health check still
+  answering ([runbooks.md](runbooks.md#emergency-maintenance)).
+- **Re-run 2026-10-12** at this release: `restore_drill.py` PASS (backup 0.7 s, restore 0.9 s).
+- **Targets: RPO ≤ 5 minutes** (point-in-time recovery), **RTO ≤ 1 hour**: a dump restore at
+  this size takes about 7 minutes of database time; a point-in-time recovery is the base
+  backup's restore plus up to about 25 s per GB of WAL since it (measured: 11-24 s per GB),
+  leaving the rest for provisioning, DNS, the ledger replay and the validation checklist. Confirm both with the business, and drill quarterly
   ([runbooks.md](runbooks.md#restore-from-backup)).
 - **Redis** holds no data that can't be lost: the broker's queued messages are re-created
   from the outbox (the durable queue is in PostgreSQL), and the cache is a cache.
@@ -688,8 +801,9 @@ With `anthropic`, before enabling it in production:
   SDK's own `ANTHROPIC_BASE_URL`/`ANTHROPIC_CUSTOM_HEADERS`);
 - the model and its limits in settings (`AI_CHAT_MODEL`, budgets, bulkheads,
   [Configuration](#configuration));
-- an evaluation with the real model on the organisation's data (R69: verified here with a
-  scripted model only).
+- a PASS report from the real-model evaluation on the synthetic CRM (`manage.py ai_eval
+  --provider anthropic`, [ai-evaluation.md](ai-evaluation.md); R69: the suite is ready, the
+  real model is not verified), then a pilot on the organisation's data.
 
 The kill switch is `AI_ENABLED=false` (it also stops queued questions).
 
@@ -721,6 +835,18 @@ The kill switch is `AI_ENABLED=false` (it also stops queued questions).
 
 ## Images
 
+- **Released images are built by the release workflow, by digest**: CI builds and tests the
+  images but publishes nothing; `.github/workflows/release.yml` rebuilds them from the
+  released commit (the builds upgrade OS packages, so a rebuild differs), runs CI's own scan
+  and smoke steps on exactly those images, and pushes them to GHCR with OCI labels
+  (`org.opencontainers.image.revision`, `.source`), a CycloneDX SBOM and a build-provenance
+  attestation per digest. Manifests reference `ghcr.io/<owner>/arkray-<name>@sha256:<digest>`.
+  The CI tools are pinned too: actions by commit (the exact release in a comment, one commit
+  per action across workflows), Trivy, actionlint and gitleaks by version and digest or
+  checksum (`tests/architecture/test_ci_workflow.py`); so is the Dockerfiles' BuildKit
+  frontend (`# syntax=docker/dockerfile:1.27@sha256:...`, run by every build).
+- **The images are amd64 only**: built and verified on x86_64, and the pinned ClamAV image
+  has no arm64 variant. Run them on x86_64 hosts ([deployment-readiness.md](deployment-readiness.md#review-by-component)).
 - Base images are pinned **by digest** in the Dockerfiles (the tag names the series). Move a
   digest deliberately (Dependabot or a reviewed edit) and rebuild; OS packages are upgraded
   at build time, so a rebuild also picks up security updates published since the base.

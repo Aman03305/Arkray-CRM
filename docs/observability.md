@@ -214,7 +214,9 @@ at scrape time in a bounded number of queries, `config/metrics.py`):
 | `arkray_ai_questions_pending` | — | questions waiting for an ai worker and not yet expired |
 | `arkray_ai_breaker_open` | — | the model provider's circuit breaker (its state is shared through the cache: no sample while the cache can't answer) |
 | `arkray_administrator_deactivations_last_hour` | — | administrator accounts deactivated in the last hour (`user.deactivated` audit events recording an administrator's role; one database count, no cache read; ADR-0033) |
-| `arkray_mfa_lockouts_last_hour` | — | second factors locked by too many wrong codes in the last hour (`mfa.locked` audit events; counted in the same database query as the administrator deactivations, no cache read; deep security audit M-4) |
+| `arkray_mfa_lockouts_last_hour` | — | second factors locked by too many wrong codes in the last hour (`mfa.locked` audit events, both kinds; counted in the same database query as the administrator deactivations, no cache read; deep security audit M-4) |
+| `arkray_mfa_locked_until_reset_last_hour` | — | second factors locked until an MFA reset in the last hour (`mfa.locked` with `until: mfa_reset`; the same database query, no cache read; R133) |
+| `arkray_erasure_ledger_gate_open` | `status` | 1 while this process's erasure-ledger gate is open (`ok`, `disabled`, `settling`), 0 while it closes the API (`behind`, `ahead`, `diverged`, `tampered`, `unavailable`); checked as readiness checks it, in the scrape's thread (deployment preparation) |
 | `arkray_attachments` | `state` (uploading, failed, pending_scan) | attachment rows still in progress, failed with their object not yet removed, waiting for a malware scan |
 | `arkray_attachment_oldest_seconds` | `state` (uploading, unpurged, pending_scan) | age of the oldest unfinished upload; of the oldest failed or deleted file whose object isn't removed yet; of the oldest stored file still waiting for its malware scan |
 | `arkray_attachment_storage_up` | `backend` (filesystem, s3) | the store answered a liveness check (S3 `head_bucket`; a directory: a sentinel written, read back, deleted), at most every 30 s per process, within the 2 s probe deadline |
@@ -293,5 +295,7 @@ The metric-based rows are shipped as Prometheus rules in `infrastructure/alerts/
 | Attachment object missing | `arkray_attachment_objects_missing_last_hour` > 0 (`ArkrayAttachmentObjectMissing`) | runbooks: attachment object missing |
 | Administrator deactivated | any administrator account deactivated in the last hour (`ArkrayAdministratorDeactivated`, ticket) | runbooks: administrator deactivated |
 | Second factor locked | any `mfa.locked` in the last hour (`ArkrayMfaLocked`, ticket): someone probably has that user's password | runbooks: second factor locked |
+| Second factor locked until an MFA reset | any `mfa.locked` with `until: mfa_reset` in the last hour (`ArkrayMfaLockedUntilReset`, ticket): someone probably has that user's password and mailbox | runbooks: second factor locked |
+| Erasure-ledger gate closed | `arkray_erasure_ledger_gate_open` 0 on any pod for 2 min (`ArkrayErasureLedgerGateClosed`, page): the API answers 503 until the ledger and the database agree | runbooks: erasure ledger behind |
 | Attachment reconciliation | mismatches > 0, outcome 2, no whole pass for 48 h (`ArkrayAttachmentReconcile*`); an upload unfinished for over an hour (`ArkrayAttachmentUploadStuck`); a file waiting over an hour for its malware scan, so not downloadable (`ArkrayAttachmentScanOverdue`) | runbooks: attachment reconciliation |
 | Malware | any `attachment_malware_blocked`; `pending_scans` growing for an hour (scanner down: files don't download) | runbooks: file storage |

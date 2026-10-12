@@ -7,7 +7,9 @@ scanned (docs/activities.md#attachments).
   else are refused, whatever their name or declared type. A file must be what its extension
   says: a PDF starts like a PDF, an image is that image format, Office files are the right
   OOXML package (without macros, ActiveX, OLE objects or anything fetched from elsewhere when
-  opened: its XML parsed, never searched as bytes), text is UTF-8 without NUL bytes.
+  opened: its XML parsed, never searched as bytes; a Word document also without a field that
+  starts a program or fetches content from elsewhere), text is UTF-8 without NUL bytes (a CSV
+  also without a cell Excel would run as a DDE formula).
 - **Names**: the uploaded name is display text only. It is cleaned (no path, no control or
   bidi characters, bounded) and never used for storage: objects live under generated keys.
 - **Receiving**: the body is read from the request stream in chunks, hashed (SHA-256) and
@@ -49,7 +51,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
-from typing import IO, Any, Protocol, cast
+from typing import IO, Any, NoReturn, Protocol, cast
 from urllib.parse import unquote, urlsplit
 from xml.etree.ElementTree import Element, ParseError
 
@@ -83,10 +85,13 @@ SAFE_EMBEDDINGS = (".xlsx", ".docx", ".pptx", ".png", ".jpeg", ".jpg", ".gif", "
 # something fetched from elsewhere when the file opens: macros, ActiveX, OLE objects, a
 # workbook's links to other workbooks and its data connections, documents Word imports when it
 # opens the file (an altChunk's RTF, which can carry OLE objects and self-updating links, or
-# MHT/HTML, which can fetch remote pictures), Office add-ins (deep security audit review).
+# MHT/HTML, which can fetch remote pictures), Office add-ins (deep security audit review),
+# Excel 4.0 (XLM) macro sheets, international ones too (ms-excel.macrosheet,
+# ms-excel.intlmacrosheet: macros without a VBA project, R132).
 ACTIVE_CONTENT_TYPES = (
     "vbaproject",
     "macroenabled",
+    "macrosheet",
     "activex",
     "oleobject",
     "vbadata",
@@ -106,12 +111,14 @@ IMPORTED_DOCUMENTS = (".rtf", ".mht", ".mhtml", ".htm", ".html", ".xhtml")
 # mode: OLE objects (CVE-2017-0199, "Follina"), remote templates, ActiveX, macro projects,
 # master-document subdocuments, frames, links to other workbooks, data connections, imported
 # documents (aFChunk: Word's altChunk), Office add-ins (webextension, webextensionTaskpanes:
-# an add-in loads from its web address when the file opens).
+# an add-in loads from its web address when the file opens), Excel 4.0 macro sheets
+# (xlMacrosheet, xlIntlMacrosheet).
 REFUSED_RELATIONSHIPS = (
     "oleobject",
     "attachedtemplate",
     "activex",
     "vbaproject",
+    "macrosheet",
     "vbadata",
     "subdocument",
     "frame",
@@ -181,7 +188,10 @@ def _webp(head: bytes, _file: IO[bytes]) -> bool:
     return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
 
 
-def _ooxml(main_part: str) -> Callable[[bytes, IO[bytes]], bool]:
+def _ooxml(
+    main_part: str,
+    body: Callable[[zipfile.ZipFile, list[zipfile.ZipInfo]], bool] | None = None,
+) -> Callable[[bytes, IO[bytes]], bool]:
     """An Office Open XML package with its main part and no active content: no macro project,
     OLE object or ActiveX control (by part name, embedded file type, declared content type,
     relationship type), nothing fetched from elsewhere when it opens (a remote template, a
@@ -189,7 +199,9 @@ def _ooxml(main_part: str) -> Callable[[bytes, IO[bytes]], bool]:
     central directory, then only its small XML parts ([Content_Types].xml, relationships;
     each and in total bounded) are read, so a zip bomb costs little here (enhancement security
     review: a renamed VBA part, an OLE package wrapping an executable, ActiveX all passed a
-    name-only check). Anything that can't be read or parsed is refused (fail closed)."""
+    name-only check). Then `body`, if any, reads the content itself (a Word document's fields:
+    _word_fields), bounded too, and may refuse with a message of its own (RejectedFile).
+    Anything that can't be read or parsed is refused (fail closed)."""
 
     def check(head: bytes, file: IO[bytes]) -> bool:
         if not head.startswith(b"PK\x03\x04"):
@@ -203,7 +215,11 @@ def _ooxml(main_part: str) -> Callable[[bytes, IO[bytes]], bool]:
                 lowered = {info.filename.lower() for info in infos}
                 if "[content_types].xml" not in lowered or main_part not in lowered:
                     return False
-                return not _active_content(package, infos)
+                if _active_content(package, infos):
+                    return False
+                return body is None or body(package, infos)
+        except RejectedFile:
+            raise  # refused with its own message (a Word field, a document too large to check)
         except Exception:  # noqa: BLE001 — a corrupt stream (zlib.error, ...), an encrypted
             return False  # entry, an unsupported compression: not a package we can vouch for
 
@@ -262,18 +278,27 @@ def _parse_part(raw: bytes) -> Element | None:
         # Never XML, and it would let the parser guess another encoding: expat reads bytes
         # starting "<\x00" as UTF-16, whatever it was told.
         return None
-    if text.startswith("<?xml"):
-        declaration = _XML_DECLARATION.match(text)
-        if declaration is None:
-            return None
-        if "encoding" in declaration[0]:
-            declared = _DECLARED_ENCODING.search(declaration[0])
-            if declared is None or declared["name"].strip().casefold() not in allowed:
-                return None
+    if not _declaration_agrees(text, allowed):
+        return None
     try:
         return defusedxml.ElementTree.fromstring(text, forbid_dtd=True, forbid_entities=True)
     except (ParseError, DefusedXmlException, ValueError):
         return None
+
+
+def _declaration_agrees(text: str, allowed: set[str]) -> bool:
+    """Whether the XML declaration at the start of `text` (if any) is well formed and names
+    no encoding, or one of `allowed` (the one the bytes were decoded with)."""
+    if not text.startswith("<?xml"):
+        return True
+    declaration = _XML_DECLARATION.match(text)
+    if declaration is None:
+        return False
+    if "encoding" in declaration[0]:
+        declared = _DECLARED_ENCODING.search(declaration[0])
+        if declared is None or declared["name"].strip().casefold() not in allowed:
+            return False
+    return True
 
 
 def _local(name: str) -> str:
@@ -320,6 +345,779 @@ def _links_active(root: Element) -> bool:
     return False
 
 
+# --- Word fields ----------------------------------------------------------------------------------
+# A field is an instruction Word evaluates (R132, the deep security audit's M-3 residual;
+# docs/activities.md#attachments). Most lay out or number the document (PAGE, TOC, REF,
+# HYPERLINK, MERGEFIELD, DATE ...); a few start a program or fetch content from another place:
+# DDE and DDEAUTO (a program, through Dynamic Data Exchange), INCLUDETEXT, INCLUDE (its old
+# name), INCLUDEPICTURE, IMPORT and LINK (a file, picture or object from wherever their
+# argument names: a web address or a network share sends the reader's address, and on Windows
+# their sign-in, to that server when the field updates), DATABASE (a query against whatever
+# data source, local or a remote server, its connection string names). Word keeps each story
+# (the body, a header, a footer, a footnote, an endnote, a comment, a text box, a building
+# block) as one stream of characters in which a field is begin, field code, separator,
+# result, end; the XML writes it as w:fldChar begin/separate/end around w:instrText runs (the
+# code split across any number of runs, other fields nested in it), or as one w:fldSimple with
+# the code in its w:instr. Every part of a Word document that could be a story is read whole,
+# decoded as _parse_part decodes; one whose text mentions field markup (_FIELD_MARKUP) is then
+# parsed as that stream: through defusedxml's expat parser (no DTD or entities), streamed,
+# never searched as bytes, each field's code judged once complete (_field_rule).
+#
+# Budget, for the whole document; past it the document is refused ("too large to check"),
+# never let through unread (the check runs inside the upload request, on a web worker):
+# - WORD_XML_BYTES decompressed: 64 MiB of story XML is thousands of pages of text (Word
+#   writes some 25-35 bytes of XML per element), far more than a 10 MB upload holds once its
+#   pictures are counted; reading that much takes about 0.4 s, and a zip bomb stops there.
+# - WORD_XML_WORK for parsing (expat calls back into Python for every element): an element
+#   counts 1 and 1 per attribute; a namespace declaration, a comment, a CDATA section, an
+#   mc:Ignorable prefix 1; field content FIELD_WORK per reading; judging a field's code 1 per
+#   FIELD_CODE_CHARS_PER_WORK characters, per reading. A unit of a real document costs
+#   under a microsecond at full clock, and, measured, no shape of part costs more per unit (one
+#   of nothing but empty elements, a zip bomb's shape: 0.4 of it), so 1 million bound parsing to
+#   under a second of CPU, what an authenticated user can make a web worker spend per upload
+#   (measured worst: 0.7 s, a 63 MiB document read whole and parsed to the budget); a real
+#   document with fields reaches it at some 15 MiB of XML (about 700 pages). What expat itself
+#   holds is bounded below (XML_TOKEN_BYTES ...): the largest traced memory any shape needed
+#   was 3.2 MiB (docs/activities.md#attachments).
+WORD_XML_BYTES = 64 * 1024 * 1024
+WORD_XML_WORK = 1_000_000
+FIELD_WORK = 3
+FIELD_CODE_CHARS = 64 * 1024  # of one field's code (an EndNote or Zotero citation is a few KB)
+FIELD_DEPTH = 64  # fields open inside one another (documents nest a few)
+# Read with breaks joined and blanks and computed parts removed, a code starting with one of
+# these is one of those fields, whatever separates its letters.
+DDE_FIELDS = ("DDE",)  # DDE, DDEAUTO
+FETCHING_FIELDS = ("INCLUDE", "IMPORT", "LINK")  # INCLUDETEXT, INCLUDEPICTURE, INCLUDE ...
+FIELD_REFUSED = (
+    "This document has a field that can start a program or fetch content from another place "
+    "(DDE, or INCLUDETEXT, INCLUDEPICTURE or LINK with a web or network address). Remove it, "
+    "or turn the fields into plain text (select all, then Ctrl+Shift+F9), and upload it again."
+)
+TOO_LARGE_TO_CHECK = (
+    "This document is too large to check for active content. Split it into smaller documents."
+)
+# Stand, in a field code, for what can't be read without evaluating the document (a field
+# nested in it: its result becomes part of the code; a symbol) and for a break (a tab, a line
+# or paragraph break, which Word may read as a blank or as nothing). Never in decoded XML text:
+# a part holding U+0000 is refused, and XML can't hold U+0001.
+_COMPUTED = "\x00"
+_BREAK = "\x01"
+# The field's name: a literal word (or "=", a formula) at the start of its code.
+_FIELD_NAME = re.compile(r"\s*(?:(?P<name>[A-Za-z]+)(?=[\s\\\"]|\Z)|=)")
+# An argument naming another place, wherever an argument can start (the code's start, after a
+# blank, at or after a quote: a superset of where Word starts one): a URL (a scheme of two
+# characters or more: one letter and a colon is a drive) or a UNC or protocol-relative path, in
+# any mix of slashes, escaped or not. One search, in C, linear in the code.
+_ELSEWHERE_ARGUMENT = re.compile(
+    r"""(?:^|(?<=[\s"]))(?:[\\/]{2}|[a-z][a-z0-9+.-]+:)""", re.IGNORECASE
+)
+_LEADING = re.compile(r"[\s\x01]*+")  # blanks and breaks before the name
+_SEEN = re.compile(r"[^\s\x00\x01]")  # what the bare reading keeps
+FIELD_CODE_CHARS_PER_WORK = 8  # judging a code: 1 unit of work per 8 characters, per reading
+
+
+def _field_rule(code: str, *, complete: bool = True) -> str | None:
+    """Why a field is refused, from its code (letter case doesn't matter), or None.
+    `complete`: False when the code was cut at FIELD_CODE_CHARS. The code is read three ways,
+    so how Word reads a break can't matter: with breaks as blanks, with breaks joining what is
+    around them, and bare (blanks, breaks and computed parts removed: "DD", a tab, "EAUTO" is
+    DDEAUTO to the bare reading, and DDE to the first).
+
+    - "computed": a name that isn't a literal word (a nested field, a quoted string, a symbol:
+      the 2017 DDE obfuscation spelled the name with nested QUOTE fields), or one of the
+      fetching fields with an argument that is (a nested MERGEFIELD naming the picture), or
+      whose code was cut: it can't be judged without evaluating the document, so it fails
+      closed.
+    - "dde": bare, the code starts with DDE (DDE, DDEAUTO), always (Word asks, and current
+      versions don't start the program by default; a document has no business asking).
+    - "database": bare, it starts with DATABASE, always (its connection string can name any
+      server).
+    - "remote": bare, it starts with INCLUDE, IMPORT or LINK (INCLUDETEXT, INCLUDEPICTURE, the
+      old INCLUDE, IMPORT, LINK) and an argument, read either way, names another place: a URL
+      of any scheme (http:, file:, mhtml:, ...) or a UNC path (\\\\host, //host). A drive or
+      root path (C:\\..., /Users/...) or a relative one passes: it names the reader's own disk,
+      which the document's author doesn't control (the file would have to be there already),
+      and ordinary documents carry them (an Excel range pasted as a link, a picture pasted from
+      a web page or an e-mail)."""
+    start = _LEADING.match(code)
+    if start is None or start.end() == len(code):
+        return None
+    if _FIELD_NAME.match(code[start.end() : start.end() + 256].replace(_BREAK, " ")) is None:
+        return "computed"
+    bare = "".join(seen[0] for seen in itertools.islice(_SEEN.finditer(code), 8)).upper()
+    if bare.startswith(DDE_FIELDS):
+        return "dde"
+    if bare.startswith("DATABASE"):
+        return "database"
+    if bare.startswith(FETCHING_FIELDS):
+        if _ELSEWHERE_ARGUMENT.search(code.replace(_BREAK, " ")) or (
+            _BREAK in code and _ELSEWHERE_ARGUMENT.search(code.replace(_BREAK, ""))
+        ):
+            return "remote"
+        if _COMPUTED in code or not complete:
+            return "computed"
+    return None
+
+
+@dataclass(slots=True)
+class _Field:
+    """A complex field being read: its code so far (bounded, blanks before the name dropped)."""
+
+    parts: list[str] = field(default_factory=list)
+    size: int = 0
+    complete: bool = True
+    in_code: bool = True  # no separator yet
+
+    def add(self, text: str) -> None:
+        if not self.size:
+            text = text.lstrip()
+        room = FIELD_CODE_CHARS - self.size
+        if len(text) > room:
+            text, self.complete = text[:room], False
+        if text:
+            self.parts.append(text)
+            self.size += len(text)
+
+    def copy(self) -> _Field:
+        return _Field(list(self.parts), self.size, self.complete, self.in_code)
+
+    def rule(self) -> str | None:
+        return _field_rule("".join(self.parts), complete=self.complete)
+
+
+@dataclass(slots=True)
+class _Scope:
+    """Where fields begin and end: a story (Word never joins its fields with anything outside
+    it) or an mc:AlternateContent branch (inline: Word reads one of the branches, and which
+    one depends on its version)."""
+
+    story: bool
+    in_code: bool = False  # a branch that opened inside a field code
+    fields: list[_Field] = field(default_factory=list)  # open, innermost last
+    stray: _Field | None = None  # w:instrText outside any field code, judged as one too
+
+
+class _Reading:
+    """One reading of a part's fields: as recorded, with every tracked change accepted
+    (deleted and moved-away content skipped: `skips` "deleted") or rejected ("inserted").
+    What Word may or may not see must not change how a field reads, so whatever can make two
+    readings differ is either read every way or refused as "structure": a field code that runs
+    into an AlternateContent branch, a field begun in a branch that doesn't end there or ending
+    in one a field begun outside, field content in an element of a namespace the document
+    declares ignorable (Word skips those it doesn't understand), fields nested past
+    FIELD_DEPTH."""
+
+    def __init__(
+        self, report: Callable[[str], None], charge: Callable[[int], None], skips: str = ""
+    ) -> None:
+        self.report = report
+        self.charge = charge  # judging a code costs work too (FIELD_CODE_CHARS_PER_WORK)
+        self.skips = skips
+        self.scopes = [_Scope(story=True)]
+
+    def clone(self, skips: str) -> _Reading:
+        other = _Reading(self.report, self.charge, skips)
+        other.scopes = [
+            _Scope(
+                scope.story,
+                scope.in_code,
+                [open_field.copy() for open_field in scope.fields],
+                None if scope.stray is None else scope.stray.copy(),
+            )
+            for scope in self.scopes
+        ]
+        return other
+
+    def in_code(self) -> bool:
+        scope = self.scopes[-1]
+        return scope.in_code or bool(scope.fields and scope.fields[-1].in_code)
+
+    def begin(self) -> None:
+        scope = self._settle()
+        if scope.fields and scope.fields[-1].in_code:
+            scope.fields[-1].add(_COMPUTED)  # a nested field: its result is part of the code
+        if len(scope.fields) >= FIELD_DEPTH:
+            self.report("structure")
+            return
+        scope.fields.append(_Field())
+
+    def separate(self) -> None:
+        scope = self._settle()
+        if not scope.fields:
+            self._unmatched(scope)
+            return
+        current = scope.fields[-1]
+        if current.in_code:
+            current.in_code = False
+            self._judge(current)
+
+    def end(self) -> None:
+        scope = self._settle()
+        if not scope.fields:
+            self._unmatched(scope)
+            return
+        current = scope.fields.pop()
+        if current.in_code:
+            self._judge(current)
+
+    def text(self, text: str, *, code: bool) -> None:
+        """Characters: `code` for w:instrText (a field code wherever it is), else run text or
+        a symbol (part of a field code only inside one)."""
+        scope = self.scopes[-1]
+        if scope.in_code:
+            self.report("structure")
+        elif scope.fields and scope.fields[-1].in_code:
+            scope.fields[-1].add(text)
+        elif code:
+            if scope.stray is None:
+                scope.stray = _Field()
+            scope.stray.add(text)
+
+    def enter(self, *, story: bool) -> None:
+        self.scopes.append(_Scope(story=story, in_code=not story and self.in_code()))
+
+    def leave(self) -> None:
+        scope = self.scopes.pop()
+        self._flush(scope)
+        if scope.fields and not scope.story:
+            self.report("structure")  # begun in the branch, it would go on outside it
+        for unfinished in scope.fields:
+            if unfinished.in_code:
+                self._judge(unfinished)
+
+    def close(self) -> None:
+        while self.scopes:
+            self.leave()
+
+    def _settle(self) -> _Scope:
+        scope = self.scopes[-1]
+        if scope.in_code:
+            self.report("structure")  # a field in a branch that opened inside a field code
+        self._flush(scope)
+        return scope
+
+    def _unmatched(self, scope: _Scope) -> None:
+        if not scope.story:
+            self.report("structure")  # it would act on a field begun outside the branch
+
+    def _flush(self, scope: _Scope) -> None:
+        if scope.stray is not None:
+            self._judge(scope.stray)
+            scope.stray = None
+
+    def _judge(self, judged: _Field) -> None:
+        self.charge(1 + judged.size // FIELD_CODE_CHARS_PER_WORK)
+        rule = judged.rule()
+        if rule is not None:
+            self.report(rule)
+
+
+_W = (
+    "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    "http://purl.oclc.org/ooxml/wordprocessingml/main",  # Strict
+)
+_MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+# expat's names: namespace URI and local name joined by "}". Matched exactly, as Word does.
+# Run text in a field code (w:t, not only w:instrText) is code to Word; a symbol (w:sym) can
+# show as any character; a tab, a line break or a paragraph mark in a code is a break
+# (_BREAK: _field_rule reads it both as a blank and as nothing).
+_WORD_ELEMENTS: dict[str, str] = {
+    f"{namespace}}}{local}": kind
+    for namespace in _W
+    for local, kind in (
+        ("fldChar", "fldChar"),
+        ("fldSimple", "fldSimple"),
+        ("instrText", "instrText"),
+        ("delInstrText", "instrText"),
+        ("t", "t"),
+        ("delText", "t"),
+        ("sym", "sym"),
+        ("tab", "break"),
+        ("ptab", "break"),
+        ("br", "break"),
+        ("cr", "break"),
+        ("p", "p"),
+        ("del", "deleted"),
+        ("moveFrom", "deleted"),
+        ("ins", "inserted"),
+        ("moveTo", "inserted"),
+        *(
+            (story, "story")
+            for story in (
+                "body",
+                "hdr",
+                "ftr",
+                "footnote",
+                "endnote",
+                "comment",
+                "docPartBody",
+                "txbxContent",
+            )
+        ),
+    )
+} | {f"{_MC}}}Choice": "branch", f"{_MC}}}Fallback": "branch"}
+# Attributes: Word reads them qualified. An unqualified w:instr is read as well (one more
+# code judged); an unqualified fldCharType isn't (a fldChar without one opens a field).
+_FIELD_CHAR_TYPE = frozenset(f"{namespace}}}fldCharType" for namespace in _W)
+_FIELD_INSTRUCTION = frozenset({"instr", *(f"{namespace}}}instr" for namespace in _W)})
+_IGNORABLE = f"{_MC}}}Ignorable"
+_IGNORABLE_NAME = frozenset({_IGNORABLE})
+_XML_SPACE = frozenset({"http://www.w3.org/XML/1998/namespace}space"})
+_XML_BLANKS = " \t\r\n"
+# Bounds on the XML itself, whatever the budget (past one, the part is refused as too large
+# to check): what expat holds whole before it calls back (a start tag with its attributes,
+# an attribute value, a comment) still unparsed past XML_TOKEN_BYTES; attributes on one
+# element; elements, and mc:Ignorable scopes, open inside one another; distinct names
+# (elements, attributes, prefixes: expat keeps a table entry for each). Word writes a few
+# dozen attributes on an element, nests a few dozen levels, uses a few hundred names.
+XML_TOKEN_BYTES = 1024 * 1024
+XML_NAMES = 10_000
+XML_ATTRIBUTES = 1_000
+XML_DEPTH = 1_000
+IGNORABLE_DEPTH = 32
+# A scope kept is paid for beyond what it adds: its start and its end each empty the name memo
+# (`kinds`), which the elements after it fill again. Sibling scopes cost about 2.3x a real
+# document per unit of work without it (independent review, third pass).
+IGNORABLE_SCOPE_WORK = 16
+
+
+def _values(attributes: list[str], names: frozenset[str]) -> list[str]:
+    """expat's attributes (name, value, name, value, ...): the values of `names`."""
+    return [
+        attributes[index + 1]
+        for index in range(0, len(attributes) - 1, 2)
+        if attributes[index] in names
+    ]
+
+
+class _Story:
+    """expat's handlers for one part: its fields as each reading sees them (as recorded, then,
+    from the first field content inside a tracked change on, also with every change accepted
+    and every change rejected), what Word may skip (an element of a namespace declared
+    ignorable), and what reading it costs (`work`, for the budget: an element is 1 and 1 per
+    attribute, field content FIELD_WORK per reading, judging a code by its length: the
+    readings `charge` it). `report(rule)` is told what is
+    refused (_field_rule's rules, or "structure"); _OverBudget past the XML's bounds. Ends
+    are matched by tag (expat only calls with well-formed XML)."""
+
+    def __init__(self, report: Callable[[str], None]) -> None:
+        self.report = report
+        self.readings = [_Reading(report, self._charge)]
+        self.live = False  # a reading is in a field code: run text counts
+        self.work = 0
+        self.depth = 0
+        self.collecting: bool | None = None  # in a w:instrText (True) or field-code w:t (False)
+        self.trimming: list[str] | None = None  # its text, held to trim its blanks
+        self.trimmed = 0
+        self.deleted = 0
+        self.inserted = 0
+        self.ignored = 0
+        self.prefixes: dict[str, list[str]] = {}
+        self.ignorable: list[tuple[int, frozenset[str]]] = []
+        self.ignorable_namespaces: frozenset[str] = frozenset()
+        self.kinds: dict[str, str] = {}  # tag -> _kind(tag)
+        self.names: set[str] = set()  # every distinct name the part used
+
+    def on_start(self, tag: str, attributes: list[str]) -> None:
+        self.depth += 1
+        self.work += 1 + (len(attributes) >> 1)
+        if len(attributes) > 2 * XML_ATTRIBUTES or self.depth > XML_DEPTH:
+            raise _OverBudget
+        if attributes and _IGNORABLE in attributes:
+            self._declare_ignorable(attributes)
+        kind = self.kinds.get(tag)
+        if kind is None:
+            kind = self._kind(tag)
+        if not kind:
+            return
+        if kind == "hidden":
+            self.ignored += 1
+        elif kind == "t":
+            if self.live:
+                self._content()
+                self._collect(attributes, code=False)
+        elif kind == "deleted":
+            self.deleted += 1
+        elif kind == "inserted":
+            self.inserted += 1
+        elif kind == "fldChar":
+            values = set(_values(attributes, _FIELD_CHAR_TYPE))
+            if len(values) > 1:
+                self.report("structure")  # Transitional and Strict disagree
+            value = values.pop() if len(values) == 1 else None
+            for reading in self._here():
+                # Only Word's exact "separate" and "end" close anything: any other value
+                # opens a field (one more field read than Word does only adds to what is
+                # judged; one fewer could join two of Word's fields into one that passes).
+                if value == "separate":
+                    reading.separate()
+                elif value == "end":
+                    reading.end()
+                else:
+                    reading.begin()
+            self._changed()
+        elif kind == "fldSimple":
+            codes = _values(attributes, _FIELD_INSTRUCTION)
+            if len(codes) > 1:
+                self.report("structure")  # which one Word reads isn't certain
+            code = codes[0] if codes else ""
+            for reading in self._here():
+                reading.begin()
+                reading.text(code, code=True)
+                reading.separate()
+            self._changed()
+        elif kind == "instrText":
+            self._content()
+            self._collect(attributes, code=True)
+        elif kind == "break":
+            if self.live:
+                for reading in self._here():
+                    reading.text(_BREAK, code=False)
+        elif kind == "sym":
+            if self.live:  # a symbol in a field code: it can show as any character
+                for reading in self._here():
+                    reading.text(_COMPUTED, code=False)
+        elif kind != "p":  # "story", "branch"
+            for reading in self._here():
+                reading.enter(story=kind == "story")
+            self._changed()
+
+    def on_end(self, tag: str) -> None:
+        kind = self.kinds.get(tag)
+        if kind is None:
+            kind = self._kind(tag)
+        if kind:
+            self._ended(kind)
+        if self.ignorable and self.ignorable[-1][0] == self.depth:
+            self.ignorable_namespaces = self.ignorable.pop()[1]
+            self.kinds.clear()
+        self.depth -= 1
+
+    def _ended(self, kind: str) -> None:
+        if kind == "hidden":
+            self.ignored -= 1
+        elif kind == "p":
+            if self.live:  # a paragraph mark inside a field code
+                for reading in self._here():
+                    reading.text(_BREAK, code=False)
+        elif kind in ("t", "instrText"):
+            if self.collecting is not None and self.trimming is not None:
+                self._dispatch("".join(self.trimming).strip(_XML_BLANKS))
+            self.collecting = self.trimming = None
+        elif kind == "deleted":
+            self.deleted -= 1
+        elif kind == "inserted":
+            self.inserted -= 1
+        elif kind == "fldSimple":
+            for reading in self._here():
+                reading.end()
+            self._changed()
+        elif kind in ("story", "branch"):
+            for reading in self._here():
+                reading.leave()
+            self._changed()
+
+    def on_text(self, text: str) -> None:
+        if self.collecting is None:
+            return
+        if self.trimming is not None:
+            self.trimming.append(text)
+            self.trimmed += len(text)
+            if self.trimmed <= 2 * FIELD_CODE_CHARS:
+                return
+            # Too long to hold: what follows streams (the code is past its limit anyway).
+            text = "".join(self.trimming).lstrip(_XML_BLANKS)
+            self.trimming = None
+        self._dispatch(text)
+
+    def _collect(self, attributes: list[str], *, code: bool) -> None:
+        """Start reading an element's text as code (w:instrText) or run text (w:t). Without
+        xml:space="preserve", Word trims the blanks around it: "DD" and " E" are DDE."""
+        self.collecting = code
+        self.trimming = None if "preserve" in _values(attributes, _XML_SPACE) else []
+        self.trimmed = 0
+
+    def _dispatch(self, text: str) -> None:
+        code = bool(self.collecting)
+        for reading in self._here():
+            reading.text(text, code=code)
+
+    def on_namespace(self, prefix: str | None, uri: str | None) -> None:
+        self.work += 1
+        self.prefixes.setdefault(prefix or "", []).append(uri or "")
+
+    def on_namespace_end(self, prefix: str | None) -> None:
+        declared = self.prefixes.get(prefix or "")
+        if declared:
+            declared.pop()
+        if not declared:
+            self.prefixes.pop(prefix or "", None)  # kept only while in scope
+
+    def on_other(self, *_: object) -> None:
+        """A comment, a processing instruction, a CDATA section: nothing to read, but each
+        costs a call (counted, so a part made of them stays within the budget)."""
+        self.work += 1
+
+    def close(self) -> None:
+        for reading in self.readings:
+            reading.close()
+
+    def _here(self) -> list[_Reading]:
+        """The readings that see field content here (a deleted run isn't there once changes
+        are accepted). They split at the first field content inside a tracked change: until
+        then all three would read the same."""
+        self._content()
+        if self.deleted or self.inserted:
+            if len(self.readings) == 1:
+                first = self.readings[0]
+                self.readings = [first, first.clone("deleted"), first.clone("inserted")]
+            here = [
+                reading
+                for reading in self.readings
+                if not (reading.skips == "deleted" and self.deleted)
+                and not (reading.skips == "inserted" and self.inserted)
+            ]
+        else:
+            here = self.readings
+        self.work += FIELD_WORK * len(here)
+        return here
+
+    def _charge(self, units: int) -> None:
+        self.work += units
+
+    def _changed(self) -> None:
+        self.live = any(reading.in_code() for reading in self.readings)
+
+    def _content(self) -> None:
+        if self.ignored:
+            self.report("structure")  # field content Word may skip unread
+
+    def _kind(self, tag: str) -> str:
+        """What an element is to the reading: a kind of _WORD_ELEMENTS, "hidden" (in a
+        namespace declared ignorable) or "" (nothing). Remembered per tag."""
+        kind = _WORD_ELEMENTS.get(tag) or (
+            "hidden" if tag.rpartition("}")[0] in self.ignorable_namespaces else ""
+        )
+        if len(self.kinds) > 2 * XML_NAMES:  # never, while the names stay within their bound
+            self.kinds.clear()
+        self.kinds[tag] = kind
+        return kind
+
+    def _declare_ignorable(self, attributes: list[str]) -> None:
+        """mc:Ignorable: prefixes whose elements a consumer that doesn't understand their
+        namespace skips (with their content), here and below. Only an attribute of that name
+        counts, a scope is kept only when it adds a namespace (the set in effect before it is
+        put back at its end, so each costs what it adds, counted as work), and at most
+        IGNORABLE_DEPTH are open at once."""
+        values = _values(attributes, _IGNORABLE_NAME)
+        if not values:
+            return  # the name was an attribute's value
+        prefixes = " ".join(values).split()
+        self.work += len(prefixes)
+        declared = frozenset(
+            self.prefixes[prefix][-1] for prefix in prefixes if self.prefixes.get(prefix)
+        )
+        if declared <= self.ignorable_namespaces:
+            return
+        if len(self.ignorable) >= IGNORABLE_DEPTH:
+            raise _OverBudget
+        self.ignorable.append((self.depth, self.ignorable_namespaces))
+        self.ignorable_namespaces |= declared
+        self.work += len(self.ignorable_namespaces) + IGNORABLE_SCOPE_WORK
+        self.kinds.clear()
+
+
+class _Refused(Exception):
+    def __init__(self, rule: str) -> None:
+        super().__init__(rule)
+        self.rule = rule
+
+
+class _OverBudget(Exception):
+    pass
+
+
+class _Unreadable(Exception):
+    pass
+
+
+@dataclass(slots=True)
+class _Budget:
+    bytes: int
+    work: int
+
+
+def _refuse(rule: str) -> NoReturn:
+    raise _Refused(rule)
+
+
+def _decoded(part: IO[bytes], budget: _Budget | None = None) -> Iterator[str]:
+    """The part's text, a chunk at a time, decoded as _parse_part decodes (UTF-8, or UTF-16
+    with its byte-order mark; a declared encoding must agree; no U+0000), so what is read is
+    what Word reads: _Unreadable when it can't be. Its decompressed bytes are taken from
+    `budget` (_OverBudget past it)."""
+    decoder: codecs.IncrementalDecoder | None = None
+    allowed: set[str] = set()
+    head: str | None = ""  # the start, until the declaration is checked
+    while True:
+        raw = part.read(CHUNK_BYTES)
+        if budget is not None:
+            budget.bytes -= len(raw)
+            if budget.bytes < 0:
+                raise _OverBudget
+        if decoder is None:
+            utf16 = raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE))
+            allowed = {"utf-16"} if utf16 else {"utf-8"}
+            decoder = codecs.getincrementaldecoder("utf-16" if utf16 else "utf-8-sig")()
+        try:
+            text = decoder.decode(raw, final=not raw)
+        except UnicodeDecodeError:
+            raise _Unreadable from None
+        if "\x00" in text:
+            raise _Unreadable  # never XML, and it would let expat guess another encoding
+        if head is not None:
+            head += text
+            if len(head) < 512 and raw:
+                continue
+            if not _declaration_agrees(head, allowed):
+                raise _Unreadable
+            text, head = head, None
+        if text:
+            yield text
+        if not raw:
+            return
+
+
+# What a part's text must contain for Word to find a field in it: the elements' local names
+# (an element's name is never escaped: no character reference, no entity) or "<!" (a DTD that
+# could declare entities, CDATA, a comment). A part without any is read, not parsed.
+_FIELD_MARKUP = ("fldChar", "fldSimple", "nstrText", "<!")
+
+
+def _mentions_fields(part: IO[bytes], budget: _Budget) -> bool:
+    """Whether the part's text (_decoded, the whole of it, bytes taken from the budget) holds
+    _FIELD_MARKUP."""
+    found = False
+    tail = ""
+    for text in _decoded(part, budget):
+        if not found:
+            window = tail + text
+            found = any(markup in window for markup in _FIELD_MARKUP)
+            tail = window[-16:]
+    return found
+
+
+def _stream_story(part: IO[bytes], budget: _Budget, story: _Story) -> bool:
+    """Feed one part's text (_decoded) to `story` through defusedxml's expat parser (no DTD,
+    entities or external references), a chunk at a time: memory stays bounded, whatever the
+    part's size. False when it can't be read the way Word reads it (not well-formed, a DTD or
+    entity, an encoding error); _OverBudget past the budget's work (what the story's reading
+    cost is taken from it) or the XML's bounds (XML_TOKEN_BYTES: expat holds a start tag,
+    an attribute value or a comment whole until it ends, so a part that is one huge tag
+    stops there); _Refused from `story`'s report."""
+    parser = defusedxml.ElementTree.DefusedXMLParser(
+        target=story, forbid_dtd=True, forbid_entities=True, forbid_external=True
+    )
+    expat = parser.parser  # the handlers directly: no element objects, no name rewriting
+    expat.StartElementHandler = story.on_start
+    expat.EndElementHandler = story.on_end
+    expat.CharacterDataHandler = story.on_text
+    expat.StartNamespaceDeclHandler = story.on_namespace
+    expat.EndNamespaceDeclHandler = story.on_namespace_end
+    expat.CommentHandler = story.on_other
+    expat.ProcessingInstructionHandler = story.on_other
+    expat.StartCdataSectionHandler = story.on_other
+    expat.EndCdataSectionHandler = story.on_other
+    fed = 0  # bytes, as expat counts them (UTF-8)
+    try:
+        for text in _decoded(part):
+            parser.feed(text)  # text: expat is told it is UTF-8, whatever the declaration says
+            story.names.update(expat.intern)  # the names this chunk used, then forgotten
+            expat.intern.clear()
+            fed += len(text) if text.isascii() else len(text.encode())
+            if (
+                story.work > budget.work
+                or fed - expat.CurrentByteIndex > XML_TOKEN_BYTES
+                or len(story.names) > XML_NAMES
+            ):
+                raise _OverBudget
+        parser.close()
+    except (_Unreadable, ParseError, DefusedXmlException):
+        return False
+    budget.work -= story.work
+    return True
+
+
+def _word_stories(
+    package: zipfile.ZipFile, infos: list[zipfile.ZipInfo]
+) -> tuple[set[str], set[str]] | None:
+    """The part names and extensions [Content_Types].xml declares as WordprocessingML XML
+    (the main document, headers, footers, footnotes, endnotes, comments, the glossary, ...,
+    under any name), or None if it can't be read (refused already by _active_content)."""
+    names: set[str] = set()
+    extensions: set[str] = set()
+    for info in infos:
+        if unquote(info.filename).lower().lstrip("/") != "[content_types].xml":
+            continue
+        with package.open(info) as part:
+            raw = part.read(OOXML_XML_PART_BYTES + 1)
+        root = _parse_part(raw) if len(raw) <= OOXML_XML_PART_BYTES else None
+        if root is None:
+            return None
+        for element in root.iter():
+            declared = {_local(key): value for key, value in element.attrib.items()}
+            kind = declared.get("contenttype", "").partition(";")[0].strip().casefold()
+            if not (kind.endswith("+xml") and ("wordprocessingml" in kind or "ms-word" in kind)):
+                continue
+            if "partname" in declared:
+                names.add(unquote(declared["partname"]).strip().lower().lstrip("/"))
+            if "extension" in declared:
+                extensions.add(declared["extension"].strip().lower().lstrip("."))
+    return names, extensions
+
+
+def _word_fields(package: zipfile.ZipFile, infos: list[zipfile.ZipInfo]) -> bool:
+    """A Word document's fields (R132): RejectedFile if one would start a program or fetch
+    content from elsewhere, or can't be judged (FIELD_REFUSED), or the document is past the
+    budget (TOO_LARGE_TO_CHECK); False if a part can't be read. Every part named *.xml and
+    every part [Content_Types].xml declares WordprocessingML XML is a story, so none can hide
+    under another name (more is read than holds fields: settings, styles, properties, custom
+    XML, charts). Each is read whole (decoded, its bytes counted), and parsed again only if
+    it mentions field markup (_FIELD_MARKUP): most parts don't, and reading costs a fraction
+    of parsing."""
+    stories = _word_stories(package, infos)
+    if stories is None:
+        return False
+    names, extensions = stories
+    budget = _Budget(WORD_XML_BYTES, WORD_XML_WORK)
+    try:
+        for info in infos:
+            name = unquote(info.filename).lower().lstrip("/")
+            last = name.rpartition("/")[2]
+            extension = last.rpartition(".")[2] if "." in last else ""
+            if name == "[content_types].xml" or not (
+                name.endswith(".xml") or name in names or extension in extensions
+            ):
+                continue
+            if info.file_size > budget.bytes:
+                raise _OverBudget  # refused unread
+            with package.open(info) as part:
+                if not _mentions_fields(part, budget):
+                    continue
+            with package.open(info) as part:  # its size is known: within the budget
+                if not _stream_story(part, budget, _Story(_refuse)):
+                    return False
+    except _Unreadable:
+        return False
+    except _OverBudget:
+        logger.info("attachment_field_check_refused", extra={"rule": "budget"})
+        raise RejectedFile(TOO_LARGE_TO_CHECK) from None
+    except _Refused as refused:
+        logger.info("attachment_field_check_refused", extra={"rule": refused.rule})
+        raise RejectedFile(FIELD_REFUSED) from None
+    return True
+
+
 def _utf8_text(head: bytes, file: IO[bytes]) -> bool:
     """UTF-8 (a BOM allowed) without NUL bytes, checked across the whole file."""
     decoder = codecs.getincrementaldecoder("utf-8")()
@@ -336,6 +1134,158 @@ def _utf8_text(head: bytes, file: IO[bytes]) -> bool:
     except UnicodeDecodeError:
         return False
     return True
+
+
+# --- CSV ------------------------------------------------------------------------------------------
+# Excel opens a .csv by evaluating every cell that starts with "=", "+", "-" or "@" as a formula,
+# and a formula of DDE's shape, app|topic!item (=cmd|' /c calc'!A0), asks to start that program
+# (R132; docs/activities.md#attachments). Such a cell is refused. A file is read as cells
+# separated by a comma, a semicolon (Excel's list separator in many regions), a tab, or whatever
+# a first "sep=" line names: a cell any of them yields counts. Fields are read as Python's csv
+# module reads them (a field starting with a quote runs to the closing quote, "" inside is a
+# quote, text after the closing quote joins the field), by regular expressions over a stream:
+# every field passes through C, never a Python loop per field or character, and memory holds
+# one chunk and one field's first CSV_FIELD_CHARS. Excel holds at most 32,767 characters in a
+# cell and 8,192 in a formula, so a field's first CSV_FIELD_CHARS decide; a longer field that
+# starts (after blanks) like a formula, or is nothing but blanks that far, is refused (fail
+# closed). Plain .txt isn't checked: double-clicking it opens a text editor, Excel reads one
+# only through its import wizard, and prose has no cells to tell a formula from a sentence.
+CSV_DDE_REFUSED = (
+    "This file has a cell that Excel would run as a command (a formula with | and !, such as "
+    "=cmd|' /c calc'!A0). Remove it and upload the file again."
+)
+CSV_DELIMITERS = (",", ";", "\t")
+CSV_FIELD_CHARS = 128 * 1024
+_FORMULA_STARTS = ("=", "+", "-", "@")
+_CSV_QUOTED_INSIDE = re.compile(r'(?:[^"]|"")*+')  # a quoted field's content, "" and all
+
+
+@dataclass(frozen=True, slots=True)
+class _CsvReading:
+    """The expressions for one separator. A formula's parts: outside its string literals
+    ("...") and quoted names ('...') anything but a "|"; DDE's shape is a "|" there, then a "!"
+    in the same field. Raw text inside a quoted field doubles its quotes ("" is ")."""
+
+    # Every field and its separator, up to a DDE field, an incomplete one or the end.
+    walk: re.Pattern[str]
+    dde: re.Pattern[str]  # a field (at its start) with DDE's shape
+    field_end: re.Pattern[str]  # a separator
+
+    @classmethod
+    def of(cls, separator: str) -> _CsvReading:
+        s = re.escape(separator)
+        blank = rf"[^\S\r\n{s}]"
+        plain_part = rf"""(?:[^{s}\r\n"'|]++|"[^"{s}\r\n]*+"|'[^'{s}\r\n]*+')"""
+        quoted_part = r"""(?:[^"'|]++|""[^"]*+""|'(?:[^'"]|"")*+')"""
+        after_plain = rf"[^{s}\r\n!]*+!"
+        after_quoted = rf'(?:[^"!]|"")*+(?:!|"(?!")[^{s}\r\n!]*+!)'
+        # Where a quoted field closes (a lone quote), the formula goes on in the text after it,
+        # in the state it was in: outside, in a string literal, in a quoted name.
+        closes = (
+            r'(?:"(?!")'
+            rf'|""[^"]*+"(?!")[^"{s}\r\n]*+"'
+            rf"|'(?:[^'\"]|\"\")*+\"(?!\")[^'{s}\r\n]*+')"
+        )
+        dde = (
+            rf"{blank}*+[=+\-@]{plain_part}*+\|{after_plain}"
+            rf'|"\s*+[=+\-@]{quoted_part}*+(?:\|{after_quoted}'
+            rf"|{closes}{plain_part}*+\|{after_plain})"
+            rf'|"\s*+"(?!"){blank}*+[=+\-@]{plain_part}*+\|{after_plain}'
+        )
+        field = rf'(?:"(?:[^"]|"")*+"[^{s}\r\n]*+|(?:[^{s}\r\n"][^{s}\r\n]*+)?)'
+        return cls(
+            walk=re.compile(rf"(?:(?!{dde}){field}(?:{s}|\r\n?|\n))*+"),
+            dde=re.compile(dde),
+            field_end=re.compile(rf"[{s}\r\n]"),
+        )
+
+
+def _csv_text(head: bytes, file: IO[bytes]) -> bool:
+    """UTF-8 text (_utf8_text) without a cell Excel would run as a DDE formula
+    (RejectedFile, CSV_DDE_REFUSED)."""
+    if not _utf8_text(head, file):
+        return False
+    if _csv_dde(file):
+        logger.info("attachment_field_check_refused", extra={"rule": "csv_dde"})
+        raise RejectedFile(CSV_DDE_REFUSED)
+    return True
+
+
+def _csv_dde(file: IO[bytes]) -> bool:
+    """Whether a cell, by any of the separators, is a DDE formula. One read finds which of "|",
+    "!" and the separators the file holds: without a "|" and a "!" there is no DDE formula and
+    nothing more is read; a separator it doesn't hold gives whole lines as fields, the same for
+    each, so that reading is done once. Each reading streams the file once (_csv_reading_finds),
+    so the cost is linear in the upload's size (ATTACHMENT_MAX_BYTES)."""
+    file.seek(0)
+    first = file.readline(64).decode("utf-8", "replace").removeprefix(chr(0xFEFF))
+    sep = first[4] if first.startswith("sep=") and first[4:5] not in ("", "\r", "\n", '"') else ""
+    candidates = list(dict.fromkeys(d for d in (*CSV_DELIMITERS, sep) if d))
+    wanted = {char: char.encode() for char in ("|", "!", *candidates)}
+    present: set[str] = set()
+    file.seek(0)
+    tail = b""
+    for chunk in iter(lambda: file.read(CHUNK_BYTES), b""):
+        window = tail + chunk
+        present.update(char for char, encoded in wanted.items() if encoded in window)
+        tail = window[-4:]
+    if not {"|", "!"} <= present:
+        return False
+    separators = [d for d in candidates if d in present]
+    separators += [d for d in candidates if d not in present][:1]  # whole lines, once
+    return any(_csv_reading_finds(file, _CsvReading.of(d)) for d in separators)
+
+
+def _csv_reading_finds(file: IO[bytes], reading: _CsvReading) -> bool:
+    """One reading of the file (UTF-8, a BOM dropped), a chunk at a time: whether a field has
+    DDE's shape. What isn't decided yet is the field at the end of the chunk, kept until the
+    next one; past CSV_FIELD_CHARS it is decided (refused if it starts like a formula or is all
+    blanks, else skipped to its end without being kept)."""
+    file.seek(0)
+    decoder = codecs.getincrementaldecoder("utf-8-sig")()
+    buffer = ""
+    skipping = ""  # "": reading fields; '"': inside a long quoted field; "plain": to its end
+    for raw in iter(lambda: file.read(CHUNK_BYTES), b""):
+        buffer += decoder.decode(raw)
+        while True:
+            if skipping == '"':
+                inside = _matched(_CSV_QUOTED_INSIDE, buffer)
+                if inside >= len(buffer) - 1:  # a quote at the end may be the first of ""
+                    buffer = buffer[inside:]
+                    break
+                buffer, skipping = buffer[inside + 1 :], "plain"
+            if skipping == "plain":
+                found = reading.field_end.search(buffer)
+                if found is None:
+                    buffer = ""
+                    break
+                buffer, skipping = buffer[found.end() :], ""
+            position = _matched(reading.walk, buffer)
+            if reading.dde.match(buffer, position):
+                return True
+            buffer = buffer[position:]
+            if len(buffer) <= CSV_FIELD_CHARS:
+                break
+            content = buffer[1:] if buffer.startswith('"') else buffer
+            start = content[:CSV_FIELD_CHARS].lstrip()
+            if not start or start.startswith(_FORMULA_STARTS):
+                return True  # a formula longer than Excel holds, or blanks: fail closed
+            skipping = '"' if buffer.startswith('"') else "plain"
+            buffer = buffer[1:] if skipping == '"' else buffer
+    buffer += decoder.decode(b"", final=True)
+    return skipping == "" and reading.dde.match(buffer) is not None
+
+
+def _matched(pattern: re.Pattern[str], text: str) -> int:
+    """Where `pattern` (which can match nothing) stops matching at the start of `text`."""
+    found = pattern.match(text)
+    return found.end() if found else 0
+
+
+def _dde_cell(cell: str) -> bool:
+    """A cell (its raw CSV field, separated by commas) that Excel evaluates and that has DDE's
+    shape. "-5", "@name", =SUM(A1:A3) or =A1&"|"&B1 are not."""
+    return _CsvReading.of(",").dde.match(cell) is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,7 +1305,7 @@ CATALOG: dict[str, FileKind] = {
     "gif": FileKind("image/gif", _starts(b"GIF87a", b"GIF89a"), previewable=True),
     "docx": FileKind(
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        _ooxml("word/document.xml"),
+        _ooxml("word/document.xml", _word_fields),
     ),
     "xlsx": FileKind(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -365,7 +1315,7 @@ CATALOG: dict[str, FileKind] = {
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         _ooxml("ppt/presentation.xml"),
     ),
-    "csv": FileKind("text/csv", _utf8_text),
+    "csv": FileKind("text/csv", _csv_text),
     "txt": FileKind("text/plain", _utf8_text),
 }
 

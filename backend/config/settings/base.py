@@ -259,6 +259,11 @@ MFA_CHALLENGE_MAX_ATTEMPTS = 5
 # audit M-4). Each guess matches at most 3 of 10^6 codes (one step of drift either way), so 20
 # leave a password thief about a 6 in 100,000 chance, for the life of that password.
 MFA_MAX_CONSECUTIVE_FAILURES = 20
+# Wrong codes since the last right one, however many new passwords came between, after which
+# the second factor is locked until an MFA reset (R133): someone holding the password and the
+# mailbox could otherwise unlock it with each emailed reset. 60 is three whole locks: about 2
+# in 10,000 in all. Must be more than MFA_MAX_CONSECUTIVE_FAILURES (system check arkray.E030).
+MFA_MAX_FAILURES_BEFORE_RESET = 60
 # The owner is emailed about a wrong code at most this often (and always when it locks).
 MFA_FAILURE_NOTICE_INTERVAL_S = 6 * 60 * 60
 # How long a started setup may be confirmed, and how many wrong codes void it.
@@ -382,6 +387,7 @@ SPECTACULAR_SETTINGS = {
         "FieldTypeEnum": "arkray.pipeline.models.FieldType",
         "NegotiationSourceEnum": "arkray.pipeline.models.NegotiationSource",
         "ScanStatusEnum": "arkray.activities.models.ScanStatus",
+        "MfaLockEnum": "arkray.identity.models.MfaLock",
     },
 }
 

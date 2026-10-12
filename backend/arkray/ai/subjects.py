@@ -177,7 +177,11 @@ def held_conversations(among: Collection[UUID] | None = None) -> set[UUID]:
     Bounded: holds are rare; the user holds are a lookup on the conversations' own columns,
     and only the conversations they don't keep are matched against the held customers, all
     of them in one scan of those conversations' questions (review P2-3: a held user's whole
-    history was matched again on every call)."""
+    history was matched again on every call).
+
+    A caller that deletes what this doesn't return calls it in the deleting transaction,
+    after core.holds.barrier(): a hold being placed meanwhile has then either committed
+    before this reads the holds, or waits for the deletion to commit (R134)."""
     users = holds.held_users()
     candidates = Conversation.objects.all()
     if among is not None:

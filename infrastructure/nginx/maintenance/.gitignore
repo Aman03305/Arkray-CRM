@@ -1,0 +1,5 @@
+# The edge's emergency maintenance switch (infrastructure/nginx/arkray.conf,
+# docs/runbooks.md#emergency-maintenance): an operator creates `on` here, on the host, to
+# close the site; this directory is mounted read-only at /etc/nginx/maintenance. Never
+# committed: every deployment of that commit would start closed.
+/on

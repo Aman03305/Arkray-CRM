@@ -381,6 +381,7 @@ USER_SERIALIZER_FIELDS = {
         "password_change_required",
         "password_changed_at",
         "mfa_enabled",
+        "mfa_lock",  # R133: what unlocks a locked factor (null or a choice), never a count
         "version",
     },
     "arkray.identity.api.serializers.WorkspaceSubjectSerializer": {"id", "full_name", "status"},

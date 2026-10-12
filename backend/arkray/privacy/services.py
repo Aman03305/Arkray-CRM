@@ -39,7 +39,9 @@ administrator runs `manage.py erase_lead`, which in one transaction:
 - last, appends `lead_erased` to the erasure ledger (core.ledger), outside the database:
   a backup restored later can't bring the person back unnoticed (privacy remediation P2-8).
   A ledger that can't be written stops the erasure (nothing is half-done). A legal hold on
-  the lead refuses it.
+  the lead refuses it. Every hold it reads (the lead's, and those on others that keep a
+  conversation) is read under the hold barrier, its transaction's first lock (core.holds):
+  a hold placed at the same moment has committed before, or waits for the erasure (R134).
 
 What stays: ids, dates, statuses, stage names, the instrument (one of a fixed list),
 amounts and the audit trail, none of which identifies the person once the text is gone.
@@ -309,19 +311,28 @@ def preview(lead_id: UUID) -> Erasure:
 
 
 @transaction.atomic
-def erase(lead_id: UUID, *, operator_id: UUID, replay: bool = False) -> Erasure:
+def erase(
+    lead_id: UUID, *, operator_id: UUID, replay: bool = False, unless_held: bool = False
+) -> Erasure:
     """`replay`: re-applying a ledger entry after a restore (privacy.replay): authorised and
     checked when it first happened, so a legal hold restored with the backup doesn't stop it,
-    and nothing new is appended to the ledger."""
+    and nothing new is appended to the ledger. `unless_held` (with `replay`): the automatic
+    reconciliation (privacy.reconcile, no operator), which leaves a held lead to an
+    operator: a hold on it stops the replay as it stops an erasure, under the same lock, so
+    one placed since the reconciliation checked is seen."""
     with connection.cursor() as cursor:
         cursor.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
-    # First, before any lock a CRM writer could be waiting behind: answers being stored
+    # The first lock: serialised with placing any hold (core.holds.barrier). The holds read
+    # below (this lead's, and the others' that keep conversations it touches) are then
+    # final until this commits: one being placed has committed, or waits (R134).
+    holds.barrier()
+    # Then, before any lock a CRM writer could be waiting behind: answers being stored
     # finish, and none is stored until this commits (see ai.service).
     ai_service.hold_erasure_lock()
     lead = Lead.objects.select_for_update().get(pk=lead_id)
     if _already_erased(lead):
         raise AlreadyErased(lead_id)
-    if not replay:  # serialised with placing a hold (core.holds)
+    if not replay or unless_held:  # serialised with placing a hold (core.holds)
         holds.refuse_if_held(HoldSubject.LEAD, lead_id)
     opportunity_ids = list(
         Opportunity.objects.select_for_update().filter(lead_id=lead_id).values_list("pk", flat=True)

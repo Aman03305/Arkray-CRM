@@ -13,7 +13,10 @@ Configuring a pipeline is never authority over the deals in it either: a deal re
 with its lead stays in its old owner's personal pipeline, out of their sight. Deleting
 custom values is refused while a deal outside the caller's scope holds one, and its job
 only touches the workspace's deals (field_values); refusals count only the deals the
-caller can see (final production audit SEC-1).
+caller can see (final production audit SEC-1). Removing a field is refused the same way
+(deep security audit L-4), and serialised with reassignments: a reassignment takes the
+personal pipelines holding the lead's deals FOR SHARE (services.follow_lead_owner), which
+this module's FOR NO KEY UPDATE waits for and holds off (R137).
 
 Concurrency: every change requires the pipeline version the client saw (409 otherwise) and
 bumps it, so two people editing one pipeline can't overwrite each other. Lock order: the
@@ -560,7 +563,10 @@ def replace_fields(
         # Before anything changes: refused as a whole. Removing a field hides its values from
         # everyone, so it is refused while a deal outside the caller's scope (a deal reassigned
         # with its lead, still in this pipeline) holds one, whether or not they are deleted too
-        # (deep security audit L-4; final production audit SEC-1 for the deletion).
+        # (deep security audit L-4; final production audit SEC-1 for the deletion). A
+        # reassignment of one of its deals' leads takes this pipeline FOR SHARE before it
+        # commits: it either did first (so it has committed, and the check sees the new
+        # owners) or waits until this commits (R137).
         field_values.require_deletable(
             scope,
             pipeline.pk,

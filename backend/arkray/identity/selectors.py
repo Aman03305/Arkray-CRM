@@ -20,11 +20,18 @@ from .policy import Capability, roles_with
 
 def _with_pending_invitation(queryset: QuerySet[User]) -> QuerySet[User]:
     """Annotate the live invitation (at most one per user: a DB constraint) in one join, and
-    whether the user has a confirmed second factor (ADR-0033), in the same query."""
+    whether the user has a confirmed second factor (ADR-0033), in the same query, with its
+    wrong-code counts (one join: at most one device per user), for whether it is locked
+    (MfaDevice.lock_for; R133: was in security events only)."""
     return queryset.annotate(
         mfa_enabled=Exists(
             MfaDevice.objects.filter(user=OuterRef("pk"), confirmed_at__isnull=False)
         ),
+        confirmed_mfa=FilteredRelation(
+            "mfa_device", condition=Q(mfa_device__confirmed_at__isnull=False)
+        ),
+        mfa_consecutive_failures=F("confirmed_mfa__consecutive_failures"),
+        mfa_cumulative_failures=F("confirmed_mfa__cumulative_failures"),
         pending_invitation=FilteredRelation(
             "account_tokens",
             condition=Q(
@@ -139,8 +146,9 @@ SECURITY_ACTIONS: dict[str, tuple[str, ...]] = {
     "mfa.reset": ("by", "reason"),
     "mfa.recovery_codes_replaced": (),
     "mfa.recovery_code_used": ("remaining",),
-    # Too many wrong codes in a row, and the new password that ended it (security audit M-4).
-    "mfa.locked": ("failures",),
+    # Too many wrong codes in a row, and the new password that ended it (security audit M-4);
+    # `until`: "mfa_reset" past the cap a new password doesn't clear (R133).
+    "mfa.locked": ("failures", "until"),
     "mfa.unlocked": ("by",),
 }
 

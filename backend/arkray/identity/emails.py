@@ -114,6 +114,15 @@ _MFA_NOTICES = {
         " locked: no code is accepted, not even the right one. To unlock it, reset your"
         " password (Forgot password on the sign-in page) or ask your administrator.",
     ),
+    # Past the cap a new password doesn't clear (R133): it took the password, and new ones
+    # chosen through the emailed link, to get there.
+    "locked_until_reset": (
+        "Two-step verification is locked until it is reset",
+        "Too many wrong two-step verification codes were entered for your account, across"
+        " several password resets, so it is locked: no code is accepted, not even the right"
+        " one, and resetting your password no longer unlocks it. Ask your administrator to"
+        " reset your two-step verification.",
+    ),
 }
 _MFA_ADVICE = (
     "If this was you, there is nothing to do. If it wasn't, change your password now "
@@ -124,13 +133,24 @@ _MFA_FAILURE_ADVICE = (
     "If this wasn't you, someone else probably knows your password: reset it now (Forgot "
     "password on the sign-in page) and tell your administrator.\n"
 )
+# Someone else probably has the password and could use the emailed reset links too: the
+# mailbox comes first.
+_MFA_RESET_LOCK_ADVICE = (
+    "If this wasn't you, someone else probably knows your password and can read your email: "
+    "secure your email account first (change its password), then tell your administrator.\n"
+)
+_ADVICE_BY_CHANGE = {
+    "wrong_code": _MFA_FAILURE_ADVICE,
+    "locked": _MFA_FAILURE_ADVICE,
+    "locked_until_reset": _MFA_RESET_LOCK_ADVICE,
+}
 
 
 def send_mfa_notice(*, to: str, first_name: str, change: str) -> None:
     """Tell the owner their second factor changed, or that wrong codes were entered for it
     (ADR-0033). Never a code or a secret."""
     subject, what = _MFA_NOTICES[change]
-    advice = _MFA_FAILURE_ADVICE if change in ("wrong_code", "locked") else _MFA_ADVICE
+    advice = _ADVICE_BY_CHANGE.get(change, _MFA_ADVICE)
     _send(to, f"{PRODUCT_NAME}: {subject}", f"Hello {first_name},\n\n{what}\n\n{advice}")
 
 

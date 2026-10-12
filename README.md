@@ -80,6 +80,9 @@ scripts/check.sh      # backend: ruff, mypy (strict), import contracts, pytest, 
 | Dashboards, admin user workspace | [dashboard.md](docs/dashboard.md), [admin-user-workspace.md](docs/admin-user-workspace.md) |
 | Deployment: topology, proxy, configuration, database, backups | [deployment.md](docs/deployment.md) |
 | Go-live and release checklist | [production-checklist.md](docs/production-checklist.md) |
+| Deployment readiness: architecture review, hosting options and monthly costs | [deployment-readiness.md](docs/deployment-readiness.md) |
+| Staging validation: capacity, saturation and resilience drills | [staging-validation.md](docs/staging-validation.md) |
+| Ask Arkray real-model evaluation (R69) | [ai-evaluation.md](docs/ai-evaluation.md) |
 | Runbooks: alerts, restores, secret rotation, erasure | [runbooks.md](docs/runbooks.md) |
 | Personal data, retention, access and erasure requests | [privacy.md](docs/privacy.md) |
 | Operations: the RAG index, the embedding model | [operations.md](docs/operations.md) |

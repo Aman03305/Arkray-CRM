@@ -1718,6 +1718,8 @@ export interface components {
             readonly password_changed_at: string | null;
             /** @description The user has a confirmed second factor. */
             readonly mfa_enabled: boolean;
+            /** @description Null while codes are accepted. Otherwise too many wrong codes locked the second factor (no code is accepted, the right one included) and this says what unlocks it: `password_reset` (a password reset by email, a password set by an administrator, or an MFA reset) or `mfa_reset` (only an MFA reset: too many wrong codes since the last right one, across new passwords; R133). */
+            readonly mfa_lock: (components["schemas"]["MfaLockEnum"] | components["schemas"]["NullEnum"]) | null;
             readonly version: number;
         };
         /** @description One keyset-paginated page of users (follow `next` / `previous` as given). */
@@ -2349,6 +2351,8 @@ export interface components {
             /** @description A code from the authenticator app, or an unused recovery code. */
             readonly code: string;
         };
+        /** @enum {string} */
+        readonly MfaLockEnum: "password_reset" | "mfa_reset";
         /** @description Shown once, at setup: the secret is never returned again. */
         readonly MfaSetup: {
             /** @description Base32, for typing into an authenticator app. */
@@ -2368,6 +2372,13 @@ export interface components {
             /** @description Required for this account's role. */
             readonly required: boolean;
             readonly can_disable: boolean;
+            /**
+             * @description Null while codes are accepted. Otherwise too many wrong codes locked the second factor (no code is accepted, the right one included) and this says what unlocks it: `password_reset` (a password reset by email, a password set by an administrator, or an MFA reset) or `mfa_reset` (only an MFA reset: too many wrong codes since the last right one, across new passwords; R133).
+             *
+             *     * `password_reset` - A new password
+             *     * `mfa_reset` - An MFA reset
+             */
+            readonly lock: (components["schemas"]["MfaLockEnum"] | components["schemas"]["NullEnum"]) | null;
         };
         readonly NegotiatedPriceInputRequest: {
             readonly version: number;

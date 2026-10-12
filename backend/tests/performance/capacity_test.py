@@ -1,10 +1,11 @@
-# ruff: noqa: T201, E501, S104, S107, S324, S501, S603, S607, DTZ006, RUF005
+# ruff: noqa: T201, E501, S104, S107, S324, S603, S607, DTZ006, RUF005
 # mypy: ignore-errors
 # A diagnostics command (prints its report), not application code: random choices pick
-# workload steps, not secrets; long lines are SQL and report formats; it talks to a local stack
-# with a self-signed certificate over IPv4 (local_address 0.0.0.0 picks the address family, it
-# binds no server), runs fixed docker/powershell commands, hashes emails only to sample users
-# deterministically, and prints local wall-clock times.
+# workload steps, not secrets; long lines are SQL and report formats; it talks over IPv4
+# (local_address 0.0.0.0 picks the address family, it binds no server), runs fixed
+# docker/powershell commands, hashes emails only to sample users deterministically, and prints
+# local wall-clock times. Certificates are checked except for this machine's own stack
+# (self-signed) or with an explicit --insecure (tls_verify).
 """Capacity test: N concurrent *active* CRM users against the production-shaped stack
 (nginx TLS -> gunicorn / Next.js, PostgreSQL, Redis, Celery), docs/reliability.md#capacity.
 
@@ -32,6 +33,11 @@ Sub-commands (all talk HTTP to --base; only `prepare`, `verify` and the monitors
     isolate   cache/workspace isolation: two users, an admin switching users, support
               sessions entering and leaving, all concurrent, every response token-checked
 
+The target is --base (https://localhost:8443: this machine's production-shaped stack). Another
+host (a staging environment) needs nothing else: the Host header, the saved sessions' cookie
+domain and certificate checking follow --base (target_host, cookie_domain, tls_verify);
+--host, --metrics-host, --insecure and --ca-file override them.
+
 Every virtual user owns a canary token (ZQ007Z for user 7) written into the customer names
 and notes it creates; every response read by a user is scanned for tokens, and a token that
 is not the viewed workspace's owner's is a cross-user leak. The numbers describe THIS
@@ -51,6 +57,7 @@ import math
 import os
 import random
 import re
+import ssl
 import statistics
 import subprocess
 import sys
@@ -62,7 +69,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -113,6 +120,44 @@ def percentile(ordered: list[float], q: float) -> float:
 
 def now() -> float:
     return time.perf_counter()
+
+
+# --- the target ---------------------------------------------------------------------------------
+LOCAL_HOST_HEADER = "localhost:8443"  # the production-shaped stack's (compose.production.yml)
+
+
+def is_loopback(hostname: str) -> bool:
+    return hostname in ("localhost", "::1") or hostname.startswith("127.")
+
+
+def target_host(args: argparse.Namespace) -> str:
+    """The Host header every request carries: --host if given; for this machine's stack
+    (a loopback --base) localhost:8443, which its nginx and DJANGO_ALLOWED_HOSTS expect whatever
+    address the requests go to; otherwise --base's own host and port."""
+    explicit = getattr(args, "host", "") or ""
+    if explicit:
+        return explicit
+    parts = urlsplit(args.base)
+    return LOCAL_HOST_HEADER if is_loopback(parts.hostname or "") else parts.netloc
+
+
+def cookie_domain(base: str) -> str:
+    """Where http.cookiejar files the cookies of a response from `base`: under the URL's host
+    name, a host name without a dot as "<name>.local". Saved sessions go back there."""
+    hostname = urlsplit(base).hostname or "localhost"
+    return hostname if "." in hostname else f"{hostname}.local"
+
+
+def tls_verify(args: argparse.Namespace) -> bool | ssl.SSLContext:
+    """Certificate checking: off with --insecure, against --ca-file's CA if given, and off by
+    default only for this machine's own stack (a loopback --base: its certificate is
+    self-signed); every other host is checked."""
+    if getattr(args, "insecure", False):
+        return False
+    ca_file = getattr(args, "ca_file", "") or ""
+    if ca_file:
+        return ssl.create_default_context(cafile=ca_file)
+    return not is_loopback(urlsplit(args.base).hostname or "")
 
 
 # --- recording --------------------------------------------------------------------------------
@@ -195,6 +240,9 @@ class Run:
         self.creates: list[dict[str, Any]] = []
         self.started_db = ""  # DB clock at the start (set by prepare_run)
         self.think_mean = args.think_mean
+        self.host = target_host(args)
+        self.cookie_domain = cookie_domain(args.base)
+        self.tls = tls_verify(args)
 
 
 class VU:
@@ -207,7 +255,7 @@ class VU:
         self.token = f"ZQ{self.index:03d}Z" if self.index >= 0 else ""
         base = run.args.base
         transport = httpx.AsyncHTTPTransport(
-            verify=False,
+            verify=run.tls,
             local_address="0.0.0.0",  # IPv4 only: "localhost" tries ::1 first on this host
             limits=httpx.Limits(max_connections=6, max_keepalive_connections=6),
             retries=0,
@@ -216,7 +264,7 @@ class VU:
             base_url=base,
             transport=transport,
             timeout=httpx.Timeout(45.0, connect=10.0),
-            headers={"Origin": base, "Referer": base + "/", "Host": "localhost:8443"},
+            headers={"Origin": base, "Referer": base + "/", "Host": run.host},
         )
         self.ws = "all" if self.is_admin else "me"
         self.view_as: dict[str, Any] | None = None  # an admin looking into a user's workspace
@@ -347,8 +395,8 @@ class VU:
     async def login(self, saved: dict[str, str] | None) -> bool:
         if saved:
             for key, value in saved.items():
-                # http.cookiejar files a host without a dot as "<host>.local"
-                self.client.cookies.set(key, value, domain="localhost.local")
+                # http.cookiejar files a host without a dot as "<host>.local" (cookie_domain)
+                self.client.cookies.set(key, value, domain=self.run.cookie_domain)
             me = await self.call("auth_me", "GET", f"{API}/auth/me", scan=False)
             if me is not None and me.status_code == 200:
                 self.signed_in = True
@@ -1036,7 +1084,7 @@ class Monitor:
         import psycopg
         import redis as redis_lib
 
-        pg = psycopg.connect(self.args.pg, autocommit=True)
+        pg = self.connect(psycopg)
         rds = None
         if self.args.redis_url:
             rds = redis_lib.Redis.from_url(self.args.redis_url, socket_timeout=3)
@@ -1045,7 +1093,11 @@ class Monitor:
         while not self.stop.is_set():
             started = time.time()
             row: dict[str, Any] = {"t": started}
+            if pg is None:
+                pg = self.connect(psycopg)  # back, or never there: try once per sample
             try:
+                if pg is None:
+                    raise ConnectionError("not sampled")
                 with pg.cursor() as cur:
                     cur.execute(
                         "SELECT coalesce(state,'none'), count(*) FROM pg_stat_activity"
@@ -1087,9 +1139,10 @@ class Monitor:
                     row["db_temp_files"], row["db_temp_bytes"] = d[3], d[4]
                     row["db_blks_read"], row["db_blks_hit"] = d[5], d[6]
             except Exception as error:  # a sampling failure is a data point, not a crash
-                row["db_error"] = type(error).__name__
-                with contextlib.suppress(Exception):  # reconnect next time round
-                    pg = psycopg.connect(self.args.pg, autocommit=True)
+                row["db_error"] = "not_sampled" if pg is None else type(error).__name__
+                if pg is not None:
+                    with contextlib.suppress(Exception):  # reconnect next time round
+                        pg = psycopg.connect(self.args.pg, autocommit=True)
             if rds is not None:
                 try:
                     t0 = time.perf_counter()
@@ -1132,7 +1185,7 @@ class Monitor:
                         f"{self.args.metrics_url}/health/metrics",
                         headers={
                             "Authorization": f"Bearer {self.args.metrics_token}",
-                            "Host": "localhost",
+                            "Host": getattr(self.args, "metrics_host", "localhost"),
                         },
                         timeout=6,
                     ).text
@@ -1154,6 +1207,16 @@ class Monitor:
             row["host_cpu"], row["host_mem_free_mb"] = host_load()
             self.rows.append(row)
             self.stop.wait(max(0.0, self.args.monitor_every - (time.time() - started)))
+
+    def connect(self, psycopg: Any) -> Any:
+        """The monitor's database connection, or None (no --pg, or unreachable within 5 s):
+        the database figures are then reported as not sampled while the rest goes on."""
+        if not self.args.pg:
+            return None
+        try:
+            return psycopg.connect(self.args.pg, autocommit=True, connect_timeout=5)
+        except Exception:
+            return None
 
     def summarise(self, since: float | None = None, until: float | None = None) -> dict[str, Any]:
         rows = [
@@ -2365,9 +2428,9 @@ async def cmd_abuse(args: argparse.Namespace) -> dict[str, Any]:
             if kind == "login":
                 async with httpx.AsyncClient(
                     base_url=args.base,
-                    verify=False,
-                    transport=httpx.AsyncHTTPTransport(verify=False, local_address="0.0.0.0"),
-                    headers={"Origin": args.base, "Host": "localhost:8443"},
+                    verify=run.tls,
+                    transport=httpx.AsyncHTTPTransport(verify=run.tls, local_address="0.0.0.0"),
+                    headers={"Origin": args.base, "Host": run.host},
                 ) as anon:
                     await anon.get(f"{API}/auth/csrf")
                     token = anon.cookies.get("__Host-arkray_csrftoken") or ""
@@ -2691,6 +2754,18 @@ def timeline(rec: Recorder, bucket: int = 10) -> list[dict[str, Any]]:
 # --- main ---------------------------------------------------------------------------------------
 def common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base", default="https://localhost:8443")
+    parser.add_argument(
+        "--host",
+        default="",
+        help="Host header (default: --base's own; localhost:8443 for a loopback --base)",
+    )
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="skip certificate checks (skipped by default only for a loopback --base)",
+    )
+    parser.add_argument("--ca-file", default="", help="check certificates against this CA")
+    parser.add_argument("--metrics-host", default="localhost", help="Host header for --metrics-url")
     parser.add_argument("--users", default="users.json")
     parser.add_argument("--sessions", default="")
     parser.add_argument(

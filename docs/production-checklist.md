@@ -73,6 +73,41 @@ the system can't verify them.
       `sslmode=verify-full` and `sslrootcert` for both scripts, one host and no service file
       ([runbooks.md](runbooks.md#backup-encryption-keys)); `RESTORE_WORK_DIR` with room for the
       dump twice.
+- [ ] The staging campaign of [staging-validation.md](staging-validation.md) run on an
+      environment equal to the target topology, every result labelled `staging`: the 100-user
+      run with a 600 s hold inside [capacity.md](capacity.md#pass-criteria-the-product-owners)'s criteria, the
+      saturation runs (saturation point and headroom recorded), the targeted runs,
+      `resilience_drill.py run --environment staging --drills all` with no FAIL and every
+      INCONCLUSIVE explained, the restore and point-in-time recovery drills with RPO and RTO
+      recorded (R114, R141).
+- [ ] Point-in-time recovery on with 30-day retention and cross-region copies, the latest
+      restorable time checked daily; or, self-hosted, WAL archiving to another region with
+      pgBackRest or WAL-G, daily base backups, 30-day retention, `pg_stat_archiver` alerts
+      ([runbooks.md](runbooks.md#database-backup)).
+- [ ] The backup repository's encryption passphrase/key (pgBackRest `repo1-cipher-pass` or
+      WAL-G `WALG_LIBSODIUM_KEY`) in the secret manager **and** with the backup key holders
+      offline.
+- [ ] The edge's maintenance switch mounted (`/etc/nginx/maintenance`, read-only) and tried
+      once: on → 503 page and JSON with `Retry-After`, the health check still up; off → normal
+      ([runbooks.md](runbooks.md#emergency-maintenance)); on a platform edge without nginx,
+      the equivalent rule prepared. No `on` file in the deployed directory.
+- [ ] Application hosts are x86_64 (the images and the pinned ClamAV image are amd64 only;
+      [deployment-readiness.md](deployment-readiness.md#review-by-component)); behind
+      Cloudflare or a load balancer, nginx's `real_ip` trusts only that proxy's ranges.
+
+**Source control and release (org)**
+
+- [ ] GitHub environments `staging` and `production` exist with required reviewers (prevent
+      self-review once there are two maintainers) and deployment branches limited to `main`
+      and `v*` tags; branch protection on `main` requires the CI checks; GHCR package
+      visibility and retention decided (the release workflow refuses to run without the
+      reviewers).
+- [ ] The commit to release pushed and its GitHub CI run green (R80).
+
+- [ ] `manage.py preflight --base-url https://<public name>` in the scanning worker's
+      container: no FAIL, and every WARN fixed or accepted in writing (managed Redis without
+      `CONFIG`, bucket settings the application's credentials can't read)
+      ([deployment.md](deployment.md#preflight)).
 
 **Secrets** (from the secret manager, never in the repository or an image)
 
@@ -83,6 +118,10 @@ the system can't verify them.
 
 **Configuration** ([deployment.md](deployment.md#configuration))
 
+- [ ] The environment built from `infrastructure/env/production.env.example`: every
+      `change-me-` value from the secret manager, every `example.com` name the deployment's,
+      the `#[service]` lines in that service only (the provider key in worker-ai, the
+      owner's password in the migrate job), nothing from the "never" list.
 - [ ] `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS`, `APP_BASE_URL` (https),
       `TRUSTED_PROXY_COUNT`, `TRUST_INCOMING_REQUEST_ID=true` behind the reference proxy;
       `TRUSTED_PROXY_ADDRESSES` and `FORWARDED_ALLOW_IPS` set to the edge proxy's own
@@ -97,7 +136,11 @@ the system can't verify them.
 - [ ] Ask Arkray: `AI_ENABLED` decided; with `AI_LLM_PROVIDER=anthropic`, the items in
       [AI configuration](deployment.md#ai-configuration): a data-processing agreement and
       the provider's retention settings **(org)**, the key on the ai worker only, an https
-      `AI_LLM_BASE_URL`, an evaluation on real data (R69) **(org)**.
+      `AI_LLM_BASE_URL`, a PASS report from the real-model evaluation (`manage.py ai_eval
+      --provider anthropic`, [ai-evaluation.md](ai-evaluation.md); three runs recommended)
+      **(org: key, spend and retention approvals)**, then a pilot on real data (R69).
+- [ ] Ask Arkray evaluation key: a separate Anthropic workspace with a spend limit, the key
+      in the operator's shell for the run only, revoked or rotated afterwards **(org)**.
 
 **Observability** ([observability.md](observability.md))
 
@@ -119,9 +162,12 @@ the system can't verify them.
       every change to their two-step verification, the rollout's check against someone with
       a phished password enrolling first.
 - [ ] The ClamAV container's health (it also fails on signatures older than 3 days),
-      `ArkrayAdministratorDeactivated`, `ArkrayMfaLocked`, `ArkrayAttachmentScanOverdue` and `ArkrayCacheDown`
+      `ArkrayAdministratorDeactivated`, `ArkrayMfaLocked`, `ArkrayMfaLockedUntilReset`,
+      `ArkrayErasureLedgerGateClosed`, `ArkrayAttachmentScanOverdue` and `ArkrayCacheDown`
       routed to people who act on them (while Redis is down, request limits are counted per
       process: R127).
+- [ ] Operators know the order for a factor locked until an MFA reset (mailbox secured,
+      password replaced, then the reset: [runbooks.md](runbooks.md#second-factor-locked)).
 - [ ] Retention periods agreed: audit trail, audit details (90 days default), backups
       (30 days), logs, Ask Arkray (30 days), customer records
       ([privacy.md](privacy.md#decisions-that-arent-the-systems)).
@@ -137,18 +183,26 @@ the system can't verify them.
 
 ## Every release
 
-1. CI green on the commit: backend and frontend gates, image smoke test
-   (`.github/workflows/ci.yml`; its first run on GitHub is still to come, R80).
-2. Images tagged with the commit SHA; base images pinned by digest.
-3. Migrate job as `arkray_owner`: `manage.py migrate --noinput && manage.py
+1. CI green on GitHub for the exact commit (the newest commit of a push to main):
+   `.github/workflows/ci.yml`: secrets, workflows, backend, frontend, images (Trivy, smoke
+   test, release on a new database). A local `scripts/ci-local.sh` run is no substitute (R80).
+2. Release workflow run for that commit SHA (`.github/workflows/release.yml`): `verify`
+   passed, `publish` approved in the **staging** environment, `promote-production` approved
+   in the **production** environment (approvers named in the release record).
+3. The two digests from the run's summary recorded with the release (and the previous
+   release's digests kept for rollback); the deploy uses `image@sha256:<digest>`, never a
+   tag, and `gh attestation verify` passes for both on the deploy host.
+4. Migrate job as `arkray_owner`: `manage.py migrate --noinput && manage.py
    grant_app_privileges arkray_app`.
-4. Release check as `arkray_app`: `manage.py check --deploy --database default` (no
+5. Release check as `arkray_app`: `manage.py check --deploy --database default` (no
    `arkray.E001`; `arkray.W002` means PostgreSQL would log statements or failing rows,
    R63).
-5. Roll out api, workers and web; beat last. Readiness gates traffic; the web server and
+6. `manage.py preflight` with the new image (scanning worker, application role): no FAIL
+   (every dependency, TLS hop and worker route: [deployment.md](deployment.md#preflight)).
+7. Roll out api, workers and web; beat last. Readiness gates traffic; the web server and
    workers refuse a privileged database role.
-6. Smoke: sign in, open the dashboard, a lead, the board; `/health/ready` OK; no error lines.
-7. Rollback = the previous image, while it can still write to the new schema (additive
+8. Smoke: sign in, open the dashboard, a lead, the board; `/health/ready` OK; no error lines.
+9. Rollback = the previous image, while it can still write to the new schema (additive
    migrations since it; not across `pipeline.0006` / `identity.0004`); otherwise roll forward
    or restore the backup ([deployment.md](deployment.md#release-process); never a
    down-migration).
@@ -157,6 +211,13 @@ the system can't verify them.
 
 - [ ] A backup restored into an empty database and the release check run on it
       (`scripts/restore.sh`), within the first month, then quarterly.
+- [ ] A point-in-time recovery into a new instance on the real platform, with sessions
+      emptied, the ledger replay and the validation checklist, within the first month and
+      then quarterly; `tests/drills/pitr_drill.py` after any change to the backup, restore or
+      ledger code ([runbooks.md](runbooks.md#restore-drill)).
+- [ ] Before a stopped-deploy release: maintenance on, T0 noted, then the migrate job
+      ([runbooks.md](runbooks.md#schema-migration-for-a-release)).
+- [ ] After any secret rotation or infrastructure change: `manage.py preflight`.
 - [ ] Dead outbox events reviewed weekly (`manage.py outbox_requeue` lists them).
 - [ ] Dependency updates: `pip-audit` and `pnpm audit` in CI; base-image digests moved
       deliberately ([deployment.md](deployment.md#images)).

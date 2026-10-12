@@ -119,10 +119,11 @@ Files on notes ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.
   enabled). A file must be what its extension says (magic bytes; OOXML packages with their
   main part and **no active content**: no macro project, OLE object (`*.bin` parts other
   than printer settings) or ActiveX control under any part name, no embedding other than
-  Office documents and pictures, no macro, OLE, ActiveX, external-link or data-connection
-  content type declared, and no relationship that is an OLE object, a template, an ActiveX
-  control, a macro project, a subdocument, a frame, a link to another workbook or a data
-  connection, or that points outside the package (anything but a hyperlink, by its exact
+  Office documents and pictures, no macro, Excel 4.0 macro sheet, OLE, ActiveX,
+  external-link or data-connection content type declared, and no relationship that is an
+  OLE object, a template, an ActiveX control, a macro project or an Excel 4.0 (XLM) macro
+  sheet (international ones too; R132), a subdocument, a frame, a link to another workbook
+  or a data connection, or that points outside the package (anything but a hyperlink, by its exact
   Transitional or Strict Type URI, with `TargetMode` other than `Internal`, or a URL/UNC
   target); no document Word imports (altChunk: an `aFChunk` relationship, an RTF, MHT or HTML
   content type or part name) and no Office add-in (web extensions, task panes):
@@ -132,6 +133,75 @@ Files on notes ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.
   audit M-3 and its review); the zip directory plus those small XML parts are read, bounded
   (1 MiB each, 4 MiB in all); text is UTF-8 without NUL bytes). Everything else is refused:
   executables, scripts (`.exe .dll .bat .cmd .ps1 .sh .js`), HTML, SVG, archives, macro documents, double extensions (`invoice.pdf.exe`).
+- **Word fields and CSV formulas** (R132): a Word document is refused when a **field** would
+  start a program or fetch content from elsewhere once it updates: `DDE` and `DDEAUTO` always;
+  `INCLUDETEXT`, `INCLUDE`, `INCLUDEPICTURE`, `IMPORT` or `LINK` with any argument naming
+  another place (a URL of any scheme, `file:` included, or a UNC path, `\\host` or `//host`; a
+  drive, root or relative path passes: it names the reader's own disk, and ordinary documents
+  carry them, such as an Excel range pasted as a link); `DATABASE` always; and a field that
+  can't be judged without evaluating the document: a name that isn't a literal word (a nested
+  field, a quoted string, a symbol: the 2017 DDE obfuscation spelled `DDEAUTO` with nested
+  `QUOTE` fields), or a fetching field whose argument isn't one (a nested `MERGEFIELD`) or
+  whose code is over 64 Ki characters. Every story is read (body, headers, footers, footnotes,
+  endnotes, comments, text boxes, building blocks: every `*.xml` part and every part
+  `[Content_Types].xml` declares WordprocessingML, so a renamed part is read too), as Word
+  assembles a field: its code split over any number of runs (run text inside a code counts; the
+  blanks Word trims around a run without `xml:space="preserve"` are trimmed), `w:fldSimple`,
+  fields nested in codes and results, and every reading of tracked changes (as recorded, all
+  accepted, all rejected). A tab, a line break or a paragraph mark inside a code is read both
+  as a blank and as nothing, and the code is also read bare (blanks, breaks and nested parts
+  removed): one that starts `DDE`, `DATABASE`, `INCLUDE`, `IMPORT` or `LINK` that way is that
+  field, however its letters are separated (independent review: `DDEAUTO`, a tab, then the
+  program passed when breaks only joined). Content Word may or may not read must not cut across
+  a field: a code that runs into an `mc:AlternateContent` branch, a field begun or ended across
+  one, field content in an element of a namespace declared ignorable, or over 64 nested fields
+  refuse the document. Each part is decoded as the relationship parts are (UTF-8, or UTF-16
+  with its byte-order mark; a declared encoding that agrees; no NUL; one that can't be refuses
+  the file); one that mentions field markup (`fldChar`, `fldSimple`, `instrText`, or `<!`:
+  element names are never escaped) is then parsed with defusedxml's expat parser, streamed (no
+  DTD or entities). **Bounds** per document, past which it is refused ("This document is too
+  large to check …"): 64 MiB of decompressed story XML; 1 million units of parsing work (an
+  element is 1 plus 1 per attribute; a namespace declaration, a comment, an `mc:Ignorable`
+  prefix 1; field content 3 per reading; judging a code 1 per 8 of its characters, per reading:
+  1,000 `INCLUDETEXT` codes of 32,000 arguments took 71 s before, independent review round 2);
+  and, in a part, nothing expat would hold whole over 1 MiB (a start tag, an attribute value, a
+  comment), at most 1,000 attributes on an element, 1,000 levels of nesting, 32 nested
+  `mc:Ignorable` scopes that add a namespace, and 10,000 distinct names (expat keeps an entry
+  for each; independent review P1-1 and P1-2: 30,000 nested `mc:Ignorable` cost 45 s, one start
+  tag of a million attributes 140 MB). A real document with fields reaches the work budget at
+  about 15 MiB of XML (some 700 pages). Measured (i7-13700HX laptop; three to four times longer
+  once it throttles under sustained load): parsing costs under a microsecond per unit of a real
+  document, and no shape of part costs more per unit (empty elements, a zip bomb's shape: 0.4
+  of it; tags of 900 attributes: 0.15; long fetching codes: 0.3-0.4; 9,000 distinct tags
+  cycling: 0.8), so a document costs at most about a second (measured worst: 0.7-0.95 s, a 63
+  MiB document read whole and parsed to the budget) of CPU in the upload request (a 64 KB zip
+  bomb holding 63 MiB of XML and one field: about 0.6 s, then refused; without a field it is
+  only read: 0.25 s); the largest traced memory any shape needed was 3.2 MiB (one 5 MiB start
+  tag, refused once 1 MiB of it was still unparsed). Ordinary fields pass: `PAGE`, `NUMPAGES`,
+  `TOC`, `PAGEREF`, `REF`, `HYPERLINK` (followed only on a click), `MERGEFIELD`, `DATE`,
+  `FORMTEXT`, `SEQ`, `IF`, formulas, citations. Known false positives, accepted: a picture
+  pasted from a web page that Word keeps as `INCLUDEPICTURE "https://…"` (Word for Mac
+  especially), mail-merge pictures (`INCLUDEPICTURE` with a nested `MERGEFIELD`), files linked
+  from a network share, any field whose name starts `DDE`; the fix is to select all and press
+  Ctrl+Shift+F9 (fields become text). **Workbooks**: Excel saves a DDE formula (`=cmd|' /C
+  calc'!A0`) as an external-link part holding a `ddeLink`, refused already by its part name,
+  type and relationship; cell formulas themselves aren't parsed (R132). A **CSV** is refused
+  when a cell Excel would evaluate (after blanks, tabs or line breaks it starts with `=`, `+`,
+  `-` or `@`) has DDE's shape: a `|` outside its string literals and quoted names, with a `!`
+  after it ("This file has a cell that Excel would run as a command …"). Its fields are read as
+  Python's csv module reads them (a quoted field runs to its closing quote, `""` inside is a
+  quote, text after the closing quote joins the field, and a formula's string literal or quoted
+  name open at that quote goes on in it: a differential fuzz against the csv module, 4
+  million inputs, finds no DDE cell it misses), separated by a comma, a semicolon (Excel's
+  separator in many regions), a tab and whatever a first `sep=` line names (a separator the
+  file doesn't hold: whole lines, read once), by regular expressions over a stream: every field
+  passes through C, memory holds a chunk and a field's first 128 Ki characters (Excel holds
+  32,767 in a cell and 8,192 in a formula; a longer field that starts like a formula, or is
+  blanks that far, is refused). Only a file holding a `|` and a `!` is read that way. A 10 MB
+  CSV costs 0.5-0.7 s at full clock with a `|` in every row and every separator present
+  (independent review P3-6: the csv module took up to 4 s and held up to 140 MB for one row of
+  millions of cells); traced memory stays under 1 MiB. `.txt` files aren't checked: a text
+  editor opens them, and Excel only through its import wizard.
 - **Names** are display text only: path components dropped, control and bidi characters
   refused, ≤ 200 characters. Objects live under generated keys (`YYYY/MM/<uuid>`), never the
   uploaded name.

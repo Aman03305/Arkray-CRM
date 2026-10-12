@@ -81,6 +81,7 @@ SAFE_FIELDS = frozenset(
         "attempt",
         "backend",
         "cache_read_tokens",
+        "cache_write_tokens",
         "checked",
         "complete",
         "conversations",
@@ -127,6 +128,9 @@ SAFE_FIELDS = frozenset(
         "requeued",
         "retry_in_s",
         "round",
+        # which upload content rule refused a file (activities.storage: a fixed word such as
+        # dde, remote, csv_dde; never the file or its name)
+        "rule",
         "security",
         "sessions",
         "source",

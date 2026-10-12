@@ -13,7 +13,7 @@ export const MFA_SETUP: MfaSetup = {
 export const RECOVERY_CODES = Array.from({ length: 10 }, (_, i) => `AAAA-BBBB-CCCC-${String(i).padStart(4, "0")}`);
 
 export function makeMfaStatus(overrides: Partial<MfaStatus> = {}): MfaStatus {
-  return { enabled: false, confirmed_at: null, recovery_codes_remaining: 0, required: false, can_disable: true, ...overrides };
+  return { enabled: false, confirmed_at: null, recovery_codes_remaining: 0, required: false, can_disable: true, lock: null, ...overrides };
 }
 
 /** The dark modules a drawn QR path covers: the sum of its runs ("M x y h n v1 h-n z"). */

@@ -488,4 +488,6 @@ Rahul/Priya secret matrix, adversarial model, injection, stale reassignment),
 `frontend/src/features/ask/` (`ask.test.tsx`, `review-regressions.test.tsx`: rendering
 safety, polling, workspace-switch races).
 Tests use `ScriptedProvider` (a scripted model that records everything it is sent) and the
-hashing embedder; no test calls a real provider. Details in [testing.md](testing.md).
+hashing embedder; no test calls a real provider. Details in [testing.md](testing.md). The
+real-model evaluation (R69) is [ai-evaluation.md](ai-evaluation.md) (`manage.py ai_eval`);
+its self-test runs with the scripted model in the default suite.

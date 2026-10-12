@@ -20,7 +20,15 @@ from arkray.core.text import SEARCH_MAX_LENGTH, SEARCH_MIN_LENGTH
 
 from .. import mfa_services
 from ..emails import validate_ascii_email
-from ..models import NAME_MAX_LENGTH, Role, SupportSession, User, UserStatus
+from ..models import (
+    NAME_MAX_LENGTH,
+    MfaDevice,
+    MfaLock,
+    Role,
+    SupportSession,
+    User,
+    UserStatus,
+)
 from ..policy import capabilities_for
 from ..support import REASON_MAX_LENGTH
 
@@ -29,6 +37,19 @@ EMAIL_MAX_LENGTH = 254
 PASSWORD_INPUT_MAX_LENGTH = 1024
 TOKEN_INPUT_MAX_LENGTH = 128
 MFA_CODE_INPUT_MAX_LENGTH = 64
+MFA_LOCK_HELP = (
+    "Null while codes are accepted. Otherwise too many wrong codes locked the second factor"
+    " (no code is accepted, the right one included) and this says what unlocks it:"
+    " `password_reset` (a password reset by email, a password set by an administrator, or an"
+    " MFA reset) or `mfa_reset` (only an MFA reset: too many wrong codes since the last right"
+    " one, across new passwords; R133)."
+)
+
+
+def _mfa_lock_field() -> serializers.ChoiceField:
+    return serializers.ChoiceField(
+        choices=MfaLock.choices, allow_null=True, help_text=MFA_LOCK_HELP
+    )
 
 
 def _password_field() -> serializers.CharField:
@@ -161,6 +182,7 @@ class AdminUserSerializer(serializers.ModelSerializer[User]):
             "password_change_required",
             "password_changed_at",
             "mfa_enabled",
+            "mfa_lock",
             "version",
         ]
         read_only_fields = fields
@@ -168,11 +190,24 @@ class AdminUserSerializer(serializers.ModelSerializer[User]):
     mfa_enabled = serializers.SerializerMethodField(
         help_text="The user has a confirmed second factor."
     )
+    mfa_lock = serializers.SerializerMethodField(help_text=MFA_LOCK_HELP)
 
     @extend_schema_field(serializers.BooleanField())
     def get_mfa_enabled(self, user: User) -> bool:
         annotated = getattr(user, "mfa_enabled", None)  # selectors.admin_user_*
         return bool(annotated) if annotated is not None else mfa_services.has_confirmed_device(user)
+
+    @extend_schema_field(_mfa_lock_field())
+    def get_mfa_lock(self, user: User) -> str | None:
+        annotated = user.__dict__
+        if "mfa_consecutive_failures" in annotated:  # selectors.admin_user_*
+            lock = MfaDevice.lock_for(
+                annotated["mfa_consecutive_failures"], annotated["mfa_cumulative_failures"]
+            )
+        else:
+            device = MfaDevice.objects.filter(user_id=user.pk, confirmed_at__isnull=False).first()
+            lock = device.lock if device is not None else None
+        return None if lock is None else lock.value
 
     @extend_schema_field(InvitationStateSerializer(allow_null=True))
     def get_invitation(self, user: User) -> dict[str, Any] | None:
@@ -250,6 +285,7 @@ class MfaStatusSerializer(serializers.Serializer[Any]):
             "recovery_codes_remaining": serializers.IntegerField(),
             "required": serializers.BooleanField(help_text="Required for this account's role."),
             "can_disable": serializers.BooleanField(),
+            "lock": _mfa_lock_field(),
         }
 
 

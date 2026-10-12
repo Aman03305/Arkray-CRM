@@ -8,22 +8,30 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request replaces its running checks. On main every commit runs to
+# the end, in a group of its own: a release needs CI's verdict on exactly the commit it
+# publishes (.github/workflows/release.yml), and one group per branch would cancel a waiting
+# run whenever a third commit arrived.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Third-party actions are pinned to a commit (the tag they were taken from in the comment):
-# a moved tag can't change what runs here (Phase 11). Move them deliberately.
+# Third-party actions are pinned to a commit, the exact release it was taken from in the
+# comment (checked with `git ls-remote --tags`): a moved tag can't change what runs here
+# (Phase 11). Move them deliberately, in every workflow at once
+# (tests/architecture/test_ci_workflow.py). No checkout keeps the token in .git/config: nothing
+# here pushes, and the tests and dependencies that run afterwards have no use for it.
 
 jobs:
   # Secrets in the repository: every commit, not just the latest tree, since a secret
   # removed later is still in the history (secret-exposure audit). Reviewed test values are
-  # listed in .gitleaksignore. The binary is pinned by version and checksum.
+  # listed in .gitleaksignore. The binary is pinned by version and checksum. A finding is
+  # reported with its file, line, rule and fingerprint, the value itself redacted.
   secrets:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -36,7 +44,21 @@ jobs:
             "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz"
           echo "${sha256}  /tmp/gitleaks.tar.gz" | sha256sum --check --strict
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
-          /tmp/gitleaks git --redact --no-banner --exit-code 1 .
+          /tmp/gitleaks git --redact --verbose --no-banner --exit-code 1 .
+
+  # The workflows themselves: expressions, permissions, job dependencies and action inputs
+  # (actionlint), and shellcheck on every `run:` script. The image is pinned by digest.
+  workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Lint the workflows
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" -w /repo \
+            rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
 
   backend:
     runs-on: ubuntu-latest
@@ -57,14 +79,19 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           enable-cache: true
-      - run: uv sync --frozen
+      # --locked, not --frozen: uv.lock must also match pyproject.toml. A dependency edited
+      # without `uv lock` fails here, instead of the images building from a stale lockfile
+      # (their `uv sync --frozen` trusts it).
+      - run: uv sync --locked
       # The pinned embedding model (SHA-256 verified), so the real-model tests run here
       # instead of skipping (backend/arkray/ai/tests/test_local_model.py).
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: backend/.models
           key: embedding-model-${{ hashFiles('backend/arkray/ai/model_files.py') }}
@@ -91,12 +118,14 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           # The pnpm version comes from "packageManager", which lives in frontend/, not the root.
           package_json_file: frontend/package.json
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version-file: frontend/.node-version
           cache: pnpm
@@ -115,34 +144,36 @@ jobs:
     timeout-minutes: 30
     needs: [backend, frontend]
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - run: docker build -t arkray-backend:ci backend
       - run: docker build --build-arg API_ORIGIN=http://backend:8000 -t arkray-frontend:ci frontend
       # The images start as production runs them: production settings, a read-only root
-      # filesystem, no capabilities. (No database here: the startup role check only warns
-      # when it can't connect; readiness would report the database.)
+      # filesystem, no capabilities. (No database for the servers: the startup role check
+      # only warns when it can't connect; readiness would report the database.)
       # Known vulnerabilities in what the images contain: OS packages and every bundled language
       # package (the final audit's R107 findings were npm inside the base image, invisible to
       # `pnpm audit`). A HIGH or CRITICAL finding with a fix available fails the build; one the
       # distribution has not fixed yet (no fixed version) is listed, not blocking, and judged
-      # for reachability in docs/risk-register.md. The scanner image is pinned by digest.
+      # for reachability in docs/risk-register.md. The scanner image is pinned by digest; its
+      # vulnerability database is downloaded once per job into a volume the six scans share.
       # Secrets in any layer (a key copied in, an ENV or build argument) also fail the build:
       # an image keeps every layer (secret-exposure audit).
+      # The release workflow runs this step and the next one unchanged on the images it
+      # publishes (tests/architecture/test_ci_workflow.py compares them).
       - name: Scan the images for known vulnerabilities and secrets
         run: |
           set -euo pipefail
           trivy=aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e
+          scan=(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache "$trivy" image --skip-version-check)
           for image in arkray-backend:ci arkray-frontend:ci; do
             echo "== $image: everything HIGH or CRITICAL (informational)"
-            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$trivy" image \
-              --skip-version-check --scanners vuln --severity HIGH,CRITICAL "$image"
+            "${scan[@]}" --scanners vuln --severity HIGH,CRITICAL "$image"
             echo "== $image: fixable HIGH or CRITICAL (blocking)"
-            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$trivy" image \
-              --skip-version-check --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
-              --exit-code 1 "$image"
+            "${scan[@]}" --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$image"
             echo "== $image: secrets, any severity (blocking)"
-            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$trivy" image \
-              --skip-version-check --scanners secret --exit-code 1 "$image"
+            "${scan[@]}" --scanners secret --exit-code 1 "$image"
           done
       - name: Smoke-test the images
         run: |
@@ -165,7 +196,7 @@ jobs:
           docker run --rm "${prod_env[@]}" "${hardened[@]}" arkray-backend:ci python manage.py check --deploy
           docker run -d --name api "${prod_env[@]}" "${hardened[@]}" -p 8000:8000 arkray-backend:ci
           docker run -d --name web "${hardened[@]}" --tmpfs /app/.next/cache:uid=10001,gid=10001 -p 3000:3000 arkray-frontend:ci
-          for i in $(seq 1 30); do curl -fsS http://localhost:8000/health/live && break; sleep 2; done
+          for _ in $(seq 1 30); do curl -fsS http://localhost:8000/health/live && break; sleep 2; done
           # Outside the loop, whose own status is always the last sleep's: the API is up.
           curl -fsS http://localhost:8000/health/live
           curl -fsS -o /dev/null http://localhost:3000/login
@@ -175,3 +206,27 @@ jobs:
             echo "the API logged errors" >&2
             exit 1
           fi
+          # A release on a new database (docs/deployment.md#release-process, steps 2-4) with
+          # this image: infrastructure/postgres/roles.sql as the superuser, every migration
+          # from nothing as arkray_owner (no superuser: a migration that needs more fails here,
+          # not in production; the test suite migrates as a superuser), the grant, nothing left
+          # unapplied, and the release check as arkray_app. The passwords are random and reach
+          # the containers through the environment, never a command line; DATABASE_URL given
+          # last replaces prod_env's.
+          export POSTGRES_PASSWORD OWNER_PASSWORD APP_PASSWORD
+          POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+          OWNER_PASSWORD="$(openssl rand -hex 24)"
+          APP_PASSWORD="$(openssl rand -hex 24)"
+          docker run -d --name db -e POSTGRES_USER=arkray -e POSTGRES_DB=postgres -e POSTGRES_PASSWORD \
+            pgvector/pgvector:0.8.7-pg16-trixie@sha256:40d828eda66737aaacb934387a337babf1455ebd56e9bdd13fc08e211257c972
+          # TCP answers only once the image's first-start initialisation is over.
+          for _ in $(seq 1 30); do docker exec db pg_isready -q -h 127.0.0.1 -U arkray && break; sleep 2; done
+          docker exec -i -e OWNER_PASSWORD -e APP_PASSWORD db \
+            psql -q -U arkray -d postgres -v database=arkray -f - < infrastructure/postgres/roles.sql
+          on_db=(--network container:db)
+          DATABASE_URL="postgres://arkray_owner:${OWNER_PASSWORD}@127.0.0.1:5432/arkray" \
+            docker run --rm "${prod_env[@]}" -e DATABASE_URL "${hardened[@]}" "${on_db[@]}" arkray-backend:ci \
+            sh -c 'python manage.py migrate --noinput && python manage.py grant_app_privileges arkray_app && python manage.py migrate --check'
+          DATABASE_URL="postgres://arkray_app:${APP_PASSWORD}@127.0.0.1:5432/arkray" \
+            docker run --rm "${prod_env[@]}" -e DATABASE_URL "${hardened[@]}" "${on_db[@]}" arkray-backend:ci \
+            python manage.py check --deploy --database default

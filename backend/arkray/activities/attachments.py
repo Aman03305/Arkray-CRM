@@ -131,6 +131,8 @@ class QuotaExceeded(BusinessRuleViolation):
 # Advisory-lock namespace ("ARKQ"): one person's uploads are checked against their quota one
 # at a time (core.idempotency's and identity.throttling's two-key form).
 _QUOTA_LOCK = 0x41524B51
+# ("ARKP"): one purge of a file at a time (purge, a try-lock).
+_PURGE_LOCK = 0x41524B50
 
 
 class AttachmentUnavailable(DomainError):
@@ -515,19 +517,17 @@ def removed_for_good() -> Q:
 
 
 def _held_notes() -> Q | None:
-    """Notes whose lead is under a legal hold: their files are never removed meanwhile."""
+    """Notes whose lead is under a legal hold: their files are never removed meanwhile. Read
+    under core.holds.barrier() by a job that acts on it (forget_purged), or only to sift
+    (housekeeping: purge decides for each file under its lead's hold lock)."""
     leads = holds.held_leads()
     return Q(note__lead_id__in=leads) if leads else None  # every activity has its lead
 
 
-def purge(attachment_id: UUID, *, replaying: bool = False) -> bool:
-    """Remove the object of a deleted, failed or rejected file from storage (idempotent:
-    a missing object counts as removed), then its name and content hash (REMOVED_NAME):
-    nothing left identifies it. Deferred while a legal hold covers the note's lead.
-    StorageUnavailable propagates: the job retries, and nothing is forgotten before the
-    object is really gone. `replaying`: the erasure ledger re-applied after a restore
-    (privacy.replay): already decided, so neither deferred nor recorded again."""
-    attachment = Attachment.objects.filter(pk=attachment_id, purged_at__isnull=True).first()
+def _purgeable(attachment: Attachment | None) -> bool:
+    """Not purged yet, and deleted, failed or rejected. Not an upload still being written:
+    its object may not exist yet. _finish (or housekeeping, giving up on it) queues the
+    purge again once it does."""
     if attachment is None:
         return False
     gone = (
@@ -535,18 +535,62 @@ def purge(attachment_id: UUID, *, replaying: bool = False) -> bool:
         or attachment.state == AttachmentState.FAILED
         or attachment.scan_status == ScanStatus.REJECTED
     )
-    if not gone or attachment.state == AttachmentState.UPLOADING:
-        # An upload still being written: its object may not exist yet. _finish (or
-        # housekeeping, giving up on it) queues the purge again once it does.
+    return gone and attachment.state != AttachmentState.UPLOADING
+
+
+def _claim_purge(attachment_id: UUID) -> bool:
+    """The file's purge claim until the transaction ends ("ARKP": never waits, so it can't
+    be part of a cycle); False while another purge of it holds the claim."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_try_advisory_xact_lock(%s, hashtext(%s))",
+            [_PURGE_LOCK, str(attachment_id)],
+        )
+        return bool(cursor.fetchone()[0])
+
+
+def purge(attachment_id: UUID, *, replaying: bool = False, unless_held: bool = False) -> bool:
+    """Remove the object of a deleted, failed or rejected file from storage (idempotent:
+    a missing object counts as removed), then its name and content hash (REMOVED_NAME):
+    nothing left identifies it. Deferred while a legal hold covers the note's lead.
+    StorageUnavailable propagates: the job retries, and nothing is forgotten before the
+    object is really gone. `replaying`: the erasure ledger re-applied after a restore
+    (privacy.replay): already decided, so neither deferred nor recorded again; with
+    `unless_held` (the automatic reconciliation, which leaves a held lead to an operator)
+    a hold on the lead raises UnderLegalHold instead.
+
+    Serialised with placing a hold on the note's lead (core.holds; R134): the lead's hold
+    lock (SHARED) is held from the check until the object is gone and the row says so, so a
+    hold placed at the same moment has either committed before the check (the file stays)
+    or waits for the purge to finish; never placed while the object is being removed. Only
+    a hold on that lead waits for it (the storage calls are each bounded by
+    ATTACHMENT_STORAGE_DEADLINE_S). No row is locked meanwhile (review P3-4): an erasure
+    rewriting the lead's files never waits for a purge's storage calls, and the purge's one
+    row lock is its last write. One purge of a file at a time: a second one (an outbox
+    retry, housekeeping) finds the file claimed and skips it, without waiting."""
+    found = Attachment.objects.filter(pk=attachment_id, purged_at__isnull=True).first()
+    if found is None or not _purgeable(found):  # the common case, without a lock: nothing to do
         return False
-    held = None if replaying else _held_notes()
-    if held is not None and Attachment.objects.filter(held, pk=attachment.pk).exists():
-        return False  # kept, object and all, until the hold is released (housekeeping)
-    storage.delete(attachment.storage_key)
-    if settings.ATTACHMENT_S3_PURGE_VERSIONS:
-        storage.delete_versions(attachment.storage_key)
-    forget = Attachment.objects.filter(removed_for_good(), pk=attachment.pk).exists()
+    checked = not replaying or unless_held
     with transaction.atomic():
+        if not _claim_purge(attachment_id):
+            return False  # being purged right now
+        if checked:
+            lead_id = Activity.objects.filter(pk=found.note_id).values_list("lead_id", flat=True)[0]
+            try:
+                holds.refuse_if_held(HoldSubject.LEAD, lead_id)
+            except holds.UnderLegalHold:
+                if unless_held:
+                    raise
+                return False  # kept, object and all, until the hold is released (housekeeping)
+        # Read again after the locks: purged meanwhile (by the purge that held the claim).
+        attachment = Attachment.objects.filter(pk=attachment_id, purged_at__isnull=True).first()
+        if attachment is None or not _purgeable(attachment):
+            return False
+        storage.delete(attachment.storage_key)
+        if settings.ATTACHMENT_S3_PURGE_VERSIONS:
+            storage.delete_versions(attachment.storage_key)
+        forget = Attachment.objects.filter(removed_for_good(), pk=attachment.pk).exists()
         updated = Attachment.objects.filter(pk=attachment.pk, purged_at__isnull=True).update(
             purged_at=timezone.now(),
             **({"original_name": REMOVED_NAME, "sha256": ERASED_SHA256} if forget else {}),
@@ -567,12 +611,17 @@ def forget_purged(*, actor_id: UUID | None, dry_run: bool = True) -> int:
         .filter(removed_for_good())
         .exclude(sha256=ERASED_SHA256)
     )
-    held = _held_notes()
-    if held is not None:
-        rows = rows.exclude(held)
     if dry_run:
-        return rows.count()
+        held = _held_notes()
+        return (rows if held is None else rows.exclude(held)).count()
     with transaction.atomic():
+        # First: serialised with placing a hold (core.holds.barrier; R134). The holds read
+        # here stay the holds until the names are gone: one being placed has committed
+        # before, or waits.
+        holds.barrier()
+        held = _held_notes()
+        if held is not None:
+            rows = rows.exclude(held)
         count = rows.update(original_name=REMOVED_NAME, sha256=ERASED_SHA256)
         if count:
             audit.record(
@@ -676,7 +725,7 @@ def housekeeping(now: datetime) -> dict[str, int]:
         | Q(state=AttachmentState.FAILED)
         | Q(scan_status=ScanStatus.REJECTED)
     )
-    held = _held_notes()
+    held = _held_notes()  # a sift: purge() decides for each file, under its lead's hold lock
     if held is not None:
         leftovers = leftovers.exclude(held)
     for attachment_id in leftovers.order_by("created_at").values_list("pk", flat=True)[:1000]:

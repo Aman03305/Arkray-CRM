@@ -164,12 +164,15 @@ def forget_conversation(actor: User, scope: AccessScope, conversation_id: UUID) 
     customer (deep security audit M-5: the person a hold targets could destroy the evidence,
     without a trace). Audited with ids only, like every deletion."""
     with transaction.atomic():
+        # First: serialised with placing any hold (core.holds.barrier). Which customers a
+        # conversation touches is only known by matching it, so every lead hold is read: one
+        # being placed has committed before they are, or waits for this deletion (R134).
+        holds.barrier()
         conversation = (
             conversations_in(actor, scope).select_for_update().filter(pk=conversation_id).first()
         )
         if conversation is None:
             raise NotFoundError()
-        # Under the conversation's row lock, serialised with placing a user hold (core.holds).
         users = dict.fromkeys([conversation.actor_id, conversation.subject_id])
         try:
             for user_id in users:
@@ -177,8 +180,6 @@ def forget_conversation(actor: User, scope: AccessScope, conversation_id: UUID) 
                     holds.refuse_if_held(HoldSubject.USER, user_id)
         except holds.UnderLegalHold:
             raise ConversationHeld() from None
-        # A customer's holds are read (as bulk jobs read them, core.holds): which customers
-        # a conversation touches is only known by matching it.
         if subjects.held_conversations(among=[conversation.pk]):
             raise ConversationHeld()
         questions = conversation.questions.count()
@@ -945,6 +946,8 @@ def answer_with_model(
                 "input_tokens": completion.input_tokens,
                 "output_tokens": completion.output_tokens,
                 "cache_read_tokens": completion.cache_read_tokens,
+                # Written to the cache at 1.25x the input price: the four counts are the cost.
+                "cache_write_tokens": completion.cache_write_tokens,
                 "provider_request_id": completion.provider_request_id,
             },
         )
@@ -1256,7 +1259,13 @@ def housekeeping(now: datetime | None = None) -> dict[str, int]:
     # committed on its own; and a conversation found held is remembered for as long as the
     # same holds are active (it can only gain questions meanwhile, so it stays held), so it
     # is not matched again every hour.
-    users = holds.held_users()
+    #
+    # Serialised with placing a hold (core.holds.barrier; R134): every batch takes the
+    # barrier first and reads the holds again (one small query) before it matches and
+    # deletes, so a hold placed since they were read here is honoured from the next batch,
+    # and one being placed while a batch runs waits for it to commit.
+    snapshot = holds.active()
+    users = snapshot[HoldSubject.USER]
     due = set(
         subjects.user_held(
             Conversation.objects.filter(questions__finished_at__lt=cutoff), users
@@ -1273,9 +1282,21 @@ def housekeeping(now: datetime | None = None) -> dict[str, int]:
     old_questions = deleted = 0
     batch_size = HOUSEKEEPING_BATCH
     pending = sorted(due - remembered)
+    holds_changed = False
     for start in range(0, len(pending), batch_size):
         batch = pending[start : start + batch_size]
         with transaction.atomic():
+            holds.barrier()
+            current = holds.active()
+            if current != snapshot:  # placed or released since: matched as they are now
+                snapshot, users, holds_changed = current, current[HoldSubject.USER], True
+                customers = subjects.HeldCustomers.now()
+            if holds_changed and users:
+                batch = list(
+                    subjects.user_held(Conversation.objects.filter(pk__in=batch), users)
+                    .order_by("pk")
+                    .values_list("pk", flat=True)
+                )
             held = customers.touching(batch)
             gone = [pk for pk in batch if pk not in held]
             removed, _ = Question.objects.filter(
@@ -1285,7 +1306,7 @@ def housekeeping(now: datetime | None = None) -> dict[str, int]:
         still_held |= held
         old_questions += removed
         deleted += per_model.get(Conversation._meta.label, 0)
-    if customers:
+    if customers and not holds_changed:  # remembered only for the holds it was matched under
         _remember(memo_key, still_held)
     return {
         "expired_questions": expired,

@@ -82,6 +82,7 @@ business logic.
 | 403 `password_change_required` / `support_session_active` | choose your own password first / not inside a support session |
 | 403 `mfa_enrollment_required` / `mfa_required` | set up two-step verification first / verify a code (`POST /auth/mfa/verify`) and repeat the request |
 | 403 `mfa_locked` | too many wrong second-factor codes in a row: no code is accepted until a password reset by email, a password set by an administrator or an MFA reset (deep security audit M-4) |
+| 403 `mfa_locked_until_reset` | `MFA_MAX_FAILURES_BEFORE_RESET` (60) wrong second-factor codes since the last right one, across new passwords: no code is accepted until an MFA reset (an administrator for an ordinary user, `manage.py reset_mfa` for anyone); a password reset doesn't unlock it (R133). Handled like `mfa_locked` (at sign-in the challenge ends) |
 | 403 `customer_restricted` | the edit names a customer field of a deal whose customer the caller may not see; the same answer whatever the value (deep security audit M-2) |
 | 404 `not_found` | does not exist **or is outside your scope** (deliberately indistinguishable) |
 | 405, 406, 415 | method / accept / media type |

@@ -67,6 +67,7 @@ REFUSE_REVERSE = {
     "identity.0004_support_sessions",
     "identity.0005_mfa",  # ADR-0033: two-step verification
     "identity.0006_mfa_consecutive_failures",  # deep security audit M-4
+    "identity.0007_mfa_cumulative_failures",  # R133: the cap a new password doesn't clear
     "leads.0007_lead_erased_at",  # deep security audit M-1
     "pipeline.0006_ownership_negotiation_fields",
     "pipeline.0007_search_customer_names",

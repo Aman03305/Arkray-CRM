@@ -109,6 +109,36 @@ waits for it; an edit arriving while a hold is being placed waits and is then re
 on a user (staff) stop their pseudonymisation and the expiry of details about them; they
 don't freeze CRM records.
 
+**Placing a hold is serialised with whatever acts on the holds** (risk register R134;
+`core/holds.py`). A hold placed at the same moment as a deletion, purge, erasure or overwrite
+either committed before that operation read the holds (the data is kept) or waits until the
+operation has committed; it is never committed between the operation's check and its
+deletion. Two transaction-scoped locks do it:
+
+- an operation on one subject's data takes that subject's hold lock, shared: every edit
+  above, and the purge of a note's file (the lead's lock is held until the file's object is
+  gone and its row says so, so a hold on that lead waits at most for that file's storage
+  calls; no row is locked meanwhile, so an erasure of the lead never waits for them, and a
+  second purge of the same file skips it);
+- an operation that reads every hold, or holds it can't name before reading them, takes the
+  **hold barrier**, shared, as the first lock of its transaction: an erasure (the
+  conversations a hold on someone else keeps), a staff pseudonymisation, deleting an Ask
+  Arkray conversation, the hourly conversation housekeeping and the deletion of a removed
+  custom field's values (each batch takes it and reads the holds again, so a hold placed
+  while either runs counts from the next batch, and one placed during a batch waits for it),
+  forgetting purged files' names, the audit-detail expiry (per batch), the support-reason
+  blanking, and a ledger replay without an operator (the automatic reconciliation, which
+  leaves a held lead or user, or a held lead's deleted file, to an operator).
+
+`legal_hold place` takes the barrier exclusively, then the subject's lock, then inserts, so it
+waits for the operations already past their check (each is short; an erasure is the longest,
+seconds) and holds new ones back until it commits. Should it wait longer than the
+database's lock timeout (5 s by default) it stops with nothing placed and says to run it
+again. Rules for code (`core/holds.py`, enforced there): the barrier is the first lock of its
+transaction, before any row lock, write or other advisory lock, so whoever waits for it holds
+nothing and it can't close a deadlock; a subject's lock comes after the operation's row
+locks.
+
 **Ask Arkray conversations** (deep security audit M-5; `ai/subjects.py: held_conversations`).
 A hold keeps every conversation that concerns its subject, whole (every question and answer
 in it), until it is released:
@@ -128,10 +158,11 @@ questions, never text). Once the hold is released, the next hourly housekeeping 
 is older than the retention. Hourly housekeeping excludes a held user's conversations
 without reading them, matches the rest against the held customers in batches that each
 commit, and remembers a conversation found held while the same holds are active, so long
-holds don't slow the deletion of everyone else's history. A user hold is checked under the same lock as placing it
-(`core.holds`); which customers a conversation touches is known only by matching it, so a lead
-hold is read when the deletion runs (as bulk jobs read holds): a conversation deleted at the
-very moment a lead hold is being placed may go.
+holds don't slow the deletion of everyone else's history. Which customers a conversation
+touches is known only by matching it, so deleting one, the housekeeping, an erasure and a
+pseudonymisation read every hold under the hold barrier (above): a lead or user hold placed
+at the same moment either keeps the conversation or is placed once it is gone, never in
+between.
 
 ## Audit trail
 

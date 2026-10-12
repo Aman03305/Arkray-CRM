@@ -105,8 +105,9 @@ move deadlocked (enhancement review P0, `test_enhancement_races.py`, reproduced 
 the fix). Restoring an archived deal also takes KEY SHARE on its stage and is refused (422)
 if the stage was removed meanwhile. Opportunity writes take shared
 locks on configuration *after* their own (lock order step 3): creation and custom-value edits
-FOR SHARE on the pipeline, moves and restores FOR KEY SHARE on the pipeline, and every
-creation or move FOR KEY SHARE on its target stage, each in the statement that reads the row
+FOR SHARE on the pipeline (a reassignment too, on the personal pipelines holding the lead's
+deals: [Custom fields](#custom-fields)), moves and restores FOR KEY SHARE on the pipeline,
+and every creation or move FOR KEY SHARE on its target stage, each in the statement that reads the row
 (PostgreSQL re-checks it under the lock). So a stage being removed and a move into it
 serialise: the move commits first (and the removal then counts it: 422) or the removal does
 (and the move finds no such stage: 400); a pipeline archived while a deal is created in it
@@ -181,7 +182,12 @@ Removing a custom field hides its values from every deal of the pipeline. Removi
 workspace while a deal outside the caller's scope (one reassigned with its lead, still in
 the caller's pipeline), or a deal of theirs whose customer they no longer see (a closed deal
 kept after its lead was reassigned), holds a value of it (deep security audit L-4 and its
-review; final production audit SEC-1 already covered the deletion). The deletion job of a
+review; final production audit SEC-1 already covered the deletion). The check is serialised
+with reassignments: it runs under the pipeline's FOR NO KEY UPDATE, and a reassignment takes
+the personal pipelines holding the lead's deals (closed ones included) FOR SHARE before it
+commits, so it either committed before the check reads the owners or waits until the field
+is removed (R137; `pipeline/tests/test_field_removal_races.py`). Shared pipelines aren't
+locked: only the organisation-wide workspace configures them. The deletion job of a
 workspace touches only deals whose owner and whose lead's owner are that workspace's owner,
 so a deal whose customer moved elsewhere keeps its value. An administrator removes such a
 field, or deletes every deal's values, from the organisation-wide workspace.
@@ -594,8 +600,10 @@ locked an opportunity before its lead; a deliberate mutation of `_lock` produced
    opportunity writes, only `KEY SHARE`-checked by the foreign keys: the review found that
    a lock over the opportunity-stage join also locked the shared stage row, so two users
    moving cards in opposite directions deadlocked (P1, fixed, pinned by real-thread tests);
-3. **configuration**: the pipeline row FOR SHARE (creating, editing custom values) or FOR KEY
-   SHARE (moves, restores), then the target stage FOR KEY SHARE ([Configuration](#configuration));
+3. **configuration**: the pipeline row FOR SHARE (creating, editing custom values; a
+   reassignment: the personal pipelines holding the lead's deals, after its opportunities)
+   or FOR KEY SHARE (moves, restores), then the target stage FOR KEY SHARE
+   ([Configuration](#configuration));
 4. **user rows**: `FOR SHARE` (`lock_assignable_user`), leaf locks;
 5. inserts: stage history, negotiated prices, audit, idempotency records.
 

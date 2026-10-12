@@ -78,6 +78,7 @@ def metrics_view(request: HttpRequest) -> HttpResponse:
             )
     database_up.add(1 if reachable else 0)
     gauges = [database_up, *from_database, *metrics.broker(), *metrics.cache_up()]
+    gauges += metrics.erasure_ledger_gate()
     # Attachment storage: a degraded signal, like the cache (the CRM works without it).
     gauges += attachment_metrics.storage_up() + attachment_metrics.events()
     return HttpResponse(metrics.render(gauges), content_type="text/plain; version=0.0.4")

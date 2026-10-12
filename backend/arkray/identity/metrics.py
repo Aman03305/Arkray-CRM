@@ -8,8 +8,12 @@
   the last hour (`mfa.locked` audit events; deep security audit M-4). Raises
   ArkrayMfaLocked: codes are asked for only after the right password, so a lockout means
   someone else very probably has that user's password.
+- `arkray_mfa_locked_until_reset_last_hour`: those of them past the cap a new password
+  doesn't clear (`mfa.locked` with `until: mfa_reset`; R133). Raises
+  ArkrayMfaLockedUntilReset: it took the password and new ones chosen through the emailed
+  link (the mailbox, very probably), and only an MFA reset unlocks it.
 
-Both from PostgreSQL at scrape time, in one count over the `audit_action_idx` index: a
+All from PostgreSQL at scrape time, in one count over the `audit_action_idx` index: a
 database-wide figure every pod reports alike. No cache read (a stalled cache must not slow
 the scrape). Labels: none.
 """
@@ -25,6 +29,7 @@ from arkray.audit.models import AuditEvent
 from arkray.core.metrics import Gauge
 
 from .mfa_services import AUDIT_LOCKED
+from .models import MfaLock
 from .policy import Capability, roles_with
 from .services import AUDIT_USER_DEACTIVATED
 
@@ -39,6 +44,10 @@ def gauges() -> list[Gauge]:
         "arkray_mfa_lockouts_last_hour",
         "Second factors locked by too many wrong codes in the last hour (mfa.locked audit events).",
     )
+    until_reset = Gauge(
+        "arkray_mfa_locked_until_reset_last_hour",
+        "Second factors locked until an MFA reset in the last hour (mfa.locked, until mfa_reset).",
+    )
     since = timezone.now() - timedelta(hours=1)
     counts = AuditEvent.objects.filter(
         action__in=[AUDIT_USER_DEACTIVATED, AUDIT_LOCKED], occurred_at__gte=since
@@ -51,7 +60,11 @@ def gauges() -> list[Gauge]:
             ),
         ),
         locked=Count("pk", filter=Q(action=AUDIT_LOCKED)),
+        until_reset=Count(
+            "pk", filter=Q(action=AUDIT_LOCKED, metadata__until=MfaLock.MFA_RESET.value)
+        ),
     )
     deactivated.add(counts["deactivated"])
     locked.add(counts["locked"])
-    return [deactivated, locked]
+    until_reset.add(counts["until_reset"])
+    return [deactivated, locked, until_reset]

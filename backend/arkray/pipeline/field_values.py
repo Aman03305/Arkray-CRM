@@ -25,7 +25,9 @@ purpose and only then:
   a deal reassigned between the request and the job keeps its value. Organisation-wide, an
   administrator deletes them on every deal;
 - deals whose lead is under a legal hold keep the value (counted, `held`); run the request
-  again once the hold is released;
+  again once the hold is released. Each batch reads the holds under the hold barrier
+  (core.holds), so a hold placed while the job runs is honoured from the batch after it
+  committed, and one placed during a batch waits for that batch;
 - irreversible once the job has run. Before that the request can't be taken back either:
   restoring a removed field isn't possible (a new one is added instead), so nothing can
   bring the field back to life between request and deletion.
@@ -77,9 +79,13 @@ def require_deletable(
 ) -> None:
     """Refuse (403) while a deal outside `scope` holds a value of these fields. Called with
     the pipeline locked FOR NO KEY UPDATE, which every writer of custom values waits for:
-    no value appears meanwhile. Reassignments don't take that lock: the job's owner filter
-    covers a deal that leaves the workspace after this check. Also for removing fields
-    (`message`: OTHERS_VALUES_HIDDEN): a removed field's values are hidden from everyone.
+    no value appears meanwhile. So does a reassignment (FOR SHARE on the personal pipelines
+    holding the lead's deals, before it commits: services.follow_lead_owner; deep security
+    audit L-4, R137): it either took that lock first, and has committed when this reads the
+    owners, or waits until the caller's change has committed. The deletion job's owner
+    filter still covers a deal that leaves the workspace before the job runs. Also for
+    removing fields (`message`: OTHERS_VALUES_HIDDEN): a removed field's values are hidden
+    from everyone.
 
     Outside the scope also means a deal the caller still owns whose customer they may not
     see (a closed deal kept after its lead was reassigned: pipeline.customer). Its values are
@@ -150,10 +156,13 @@ def purge(field_id: UUID, *, owner_id: UUID | None = None, replay: bool = False)
     owners = [owner_id] if owner_id is not None else None
     removed = idle = 0
     while True:
-        # Read again for every batch: a hold placed while the job runs stops it for that
-        # lead from the next batch on (a batch is not serialised with placing a hold).
-        held_leads = list(holds.held_leads())
+        # Each batch is serialised with placing a hold (core.holds.barrier, its first lock;
+        # R134): the holds are read again inside it, so a hold placed while the job runs
+        # has either committed before the batch reads them (its lead's deals keep the
+        # value) or waits for the batch to commit.
         with transaction.atomic(), connection.cursor() as cursor:
+            holds.barrier()
+            held_leads = list(holds.held_leads())
             cursor.execute(
                 "UPDATE pipeline_opportunity SET custom_fields = custom_fields - %s"
                 " WHERE id IN ("

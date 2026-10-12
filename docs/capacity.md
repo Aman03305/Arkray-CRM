@@ -303,6 +303,33 @@ tier's CPU** (4 vCPU, 8 sync workers), not the database or its connections (14 a
 capacity (more vCPU and `WEB_CONCURRENCY`, or a second API instance) is the first step for more
 load; this test does **not** show how many users that would serve.
 
+### Re-run at deployment preparation (2026-10-12)
+
+The same tool, topology and data (a fresh copy of the 1M-lead benchmark, migrated to this
+release; `capacity_test.py run --stage-seconds 120 --hold-seconds 600`), on the same laptop,
+which now shares its Docker VM (8 GB) with about 25 containers of six other projects.
+
+| Run | Hold (100 users, 600 s) | Verdict |
+|---|---|---|
+| 1 | 73.1 req/s, p95 1,617 ms, max 15 s | discarded: a CPU-bound review job ran on the same host; the timeline shows normal p95 (150-400 ms) until a 3-minute host stall, with 0 database lock waiters and 9-11 connections throughout |
+| 2 | 66.5 req/s, p95 2,375 ms; 10 users already p95 1.4 s | discarded: the Docker VM was out of memory (swap 2,048 of 2,048 MB used, 119 MB free, memory and I/O pressure sustained); PostgreSQL's page cache fell from 1.4 GB to 0.46 GB |
+| **3** | **85.8 req/s, 51,462 requests, 5 network errors (0.01 %), 0 throttled; API p50 / p95 / p99 52 / 347 / 709 ms; pages 70 / 389 / 781 ms** | the load stack's own ClamAV stopped (this mix uploads nothing) to give the VM 3 GB of headroom; the first two stages re-warmed the cache (p95 1.6-9.8 s), from 50 users on normal |
+
+Run 3 by endpoint (p95, hold): lead list 259 ms, lead detail 243 ms, lead timeline 303 ms,
+dashboard 361 ms, board page 527 ms, opportunity detail 294 ms, negotiated prices 308 ms,
+search 583 ms: every one inside the pass criteria. 25 searches answered `search_busy` (the 2 s
+per-statement bound, by design). Integrity after the run: 862 of 862 logical creates, 0
+duplicates, 0 orphans, 0 lost updates (4,451 versions checked), 0 impossible states, 0
+deadlocks, 0 cross-user leaks; one user's dashboard couldn't be fetched for the arithmetic
+check (96 of 97 checked, no mismatch). PostgreSQL connections 9-10.
+
+**Reading**: the release passes the criteria, but run 3's p95 (347 ms) is not comparable with
+the 2026-10-07 baseline's 137 ms: the host was memory-constrained and shared. The numbers say
+the code holds 100 users without errors or contention of its own; they are not a capacity
+figure. Staging on dedicated hosts ([staging-validation.md](staging-validation.md)) is where
+the real one comes from (R114, R141). Before trusting a local run, check the VM's memory
+(`free -m`, `/proc/pressure/memory`).
+
 ### What this does and does not say
 
 100 simultaneous active users, at the stated pace, on this topology and this 1M-lead data set,

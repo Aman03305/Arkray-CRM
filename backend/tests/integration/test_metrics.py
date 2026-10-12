@@ -265,3 +265,58 @@ def test_each_outbox_count_reads_its_partial_index():
             cursor.execute(f"EXPLAIN {query['sql']}")
             plan = "\n".join(row[0] for row in cursor.fetchall())
             assert "Seq Scan on core_outbox_event" not in plan, plan
+
+
+@pytest.mark.usefixtures("configured")
+@pytest.mark.parametrize(
+    ("status", "value"),
+    [
+        ("ok", 1),
+        ("disabled", 1),
+        ("settling", 1),
+        ("behind", 0),
+        ("ahead", 0),
+        ("diverged", 0),
+        ("tampered", 0),
+        ("unavailable", 0),
+    ],
+)
+def test_the_erasure_ledger_gate_is_reported_with_its_status(monkeypatch, status, value):
+    """A closed gate made every API request and readiness answer 503 with nothing in the
+    metrics naming the cause (deployment preparation): ArkrayErasureLedgerGateClosed alerts
+    on this gauge."""
+    from arkray.core import ledger_gate
+
+    monkeypatch.setattr(ledger_gate.GATE, "status", lambda now=None: status)
+    body = scrape().content.decode()
+    samples = [x for x in body.splitlines() if x.startswith("arkray_erasure_ledger_gate_open")]
+    assert samples == [f'arkray_erasure_ledger_gate_open{{status="{status}"}} {value}']
+
+
+@pytest.mark.usefixtures("configured")
+def test_a_failing_gate_check_drops_its_gauge_alone(monkeypatch, caplog):
+    from arkray.core import ledger_gate
+
+    def broken(now=None):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(ledger_gate.GATE, "status", broken)
+    response = scrape()
+    body = response.content.decode()
+    assert response.status_code == 200
+    assert "arkray_db_up 1" in body
+    assert "arkray_erasure_ledger_gate_open{" not in body
+    assert any(record.msg == "metrics_gauge_failed" for record in caplog.records)
+
+
+@pytest.mark.usefixtures("configured")
+def test_the_real_gate_without_a_ledger_is_reported_open(settings):
+    from arkray.core import ledger_gate
+
+    settings.ERASURE_LEDGER_URL = ""
+    ledger_gate.GATE.reset()
+    try:
+        body = scrape().content.decode()
+    finally:
+        ledger_gate.GATE.reset()
+    assert 'arkray_erasure_ledger_gate_open{status="disabled"} 1' in body

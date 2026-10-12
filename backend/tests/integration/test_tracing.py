@@ -63,6 +63,8 @@ class Usage(ScriptedProvider):
             super().complete(**kwargs),
             input_tokens=1200,
             output_tokens=80,
+            cache_read_tokens=900,
+            cache_write_tokens=300,
             provider_request_id="req_011CTESTPROVIDER",
         )
 
@@ -80,6 +82,8 @@ def test_each_model_call_is_logged_without_content(user_a, caplog):
     assert [r.round for r in calls] == [0, 1]
     assert {r.provider_request_id for r in calls} == {"req_011CTESTPROVIDER"}
     assert all(r.input_tokens == 1200 and r.latency_ms >= 0 for r in calls)
+    # Every usage count the cost depends on (deployment preparation: cache writes too).
+    assert all((r.cache_read_tokens, r.cache_write_tokens) == (900, 300) for r in calls)
     logged = json.dumps([r.__dict__ for r in caplog.records], default=str)
     assert "MODEL-CALL-SECRET-5521" not in logged
     assert "What was agreed" not in logged

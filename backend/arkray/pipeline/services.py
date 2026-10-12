@@ -31,7 +31,9 @@ can never wait for each other in a cycle:
                          stage: shared configuration rows are only key-share-checked);
                          several at once only in ascending id order
     3. configuration     the pipeline row FOR SHARE (writers of custom values: creating, or
-                         editing them) or FOR KEY SHARE (moves, restores), then the target
+                         editing them; a reassignment: the personal pipelines holding the
+                         lead's deals, follow_lead_owner) or FOR KEY SHARE (moves,
+                         restores), then the target
                          stage FOR KEY SHARE, each re-read under its lock. Configuration
                          changes (configuration.py) lock the pipeline and stage rows
                          exclusively and never lock a lead or an opportunity, so they can't
@@ -304,6 +306,10 @@ _SHARE_USABLE_PIPELINE = (
     " AND (owner_id IS NULL OR owner_id = %s) FOR SHARE"
 )
 _SHARE_PIPELINE = "SELECT 1 FROM pipeline_pipeline WHERE id = %s FOR SHARE"
+_SHARE_PERSONAL_PIPELINES_OF_LEAD = (
+    "SELECT id FROM pipeline_pipeline WHERE owner_id IS NOT NULL AND id IN"
+    " (SELECT pipeline_id FROM pipeline_opportunity WHERE lead_id = %s) ORDER BY id FOR SHARE"
+)
 _KEY_SHARE_ACTIVE_PIPELINE = (
     "SELECT 1 FROM pipeline_pipeline WHERE id = %s AND is_active FOR KEY SHARE"
 )
@@ -1506,7 +1512,8 @@ def follow_lead_owner(*, lead_id: UUID, to_owner_id: UUID, actor_id: UUID, at: d
     """The lead was just reassigned (its row is locked by the reassignment): move its OPEN
     opportunities, archived ones included, to the new owner. Won and lost opportunities keep
     the owner who closed them (they record who did the work). Returns how many moved.
-    Constant queries however many move: one lock, one update, one audit insert (review)."""
+    Constant queries however many move: one lock, one share lock on the personal pipelines
+    involved, one update, one audit insert (review)."""
     moving = list(
         Opportunity.objects.select_for_update(no_key=True)
         .filter(lead_id=lead_id, status=StageCategory.OPEN)
@@ -1514,6 +1521,14 @@ def follow_lead_owner(*, lead_id: UUID, to_owner_id: UUID, actor_id: UUID, at: d
         .order_by("id")  # lock order for several opportunities
         .only("id", "lead_id", "owner_id")
     )
+    # Then (lock order step 3) the personal pipelines holding any deal of the lead, closed
+    # ones included (their customer leaves the old owner's workspace too), FOR SHARE: removing
+    # a custom field there checks who owns their deals under FOR NO KEY UPDATE
+    # (configuration.replace_fields), so it either committed before this reassignment or
+    # waits for it, and then sees the new owners (deep security audit L-4, R137). Shared
+    # pipelines aren't locked: only the organisation-wide workspace configures them.
+    with connection.cursor() as cursor:
+        cursor.execute(_SHARE_PERSONAL_PIPELINES_OF_LEAD, [lead_id])
     if not moving:
         return 0
     Opportunity.objects.filter(pk__in=[o.pk for o in moving]).update(

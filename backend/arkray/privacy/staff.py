@@ -19,7 +19,9 @@ API), on a deactivated account only:
   the append-only audit trail, stage and price history (ids, amounts, never names).
 
 A conversation a legal hold keeps (another held user's, or one touching a held customer:
-ai.subjects.held_conversations) is kept, as housekeeping keeps it. Refused while a legal hold
+ai.subjects.held_conversations) is kept, as housekeeping keeps it; those holds are read under
+the hold barrier, the transaction's first lock (core.holds: one being placed at the same
+moment has committed before, or waits; R134). Refused while a legal hold
 covers them, while they still own work someone must take over
 (unarchived leads, open deals, open tasks, scheduled meetings: reassign first), for an active
 or invited account, and for the operator themselves. A dry run (`preview`) shows the counts.
@@ -216,16 +218,23 @@ def pseudonymise(
     operator_id: UUID | None,
     replay: bool = False,
     allow_administrator: bool = False,
+    unless_held: bool = False,
 ) -> StaffErasure:
     """`replay`: re-applying a ledger entry after a restore (privacy.replay). The erasure was
     authorised and checked when it first happened, so only "already done" stops it (an
     administrator's too); an account the backup has active again is deactivated with it.
     `operator_id` None is the system (the automatic ledger reconciliation): only with
-    `replay`, audited with no actor.
+    `replay`, audited with no actor. `unless_held` (with `replay`): the automatic
+    reconciliation leaves a held account to an operator (privacy.reconcile), so a hold on it
+    stops the replay, under the same lock as a first pseudonymisation.
     `allow_administrator`: only the operator's command passes it (never the API), to
     pseudonymise an administrator's account (ADR-0030, SEC-2)."""
     if operator_id is None and not replay:
         raise ValueError("Only a replay is made without an operator.")
+    # The first lock: serialised with placing any hold (core.holds.barrier). The holds read
+    # below (theirs, and those keeping conversations that name them) are then final until
+    # this commits: one being placed has committed, or waits (R134).
+    holds.barrier()
     # The user-administration lock, then the account's row (identity's order): a promotion or
     # demotion is either committed before the check reads the role, or waits for this one.
     serialise_user_administration()
@@ -236,6 +245,8 @@ def pseudonymise(
     if replay:
         if pseudonymised(user):
             raise AlreadyPseudonymised(user.pk)
+        if unless_held:
+            holds.refuse_if_held(HoldSubject.USER, user.pk)
     else:
         assert operator_id is not None  # noqa: S101 — refused above
         _require_operator(operator_id)

@@ -123,6 +123,7 @@ class TestEnrolment:
             "recovery_codes_remaining": 10,
             "required": False,
             "can_disable": True,
+            "lock": None,  # R133: what unlocks it, once wrong codes locked it
         }
         assert status["confirmed_at"]
         me = client.get(ME).json()

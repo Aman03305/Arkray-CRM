@@ -53,7 +53,8 @@ export PGOPTIONS="${PGOPTIONS:--c maintenance_work_mem=${RESTORE_MAINTENANCE_WOR
 # The password goes to libpq through the environment, never on a command line.
 if [[ "$TARGET_DATABASE_URL" =~ ^(postgres(ql)?://)([^:@/]+):([^@]*)@(.*)$ ]]; then
   password="${BASH_REMATCH[4]}"
-  export PGPASSWORD="$(printf '%b' "${password//%/\\x}")"
+  PGPASSWORD="$(printf '%b' "${password//%/\\x}")"
+  export PGPASSWORD
   TARGET_DATABASE_URL="${BASH_REMATCH[1]}${BASH_REMATCH[3]}@${BASH_REMATCH[5]}"
 fi
 

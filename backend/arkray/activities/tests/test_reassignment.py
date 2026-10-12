@@ -177,6 +177,6 @@ def test_query_count_is_constant_however_much_work_moves(admin, user_a, user_b, 
         )
     assert Activity.objects.filter(lead=lead, owner=user_b).count() == 2 * n
     # savepoint, lead lock, user share lock, lead update, lead audit, opportunities lock,
-    # activities lock, activities update, one audit insert for all of them, timeline entry,
-    # release, reload
-    assert len(queries) == 12
+    # personal pipelines share lock (deep security audit L-4, R137), activities lock,
+    # activities update, one audit insert for all of them, timeline entry, release, reload
+    assert len(queries) == 13

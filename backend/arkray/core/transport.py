@@ -148,13 +148,21 @@ def smtp_problem(
     )
 
 
-def s3_problem(endpoint_url: str, private_hosts: Collection[str] = ()) -> str | None:
+def s3_problem(
+    endpoint_url: str,
+    private_hosts: Collection[str] = (),
+    *,
+    setting: str = "ATTACHMENT_S3_ENDPOINT_URL",
+    carries: str = "attachment files",
+) -> str | None:
+    """`setting` names the variable the refusal is about (the erasure ledger's endpoint was
+    reported as the attachments' one: deployment preparation)."""
     if not endpoint_url:
         return None  # AWS's own endpoints: https
     parts = urlsplit(endpoint_url)
     if parts.scheme.lower() == "https" or _exempt(parts.hostname or "", private_hosts):
         return None
-    return "ATTACHMENT_S3_ENDPOINT_URL must be https:// (attachment files travel over it)."
+    return f"{setting} must be https:// ({carries} travel over it)."
 
 
 def scanner_problem(scanner_url: str, private_hosts: Collection[str] = ()) -> str | None:

@@ -157,7 +157,8 @@ require_verified_tls() {
 # local user could read it in the process list for the length of the backup).
 if [[ "$DATABASE_URL" =~ ^(postgres(ql)?://)([^:@/]+):([^@]*)@(.*)$ ]]; then
   password="${BASH_REMATCH[4]}"
-  export PGPASSWORD="$(printf '%b' "${password//%/\\x}")"
+  PGPASSWORD="$(printf '%b' "${password//%/\\x}")"
+  export PGPASSWORD
   DATABASE_URL="${BASH_REMATCH[1]}${BASH_REMATCH[3]}@${BASH_REMATCH[5]}"
 fi
 require_verified_tls "$DATABASE_URL" DATABASE_URL

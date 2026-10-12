@@ -313,6 +313,98 @@ throttling. Before go-live: a smoke upload, download and delete against the real
 `reconcile_attachments --check` against it, and one outage drill (block the endpoint at the
 network: uploads answer 503 within 12 s, `arkray_attachment_storage_up` 0, recovery).
 
+## Deployment preparation (2026-10-12)
+
+Production deployment preparation from `f19d968`
+([deployment-readiness.md](deployment-readiness.md)). Every new test runs in the default
+suite unless it is a drill; each fix was mutation-checked (the fix removed, the test seen
+failing, the fix restored).
+
+- **Long-window second-factor cap (R133):** `identity/tests/test_mfa_long_window.py` (18
+  tests: two locks ended by new passwords, the third past the cap locks until an MFA reset; a
+  password reset or an administrator-set password leaves it locked; the right code refused; an
+  administrator's MFA reset and an operator's `reset_mfa` lift it and a new setup starts at 0; a
+  right authenticator or recovery code before the cap forgets both counts; recovery-code and
+  step-up guesses count; four threads racing at the cap count exactly to it, one event, one
+  email; the lock on `GET /auth/mfa` and the administrators' user list and detail; the gauge's
+  hour; system check `arkray.E030`). 10 mutations, all killed.
+- **Administrator MFA enforcement:** `tests/security/test_admin_mfa_enforcement.py` (97): every
+  non-public route and method of the authorization matrix answers an un-enrolled administrator
+  `403 mfa_enrollment_required` except the five pinned ones; public routes and non-API URL
+  patterns pinned (no Django admin; metrics needs its bearer token); privileged roles must
+  enrol; neither a step-up mark nor a support session gets past the gate; production refuses MFA
+  off with the opt-in on a public host.
+- **Legal-hold races (R134, R137):** `tests/security/test_hold_races.py` (28): every reader that
+  deletes or overwrites on the strength of the holds (conversation deletion and housekeeping,
+  erasure, pseudonymisation, the custom-value job, the attachment purge, forgetting purged
+  names, the audit-detail expiry, the support-reason blanking, the automatic replay) is stopped
+  between its check and its deletion while another thread places a hold (which must wait), or
+  the placement is stopped before its commit while the reader runs (which must wait and then
+  keep the data); the lock-order interleaving that deadlocked with the barrier taken after a
+  subject's lock; `legal_hold place` kept waiting past the lock timeout stops cleanly; readers,
+  edits and placements at once (3 rounds, no deadlock). `arkray/pipeline/tests/
+  test_field_removal_races.py` (10): custom-field removal against reassignment in both
+  directions, open and won deals, with and without deleting the values, and a no-deadlock round.
+  An erasure never waits for a file being purged, a second purge skips it at once, and the
+  automatic replay leaves a held lead's deleted file to an operator. 21 mutations, all
+  caught; the reassignment query-count pins move from 12 to 13 (the share
+  lock on personal pipelines).
+- **Word fields and CSV DDE (R132):** `activities/tests/test_office_field_codes.py` (156): Word fields that
+  start a program or fetch content (`DDE`, `DDEAUTO`, `DATABASE`, remote `INCLUDE*`/`IMPORT`/
+  `LINK`) in every story and under any part name, assembled as Word assembles them and with
+  tracked changes read three ways; unevaluable codes and structures; the byte and work budgets;
+  an Excel-saved DDE workbook; Excel 4.0 macro sheets; CSV DDE cells by every separator; each
+  refused variant trips exactly one rule; the review's CPU and memory shapes (nested
+  `mc:Ignorable`, a million attributes, a 5 MiB start tag, names split by tabs, breaks and
+  paragraphs, 32,000 arguments per code) refused within the limits, with traced-memory
+  assertions; CSV readings checked against a csv-module reference by fuzzing. 57 mutations killed.
+- **Erasure-ledger gate metric (R144):** `tests/integration/test_metrics.py` (every gate status
+  mapped to 1/0 with its label, a failing check drops the gauge alone, the real gate without a
+  ledger reported open); `tests/architecture/test_alert_rules.py` covers
+  `ArkrayErasureLedgerGateClosed`.
+- **Environment template and preflight:** `tests/architecture/test_env_templates.py` (57: the
+  production template is complete against what settings, gunicorn, the transport rules,
+  backup.sh, restore.sh, roles.sql, ClamAV's health check and the web tier read; holds no secret;
+  filled in, production settings start for every backend service and variant and `check
+  --deploy` reports only W005/W021; its optional lines equal production's defaults; the unfilled
+  template and 34 single weakenings are each refused at startup, naming the variable — the
+  erasure ledger's endpoint now named correctly). `tests/integration/test_preflight.py` (57) and
+  `test_preflight_live.py` (29): `manage.py preflight`'s decisions with fakes; the deadline,
+  redaction and exit code; real protocols on 127.0.0.1 (the test database and a restricted role,
+  Redis with and without a password over verified TLS, SMTP STARTTLS against a throwaway CA, the
+  S3 protocol fake, clamd, a file ledger, an HTTPS edge). 19 mutations, all caught. By hand: a
+  real PostgreSQL 16 with TLS (`verify-full` PASS; `require`, plain text to a public name and
+  another CA FAIL) and a real ClamAV 1.5.4 (PONG, VERSION, EICAR found).
+- **Edge maintenance switch:** `tests/architecture/test_edge_maintenance.py` (7; 18 mutants of
+  the conf, the compose mount and the `.gitignore` killed; 23 live checks in the pinned nginx).
+- **CI and releases:** `tests/architecture/test_ci_workflow.py` (16) pins every action to a
+  commit with its exact release, every tool image by digest, minimal permissions, timeouts, no
+  token kept by a checkout, no expression inside a shell script, no
+  `pull_request_target`/`workflow_run`; the release only by hand, only after CI success for
+  exactly the commit, with CI's scan and smoke steps byte-identical, publishing in `staging` and
+  verification in `production`; `scripts/ci-local.sh` uses CI's pins, environment and gates (33
+  mutations caught); actionlint 1.7.12 (with shellcheck) on both workflows.
+  `tests/architecture/test_compose_hardening.py` now also requires the Dockerfiles' BuildKit
+  frontend (`# syntax=`) pinned by digest.
+- **Ask Arkray real-model evaluation (R69):** `arkray/ai/tests/test_evaluation.py` (13) and
+  `test_evaluation_units.py` (26): the whole `ai_eval` suite with well-behaved scripts passes
+  every grader and reports NOT VERIFIED; adversarial scripts fail exactly the graders aimed at
+  them; a masking regression fails `payload_minimised`; a dry run sends nothing; the spend and
+  call caps stop the run before a call could cross them; the interlocks; the database guard.
+  `tests/architecture/test_ai_provider_defaults.py` (2): `AI_LLM_PROVIDER` is `none` in settings,
+  both compose files and `.env.example`. 11 mutations caught. Never run against the real model.
+- **Resilience drills and staging targets:** `tests/drills/test_resilience_drill.py` (47: the
+  orchestrator's criteria, recovery and backlog arithmetic, always-restore on failure, Ctrl+C
+  and a half-applied fault, environment labelling, bounded docker calls) and
+  `tests/performance/test_capacity_target.py` (13: the load tools' Host header, saved-session
+  cookie domain and certificate checking derived from `--base`; the monitor without a database).
+- **Drills** (not in the default suite): `tests/drills/pitr_drill.py` (point-in-time recovery end
+  to end on throwaway PostgreSQL containers from the production image: roles.sql provisioning,
+  WAL archive, base backup, writes before and after T through the application, recovery to T in
+  a new server, every table compared with T, the ledger gate and `replay_erasures`, sessions,
+  release check, attachment reconciliation, vacuum; 20 checks, about 75 s; three mutations each
+  fail it) and `tests/drills/resilience_drill.py` (14 drills, [staging-validation.md](staging-validation.md)).
+
 ## What exists after the product enhancement phase
 
 - Backend: `pipeline/tests/test_configuration.py` (pipelines and stages: ownership, limits,

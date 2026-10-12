@@ -304,6 +304,13 @@ changes an administrator when the policy is in the way: [security.md](security.m
   not by a password change in a signed-in session. The owner is emailed about the first
   wrong code in 6 hours (`MFA_FAILURE_NOTICE_INTERVAL_S`) and when it locks
   ([ADR-0033 addendum](adr/0033-administrator-mfa-and-reactivation.md#addendum-deep-security-audit-m-4-2026-10-12-wrong-codes-accumulate-until-the-factor-locks)).
+  The same wrong codes also add up in `cumulative_failures`, which only a right code or
+  an MFA reset forgets: from `MFA_MAX_FAILURES_BEFORE_RESET` (60) every code is refused
+  until an MFA reset, a new password included (`403 mfa_locked_until_reset`, audited as
+  `mfa.locked` with `until: mfa_reset`; R133,
+  [second addendum](adr/0033-administrator-mfa-and-reactivation.md#addendum-r133-residual-2026-10-12-a-long-window-cap-only-an-mfa-reset-lifts)).
+  `GET /auth/mfa` (`lock`) and the administrators' user responses (`mfa_lock`) say which
+  lock holds: null, `password_reset` or `mfa_reset`.
 - **Step-up**: the session records when a code was last verified (at sign-in, confirmation or
   `POST /auth/mfa/verify`). Views marked `requires_recent_mfa` answer `403 mfa_required` when
   the caller has a confirmed device and that is older than `MFA_STEP_UP_TTL_S` (15 minutes):
@@ -329,7 +336,7 @@ changes an administrator when the policy is in the way: [security.md](security.m
   ([runbooks](runbooks.md#lost-second-factor)).
 - **Audit**: `mfa.enabled`, `mfa.disabled`, `mfa.reset` (by `administrator` or `operator`,
   the operator's reason as an expiring detail), `mfa.recovery_codes_replaced`,
-  `mfa.recovery_code_used`, `mfa.locked` (with the count) and `mfa.unlocked` (by
+  `mfa.recovery_code_used`, `mfa.locked` (with the count; `until: mfa_reset` for the lock only an MFA reset lifts) and `mfa.unlocked` (by
   `password_reset` or `administrator`); all in the security events, and the changes, wrong
   codes and the lock emailed to the account's own address. Never a secret, a code or a hash. Accepted (ADR-0033): an administrator can
   reset an ordinary user's factor, set a temporary password and promote the account; that

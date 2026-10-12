@@ -104,6 +104,9 @@ class Completion:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     provider_request_id: str = ""  # the provider's id for this call (support, tracing)
+    # Tokens written to the prompt cache (billed at 1.25x input): the real-model evaluation
+    # prices every call from all four usage counts (ai.evaluation.pricing, R69).
+    cache_write_tokens: int = 0
 
 
 class ChatProvider(Protocol):
@@ -258,6 +261,7 @@ class AnthropicProvider:
                 output_tokens=usage.output_tokens or 0,
                 cache_read_tokens=usage.cache_read_input_tokens or 0,
                 provider_request_id=str(getattr(response, "_request_id", "") or "")[:100],
+                cache_write_tokens=usage.cache_creation_input_tokens or 0,
             )
         except Exception as exc:  # noqa: BLE001 — not a Messages response (an HTML page, say)
             raise _bad_response(exc) from None
