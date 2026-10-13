@@ -173,7 +173,7 @@ services:
   # The cache (rate limits, breakers, counters): its own instance, nothing persisted
   # (docs/deployment.md#redis), so the client addresses in rate-limit keys never reach disk.
   redis-cache:
-    image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    image: redis:8.10-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
     logging: *logging
     environment:
       REDIS_PASSWORD: ${ARKRAY_PROD_REDIS_PASSWORD:?set ARKRAY_PROD_REDIS_PASSWORD}
@@ -564,7 +564,7 @@ services:
 
   nginx:
     profiles: ["app"]
-    image: nginx:1.30-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+    image: nginx:1.31-alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2
     # Rotated like every container (docker-compose.yml x-logging).
     logging: *logging
     # Read-only like the rest; nginx's master switches to its worker user.
