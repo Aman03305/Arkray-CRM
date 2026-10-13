@@ -87,9 +87,14 @@ class TestCheck:
             assert all("LIMIT" in q["sql"] for q in queries)
 
     def test_the_account_query_uses_the_partial_index(self):
+        """At 50 rows every plan costs about the same, and which one PostgreSQL picked depended
+        on what earlier tests left in the table and its indexes (CI of 55f067f: a sort over
+        another scan). With sequential scans and sorts off, only an index that reads the
+        account's failures newest first is cheap: the account index, if the query can use it."""
         failures(50)
         with connection.cursor() as cursor:
             cursor.execute("SET LOCAL enable_seqscan = off")
+            cursor.execute("SET LOCAL enable_sort = off")
             sql, params = (
                 AuthThrottleEvent.objects.filter(
                     kind=ThrottleKind.LOGIN_FAILURE, identifier_hash=IDENTIFIER, device_id=""
@@ -100,7 +105,8 @@ class TestCheck:
             )
             cursor.execute(f"EXPLAIN {sql}", params)
             plan = "\n".join(row[0] for row in cursor.fetchall())
-        assert "auth_throttle_account_idx" in plan
+        assert "auth_throttle_account_idx" in plan, plan
+        assert "Sort" not in plan, plan
 
 
 class TestDeviceCookie:
