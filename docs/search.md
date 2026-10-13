@@ -185,7 +185,10 @@ Sinhala, whose marks split pg_trgm's words: "शर्मा" is looked up as "�
 every character, pinned by `test_phase7_review_regressions.py`). Python's `indexable`
 approximates it; where they disagree (letters newer than the server's Unicode data, a
 Devanagari mark after Latin letters) such a word is searched among the 5,000 most recent
-records only.
+records only. PostgreSQL's table comes from the C library, so it differs between database
+images: Kawi letters (Unicode 15) are unknown to glibc 2.36 (Debian bookworm, the development
+database; the measurements below) and indexed as letters by glibc 2.41 (trixie, CI and
+production); the tests take the expected answer from the database they run on.
 
 **Each recent record's text is read once.** The recent pass computes the searched text
 (for a note, `upper(description)`: up to 10,000 characters) in an inner query and checks it

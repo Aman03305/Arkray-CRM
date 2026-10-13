@@ -23,6 +23,7 @@ from tests.helpers import signed_in
 pytestmark = pytest.mark.django_db
 
 SEARCH = "/api/v1/workspaces/{}/search"
+KAWI = chr(0x11F04) * 3  # three Kawi letters (Unicode 15)
 
 
 def _older_pass(user, monkeypatch, word: str) -> str:
@@ -40,6 +41,16 @@ def _older_pass(user, monkeypatch, word: str) -> str:
         cursor.execute(f"EXPLAIN (ANALYZE, COSTS OFF) {sql}")
         plan = "\n".join(row[0] for row in cursor.fetchall())
     return plan[plan.index("CTE search_older") : plan.index("CTE search_older") + 2000]
+
+
+def _assert_never_runs(older: str) -> None:
+    """PostgreSQL folds the older pass's constant gate at plan time (no scan at all), or
+    never runs its scans."""
+    scans = [
+        line for line in older.splitlines() if re.search(r"Scan .*on activities_activity", line)
+    ]
+    folded = "One-Time Filter: false" in older
+    assert folded or (scans and all("never executed" in s for s in scans)), older
 
 
 class TestWordsAnIndexCanLookUp:
@@ -124,29 +135,45 @@ class TestWordsAnIndexCanLookUp:
             )
             assert cursor.fetchone()[0] == 0
 
-    @pytest.mark.parametrize(
-        "word",
-        [
-            # Kawi letters (Unicode 15) are letters to Python, unknown to PostgreSQL's tables.
-            chr(0x11F04) * 3,
-            # P2-1: a Devanagari nukta after Latin letters counts to Python (an Indic mark),
-            # but splits the word for pg_trgm: only the padded "on " would be looked up.
-            "on" + chr(0x093C),
-        ],
-    )
     def test_a_word_postgresql_cant_look_up_well_never_runs_the_older_pass(
-        self, user_a, monkeypatch, word
+        self, user_a, monkeypatch
     ):
-        """Python accepts the word, PostgreSQL's index would only get padded fragments
-        matching almost everything: the gate keeps the older pass from reading every note."""
+        """P2-1: a Devanagari nukta after Latin letters counts to Python (an Indic mark), but
+        splits the word for pg_trgm: only the padded "on " would be looked up, matching almost
+        everything. The gate keeps the older pass from reading every note."""
+        word = "on" + chr(0x093C)
         assert indexable(word)
-        older = _older_pass(user_a, monkeypatch, word)
+        _assert_never_runs(_older_pass(user_a, monkeypatch, word))
+
+    def test_kawi_is_looked_up_exactly_when_postgresqls_tables_know_its_letters(
+        self, user_a, monkeypatch
+    ):
+        """Kawi (Unicode 15) letters are letters to Python, and to PostgreSQL only with a new
+        enough C library: glibc 2.36 (Debian bookworm, the development database) doesn't know
+        them, glibc 2.41 (trixie: CI's and production's image) does. Unknown, the index would
+        only get padded fragments, and the gate keeps the older pass from running; known,
+        they are a word the index narrows by, and old matches are found."""
+        assert indexable(KAWI)
+        old = NoteFactory(lead=LeadFactory(owner=user_a), description=f"{KAWI} visit")
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT %s ~ '^[[:alpha:]]+$', %s ~ %s", [KAWI, KAWI, ranking._INDEXABLE_SQL]
+            )
+            known, gate = cursor.fetchone()
+        assert gate is known
+        older = _older_pass(user_a, monkeypatch, KAWI)
+        if not known:
+            _assert_never_runs(older)
+            return
         scans = [
             line for line in older.splitlines() if re.search(r"Scan .*on activities_activity", line)
         ]
-        # PostgreSQL folds the constant gate at plan time (no scan at all), or never runs it.
-        folded = "One-Time Filter: false" in older
-        assert folded or (scans and all("never executed" in s for s in scans)), older
+        assert scans, older
+        assert all("never executed" not in s for s in scans), older
+        found = activity_search(
+            AccessScope.own(user_a.pk), SearchQuery.parse(KAWI), ActivityType.NOTE, limit=5
+        )
+        assert old in found.items
 
     @pytest.mark.parametrize("word", ["शर्मा", "श्री", "quotation"])
     def test_words_with_selective_fragments_still_run_the_older_pass(
@@ -178,7 +205,6 @@ class TestWordsAnIndexCanLookUp:
             ("on" + chr(0x093C), False),  # only "on", padded
             ("क्क", False),  # one-letter fragments
             ("on-on", False),
-            (chr(0x11F04) * 3, False),
         ],
     )
     def test_the_gate_asks_for_a_fragment_the_index_can_narrow_by(self, word, gate):
