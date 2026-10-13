@@ -49,6 +49,8 @@ from tests.helpers import signed_in
 
 SERVER_ZONE = "arkray_conn"
 BODY_ZONE = "arkray_body"
+BODY_ADDRESS_ZONE = "arkray_body_address"
+SMALL_BODY_ZONE = "arkray_small_body"
 UPLOAD_ZONE = "arkray_upload"
 EXPORT_ZONE, EXPORT_ALL_ZONE = "arkray_export", "arkray_export_all"
 UPLOADS = "~* ^/api/v1/workspaces/[^/]+/activities/[^/]+/attachments$"
@@ -128,7 +130,12 @@ def test_connections_are_counted_per_client_with_the_sign_in_limits_key():
     zones = {zone: key for key, zone in found}
     assert zones == {
         SERVER_ZONE: "$arkray_client_key",
+        # Per session, or the address without one; and per address over all of them
+        # (adversarial review of 73ff1e3, L13: test_edge_hardening.py).
         BODY_ZONE: "$arkray_body_client_key",
+        BODY_ADDRESS_ZONE: "$arkray_body_address_key",
+        # Small declared bodies, per address under the request slots (review round 1, INFRA-3).
+        SMALL_BODY_ZONE: "$arkray_small_body_key",
         UPLOAD_ZONE: "$arkray_client_key",
         EXPORT_ZONE: "$arkray_client_key",
         # One key for the whole server: every client together.
@@ -138,20 +145,24 @@ def test_connections_are_counted_per_client_with_the_sign_in_limits_key():
 
 
 def test_requests_with_a_body_count_by_the_same_key():
-    """P2-2: only a GET, HEAD or OPTIONS that declares no body (no Content-Length, no
-    Transfer-Encoding) is left out; everything else counts, by the client key."""
+    """P2-2: a GET, HEAD or OPTIONS that declares no body (no Content-Length, no
+    Transfer-Encoding) is left out; since the adversarial review of 73ff1e3 (L13) so is a
+    declared body that stays in memory (16 KB at most: it never reaches a temp area, and a
+    sign-in or a save no longer waits behind a trickler's bodies). Everything else counts:
+    per session, the address without one (test_edge_hardening.py has the whole rule)."""
     (body,) = re.findall(
         r'^map "\$request_method:\$http_content_length\$http_transfer_encoding" '
-        r"\$arkray_body_client_key \{\n(.*?)^\}",
+        r"\$arkray_spooled_body \{\n(.*?)^\}",
         _http_level(),
         re.S | re.M,
     )
     rules = [line.split() for line in body.strip().splitlines() if not line.strip().startswith("#")]
-    assert rules == [['"~^(GET|HEAD|OPTIONS):$"', '"";'], ["default", "$arkray_client_key;"]]
+    assert rules[0] == ['"~^(GET|HEAD|OPTIONS):$"', '"";']
+    assert rules[-1] == ["default", "1;"]
+    assert len(rules) == 3  # and the small declared bodies between them
     skipped = re.compile(rules[0][0].strip('"').removeprefix("~"))
     for method in ("GET", "HEAD", "OPTIONS"):
         assert skipped.search(f"{method}:")
-        assert not skipped.search(f"{method}:10"), method  # a declared body counts
         assert not skipped.search(f"{method}:chunked"), method
     for method in ("POST", "PUT", "PATCH", "DELETE"):
         assert not skipped.search(f"{method}:"), method
@@ -159,20 +170,27 @@ def test_requests_with_a_body_count_by_the_same_key():
 
 def test_every_location_counts_against_the_per_client_limit():
     """In the server block, so every location has it. nginx doesn't inherit limit_conn into a
-    location that has its own: such a location repeats the server's line."""
+    location that has its own: such a location repeats the server's line. Uploads leave out the
+    JSON bodies' zones on purpose (review round 1, INFRA-3: counted before the session check,
+    forged sessions' JSON trickles held them and blocked co-workers' uploads); their own area
+    and zone bound them."""
     server = _limits(_server_head())
-    assert set(server) == {SERVER_ZONE, BODY_ZONE}
+    assert set(server) == {SERVER_ZONE, BODY_ZONE, BODY_ADDRESS_ZONE, SMALL_BODY_ZONE}
     # Bounds one address's share of nginx's memory, and still lets an office behind one
     # address work (docs/capacity.md: 100 users from one address).
     assert 64 <= server[SERVER_ZONE] <= 256
     proxied = _proxied()
     assert UPLOADS in proxied
     assert EXPORTS in proxied
+    json_body_zones = {BODY_ZONE, BODY_ADDRESS_ZONE}
     for name, body in proxied.items():
         own = _limits(body)
         if own:
             for zone, limit in server.items():
-                assert own.get(zone) == limit, (name, zone)
+                if name == UPLOADS and zone in json_body_zones:
+                    assert zone not in own, (name, zone)
+                else:
+                    assert own.get(zone) == limit, (name, zone)
 
 
 def test_json_bodies_are_bounded_per_client_in_an_area_of_their_own():

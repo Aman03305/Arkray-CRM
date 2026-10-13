@@ -39,11 +39,14 @@ class TestConfig:
             ("lost", "0.00", "lost"),
         ]
 
-    def test_retired_stages_are_listed_but_flagged(self, user_a_client, stages):
+    def test_retired_stages_are_not_listed(self, user_a_client, stages):
+        """They were listed, flagged; the payload then grew with every stage ever retired
+        (adversarial review of 73ff1e3, L10). A deal in one carries its stage itself."""
         Stage.objects.filter(pk=stages["qualified"].pk).update(is_active=False)
         body = user_a_client.get("/api/v1/config/pipelines").json()
         flags = {s["key"]: s["is_active"] for s in body["results"][0]["stages"]}
-        assert flags["qualified"] is False
+        assert "qualified" not in flags
+        assert all(flags.values())
 
 
 class TestCreateAndDetail:

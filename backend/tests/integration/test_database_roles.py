@@ -87,6 +87,8 @@ def test_the_grants_follow_the_append_only_trigger_not_a_list():
         "activities_timeline_entry",
         "audit_event",
         "pipeline_negotiation_price",
+        # Closed-deal corrections (adversarial review of 73ff1e3, M2): append-only by trigger.
+        "pipeline_opportunity_correction",
         "pipeline_stage_history",
     ]
 

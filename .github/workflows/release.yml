@@ -6,7 +6,8 @@ name: Release
 #
 #   verify              CI concluded `success` for exactly this commit on main, the commit is
 #                       the one the run was started on, and both environments below require
-#                       a reviewer (read-only API calls with this run's token).
+#                       a reviewer and let only chosen branches and tags deploy (read-only
+#                       API calls with this run's token).
 #   publish             (environment `staging`: its reviewers approve publishing) builds both
 #                       images from the commit, runs CI's own scan and smoke-test steps on them
 #                       unchanged, pushes them to GHCR as ghcr.io/<owner>/arkray-<name>:<sha>,
@@ -91,6 +92,20 @@ jobs:
               refuse "the $environment environment does not exist: create it with required reviewers first"
             [[ "$reviewers" -ge 1 ]] ||
               refuse "the $environment environment has no required reviewers: add them first"
+            # And only main and v* tags may deploy to it (adversarial review of 73ff1e3, L14):
+            # the checks in this file run from whatever branch a run starts on, so a modified
+            # copy on another branch could leave them out; the environment's own branch
+            # policy, set in the repository's settings, it can't. Exactly the custom rules
+            # `main` (branch) and `v*` (tag): "protected branches" or a `*` rule would let
+            # another branch deploy (review round 1, INFRA-8).
+            policy="$(gh api "repos/$GITHUB_REPOSITORY/environments/$environment" \
+              --jq '.deployment_branch_policy | if . == null then "none" elif .custom_branch_policies and (.protected_branches | not) then "custom" else "protected" end')"
+            [[ "$policy" == custom ]] ||
+              refuse "the $environment environment must allow exactly main and v* (deployment branches and tags: selected, branch main, tag v*); it allows $policy"
+            rules="$(gh api --paginate "repos/$GITHUB_REPOSITORY/environments/$environment/deployment-branch-policies" \
+              --jq '.branch_policies[] | "\(.type // "branch"):\(.name)"' | sort | paste -sd ' ' -)"
+            [[ "$rules" == "branch:main tag:v*" ]] ||
+              refuse "the $environment environment's deployment rules are '$rules', not exactly branch main and tag v*"
           done
           echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           echo "CI passed for \`$GITHUB_SHA\`: $ci_run" >> "$GITHUB_STEP_SUMMARY"
@@ -301,10 +316,17 @@ jobs:
               { echo "::error::unexpected image reference from publish: $pair"; exit 1; }
             images+=("$pair")
           done
-          # Signed by this workflow, from this commit, on a GitHub-hosted runner: provenance,
-          # then the SBOM.
+          # Signed by this workflow, from this commit, on this run's ref, on a GitHub-hosted
+          # runner: provenance, then the SBOM. The ref is the one verify allowed (main or a v*
+          # tag), bound exactly (adversarial review of 73ff1e3, L14): a copy of this workflow
+          # run from another branch signs with that branch's ref, which this refuses, here and
+          # wherever the summary's commands are run again.
+          case "$GITHUB_REF" in
+            refs/heads/main | refs/tags/v*) ;;
+            *) echo "::error::releases are verified for main or a v* tag, not $GITHUB_REF"; exit 1 ;;
+          esac
           verify=(--repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
-            --source-digest "$RELEASE_SHA" --deny-self-hosted-runners)
+            --source-digest "$RELEASE_SHA" --source-ref "$GITHUB_REF" --deny-self-hosted-runners)
           for image in "${images[@]}"; do
             gh attestation verify "oci://$image" "${verify[@]}"
             gh attestation verify "oci://$image" "${verify[@]}" --predicate-type https://cyclonedx.org/bom

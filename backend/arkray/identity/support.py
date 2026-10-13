@@ -47,6 +47,7 @@ from arkray.core.text import TextRejected, clean_line
 
 from .models import SupportEnd, SupportSession, User, UserStatus
 from .policy import Capability, has_capability, roles_with
+from .services import refuse_if_pseudonymised
 
 SESSION_KEY = "_arkray_support"
 AUDIT_STARTED = "support_session.started"
@@ -119,6 +120,7 @@ def start(request: HttpRequest, actor: User, target_id: UUID, reason: str = "") 
             target = User.objects.filter(pk=target_id).first()
             if target is None or target.pk == actor.pk:
                 raise NotFoundError()
+            refuse_if_pseudonymised(target)  # review of 73ff1e3, L4
             if target.status != UserStatus.ACTIVE:
                 raise BusinessRuleViolation(NOT_ACTIVE_USER)
             if _is_manager(target):

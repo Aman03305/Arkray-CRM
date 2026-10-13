@@ -118,20 +118,59 @@ Files on notes ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.
   by content): PDF, PNG, JPEG, WebP, DOCX, XLSX, CSV, TXT by default (GIF and PPTX can be
   enabled). A file must be what its extension says (magic bytes; OOXML packages with their
   main part and **no active content**: no macro project, OLE object (`*.bin` parts other
-  than printer settings) or ActiveX control under any part name, no embedding other than
-  Office documents and pictures, no macro, Excel 4.0 macro sheet, OLE, ActiveX,
-  external-link or data-connection content type declared, and no relationship that is an
+  than printer settings) or ActiveX control under any part name. Every other part is judged by
+  what it holds, whatever it is called and wherever it sits (Office activates an embedded
+  package through a `package` relationship to any part): an OLE compound file is refused; an
+  OOXML package (a worksheet, document or deck embedded as an object) is opened and checked one
+  level deep with these same rules and the content checks below (a workbook's formulas always; a
+  document's Word fields when its `[Content_Types].xml` declares WordprocessingML parts or it
+  holds `word/document.xml`; whatever its main part is called: review round 2, PARSERS2-4, they
+  ran only when the main part was `xl/workbook.xml` or `word/document.xml`), refused if it
+  carries active content; a package under a
+  picture's name, a package inside a package, or under `/embeddings/` anything named other than
+  a picture or `.docx/.xlsx/.pptx` (a macro-enabled `.docm/.xlsm/.pptm`, a renamed executable)
+  is refused (adversarial review of 73ff1e3, L7, R159, and its review round 1: an embedded
+  `.docx` could load a remote template or carry macros, and the embedded package itself was
+  never inspected before). Embedded packages have their own byte budget: one is held in memory
+  while it is checked, at most 16 MiB of it, at most 32 MiB for all of an upload's (an ordinary
+  proposal with two 2.2 MB workbooks, or one of 4.5 MB, passes); past it, or past the 10,000
+  entries an upload and its embedded packages may hold in all, the file is "too large to check",
+  not a type mismatch. A package's end records (ZIP64 ones too, found as `zipfile` finds them)
+  are read before its directory: a package, outer or embedded, that declares more entries than
+  are left, or a directory larger than 128 bytes per entry left or 2 MiB, is "too large to check"
+  before a record is parsed (review round 2, PARSERS2-3: `zipfile` parses every record before the
+  entries can be counted, and 357,000 records in a 16 MiB embedded package cost 2.2 s and 149
+  MiB from a 50 KB upload; now 0.02 s, the embedded package's own bytes the largest memory).
+  Then its records are walked as `zipfile` will walk them, and a package with more records than
+  entries left, or a record whose name, extra field or comment is over 1 KiB (Office writes names
+  under 200 bytes and extra fields of at most 36), is "too large to check" too; the directory's
+  bytes are paid for from the work pool (review round 4, PARSERS4-1: `zipfile` parses each
+  record with its name and extra field, Python 3.12 decodes a 64 KiB extra field in 16 ms, and
+  names of 65,000 `%` cost every pass that decodes them; a 20-55 KB upload took 3.6-4.5 s until
+  the CPU deadline, now 0.00-0.02 s). No macro, Excel 4.0 macro sheet, OLE, ActiveX,
+  external-link, data-connection or query-table content type declared, and no relationship that is an
   OLE object, a template, an ActiveX control, a macro project or an Excel 4.0 (XLM) macro
-  sheet (international ones too; R132), a subdocument, a frame, a link to another workbook
-  or a data connection, or that points outside the package (anything but a hyperlink, by its exact
+  sheet (international ones too; R132), a subdocument, a frame, a link to another workbook,
+  a data connection or a query table, or that points outside the package (anything but a hyperlink, by its exact
   Transitional or Strict Type URI, with `TargetMode` other than `Internal`, or a URL/UNC
   target); no document Word imports (altChunk: an `aFChunk` relationship, an RTF, MHT or HTML
   content type or part name) and no Office add-in (web extensions, task panes):
   `[Content_Types].xml` and every `.rels` part are parsed as XML (defusedxml: no DTD or
   entities; UTF-8, or UTF-16 with its byte-order mark, and a declared encoding that agrees),
   never searched as bytes, and a part that doesn't parse refuses the file (deep security
-  audit M-3 and its review); the zip directory plus those small XML parts are read, bounded
-  (1 MiB each, 4 MiB in all); text is UTF-8 without NUL bytes). Everything else is refused:
+  audit M-3 and its review). They are streamed, each element looked at and forgotten, at most
+  20,000 elements, 1,000 attributes on one and 1,000 levels each (then "too large to check"), and
+  what the content types declare is read once a package and reused by every check (review round
+  3, PARSERS3-2: both were built into trees and the content types parsed again by each check, so
+  a 2 KB upload of four 1 MiB element-dense copies cost 4-6 s and 75-128 MiB; now 0.03 s and 2
+  MiB). A part named twice (letter case ignored, percent-decoded, as OPC compares part names)
+  refuses the package, as Office does. The zip directory, those small XML parts and the first bytes of
+  every other part are read, bounded (1 MiB each, 4 MiB in all, then "too large to check"); a
+  member compressed with anything but deflate or stored is
+  refused unread (adversarial review of 73ff1e3, found with L7, R167: `zipfile` decompresses
+  such a member whole on the first read whatever length is asked, so a tiny member
+  understating its size could expand to gigabytes);
+  text is UTF-8 without NUL bytes). Everything else is refused:
   executables, scripts (`.exe .dll .bat .cmd .ps1 .sh .js`), HTML, SVG, archives, macro documents, double extensions (`invoice.pdf.exe`).
 - **Word fields and CSV formulas** (R132): a Word document is refused when a **field** would
   start a program or fetch content from elsewhere once it updates: `DDE` and `DDEAUTO` always;
@@ -160,7 +199,8 @@ Files on notes ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.
   the file); one that mentions field markup (`fldChar`, `fldSimple`, `instrText`, or `<!`:
   element names are never escaped) is then parsed with defusedxml's expat parser, streamed (no
   DTD or entities). **Bounds** per document, past which it is refused ("This document is too
-  large to check …"): 64 MiB of decompressed story XML; 1 million units of parsing work (an
+  large to check …"): 64 MiB of decompressed story XML; 1 million units of parsing work (64
+  bytes parsed are 1, review round 2; a member opened 16 and a parser 48, review round 3; an
   element is 1 plus 1 per attribute; a namespace declaration, a comment, an `mc:Ignorable`
   prefix 1; field content 3 per reading; judging a code 1 per 8 of its characters, per reading:
   1,000 `INCLUDETEXT` codes of 32,000 arguments took 71 s before, independent review round 2);
@@ -168,8 +208,10 @@ Files on notes ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.
   comment), at most 1,000 attributes on an element, 1,000 levels of nesting, 32 nested
   `mc:Ignorable` scopes that add a namespace, and 10,000 distinct names (expat keeps an entry
   for each; independent review P1-1 and P1-2: 30,000 nested `mc:Ignorable` cost 45 s, one start
-  tag of a million attributes 140 MB). A real document with fields reaches the work budget at
-  about 15 MiB of XML (some 700 pages). Measured (i7-13700HX laptop; three to four times longer
+  tag of a million attributes 140 MB). These units come from the upload's one work pool (see
+  Workbooks, below). A real document with a field in every paragraph reaches the work budget at
+  about 10.6 MiB of XML (some 500 pages; about 15 MiB before review round 2 charged the bytes
+  parsed), in about 0.6 s. Measured before review round 2 (i7-13700HX laptop; three to four times longer
   once it throttles under sustained load): parsing costs under a microsecond per unit of a real
   document, and no shape of part costs more per unit (empty elements, a zip bomb's shape: 0.4
   of it; tags of 900 attributes: 0.15; long fetching codes: 0.3-0.4; 9,000 distinct tags
@@ -185,10 +227,83 @@ Files on notes ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.
   from a network share, any field whose name starts `DDE`; the fix is to select all and press
   Ctrl+Shift+F9 (fields become text). **Workbooks**: Excel saves a DDE formula (`=cmd|' /C
   calc'!A0`) as an external-link part holding a `ddeLink`, refused already by its part name,
-  type and relationship; cell formulas themselves aren't parsed (R132). A **CSV** is refused
-  when a cell Excel would evaluate (after blanks, tabs or line breaks it starts with `=`, `+`,
-  `-` or `@`) has DDE's shape: a `|` outside its string literals and quoted names, with a `!`
-  after it ("This file has a cell that Excel would run as a command …"). Its fields are read as
+  type and relationship. Cell formulas themselves are also read now (adversarial review of
+  73ff1e3, L8, R160, and its review round 1): every part `[Content_Types].xml` declares as a
+  worksheet, table, dialog sheet, chart sheet, chart, pivot cache or pivot table, or the
+  workbook (a template's too: review round 2) — the parts Excel loads and evaluates, bound by
+  their declared type (an Override or a Default), not their path — is read, and a formula that
+  fetches content or calls out is
+  refused: in a cell's `<f>` (shared and array formulas too), a defined name, a table's
+  calculated-column or totals-row formula, a conditional format's or data validation's
+  formula, a pivot cache's calculated field; with any namespace prefix on the element
+  (`<x:f>`); `WEBSERVICE`, the modern `IMAGE`, `RTD`, `CALL`, `REGISTER`/`REGISTER.ID`, `EXEC`,
+  and the Google-Sheets `IMPORTDATA`/`XML`/`HTML`/`FEED`/`RANGE`, in any letter case, behind a
+  `_xlfn.`/`_xlws.` prefix, a character reference, a comment, CDATA or a processing
+  instruction, called (blanks allowed before the bracket) or passed by name (review round 2,
+  PARSERS2-6: an `_xleta.` prefix, `MAP(A1:A3,WEBSERVICE)`, or a defined name that is only the
+  function, `Fetch` = `_xleta.WEBSERVICE` used as `=Fetch(url)`); `WEBSERVICE`, `RTD`, `CALL`,
+  `EXEC`, `REGISTER.ID` and the `IMPORT` functions also wherever they stand as a value that can
+  then be called (review round 3, PARSERS3-3: after `(`, an operator or `@`, or at the start, and
+  before `)`, `,` or `;`: `MAP(WEBSERVICE,A1:A2)`, `(WEBSERVICE)`, `IF(TRUE,(RTD),0)`; in a
+  workbook also before the formula's end, so a defined name `+WEBSERVICE`), but not `IMAGE` or
+  `REGISTER`, which are plausible range names (`=SUM(Register)`, `=Image*2` pass: an owner
+  decision); outside string literals, quoted sheet or workbook names and structured references
+  (review round 2, PARSERS2-5: `SUM('Purchase Register (2024-25)'!B2:B500)` and
+  `Calls[[#This Row],[Call (min)]]` were refused) ("This file has a cell formula that fetches
+  content from elsewhere or calls out …"; a name before `!` or `[` is a sheet or table).
+  `HYPERLINK` is kept: it
+  fetches nothing until someone clicks it (the one deliberate exception to "nothing fetched
+  from elsewhere", in documents, workbooks and CSVs alike). A part is parsed only when its text
+  could hold a call at all (a fetching name followed, blanks aside, by `(`, `,`, `;` or `)`, an
+  `_xleta.` prefix, `&#`, `<!`, or `<?` after the declaration: plain byte searches, each
+  character one byte, letter case folded), so a sheet of numbers or of ordinary formulas is only
+  read: a workbook of 400,000 numeric cells and a `SUM` passes in about 0.3 s. **The upload's
+  work pool** (review round 2, PARSERS2-2: a 70-260 KB upload cost 9-13 s of CPU by spending
+  each check's budget in turn at its most expensive unit): everything one upload's check does,
+  its embedded packages' included, is paid for from 1 million units, a unit about a microsecond
+  at the slowest shape measured (0.1-1.0 µs on the development laptop, measured again in review
+  round 3): 160 decompressed bytes read, 64 bytes parsed, an element parsed 1 plus 1 per
+  attribute, a parser 48, a member opened 16, an entry 4, an embedded package 96, a formula
+  judged 4 plus 1 per 8 characters plus 2 per fetching name in it; character data reaches Python
+  only inside a formula element, and judging a formula is linear in its length (review round 3,
+  PARSERS3-1: the test for a defined name that is only a function copied the text before every
+  fetching name, so 35 formulas of 64K characters in a 2-7 KB upload, a sheet, an embedded
+  workbook or a pivot cache, cost 17-31 s and passed; now 0.5-0.8 s). The scan also keeps its
+  own caps (review round 1: it shared the Word fields' budget and refused large ordinary
+  workbooks): 256 MiB of decompressed XML read and 1 million units. Past any of them the file is
+  "too large to check": every adversarial shape the reviews found (a sheet parsed to the budget,
+  1.9 million spaced brackets, the worst document with the worst workbook embedded, 10,000 tiny
+  members each opened and parsed, element-dense content types) now costs 0.03-0.9 s of CPU and
+  under 25 MiB of traced memory. **The CPU deadline** (review round 3, structural: each round
+  found a path the units did not price): every check of one upload, packages and CSVs alike, also
+  runs against 5 s of its thread's CPU (`UPLOAD_CPU_SECONDS`), looked at once a member, a chunk
+  read or parsed, a formula or field code judged, an embedded package and a CSV cell judged;
+  past it the upload is "too large to check". The units stay the primary bound, the same answer
+  on any machine; the deadline is met only by a path they fail to price, or on a core several
+  times slower than the development laptop's (ordinary uploads cost a fraction of a second
+  there). DDE syntax written inside a cell's formula is still not judged (R132). A **CSV** is
+  refused when a cell Excel would evaluate (after blanks, tabs or line breaks it starts with
+  `=`, `+`, `-` or `@`) has DDE's shape — a `|` outside its string literals and quoted names,
+  with a `!` after it ("This file has a cell that Excel would run as a command …") — or calls
+  one of the same fetching functions the way Excel calls one: the name right before its `(`,
+  no blank between, where an operand can start, or passed by name as above (`_xleta.`, an
+  argument, a value-only name inside a call; a CSV has no defined names, so "- call, then
+  email" is a note), outside string literals, quoted names and structured references ("This file has a
+  cell formula that fetches content …"; `HYPERLINK` kept; review round 1: "-Call (follow-up)
+  with lab manager" or "+Image (brochure) attached" are notes, not calls). A quoted formula cell
+  with text after its closing quote (malformed CSV that joins the two, so a name could be split
+  by the quote) is refused as calling out. Only a file whose bytes, quotes and blanks removed,
+  hold a fetching name followed by `(`, `,`, `;` or `)` (or `_xleta.`) is read cell by cell for
+  this (plain byte searches: a 10 MB CSV of ordinary formulas costs under 0.1 s); then the
+  fields holding such a name are found in bytes (one a character, letter case folded, kept as
+  the text arrives: review round 2, PARSERS2-1, re-lowering the buffer cost 3-8 s on accented or
+  Hindi text) and judged, within a counted budget of 1 million units: 2 a field that can't be a
+  formula (its first character, or the first after an opening quote, isn't `=` `+` `-` `@`:
+  review round 2, PARSERS2-7, a call log with "Call(s)" on every row ran out at 20,000 rows; a
+  10 MB one passes now), 12 a formula field plus 1 per 8 characters plus 2 per fetching name in
+  it; past it, "too large to check". Every 10 MB shape tried, adversarial ones included, costs
+  0.2-1.1 s of CPU on a loaded laptop (an accented export with one "Image(s)" note: 0.3 s, 2.9 s
+  before; 125,000-character Hindi fields: 0.5-0.9 s, 5.4 s before). Its fields are read as
   Python's csv module reads them (a quoted field runs to its closing quote, `""` inside is a
   quote, text after the closing quote joins the field, and a formula's string literal or quoted
   name open at that quote goes on in it: a differential fuzz against the csv module, 4
@@ -196,14 +311,29 @@ Files on notes ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.
   separator in many regions), a tab and whatever a first `sep=` line names (a separator the
   file doesn't hold: whole lines, read once), by regular expressions over a stream: every field
   passes through C, memory holds a chunk and a field's first 128 Ki characters (Excel holds
-  32,767 in a cell and 8,192 in a formula; a longer field that starts like a formula, or is
-  blanks that far, is refused). Only a file holding a `|` and a `!` is read that way. A 10 MB
+  32,767 in a cell and 8,192 in a formula; for the DDE check a longer field that starts like a
+  formula, or is blanks that far, is refused; for the fetching check it is judged on what was
+  read and skipped, so a long ordinary `=SUM` line passes). Only a file holding a `|` and a `!`
+  is read for DDE that way. A 10 MB
   CSV costs 0.5-0.7 s at full clock with a `|` in every row and every separator present
   (independent review P3-6: the csv module took up to 4 s and held up to 140 MB for one row of
   millions of cells); traced memory stays under 1 MiB. `.txt` files aren't checked: a text
   editor opens them, and Excel only through its import wizard.
 - **Names** are display text only: path components dropped, control and bidi characters
-  refused, ≤ 200 characters. Objects live under generated keys (`YYYY/MM/<uuid>`), never the
+  refused, and the characters that render blank (every Unicode default-ignorable character but
+  the zero-width joiner and non-joiner, the Braille blank, the Egyptian hieroglyph blanks
+  U+13441 and U+13442, the Khitan filler U+16FE4, the ideographic half fill space U+303F, the
+  Tifinagh consonant joiner U+2D7F anywhere but between two Tifinagh letters (checked one
+  character either side: review round 4, PARSERS4-2, the check copied the rest of the text for
+  each joiner, 1.6 s for a 1 MiB value; cleaning is linear, 0.1 s for it), a code point
+  unassigned in the server's Unicode data outside the emoji blocks (newer emoji are kept), and a
+  variation selector except after a base it is defined for: a keycap digit, `#` or `*` with
+  U+20E3 after it, one of the 359 emoji with variation sequences (`↔`, `⭐` or `✔` is such a
+  base; `→`, `★`, `✓` or `😀` is not: review round 3), `0` and a few mathematical symbols
+  with standardized variants, the CJK ideograph a compatibility variant is defined for (U+FE00-
+  FE02, 1,002 sequences), a CJK ideograph with an ideographic variation selector in use
+  (U+E0100-E013F), a Mongolian letter: adversarial review of 73ff1e3, L12, R164, and its review
+  rounds 1-3, [leads.md](leads.md#names)), ≤ 200 characters. Objects live under generated keys (`YYYY/MM/<uuid>`), never the
   uploaded name.
 - **Limits**: `ATTACHMENT_MAX_BYTES` (10 MB; checked from Content-Length and again while
   reading: 413), `ATTACHMENT_MAX_PER_NOTE` (10; counted under the note's lock: 422), empty
@@ -402,6 +532,20 @@ type accepts only its own fields (a task with a `location` is a 400, not an igno
 Output is an explicit allowlist: people as `{id, full_name, is_active}`, related records
 only when visible, text previews in lists, `is_overdue` and `completable` computed with the
 server's clock.
+
+**Write budgets** (adversarial review of 73ff1e3, M6; R153). Creating is budgeted, inside
+the creating transaction: at most `ACTIVITY_MAX_CREATED_PER_USER_PER_DAY` (1,000) tasks,
+meetings and notes per person in any 24 hours (429 `rate_limited` with `Retry-After`; counted
+from the activities themselves, which are never deleted, in one statement over
+`activities_created_by_idx` whatever else the person did (review round 1, QUEUES-3), under a
+per-person advisory lock of its own taken first; the creator pays, also in someone else's
+workspace, and archiving gives nothing back),
+and `ACTIVITY_MAX_PER_CUSTOMER` (5,000) activities per customer, archived ones included,
+counted under the lead's lock (422 `activity_limit_reached`). `0` turns either off; nothing is
+written when one refuses. Edits, completions and archives aren't budgeted (they create
+nothing). One account posting long notes had kept the indexing worker hours behind for
+everyone; details and the reasons for the numbers:
+[reliability.md](reliability.md#write-budgets).
 
 ## Idempotency
 

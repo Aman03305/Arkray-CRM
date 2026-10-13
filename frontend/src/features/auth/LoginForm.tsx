@@ -97,7 +97,11 @@ export function LoginForm() {
   const temporaryExpired = isApiError(login.error, 400, "temporary_password_expired");
   const errors = temporaryExpired ? { ...missing } : { ...serverFields, ...missing };
   const showBanner = login.isError && (temporaryExpired || Object.keys(serverFields).length === 0);
-  const banner = describeError(login.error, { tooMany: "sign-in attempts" });
+  // Too many failed sign-ins in a day locked the account from new browsers (review of 73ff1e3,
+  // L1): the server's words say what to do (a browser used before, the emailed link, a reset).
+  const banner = isApiError(login.error, 429, "sign_in_locked")
+    ? { message: login.error.message, requestId: login.error.requestId }
+    : describeError(login.error, { tooMany: "sign-in attempts" });
   const otherSession = existingSession.isSuccess && reason ? existingSession.data : null;
 
   return (

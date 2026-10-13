@@ -239,9 +239,10 @@ def test_writes_cost_the_same_whatever_else_exists(user_a_client, user_a, existi
             format="json",
         )
     assert response.status_code == 201
-    # session, user, savepoint, lead lock, owner share lock, insert, timeline, audit,
-    # release, reload
-    assert len(created) == 10
+    # session, user, savepoint, daily budget lock and count (review of 73ff1e3, M6), lead
+    # lock, the customer's count (M6), owner share lock, insert, timeline, audit, release,
+    # reload
+    assert len(created) == 13
     task_id = response.json()["id"]
     with CaptureQueriesContext(connection) as completed:
         assert (

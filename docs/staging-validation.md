@@ -53,6 +53,21 @@ update `identity_user`; everything else only reads; give the reading role `pg_mo
 the drills, `docker` on a single-VM staging host that runs compose, or the platform's console
 for managed services (the `manual` driver).
 
+**A single-VM staging host that runs compose** (`infrastructure/compose.production.yml`):
+its own secrets file, generated for staging alone (`scripts/init-prod-env.sh
+/secure/arkray-staging.env`, never production's values, never the repository's `.env`), with
+every Compose command run through `scripts/prod-compose.sh /secure/arkray-staging.env
+--project <project>` (adversarial review of 73ff1e3, M4 and its review round 1;
+[operations.md](operations.md#production-shaped-stack)). Its PostgreSQL publishes no port and
+admits only `arkray_app` (TLS, the stack's own networks) and the owner from the migrate job's
+network (`infrastructure/postgres/pg_hba.conf`). For the campaign's SQL access, add to the
+staging copy of that file one `hostssl arkray <reader or owner role> <the tunnel's address>/32
+scram-sha-256` line per role the tools use, above the final `reject` lines, reached through
+an SSH tunnel to a port published on 127.0.0.1 only; remove them afterwards. Never a line
+for the superuser (`scripts/prod-compose.sh ... exec postgres ...` on the host is its way
+in). A staging host behind a shared office address needs the front proxy
+[operations.md](operations.md#edge-rate-limits) requires; run the campaign through it.
+
 **The target.** `capacity_test.py` and the drills (whose load is its virtual users) take the
 target from `--base`: for this machine's stack (a loopback `--base`) everything is as it always
 was (`Host: localhost:8443`, saved sessions under `localhost.local`, the self-signed certificate

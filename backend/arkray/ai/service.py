@@ -35,6 +35,7 @@ from uuid import UUID
 from django.conf import settings
 from django.core.cache import cache
 from django.db import DatabaseError, OperationalError, connection, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from arkray.activities import selectors as activity_selectors
@@ -45,7 +46,6 @@ from arkray.core.access import AccessScope, ScopeKind
 from arkray.core.business_time import business_date
 from arkray.core.context import current_correlation_id, current_support_session_id
 from arkray.core.errors import (
-    ConflictError,
     DomainError,
     InvalidInputError,
     NotFoundError,
@@ -137,32 +137,42 @@ def _subject(scope: AccessScope) -> UUID | None:
 
 def conversations_in(actor: User, scope: AccessScope) -> Any:
     """The actor's conversations in exactly this workspace (never another's, never another
-    workspace's: Rahul's conversation is not visible from Priya's workspace)."""
+    workspace's: Rahul's conversation is not visible from Priya's workspace), without those
+    they deleted that a legal hold keeps (tombstones: forget_conversation). Everything a user
+    reads, continues or deletes is looked up here, so a tombstone is a 404 like a deleted
+    conversation, everywhere."""
     return Conversation.objects.filter(
-        actor_id=actor.pk, workspace_kind=_kind(scope), subject_id=_subject(scope)
+        actor_id=actor.pk,
+        workspace_kind=_kind(scope),
+        subject_id=_subject(scope),
+        forgotten_at__isnull=True,
     )
 
 
 CONVERSATION_DELETED = "ai.conversation_deleted"
-
-
-class ConversationHeld(ConflictError):
-    """409 `legal_hold`, as every edit a legal hold refuses (core.holds.UnderLegalHold), worded
-    for the person deleting their own conversation."""
-
-    code = "legal_hold"
-    default_message = (
-        "This conversation is kept under a legal hold, so it can't be deleted until an"
-        " administrator releases the hold."
-    )
+# A kept conversation's question still waiting for a worker when its asker deleted it: never
+# answered (a deleted conversation's goes with it), and no longer counted as theirs.
+FORGOTTEN = "forgotten"
 
 
 def forget_conversation(actor: User, scope: AccessScope, conversation_id: UUID) -> None:
     """Delete one of the actor's conversations in this workspace, with its questions and
-    answers (404 for any other). Refused (409 `legal_hold`, nothing deleted) while a legal hold
-    keeps it: its asker or the user whose workspace it is in is held, or it touches a held
-    customer (deep security audit M-5: the person a hold targets could destroy the evidence,
-    without a trace). Audited with ids only, like every deletion."""
+    answers (404 for any other): gone for them everywhere, with the same answer whatever the
+    legal holds (204 through the API).
+
+    One a legal hold keeps (its asker or the user whose workspace it is in is held, or it
+    touches a held customer: ai.subjects.hold_keeps; deep security audit M-5: the person a hold
+    targets could otherwise destroy the evidence, without a trace) is kept as a tombstone
+    instead (`forgotten_at`; its pending questions failed `forgotten`): never shown, continued
+    or answered again, still in exports and erasures as the hold's evidence, and deleted by
+    housekeeping once no hold keeps it. Refusing it (409 `legal_hold`, as before) told the
+    asker whether any customer their question named, anyone's in the organisation, was held,
+    and a held asker that they were (adversarial review M1): the two paths now differ in
+    nothing the asker sees, and do the same work.
+
+    Audited (`ai.conversation_deleted`) with ids and counts only, and whether a hold kept it
+    (`retained`: for the compliance trail; no screen shows this event's metadata), never
+    which hold, customer or words."""
     with transaction.atomic():
         # First: serialised with placing any hold (core.holds.barrier). Which customers a
         # conversation touches is only known by matching it, so every lead hold is read: one
@@ -173,24 +183,23 @@ def forget_conversation(actor: User, scope: AccessScope, conversation_id: UUID) 
         )
         if conversation is None:
             raise NotFoundError()
-        users = dict.fromkeys([conversation.actor_id, conversation.subject_id])
-        try:
-            for user_id in users:
-                if user_id is not None:
-                    holds.refuse_if_held(HoldSubject.USER, user_id)
-        except holds.UnderLegalHold:
-            raise ConversationHeld() from None
-        if subjects.held_conversations(among=[conversation.pk]):
-            raise ConversationHeld()
         questions = conversation.questions.count()
-        conversation.delete()
+        retained = subjects.hold_keeps(conversation)
+        if retained:
+            now = timezone.now()
+            Conversation.objects.filter(pk=conversation.pk).update(forgotten_at=now)
+            Question.objects.filter(
+                conversation_id=conversation.pk, status=QuestionStatus.PENDING
+            ).update(status=QuestionStatus.FAILED, error_code=FORGOTTEN, finished_at=now)
+        else:
+            conversation.delete()
         audit.record(
             CONVERSATION_DELETED,
             actor_id=actor.pk,
             target_type="ai_conversation",
             target_id=conversation_id,
             subject_user_id=scope.subject_user_id if scope.is_delegated else None,
-            metadata={"questions": questions},
+            metadata={"questions": questions, "retained": retained},
         )
 
 
@@ -497,6 +506,15 @@ def answer(question_id: UUID) -> None:
         Question.objects.select_related("conversation", "actor").filter(pk=question_id).first()
     )
     if question is None:  # its conversation was deleted meanwhile (by its owner, an erasure)
+        logger.info("ai_question_skipped", extra={"question_id": str(question_id)})
+        return
+    if question.conversation.forgotten_at is not None:
+        # Deleted by its owner and kept for a legal hold: never answered, and failed
+        # `forgotten` as forget_conversation fails the pending questions it finds (one claimed
+        # just before it, or written into the tombstone afterwards by a pod of the previous
+        # release during a rolling deploy). Left pending, it counted against its asker's
+        # pending questions until it expired (independent review of M1, AI-3).
+        _finish(question, QuestionStatus.FAILED, error_code=FORGOTTEN)
         logger.info("ai_question_skipped", extra={"question_id": str(question_id)})
         return
     started = time.monotonic()
@@ -1241,8 +1259,10 @@ def housekeeping(now: datetime | None = None) -> dict[str, int]:
     """Hourly: fail questions stuck past their deadline; delete every question (and its
     answer) finished longer ago than the retention period, even in a conversation still in
     use, so no answer outlives AI_CONVERSATION_RETENTION_DAYS (privacy remediation: a
-    conversation's latest question used to keep all its earlier ones); and delete
-    conversations idle that long (with what is left in them)."""
+    conversation's latest question used to keep all its earlier ones); delete
+    conversations idle that long (with what is left in them); and complete the deletion of
+    conversations their askers deleted while a legal hold kept them (tombstones:
+    forget_conversation) once none does, whatever their age (adversarial review M1)."""
     now = now or timezone.now()
     expired = Question.objects.filter(status=QuestionStatus.PENDING, expires_at__lte=now).update(
         status=QuestionStatus.FAILED, error_code="timeout", finished_at=now
@@ -1264,16 +1284,20 @@ def housekeeping(now: datetime | None = None) -> dict[str, int]:
     # barrier first and reads the holds again (one small query) before it matches and
     # deletes, so a hold placed since they were read here is honoured from the next batch,
     # and one being placed while a batch runs waits for it to commit.
+    #
+    # Tombstones are due like idle conversations, and matched with them, in the same batches:
+    # a held one is kept whole, as every held conversation is (its old questions included);
+    # one no hold keeps any more is deleted, its asker's deletion completed at the first run
+    # after the hold's release.
     snapshot = holds.active()
     users = snapshot[HoldSubject.USER]
+    ending = Q(updated_at__lt=cutoff) | Q(forgotten_at__isnull=False)
     due = set(
         subjects.user_held(
             Conversation.objects.filter(questions__finished_at__lt=cutoff), users
         ).values_list("pk", flat=True)
     ) | set(
-        subjects.user_held(Conversation.objects.filter(updated_at__lt=cutoff), users).values_list(
-            "pk", flat=True
-        )
+        subjects.user_held(Conversation.objects.filter(ending), users).values_list("pk", flat=True)
     )
     customers = subjects.HeldCustomers.now()
     memo_key = _held_memo_key(customers)
@@ -1302,7 +1326,7 @@ def housekeeping(now: datetime | None = None) -> dict[str, int]:
             removed, _ = Question.objects.filter(
                 conversation_id__in=gone, finished_at__lt=cutoff
             ).delete()
-            _, per_model = Conversation.objects.filter(pk__in=gone, updated_at__lt=cutoff).delete()
+            _, per_model = Conversation.objects.filter(ending, pk__in=gone).delete()
         still_held |= held
         old_questions += removed
         deleted += per_model.get(Conversation._meta.label, 0)

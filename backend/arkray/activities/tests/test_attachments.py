@@ -627,7 +627,9 @@ class TestOfficeActiveContent:
                 "print.xlsx",
                 {"xl/workbook.xml": "<x/>", "xl/printerSettings/printerSettings1.bin": "x"},
             ),
-            ("chart.docx", {"word/document.xml": "<x/>", "word/embeddings/Sheet1.xlsx": "x"}),
+            # A real embedded worksheet (a chart's data), opened and found free of active
+            # content one level deep (L7): an ordinary embedded package still passes.
+            ("chart.docx", {"word/document.xml": "<x/>", "word/embeddings/Sheet1.xlsx": XLSX}),
             (
                 "links.docx",
                 {
@@ -718,7 +720,7 @@ OFFICE_FILES = {
                 *HYPERLINKS,
             ),
             "word/media/image1.png": PNG,
-            "word/embeddings/Microsoft_Excel_Worksheet.xlsx": "x",
+            "word/embeddings/Microsoft_Excel_Worksheet.xlsx": XLSX,
         }
     ),
     "prices.xlsx": package(

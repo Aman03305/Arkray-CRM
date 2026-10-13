@@ -91,36 +91,90 @@ address and finds the first four groups by where `::` is;
 formatting for 20,000 random addresses and every compression shape, and it was checked live
 in the pinned nginx through `real_ip` with 3,226 addresses (0 mismatches). Behind another
 proxy or load balancer, set nginx's `real_ip` module to take the client address from it,
-or the whole site shares one bucket.
+or the whole site shares one bucket: **required behind a CDN** (adversarial review of
+73ff1e3, L13). `arkray.conf` carries the lines, commented out where the key is made:
+`set_real_ip_from` for each of the proxy's published ranges only (never `0.0.0.0/0`: any
+client could then name any address) and `real_ip_header CF-Connecting-IP` (an ALB:
+`X-Forwarded-For` with `real_ip_recursive on`); and only those ranges may reach the origin
+(a security group, or Cloudflare's Authenticated Origin Pulls). Without them one slow client
+holds every limit below for every user.
+
+**Requests to the API** (adversarial review of 73ff1e3, L2: DRF checks permissions before its
+throttles, so 401 and 403 answers were never counted and cheap refused requests could keep the
+sync web workers busy). Every `/api/` location limits requests per signed-in session (its
+cookie, read only in Django's 32-character format) at 20 a second with bursts of 200, per
+address for requests without a session at 10 a second with bursts of 100, and per address
+in all at 300 a second with bursts of 1,000: twice what the capacity test's 100 users from one
+address reached at twice their normal pace (147 a second, [capacity.md](capacity.md#headroom)).
+Checked live in the pinned nginx: 300 anonymous requests at once, 105 answered and the rest
+429; 400 at once on one session, 212 and the rest 429; 100 sessions from one address at 149
+a second for 8 s, none refused. Refusals are 429 in the API's JSON envelope with the request
+id and `Retry-After`. Django's own limits (R77) stay the authority for everything they count.
 
 The same key also limits **requests in flight** (`limit_conn`, deep security audit H-1): 256
-per client in every location, 8 requests with a body, 4 attachment uploads per client (a zone
-of their own, so an office's page loads never count against its uploads), and 2 data-export
-downloads per client (4 in all), refused 429 in the API's JSON shape. Signs in the access
-log: bursts of 429 on `/api/v1/workspaces/*/activities/*/attachments`; a 429 on
+per client in every location; request bodies that can reach a temp area (declared over 16 KB,
+or not declared) 8 per session, or per address without one, and 16 per address in all; 4
+attachment uploads per client (a zone of their own, so an office's page loads never count
+against its uploads), and 2 data-export downloads per client (4 in all), refused 429 in the
+API's JSON shape. A sign-in or an ordinary save (a body of 16 KB or less, kept in memory)
+takes no JSON-body slot: one person trickling bodies on an office's shared address held all 8
+of its slots and blocked everyone's saves and sign-ins (adversarial review of 73ff1e3,
+L13). Small bodies have a ceiling of their own instead, **128 per address**, half the
+request slots, so whatever they hold the address keeps room for its reads and page loads
+(review round 1, INFRA-3: 256 small trickled bodies had held every request slot of their
+address). **Pages** take only GET and HEAD without a body: anything else is answered 405
+before any slot is taken (256 trickled `POST /login` page requests had blocked an address's
+sign-ins, page loads, saves and uploads). Uploads don't count against the JSON bodies'
+slots (forged sessions' chunked JSON trickles had blocked co-workers' uploads); headers must
+arrive within 10 s in all. Checked live: with 8 bodies of 1 MB trickled a byte every 5 s by one
+session, a sign-in, a co-worker's save and a co-worker's 20 KB note all got through and only
+the trickler's ninth body was refused; forged session cookies held 8 more slots, then 429;
+256 trickled page POSTs blocked nothing; 16 chunked JSON bodies under two forged sessions
+left uploads working. Signs in the access log: bursts of 429 on `/api/v1/workspaces/*/activities/*/attachments`; a 429 on
 `/api/v1/admin/privacy/exports/*/download` means the export slots are busy. An upload
 without a session is answered 401 by the edge's session check (`auth_request` to
 `/api/v1/auth/me`) before its body is read; a 503 on every upload while the API is up
 points at that check (its timeout is 10 s). The upload area (`/var/cache/nginx`, 64 MB
-tmpfs) or the JSON-body area (`/var/cache/nginx-body`, 16 MB) full shows as 503
+tmpfs) or the JSON-body area (`/var/cache/nginx-body`, 40 MB) full shows as 503
 `service_unavailable` from the edge on uploads or on large JSON writes, and as `No space
 left on device` lines in nginx's error log (it logs `crit`, so they appear). They empty
-themselves as the slow clients time out (15 s without a byte) or finish. The export spool
+themselves as the slow clients time out (10 s without a byte of a body) or finish. The export spool
 volume `edge-export-spool` can be emptied at any time with nginx stopped (nothing in it
 outlives a request). If a legitimate office hits the per-client limits, raise them in
 `arkray.conf` together with the tmpfs sizes and the container's memory limit (the tests
 check they stay consistent).
 
-What remains possible without signing in (deep security audit H-1 and its review; R129):
+What remains possible without signing in (deep security audit H-1 and its review; R129;
+review round 1 of the adversarial review of 73ff1e3, INFRA-3). The root of the "one address"
+rows: nginx bounds the time *between* two reads of a body (10 s) but has no deadline for a
+whole body, so a client sending a byte every few seconds keeps its request open indefinitely,
+and a session cookie can be forged before anything checks it:
 
 | What | Bound | Addresses to exhaust | Effect while it lasts |
 |---|---|---|---|
 | Upload area (64 MB) | not reachable: the body is read only for a confirmed session | cannot, without an account | none |
-| JSON-body area (16 MB), declared bodies | 8 x 1 MB per client | 2 | JSON writes over 16 KB get 503 |
-| JSON-body area, undeclared HTTP/2 bodies (not counted) | 256 x 1 MB per client, area capped | 1 | JSON writes over 16 KB get 503; uploads and downloads unaffected |
+| JSON-body area (40 MB), bodies over 16 KB | 8 x 1 MB per session (or address); 16 x 1 MB per address, forged sessions included | 3 | JSON writes over 16 KB get 503 site-wide |
+| JSON-body slots of one address, held with forged session cookies | 16 per address | 1 (the office's own) | that address's JSON writes over 16 KB get 429 |
+| Small-body slots of one address (16 KB or less), trickled anonymously or under forged sessions | 128 per address | 1 (the office's own) | **that address's sign-ins and saves get 429**; its page loads, reads and uploads work (checked live) |
+| JSON-body area, undeclared HTTP/2 bodies on API routes (not counted) | 256 x 1 MB per client, area capped | 1 | JSON writes over 16 KB get 503 site-wide |
 | Export download slots (4 in all), held by trickling a chunked or undeclared body | 2 per client | 2 | administrators' export downloads get 429; nothing spooled |
-| Requests in flight / connections (memory) | 256 per client; `worker_connections` | many (a DDoS) | the platform's DDoS protection is the bound |
-| The address's own upload slots, held by refused bodies being discarded | about 30 s each (`lingering_time`) | none | only that address |
+| The address's own upload slots, held by forged-session uploads being discarded after their 401 | 4 per address, about 30 s each (`lingering_time`) | 1 (the office's own) | that address's uploads get 429 |
+| Requests in flight (memory) | 256 per client | many (a DDoS) | the platform's DDoS protection is the bound |
+| Connections still sending their headers (not counted by `limit_conn`: nginx counts a request once its headers are read) | `worker_connections` (1,024 per worker process in the image) and the 10 s header deadline | 1, with enough connections | **every client** gets refused or stalled connections while it lasts (slowloris) |
+
+**A shared office address needs a front proxy with a total request deadline.** For any
+deployment where many people share one public address (an office behind NAT, a guest
+network), the rows marked "1 (the office's own)" and the header row mean one person there can
+deny their colleagues sign-ins and saves, or (headers) everyone service, without an account.
+nginx alone can't end that; a proxy in front that bounds the *whole* time to receive a
+request, headers and a small body together, and the connections per client address, does:
+HAProxy (`timeout http-request 10s` with `option http-buffer-request`, a per-source
+connection cap with a stick table), or a CDN or load balancer documented to do the same (then
+nginx's `real_ip` from it, above). It is a production requirement for that topology
+([deployment-readiness.md](deployment-readiness.md); production-checklist). Verify it once
+through the real front: a sign-in POST whose 1 KB body arrives a byte every 4 s must be cut
+off at the proxy's deadline, and a client opening connections without finishing their headers
+must be capped.
 
 With an account the per-client limits still apply: a signed-in user from 2 addresses can fill
 the upload area (4 x 11 MB each); their uploads are attributable (session, audit) and others'
@@ -129,15 +183,52 @@ get 503 while it lasts.
 ## Production-shaped stack
 
 ```bash
-# secrets in a file outside the repository: DJANGO_SECRET_KEY POSTGRES_PASSWORD
-# ARKRAY_OWNER_PASSWORD ARKRAY_APP_PASSWORD REDIS_PASSWORD METRICS_TOKEN ERASURE_LEDGER_KEY
-. /secure/prod.env
-docker compose -p arkray-prod -f docker-compose.yml -f infrastructure/compose.production.yml \
-    --profile app up -d --build
-docker compose -p arkray-prod ... ps            # every long-running service (healthy)
+# once: every secret generated (ARKRAY_PROD_*), owner-only, outside the repository
+scripts/init-prod-env.sh /secure/arkray-prod.env
+# docker compose --env-file <it> -p arkray-prod -f docker-compose.yml
+#   -f infrastructure/compose.production.yml --profile app, with every ARKRAY_PROD_* unset first
+prod=(scripts/prod-compose.sh /secure/arkray-prod.env)
+"${prod[@]}" up -d --build
+"${prod[@]}" ps                                 # every long-running service (healthy)
 docker exec arkray-prod-backend-1 python manage.py check --deploy
-docker compose -p arkray-prod ... down -v       # this project only
+docker exec arkray-prod-worker-1 python manage.py preflight --only credentials,database,redis
+"${prod[@]}" down -v                            # this project only
 ```
+
+**Every** `docker compose` command for this project goes through `scripts/prod-compose.sh
+<secrets file>` (`--project <name>` for another project), which names the secrets file with
+`--env-file` (adversarial review of 73ff1e3, M4). Compose then reads that file instead of
+the checkout's `.env`; without it Compose stops at the first missing `ARKRAY_PROD_*`
+variable, and no development file defines one. **Never load the file into a shell**: a
+variable exported in the shell wins over `--env-file` (Compose's precedence), so an
+`ARKRAY_PROD_*` left there by `set -a; . file` (or another environment's file) would
+silently replace the file's value; the wrapper unsets every `ARKRAY_PROD_*` and
+`COMPOSE_ENV_FILES` before it runs Compose (review round 1, INFRA-5), and a plain `. file`
+without `set -a` exports nothing at all (Compose then looked in `.env`, where
+`.env.example`'s published superuser password filled `POSTGRES_PASSWORD`). Before anything else
+starts, `credential-guard` checks every secret (`config/credentials.py`): missing, a value
+the repository publishes or a placeholder, under 32 characters, too few or too unevenly
+used characters, predictable, a repeated part, a keyboard or alphabet run, words and
+numbers joined, a common password word, or one value for two secrets, and the whole stack stays down,
+its log naming the variable (`"${prod[@]}" logs credential-guard`), never a value. The
+secrets embedded in connection URLs (database and Redis passwords) use letters, digits and
+`- . _ ~` only; the generator writes 64 hex characters for each.
+
+Who reaches the database (`infrastructure/postgres/pg_hba.conf`): the superuser only on
+the server's local socket, inside the PostgreSQL container (`"${prod[@]}" exec postgres psql
+-U arkray`) or in the one-shot `db-roles` job, the only other container mounting the
+socket's volume (it has no network at all), physical replication included (pg_basebackup,
+pgBackRest, WAL-G beside the server: [runbooks.md](runbooks.md#database-backup));
+`arkray_owner` only from `db-owner` (`10.252.17.16/28`, internal), which only `migrate` joins,
+so `run --rm migrate python manage.py replay_erasures ...` and the other owner commands run
+there; `arkray_app` over TLS from the stack's networks; both only to `arkray` and to
+`arkray_restored`, the database a dump is restored into before it is renamed into place;
+SCRAM everywhere, everything else rejected. Backups and restores run as the owner in one-off
+containers of the PostgreSQL image on `db-owner`, exactly as
+[runbooks.md](runbooks.md#restore-from-backup) writes them (checked live, end to end: dump,
+restore into `arkray_restored`, the grant and replay as the owner, the release check as
+`arkray_app`, the swap; the same `pg_dump` from `default` is refused). A rule change takes
+effect on `SELECT pg_reload_conf();` on the socket, without a restart.
 
 Checks worth repeating after a change to it: clamd answers `PONG` from the `worker`
 container and is unreachable (no such host) from every other one; `/login` through

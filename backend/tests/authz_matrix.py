@@ -49,6 +49,9 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     "api/v1/auth/password-reset/confirm": _rule("public", "POST"),
     "api/v1/auth/invitations/verify": _rule("public", "POST"),
     "api/v1/auth/invitations/accept": _rule("public", "POST"),
+    # The emailed link that lifts a sign-in lock (review of 73ff1e3, L1).
+    "api/v1/auth/sign-in-unlock": _rule("public", "POST"),
+    "api/v1/auth/sign-in-unlock/verify": _rule("public", "POST"),  # review round 1
     # --- two-step verification (ADR-0033): the second sign-in step is public (it needs the
     # pending challenge of a right password); the rest act on one's own account, refused in
     # a support session (identity.permissions). ----------------------------------------------
@@ -72,6 +75,8 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     "api/v1/admin/users/<uuid:user_id>/set-password": _rule(USERS_MANAGE, "POST"),
     # An ordinary user's second factor; never an administrator's (ADR-0033).
     "api/v1/admin/users/<uuid:user_id>/mfa/reset": _rule(USERS_MANAGE, "POST"),
+    # Lifting the daily sign-in lock (review of 73ff1e3, L1).
+    "api/v1/admin/users/<uuid:user_id>/clear-sign-in-lock": _rule(USERS_MANAGE, "POST"),
     "api/v1/admin/security-events": _rule("capability:audit.view", "GET"),
     "api/v1/admin/support-sessions": _rule("capability:support.access", "POST"),
     "api/v1/admin/support-sessions/current": _rule("capability:support.access", "DELETE"),
@@ -111,6 +116,11 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     # their owner or an administrator managing that workspace; shared ones by
     # administrators organisation-wide, config.manage, checked by the services). -----------
     f"{OPPORTUNITY}/negotiated-prices": _rule("workspace", "GET", "POST"),
+    # Correcting a won or lost deal's figures (review of 73ff1e3, M2): administrators only
+    # (crm.manage_any, a recent second factor, never in a support session); whoever sees the
+    # deal reads its corrections.
+    f"{OPPORTUNITY}/correct": _rule("capability:crm.manage_any", "POST"),
+    f"{OPPORTUNITY}/corrections": _rule("workspace", "GET"),
     f"{OPPORTUNITY}/notes": _rule("workspace", "GET"),
     f"{ACTIVITY}/attachments": _rule("workspace", "POST"),
     "api/v1/workspaces/<str:workspace>/attachments/<uuid:attachment_id>": _rule(

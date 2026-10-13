@@ -787,7 +787,8 @@ def test_the_users_list_stays_constant_with_workspace_links(admin):
     with CaptureQueriesContext(connection) as queries:
         response = client.get("/api/v1/admin/users")
     assert response.status_code == 200
-    assert len(queries) == 3
+    # + the page's sign-in locks, in one query (review of 73ff1e3, L1)
+    assert len(queries) == 4
     # The list carries what the name link needs (id, name) and no per-user CRM figures.
     row = response.json()["results"][0]
     assert {"id", "full_name"} <= set(row)

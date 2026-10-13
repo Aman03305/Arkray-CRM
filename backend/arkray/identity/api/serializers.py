@@ -8,6 +8,7 @@ and only the fields a given operation may change are declared at all.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from django.conf import settings
@@ -18,7 +19,7 @@ from rest_framework import serializers
 from arkray.core.api import OpaqueIdField, StrictInputSerializer
 from arkray.core.text import SEARCH_MAX_LENGTH, SEARCH_MIN_LENGTH
 
-from .. import mfa_services
+from .. import mfa_services, throttling
 from ..emails import validate_ascii_email
 from ..models import (
     NAME_MAX_LENGTH,
@@ -183,6 +184,8 @@ class AdminUserSerializer(serializers.ModelSerializer[User]):
             "password_changed_at",
             "mfa_enabled",
             "mfa_lock",
+            "sign_in_locked_at",
+            "pseudonymised_at",
             "version",
         ]
         read_only_fields = fields
@@ -191,6 +194,30 @@ class AdminUserSerializer(serializers.ModelSerializer[User]):
         help_text="The user has a confirmed second factor."
     )
     mfa_lock = serializers.SerializerMethodField(help_text=MFA_LOCK_HELP)
+    sign_in_locked_at = serializers.SerializerMethodField(
+        help_text="Null, or when too many failed sign-ins in a day locked this account's"
+        " sign-in from browsers it hasn't been used in (those it has keep working). The owner"
+        " was emailed an unlock link; a password reset or POST .../clear-sign-in-lock lifts it."
+    )
+    pseudonymised_at = serializers.DateTimeField(
+        read_only=True,
+        allow_null=True,
+        help_text="Null, or when this former user was pseudonymised: then nothing about the"
+        " account can be changed any more (422 `account_pseudonymised`).",
+    )
+
+    @extend_schema_field(serializers.DateTimeField(allow_null=True))
+    def get_sign_in_locked_at(self, user: User) -> str | None:
+        # A list passes them all at once (one query); a single user is looked up.
+        locks = self.context.get("sign_in_locks")
+        locked_at: datetime | None = (
+            locks.get(user.email)
+            if isinstance(locks, dict)
+            else throttling.sign_in_locked_at(user.email)
+        )
+        return (
+            None if locked_at is None else serializers.DateTimeField().to_representation(locked_at)
+        )
 
     @extend_schema_field(serializers.BooleanField())
     def get_mfa_enabled(self, user: User) -> bool:
@@ -358,6 +385,14 @@ class PasswordChangeSerializer(StrictInputSerializer):
 
 class PasswordResetRequestSerializer(StrictInputSerializer):
     email = serializers.CharField(max_length=EMAIL_MAX_LENGTH)
+
+
+class SignInUnlockSerializer(StrictInputSerializer):
+    token = serializers.CharField(max_length=TOKEN_INPUT_MAX_LENGTH)
+
+
+class SignInUnlockPreviewSerializer(serializers.Serializer[Any]):
+    email = serializers.CharField(help_text="The account's address, masked: r***@example.com.")
 
 
 class PasswordResetConfirmSerializer(StrictInputSerializer):

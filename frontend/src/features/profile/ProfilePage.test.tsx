@@ -191,7 +191,7 @@ describe("ProfilePage: two-step verification (ADR-0033)", () => {
       "GET /api/v1/auth/mfa": { status: 200, body: makeMfaStatus({ enabled: true, recovery_codes_remaining: 10, required: true, can_disable: false }) },
     });
     renderWithProviders(<ProfilePage />, { viewer: adminViewer });
-    expect(await within(twoStep()).findByText("Required for your role")).toBeInTheDocument();
+    expect(await within(twoStep()).findByText("Required for your account")).toBeInTheDocument();
     expect(within(twoStep()).getByRole("button", { name: "Replace recovery codes" })).toBeInTheDocument();
     expect(within(twoStep()).queryByRole("button", { name: "Turn off" })).not.toBeInTheDocument();
   });

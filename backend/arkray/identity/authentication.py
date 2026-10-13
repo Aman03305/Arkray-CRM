@@ -7,6 +7,10 @@ happens before the password is checked and is keyed by the submitted email, so a
 throttled attempt reveals nothing either. A failed sign-in of an existing account is
 audited (`auth.login_failed`, shown in security events; bounded by the throttle); one of an
 unknown email is a log line only, so an anonymous caller can't create audit rows at will.
+It does the same database work all the same (adversarial review of 73ff1e3, AUTH-4: the
+real account's two committed audit inserts were 3 to 7 ms a few hundred samples could
+measure, R135): the same inserts in a savepoint that is rolled back, and one commit either
+way. An email that isn't ASCII never names an account (models.normalize_email; AUTH-7).
 
 With a second factor (ADR-0033) the sign-in takes two requests: the right password gives a
 202 and a pending challenge in a fresh anonymous session (identity.mfa_services), and
@@ -21,6 +25,7 @@ import logging
 import secrets
 from dataclasses import dataclass
 from functools import lru_cache
+from uuid import uuid4
 
 from django.conf import settings
 from django.contrib.auth import update_session_auth_hash
@@ -39,9 +44,9 @@ from arkray.core.errors import (
 )
 
 from . import mfa_services, support, throttling
-from .models import AccountToken, SupportEnd, TokenPurpose, TokenStatus, User, normalize_email
+from .models import AccountToken, SupportEnd, TokenStatus, User, normalize_email
 from .passwords import check_new_password
-from .services import SESSION_ENDED
+from .services import CREDENTIAL_LINKS, SESSION_ENDED
 from .sessions import end_session, session_matches, start_session
 
 logger = logging.getLogger(__name__)
@@ -131,6 +136,24 @@ def _audit_failure(account: User, reason: str, throttle: throttling.LoginThrottl
     )
 
 
+def _record_failure(account: User | None, throttle: throttling.LoginThrottle) -> None:
+    """A wrong password: counted (and, from an unrecognised browser, checked against the
+    daily cap), and audited for an existing account, in one transaction that does the same
+    work for an unknown email (AUTH-4): its audit rows are written in a savepoint and rolled
+    back, so the statements, the tables and indexes they touch and the commit are the same,
+    and still no audit row an anonymous caller chose remains."""
+    with transaction.atomic():
+        throttle.failed()
+        savepoint = transaction.savepoint()
+        if account is not None:
+            reason = "wrong_password" if account.is_active else "account_inactive"
+            _audit_failure(account, reason, throttle)
+            transaction.savepoint_commit(savepoint)
+        else:
+            _audit_failure(User(pk=uuid4(), is_active=True), "wrong_password", throttle)
+            transaction.savepoint_rollback(savepoint)
+
+
 def sign_in(request: HttpRequest, email: str, password: str) -> SignIn | SecondFactorNeeded:
     throttle = _throttle_for(request, email)
     denied = throttle.reserve()
@@ -142,11 +165,8 @@ def sign_in(request: HttpRequest, email: str, password: str) -> SignIn | SecondF
 
     user, account = _verify_credentials(email, password)  # outside any transaction
     if user is None:
-        throttle.failed()
+        _record_failure(account, throttle)
         logger.info("login_failed", extra={"login": throttle.identifier[:12]})
-        if account is not None:
-            reason = "wrong_password" if account.is_active else "account_inactive"
-            _audit_failure(account, reason, throttle)
         raise InvalidCredentialsError()
     if temporary_password_expired(user):
         logger.info("login_temporary_password_expired", extra={"login": throttle.identifier[:12]})
@@ -310,8 +330,10 @@ def change_password(request: HttpRequest, current_password: str, new_password: s
                 "updated_at",
             ]
         )
+        # And any unlock link (review round 1, IDENTITY-2): it would trust a browser for the
+        # new password.
         AccountToken.objects.filter(
-            user=user, purpose=TokenPurpose.PASSWORD_RESET, status=TokenStatus.PENDING
+            user=user, purpose__in=CREDENTIAL_LINKS, status=TokenStatus.PENDING
         ).update(status=TokenStatus.REVOKED, revoked_at=timezone.now())
         # The safe event administrators see (who and when; never the password, its hash or
         # any token): docs/authorization.md#password-change-notification.
@@ -337,6 +359,6 @@ def disable_mfa(request: HttpRequest, current_password: str, code: str) -> None:
     requires a second factor (checked first: nothing to guess then)."""
     actor = _signed_in_user(request)
     if mfa_services.required_for(actor):
-        raise BusinessRuleViolation(mfa_services.REQUIRED_FOR_ROLE)
+        raise BusinessRuleViolation(mfa_services.required_message())
     verify_current_password(request, current_password)
     mfa_services.disable(request, actor, code)

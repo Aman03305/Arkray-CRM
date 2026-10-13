@@ -1,6 +1,6 @@
 # 0033. Two-step verification (TOTP) for administrators; reactivated administrators reset their password
 
-Status: Accepted
+Status: Accepted; amended by [0034](0034-staging-security-remediation.md) (two-step verification can be required of every user, `MFA_REQUIRED_FOR_ALL_USERS`; the acceptance of an administrator turning an ordinary account into an administrator account they control is withdrawn: a 7-day cooling-off and owner emails)
 Date: 2026-10-11
 
 ## Context

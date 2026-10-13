@@ -252,6 +252,26 @@ def kept(question: Question) -> bool:
     return Conversation.objects.filter(pk=question.conversation_id).exists()
 
 
+def forgotten_consistently(question: Question, owner: User) -> bool:
+    """A conversation its owner deleted while a hold was being placed: gone for the owner
+    either way, and either deleted (the deletion committed before the hold existed) or kept
+    as a tombstone (the hold committed first), audited as what happened (adversarial review
+    M1: the owner is told neither)."""
+    event = AuditEvent.objects.get(
+        action=service.CONVERSATION_DELETED, target_id=str(question.conversation_id)
+    )
+    row = Conversation.objects.filter(pk=question.conversation_id).first()
+    if (
+        service.conversations_in(owner, AccessScope.own(owner.pk))
+        .filter(pk=question.conversation_id)
+        .exists()
+    ):
+        return False
+    if row is None:
+        return event.metadata["retained"] is False
+    return row.forgotten_at is not None and event.metadata["retained"] is True
+
+
 def stored_file(note: Activity, owner: User, *, deleted: bool = True) -> Attachment:
     key = f"test/{uuid4().hex}"
     storage.save(key, io.BytesIO(PDF))
@@ -285,9 +305,7 @@ class TestAskArkray:
         lead = LeadFactory(owner=owner, first_name="Sunita", last_name="Rao")
         question = stored(owner, "What did Sunita Rao say about reagents?")
         stop = Stop()
-        with mock.patch.object(
-            subjects, "held_conversations", stopping_after(subjects.held_conversations, stop)
-        ):
+        with mock.patch.object(subjects, "hold_keeps", stopping_after(subjects.hold_keeps, stop)):
             hold_placed_while_stopped(
                 lambda: service.forget_conversation(
                     owner, AccessScope.own(owner.pk), question.conversation_id
@@ -297,8 +315,13 @@ class TestAskArkray:
             )
         assert not kept(question)  # deleted before the hold, which came after
         assert holds.is_held(HoldSubject.LEAD, lead.pk)
+        assert forgotten_consistently(question, owner)
 
-    def test_a_deletion_arriving_while_a_hold_is_placed_waits_and_is_refused(self):
+    @pytest.mark.parametrize("subject", [HoldSubject.LEAD, HoldSubject.USER])
+    def test_a_deletion_arriving_while_a_hold_is_placed_waits_and_keeps_it(self, subject):
+        """It waits for the hold, sees it and keeps the conversation as a tombstone, gone
+        for its owner all the same: the same 204 as any deletion (adversarial review M1;
+        it was a 409 `legal_hold`, which told the owner about the hold)."""
         owner, admin = UserFactory(), AdminFactory()
         lead = LeadFactory(owner=owner, first_name="Sunita", last_name="Rao")
         question = stored(owner, "What did Sunita Rao say about reagents?")
@@ -306,13 +329,31 @@ class TestAskArkray:
             lambda: service.forget_conversation(
                 owner, AccessScope.own(owner.pk), question.conversation_id
             ),
-            HoldSubject.LEAD,
-            lead.pk,
+            subject,
+            lead.pk if subject == HoldSubject.LEAD else owner.pk,
             admin,
         )
-        assert isinstance(result, service.ConversationHeld), result
+        assert result is None, result
         assert kept(question)
-        assert not AuditEvent.objects.filter(action=service.CONVERSATION_DELETED).exists()
+        assert forgotten_consistently(question, owner)
+        assert Conversation.objects.get(pk=question.conversation_id).forgotten_at is not None
+
+    @pytest.mark.parametrize("subject", [HoldSubject.LEAD, HoldSubject.USER])
+    @pytest.mark.parametrize("round_", range(3))
+    def test_a_deletion_racing_a_placement_is_before_it_or_kept(self, subject, round_):
+        """Started at the same moment (a barrier): never a deadlock or a refusal, and the
+        outcome is always one of the two serial orders (adversarial review M1)."""
+        owner, admin = UserFactory(), AdminFactory()
+        lead = LeadFactory(owner=UserFactory(), first_name="Zelda", last_name="Quillfeather")
+        question = stored(owner, "Do we have a customer called Zelda Quillfeather?")
+        results = run_concurrently(
+            placing(subject, lead.pk if subject == HoldSubject.LEAD else owner.pk, admin),
+            lambda: service.forget_conversation(
+                owner, AccessScope.own(owner.pk), question.conversation_id
+            ),
+        )
+        assert results == ["placed", None], results
+        assert forgotten_consistently(question, owner)
 
     @pytest.mark.parametrize("subject", [HoldSubject.LEAD, HoldSubject.USER])
     def test_housekeeping_honours_a_hold_placed_after_it_read_them(self, subject):
@@ -870,6 +911,9 @@ class TestLockOrder:
             assert not isinstance(result, OperationalError), result  # deadlock, lock timeout
             assert "deadlock" not in str(result).lower(), result
         assert results[:3] == ["placed"] * 3, results[:3]
-        allowed = (holds.UnderLegalHold, service.ConversationHeld)
         for result in results[3:]:
-            assert not isinstance(result, BaseException) or isinstance(result, allowed), result
+            assert not isinstance(result, BaseException) or isinstance(
+                result, holds.UnderLegalHold
+            ), result
+        assert results[4] is None, results[4]  # deleting a conversation is never refused (M1)
+        assert forgotten_consistently(about_b, owner)

@@ -146,8 +146,9 @@ class TestList:
     ):
         UserFactory.create_batch(extra_users)
         InvitedUserFactory.create_batch(3)
-        # session + signed-in user + one list query (invitation state joined, not N+1)
-        with django_assert_num_queries(3):
+        # session + signed-in user + one list query (invitation state joined, not N+1) + one
+        # for the page's sign-in locks (review of 73ff1e3, L1; all of them at once)
+        with django_assert_num_queries(4):
             response = admin_client.get(USERS, {"page_size": 100})
         assert response.status_code == 200
 

@@ -30,7 +30,12 @@ count sees it, or waits and then finds the stage archived.
 
 Nothing is ever deleted that anything references: a removed stage is archived when an
 opportunity, its history or a negotiated price mentions it, and deleted only if it was never
-used. Custom fields are archived, their values kept (hidden).
+used. A pipeline keeps at most MAX_RETIRED_STAGES_PER_PIPELINE such retired stages (a removal
+past it is refused), and its configuration payloads list the active ones only, so neither
+the stage positions nor the payloads grow with every stage ever retired (adversarial review
+of 73ff1e3, L10). Custom fields are archived, their values kept (hidden), at most
+MAX_ARCHIVED_FIELDS_PER_PIPELINE of them; an owner keeps at most
+MAX_ARCHIVED_PIPELINES_PER_OWNER archived pipelines (review round 1, DEALS-3 and DEALS-1).
 """
 
 from __future__ import annotations
@@ -103,9 +108,30 @@ UNKNOWN_STAGE = "This stage isn't part of the pipeline any more. Reload and try 
 UNKNOWN_FIELD = "This field isn't part of the pipeline any more. Reload and try again."
 UNKNOWN_OPTION = "This choice isn't part of the field any more. Reload and try again."
 
+TOO_MANY_RETIRED = (
+    "This pipeline already keeps {count} removed stages that its deals and their history "
+    "still refer to, the most a pipeline keeps ({limit}). Keep this stage (rename it if you "
+    "like), or start a new pipeline."
+)
+TOO_MANY_ARCHIVED = (
+    "{whose} already {verb} {limit} archived pipelines, the most kept. Restore one and reuse it "
+    "instead of archiving another."
+)
+TOO_MANY_REMOVED_FIELDS = (
+    "This pipeline already keeps {count} removed fields (their values are kept, hidden), the "
+    "most a pipeline keeps ({limit}). Keep this field (rename it if you like), or start a new "
+    "pipeline."
+)
+RETIRED_POSITIONS_FULL = (
+    "This pipeline can't keep any more removed stages. Keep this stage (rename it if you "
+    "like), or start a new pipeline."
+)
+
 # Retired stages keep their rows; their positions move out of the board's range (the
-# position is unique per pipeline, active or not).
+# position is unique per pipeline, active or not), and never past the column's range (a
+# smallint: RETIRED_POSITION_MAX), whatever earlier releases left (review of 73ff1e3, L10).
 RETIRED_POSITION_BASE = 10000
+RETIRED_POSITION_MAX = 32767
 _SERIALISE_NAMESPACE = 0x41524B33  # "ARK3": per-owner pipeline creation
 
 
@@ -178,10 +204,12 @@ def _serialise_owner(owner_id: UUID | None) -> None:
         )
 
 
-def _owner_pipelines(owner_id: UUID | None) -> Any:
-    active = m.Pipeline.objects.filter(is_active=True)
+def _owner_pipelines(owner_id: UUID | None, *, active: bool = True) -> Any:
+    pipelines = m.Pipeline.objects.filter(is_active=active)
     return (
-        active.filter(owner__isnull=True) if owner_id is None else active.filter(owner_id=owner_id)
+        pipelines.filter(owner__isnull=True)
+        if owner_id is None
+        else pipelines.filter(owner_id=owner_id)
     )
 
 
@@ -289,9 +317,12 @@ def archive_pipeline(
     *, actor: User, scope: AccessScope, pipeline_id: UUID, version: int
 ) -> m.Pipeline:
     """Hide a pipeline from selectors and forms. Its opportunities, history and prices stay.
-    Refused while it holds open opportunities (they would have no board), and for the
-    default pipeline. FOR UPDATE: creations (FOR SHARE) and moves (FOR KEY SHARE) wait, then
-    find it archived."""
+    Refused while it holds open opportunities (they would have no board), for the default
+    pipeline, and when its owner (or the organisation) already keeps
+    MAX_ARCHIVED_PIPELINES_PER_OWNER archived pipelines (review round 1, DEALS-1: create and
+    archive grew them without limit). FOR UPDATE: creations (FOR SHARE) and moves (FOR KEY
+    SHARE) wait, then find it archived; the owner's creations, restores and archives are
+    serialised (_serialise_owner) so the count holds."""
     with transaction.atomic():
         pipeline = _lock(actor, scope, pipeline_id, None, exclusive=True)
         if not pipeline.is_active:
@@ -308,6 +339,22 @@ def archive_pipeline(
             raise BusinessRuleViolation(OPEN_DEALS.format(**_plural(open_count)))
         if open_deals.exists():
             raise BusinessRuleViolation(OPEN_DEALS_OF_OTHERS)
+        _serialise_owner(pipeline.owner_id)
+        if _owner_pipelines(pipeline.owner_id, active=False).count() >= (
+            m.MAX_ARCHIVED_PIPELINES_PER_OWNER
+        ):
+            own = pipeline.owner_id is not None and pipeline.owner_id == actor.pk
+            raise BusinessRuleViolation(
+                TOO_MANY_ARCHIVED.format(
+                    whose="You"
+                    if own
+                    else "This workspace"
+                    if pipeline.owner_id
+                    else "The organisation",
+                    verb="keep" if own else "keeps",
+                    limit=m.MAX_ARCHIVED_PIPELINES_PER_OWNER,
+                )
+            )
         pipeline.is_active = False
         pipeline.version += 1
         pipeline.save(update_fields=["is_active", "version", "updated_at"])
@@ -359,8 +406,9 @@ def replace_stages(
     Never rewrites opportunities or their history: an opportunity keeps the probability it
     adopted, and history keeps the names it recorded (docs/pipeline.md#stages).
 
-    Refused (422) when a removed stage still holds opportunities that aren't archived, or a
-    stage holding any opportunity would change between open, won and lost."""
+    Refused (422) when a removed stage still holds opportunities that aren't archived, a
+    stage holding any opportunity would change between open, won and lost, or the pipeline
+    would keep more than MAX_RETIRED_STAGES_PER_PIPELINE retired stages."""
     specs = validation.clean_stage_specs(stages)
     with transaction.atomic():
         # FOR UPDATE, not NO KEY UPDATE: it conflicts with the KEY SHARE every move and
@@ -411,23 +459,34 @@ def replace_stages(
         if problems:
             raise BusinessRuleViolation(" ".join(problems))
 
-        retired_position = max(
-            [
-                RETIRED_POSITION_BASE,
-                *(
-                    position + 1
-                    for position in m.Stage.objects.filter(
-                        pipeline=pipeline, position__gte=RETIRED_POSITION_BASE
-                    ).values_list("position", flat=True)
-                ),
-            ]
-        )
+        # Referenced stages are retired (kept), the others deleted. A pipeline keeps at most
+        # MAX_RETIRED_STAGES_PER_PIPELINE: retiring past it is refused as a whole, before
+        # anything changes (review of 73ff1e3, L10: an add-move-remove loop grew them without
+        # limit until every stage edit failed). The pipeline's row lock serialises the count.
+        retiring = {s.pk for s in locked if s.pk in removed_ids and _stage_referenced(s.pk)}
+        retired_position = RETIRED_POSITION_BASE
+        if retiring:
+            retired = m.Stage.objects.filter(pipeline=pipeline, is_active=False)
+            count = retired.count()
+            if count + len(retiring) > m.MAX_RETIRED_STAGES_PER_PIPELINE:
+                raise BusinessRuleViolation(
+                    TOO_MANY_RETIRED.format(count=count, limit=m.MAX_RETIRED_STAGES_PER_PIPELINE)
+                )
+            highest = (
+                m.Stage.objects.filter(pipeline=pipeline, position__gte=RETIRED_POSITION_BASE)
+                .order_by("-position")
+                .values_list("position", flat=True)
+                .first()
+            )
+            retired_position = max(RETIRED_POSITION_BASE, (highest or 0) + 1)
+            if retired_position + len(retiring) - 1 > RETIRED_POSITION_MAX:
+                raise BusinessRuleViolation(RETIRED_POSITIONS_FULL)
         archived_keys: list[str] = []
         deleted_keys: list[str] = []
         for stage in locked:
             if stage.pk not in removed_ids:
                 continue
-            if _stage_referenced(stage.pk):
+            if stage.pk in retiring:
                 stage.is_active = False
                 stage.position = retired_position
                 retired_position += 1
@@ -575,6 +634,17 @@ def replace_fields(
             if delete_removed_values
             else field_values.OTHERS_VALUES_HIDDEN,
         )
+        # A pipeline keeps at most MAX_ARCHIVED_FIELDS_PER_PIPELINE removed fields (review
+        # round 1, DEALS-3): removing past it is refused as a whole, before anything changes.
+        # The pipeline's row lock serialises the count.
+        if removed:
+            kept_removed = m.CustomField.objects.filter(pipeline=pipeline, is_active=False).count()
+            if kept_removed + len(removed) > m.MAX_ARCHIVED_FIELDS_PER_PIPELINE:
+                raise BusinessRuleViolation(
+                    TOO_MANY_REMOVED_FIELDS.format(
+                        count=kept_removed, limit=m.MAX_ARCHIVED_FIELDS_PER_PIPELINE
+                    )
+                )
         for field in removed:
             field.is_active = False
             field.save(update_fields=["is_active", "updated_at"])
@@ -611,7 +681,6 @@ def replace_fields(
             changed=changed,
             archived=[str(field.pk) for field in removed],
         )
-        if delete_removed_values:  # the job records it in the erasure ledger
-            for field in removed:
-                field_values.request_for(actor.pk, field, scope)
+        if delete_removed_values:  # one job, one erasure-ledger entry (field_values)
+            field_values.request_for_fields(actor.pk, removed, scope)
     return selectors.visible_pipeline(scope, pipeline_id)

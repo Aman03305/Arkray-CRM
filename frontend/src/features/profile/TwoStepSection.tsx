@@ -83,7 +83,7 @@ function ReplaceCodesDialog({ onClose, onReplaced }: { onClose: () => void; onRe
   );
 }
 
-/** Turning it off: the password and a code (offered only when the role allows it). */
+/** Turning it off: the password and a code (offered only when the account may go without). */
 function DisableDialog({ onClose, onDisabled }: { onClose: () => void; onDisabled: () => void }) {
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -159,8 +159,8 @@ type Open = "setup" | "replace" | "disable" | null;
 
 /**
  * The viewer's own two-step verification in Settings (ADR-0033): whether it's on, setting it
- * up, replacing the recovery codes, and turning it off where the role allows. Not rendered
- * during a support session (the API refuses every two-step change there).
+ * up, replacing the recovery codes, and turning it off where the account may go without. Not
+ * rendered during a support session (the API refuses every two-step change there).
  */
 export function TwoStepSection() {
   const queryClient = useQueryClient();
@@ -242,7 +242,7 @@ export function TwoStepSection() {
         {mfa.required ? (
           <div>
             <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">Policy</dt>
-            <dd className="mt-1 text-sm text-slate-900">Required for your role</dd>
+            <dd className="mt-1 text-sm text-slate-900">Required for your account</dd>
           </div>
         ) : null}
       </dl>

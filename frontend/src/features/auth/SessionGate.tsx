@@ -20,8 +20,10 @@ import { MfaEnrollment } from "./MfaEnrollment";
  * never guessed data. This is UX only: the API refuses unauthenticated requests anyway.
  *
  * Someone whose password was set by an administrator must choose their own before anything
- * else: until then the password form replaces the app. Then, when their role requires
- * two-step verification and it isn't set up (ADR-0033), the set-up replaces the app.
+ * else: until then the password form replaces the app. Then, when the API says their account
+ * must have two-step verification and it isn't set up (`mfa_enrollment_required`: ADR-0033's
+ * administrators, or every account when the organisation requires it), the set-up replaces the
+ * app.
  */
 export function SessionGate({ children }: { children: ReactNode }) {
   const viewer = useViewerQuery();

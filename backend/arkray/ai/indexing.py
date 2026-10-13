@@ -13,14 +13,20 @@
 - **Derived.** Everything here can be deleted and rebuilt from the CRM (`rebuild`, the
   `ai_reindex` command); the nightly reconciliation re-enqueues drifted sources.
 - **Bounded.** One source per event; reconciliation walks bounded batches, each its own
-  outbox event, so no job runs long or holds locks across the model call.
+  outbox event, so no job runs long or holds locks across the model call. A lead's re-sync
+  (`ai.index_lead`, after a reassignment or an erasure) handles at most LEAD_BATCH sources a
+  job and queues a continuation from where it stopped (review of 73ff1e3, M6: one job re-synced
+  a customer's thousands of notes while everyone else's new notes waited behind it). The
+  continuation re-enters the outbox's fair queue as the same user's work, so other people's
+  indexing runs between two batches; it is dropped when a fresh re-sync of the lead is waiting
+  (that one redoes the whole lead), and a duplicate of it is coalesced.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 from uuid import UUID
@@ -31,21 +37,26 @@ from django.db import connection, transaction
 from django.db.models import Count, Max, Min
 
 from arkray.core import outbox
-from arkray.core.knowledge import KnowledgeDocument, SourceType
+from arkray.core.knowledge import KnowledgeDocument
 from arkray.leads import selectors as lead_selectors
 from arkray.pipeline import selectors as pipeline_selectors
 
 from . import chunking
 from .embeddings import get_embedder
 from .models import KnowledgeChunk
-from .sources import LOADERS, MODULE_OF, SourceModule
+from .sources import LOADERS, SourceModule
 
 logger = logging.getLogger(__name__)
 
 TOPIC_INDEX_SOURCE = "ai.index_source"  # {"source": module, "id": uuid}
-TOPIC_INDEX_LEAD = "ai.index_lead"  # {"lead_id": uuid}: everything indexed under a lead
+# {"lead_id": uuid}: everything indexed under a lead; a continuation adds where to go on from,
+# {"source": module, "after": uuid | null} (a job of the previous release has neither: the start)
+TOPIC_INDEX_LEAD = "ai.index_lead"
 TOPIC_RECONCILE = "ai.reconcile_batch"  # {"source": module, "after": uuid | null}
 RECONCILE_BATCH = 500
+# Sources one ai.index_lead job re-syncs (M6): a few seconds of the worker when the text has
+# to be embedded again, well under a second when only the owner changes (a reassignment).
+LEAD_BATCH = 200
 
 
 class Outcome(StrEnum):
@@ -68,12 +79,17 @@ def enqueue_source(module: SourceModule, source_id: UUID) -> None:
     )
 
 
+def _lead_key(lead_id: UUID) -> str:
+    return f"lead-tree:{lead_id}"
+
+
 def enqueue_lead(lead_id: UUID) -> None:
     """Re-sync everything indexed under a lead (its reassignment moved the lead, its open
-    opportunities and its current work in one transaction): one event, not one per row."""
+    opportunities and its current work in one transaction): one event, not one per row (its
+    job then goes batch by batch: continue_lead)."""
     if not settings.AI_INDEXING_ENABLED:
         return
-    outbox.enqueue(TOPIC_INDEX_LEAD, {"lead_id": str(lead_id)}, dedupe_key=f"lead-tree:{lead_id}")
+    outbox.enqueue(TOPIC_INDEX_LEAD, {"lead_id": str(lead_id)}, dedupe_key=_lead_key(lead_id))
 
 
 # --- applying it ---------------------------------------------------------------------------
@@ -225,22 +241,93 @@ def index_source(module: SourceModule, source_id: UUID) -> Outcome:
     return next(iter(index_sources(module, [source_id])))
 
 
-def index_lead(lead_id: UUID) -> dict[Outcome, int]:
-    """Re-sync the lead and every source indexed under it (after a reassignment: the moved
-    records' chunks get their new owner; text is not re-embedded)."""
-    totals: dict[Outcome, int] = {}
-    indexed = (
-        KnowledgeChunk.objects.filter(lead_id=lead_id)
-        .values_list("source_type", "source_id")
-        .distinct()
+# Where a lead's re-sync goes on from: a source module, and the last source id done in it
+# (None: from that module's first). Modules in SourceModule's order, the lead itself first.
+LeadCursor = tuple[SourceModule, UUID | None]
+
+
+@dataclass(frozen=True, slots=True)
+class LeadBatch:
+    outcomes: dict[Outcome, int] = field(default_factory=dict)
+    next: LeadCursor | None = None  # None: the whole lead is done
+
+
+def _lead_sources(
+    lead_id: UUID, module: SourceModule, after: UUID | None, limit: int
+) -> list[UUID]:
+    """The next `limit` sources of `module` indexed under the lead, in id order after `after`
+    (the lead itself for its own module: it is re-synced even when it has no chunks yet)."""
+    if module is SourceModule.LEAD:
+        return [lead_id] if after is None and limit > 0 else []
+    indexed = KnowledgeChunk.objects.filter(
+        lead_id=lead_id, source_type__in=LOADERS[module].source_types
     )
-    by_module: dict[SourceModule, set[UUID]] = {SourceModule.LEAD: {lead_id}}
-    for source_type, source_id in indexed:
-        by_module.setdefault(MODULE_OF[SourceType(source_type)], set()).add(source_id)
-    for module, ids in by_module.items():
-        for outcome, count in index_sources(module, ids).items():
+    if after is not None:
+        indexed = indexed.filter(source_id__gt=after)
+    return list(
+        indexed.order_by("source_id").values_list("source_id", flat=True).distinct()[:limit]
+    )
+
+
+def index_lead_batch(
+    lead_id: UUID, start: LeadCursor | None = None, *, limit: int | None = None
+) -> LeadBatch:
+    """Re-sync at most `limit` (LEAD_BATCH) of the sources indexed under the lead, from `start`
+    (after a reassignment: the moved records' chunks get their new owner; text is not
+    re-embedded). Returns what it did and where the next batch starts."""
+    budget = limit or LEAD_BATCH
+    modules = list(SourceModule)
+    module, after = start or (modules[0], None)
+    totals: dict[Outcome, int] = {}
+    for index in range(modules.index(module), len(modules)):
+        module = modules[index]
+        # One more than there is room for: whether this module has more after the batch.
+        ids = _lead_sources(lead_id, module, after, budget + 1)
+        done, more = ids[:budget], len(ids) > budget
+        if done:
+            for outcome, count in index_sources(module, done).items():
+                totals[outcome] = totals.get(outcome, 0) + count
+            budget -= len(done)
+        if more:
+            return LeadBatch(totals, (module, done[-1]))
+        after = None
+        if budget == 0 and index + 1 < len(modules):
+            return LeadBatch(totals, (modules[index + 1], None))
+    return LeadBatch(totals, None)
+
+
+def continue_lead(lead_id: UUID, start: LeadCursor | None) -> LeadBatch:
+    """The `ai.index_lead` job: one batch, then its continuation, unless a fresh re-sync of the
+    lead is waiting (it redoes the whole lead: backpressure). The continuation is the same
+    user's work (core.outbox), keyed by its cursor: a duplicate delivery of this batch
+    coalesces into the one already queued."""
+    batch = index_lead_batch(lead_id, start)
+    if batch.next is None:
+        return batch
+    if outbox.waiting(TOPIC_INDEX_LEAD, _lead_key(lead_id)):
+        logger.info("ai_lead_resync_superseded")  # no lead id: not a logged field (core.logging)
+        return batch
+    module, after = batch.next
+    outbox.enqueue(
+        TOPIC_INDEX_LEAD,
+        {"lead_id": str(lead_id), "source": module.value, "after": str(after) if after else None},
+        dedupe_key=f"{_lead_key(lead_id)}:{module.value}:{after or ''}",
+    )
+    return batch
+
+
+def index_lead(lead_id: UUID) -> dict[Outcome, int]:
+    """Re-sync the lead and every source indexed under it now, batch after batch (for a
+    synchronous caller; the job runs one batch at a time: continue_lead)."""
+    totals: dict[Outcome, int] = {}
+    start: LeadCursor | None = None
+    while True:
+        batch = index_lead_batch(lead_id, start)
+        for outcome, count in batch.outcomes.items():
             totals[outcome] = totals.get(outcome, 0) + count
-    return totals
+        if batch.next is None:
+            return totals
+        start = batch.next
 
 
 # --- reconciliation and rebuild ------------------------------------------------------------

@@ -95,28 +95,30 @@ def conversation_url(question: Question, workspace: str = "me") -> str:
 
 # --- M-5 (a): deleting a conversation under a legal hold ------------------------------------------
 class TestDeletingUnderAHold:
-    def test_the_held_user_cannot_delete_until_the_hold_is_released(self, user_a, admin):
+    def test_the_held_users_conversation_is_kept_until_the_hold_is_released(self, user_a, admin):
+        """The deletion answers 204 like any other (adversarial review M1: a 409 told the user
+        they were held; tests/security/test_ask_hold_oracle.py): the conversation is kept,
+        hidden from them, until the hold is released and housekeeping completes it."""
         question = stored(user_a, "What is my pipeline value?")
         legal_hold = hold(HoldSubject.USER, user_a.pk, admin)
         client = signed_in(user_a)
 
-        refused = client.delete(conversation_url(question))
-        assert refused.status_code == 409
-        assert refused.json()["error"]["code"] == "legal_hold"
-        assert Question.objects.filter(pk=question.pk).exists()
-        assert not AuditEvent.objects.filter(action=service.CONVERSATION_DELETED).exists()
-
-        release(legal_hold, admin)
         assert client.delete(conversation_url(question)).status_code == 204
-        assert not Conversation.objects.filter(pk=question.conversation_id).exists()
+        assert client.get(conversation_url(question)).status_code == 404
+        assert Question.objects.filter(pk=question.pk).exists()
         event = AuditEvent.objects.get(action=service.CONVERSATION_DELETED)
         assert (event.actor_id, event.target_type, event.target_id) == (
             user_a.pk,
             "ai_conversation",
             str(question.conversation_id),
         )
-        assert event.metadata == {"questions": 1}  # ids and counts only, never the text
+        # Ids and counts only, never the text; and that a hold kept it, never which.
+        assert event.metadata == {"questions": 1, "retained": True}
         assert event.subject_user_id is None
+
+        release(legal_hold, admin)
+        service.housekeeping()
+        assert not Conversation.objects.filter(pk=question.conversation_id).exists()
 
     def test_a_conversation_about_a_held_customer_is_kept(self, user_a, admin):
         lead = LeadFactory(owner=user_a, first_name="Sunita", last_name="Rao")
@@ -134,19 +136,21 @@ class TestDeletingUnderAHold:
         legal_hold = hold(HoldSubject.LEAD, lead.pk, admin)
         client = signed_in(user_a)
         for question in (named, cited):
-            response = client.delete(conversation_url(question))
-            assert (response.status_code, response.json()["error"]["code"]) == (409, "legal_hold")
+            # 204 as any deletion (adversarial review M1), and kept, hidden, as evidence.
+            assert client.delete(conversation_url(question)).status_code == 204
             assert Question.objects.filter(pk=question.pk).exists()
         assert client.delete(conversation_url(unrelated)).status_code == 204
+        assert not Question.objects.filter(pk=unrelated.pk).exists()
 
         release(legal_hold, admin)
-        assert client.delete(conversation_url(named)).status_code == 204
+        service.housekeeping()
+        assert not Question.objects.filter(pk__in=[named.pk, cited.pk]).exists()
 
     def test_an_administrators_conversation_in_a_held_users_workspace_is_kept(self, user_a, admin):
         question = stored(admin, "How many overdue tasks?", subject=user_a, kind=WorkspaceKind.USER)
         hold(HoldSubject.USER, user_a.pk, admin)
         response = signed_in(admin).delete(conversation_url(question, str(user_a.pk)))
-        assert (response.status_code, response.json()["error"]["code"]) == (409, "legal_hold")
+        assert response.status_code == 204  # as any deletion (adversarial review M1)
         assert Question.objects.filter(pk=question.pk).exists()
 
     def test_another_persons_conversation_is_still_a_404(self, user_a, user_b, admin):
@@ -630,8 +634,10 @@ class TestHousekeepingStaysBoundedUnderHolds:
         assert Question.objects.filter(pk=kept.pk).exists()
 
     def test_held_conversations_never_matches_what_a_user_hold_keeps(self, user_a, admin):
-        """The rule forgetting and pseudonymising use: a held user's conversations are kept
-        without matching them against the held customers."""
+        """The rule pseudonymising uses: a held user's conversations are kept without matching
+        them against the held customers. (Forgetting one conversation matches it all the
+        same, ai.subjects.hold_keeps: the same work whatever the answer, adversarial review
+        M1.)"""
         lead = LeadFactory(owner=admin, first_name="Sunita", last_name="Rao")
         hold(HoldSubject.LEAD, lead.pk, admin)
         hold(HoldSubject.USER, user_a.pk, admin)

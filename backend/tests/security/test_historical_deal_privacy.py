@@ -281,7 +281,10 @@ def test_the_previous_owner_cannot_write_or_probe_a_hidden_customer_field(
     assert page(client, deal)["version"] == version
 
 
-def test_the_previous_owner_still_edits_the_deals_value(admin, user_a, user_b, deal):
+def test_the_previous_owner_no_longer_edits_the_deals_value(admin, user_a, user_b, deal):
+    """Their value, probability and dates stayed editable here; a closed deal's figures are
+    frozen for everyone now (adversarial review of 73ff1e3, M2: 422 `deal_closed`), so such
+    a deal is read-only to its previous owner."""
     reassign(admin, deal, user_b)
     client = signed_in(user_a)
     url = f"/api/v1/workspaces/me/opportunities/{deal['opportunity'].pk}"
@@ -297,9 +300,10 @@ def test_the_previous_owner_still_edits_the_deals_value(admin, user_a, user_b, d
         },
         format="json",
     )
-    assert response.status_code == 200, response.content
+    assert response.status_code == 422, response.content
+    assert response.json()["error"]["code"] == "deal_closed"
     stored = Opportunity.objects.get(pk=deal["opportunity"].pk)
-    assert stored.value == Decimal("900000.00")
+    assert stored.value == Decimal("950000.00")
     assert stored.contact_email == EMAIL  # the hidden copy is untouched
     assert stored.custom_fields[_text_field(deal)] == f"Ask for {PERSON}"
 
@@ -383,3 +387,138 @@ def test_a_frozen_field_gets_one_answer_whatever_became_of_the_customer(
         )
         assert after == before, state
     assert answers[0] == answers[1] == answers[2]
+
+
+# --- adversarial review of 73ff1e3, L6: one rule for the deal's free text (R118) -----------------
+@pytest.fixture
+def chatty_deal(user_a):
+    """A deal whose free text names its customer, as dictated notes do: its description,
+    work load, Expected CPT, agreed CPT (with its price history) and lost reason (with its
+    stage history), and a free-text custom value."""
+    from arkray.pipeline import services
+    from tests.factories import default_stage
+
+    lead = LeadFactory(owner=user_a, first_name="Ravi", last_name="Kumar", organization_name="")
+    scope = AccessScope.own(user_a.pk)
+    created = services.create_opportunity(
+        actor=user_a,
+        scope=scope,
+        lead_id=lead.pk,
+        fields={
+            "value": Decimal("950000"),
+            "account_name": "Apollo Labs",
+            "customer_name": PERSON,
+            "description": f"{PERSON} wants it before March.",
+            "work_load": "Ravi's lab: 300 a day",
+            "expected_cpt": "Rs 18 if Ravi signs",
+        },
+        stage_id=default_stage("negotiation").pk,
+        negotiated_price=Decimal("900000"),
+        agreed_cpt="Rs 17, agreed with Ravi",
+    ).opportunity
+    lost = services.move_opportunity(
+        actor=user_a,
+        scope=scope,
+        opportunity_id=created.pk,
+        version=created.version,
+        stage_id=default_stage("lost").pk,
+        lost_reason=f"{PERSON} chose another analyser.",
+    )
+    return {"lead": lead, "opportunity": lost}
+
+
+def test_the_previous_owner_never_reads_the_deals_free_text(admin, user_a, user_b, chatty_deal):
+    """Ask Arkray withheld the deal's text from its previous owner while the API returned it
+    verbatim (description, lost reason, work load, Expected CPT, agreed CPT, and the lost
+    reasons and agreed CPTs of its histories). One rule now (pipeline.customer.WITHHELD_TEXT),
+    on every surface: the commercial record (amounts, stages, dates, who did what) stays."""
+    reassign(admin, chatty_deal, user_b)
+    client = signed_in(user_a)
+    deal = chatty_deal["opportunity"]
+    base = f"/api/v1/workspaces/me/opportunities/{deal.pk}"
+    detail = client.get(base).json()
+    for field in ("description", "lost_reason", "work_load", "expected_cpt", "agreed_cpt"):
+        assert detail[field] == "", field
+    assert (detail["value"], detail["negotiated_price"]) == ("950000.00", "900000.00")
+    surfaces = {
+        "detail": detail,
+        "list": client.get("/api/v1/workspaces/me/opportunities?status=lost").json(),
+        "board": client.get("/api/v1/workspaces/me/pipeline-board").json(),
+        "history": client.get(f"{base}/history").json(),
+        "prices": client.get(f"{base}/negotiated-prices").json(),
+    }
+    for name, payload in surfaces.items():
+        assert not leaked(payload), (name, leaked(payload))
+    history = surfaces["history"]["results"]
+    assert [row["to_stage_name"] for row in history] == ["Lost", "Negotiation"]  # still there
+    assert history[0]["lost_reason"] == ""
+    prices = surfaces["prices"]["results"]
+    assert [(p["price"], p["agreed_cpt"]) for p in prices] == [("900000.00", "")]
+
+
+@pytest.mark.parametrize("tool", ["get_record", "get_negotiation_history"])
+def test_ask_arkray_tools_withhold_the_deals_free_text(admin, user_a, user_b, chatty_deal, tool):
+    """The same rule in Ask Arkray's tools (pipeline.customer.WITHHELD_TEXT): get_record sent a
+    restricted deal's work load, Expected CPT and agreed CPTs, and get_negotiation_history its
+    agreed CPTs, while the API blanked them (adversarial review of 73ff1e3, L6). The figures
+    stay; an administrator's tools still read the text."""
+    reassign(admin, chatty_deal, user_b)
+    deal = chatty_deal["opportunity"]
+    args = {"ref": f"opportunity:{deal.pk}"}
+    ctx = tools.ToolContext(scope=AccessScope.own(user_a.pk), now=timezone.now())
+    outcome = tools.execute(ctx, tool, args)
+    assert not outcome.is_error, outcome.content
+    content = json.loads(outcome.content)
+    assert not leaked(content), leaked(content)
+    assert content["customer_restricted"] is True
+    history = content["negotiation_history" if tool == "get_record" else "history"]
+    assert [row["price"] for row in history]
+    assert all("agreed_cpt" not in row for row in history)
+    if tool == "get_record":
+        assert not {"work_load", "expected_cpt", "agreed_cpt"} & set(content)
+    else:
+        assert content["latest_agreed_cpt"] is None
+    org = tools.ToolContext(scope=AccessScope.organization(admin.pk), now=timezone.now())
+    full = json.loads(tools.execute(org, tool, args).content)
+    assert "Rs 17, agreed with Ravi" in json.dumps(full, ensure_ascii=False)
+
+
+def test_the_new_owner_and_an_administrator_still_read_it(admin, user_a, user_b, chatty_deal):
+    reassign(admin, chatty_deal, user_b)
+    deal = chatty_deal["opportunity"]
+    for client, workspace in ((signed_in(user_b), "me"), (signed_in(admin), "all")):
+        detail = client.get(f"/api/v1/workspaces/{workspace}/opportunities/{deal.pk}")
+        if workspace == "me":  # a closed deal stays with its closer: not in B's workspace
+            assert detail.status_code == 404
+            continue
+        body = detail.json()
+        assert body["description"] == f"{PERSON} wants it before March."
+        assert body["agreed_cpt"] == "Rs 17, agreed with Ravi"
+        history = client.get(
+            f"/api/v1/workspaces/{workspace}/opportunities/{deal.pk}/history"
+        ).json()
+        assert history["results"][0]["lost_reason"] == f"{PERSON} chose another analyser."
+
+
+def test_the_previous_owner_never_reads_a_corrections_reason(admin, user_a, user_b, chatty_deal):
+    deal = chatty_deal["opportunity"]
+    corrected = signed_in(admin).post(
+        f"/api/v1/workspaces/all/opportunities/{deal.pk}/correct",
+        {"version": deal.version, "value": "940000.00", "reason": f"{PERSON} paid less."},
+        format="json",
+    )
+    assert corrected.status_code == 200, corrected.content
+    reassign(admin, chatty_deal, user_b)
+    rows = (
+        signed_in(user_a)
+        .get(f"/api/v1/workspaces/me/opportunities/{deal.pk}/corrections")
+        .json()["results"]
+    )
+    assert [(r["fields"], r["reason"]) for r in rows] == [(["value"], "")]
+    assert not leaked(rows)
+    admin_rows = (
+        signed_in(admin)
+        .get(f"/api/v1/workspaces/all/opportunities/{deal.pk}/corrections")
+        .json()["results"]
+    )
+    assert admin_rows[0]["reason"] == f"{PERSON} paid less."

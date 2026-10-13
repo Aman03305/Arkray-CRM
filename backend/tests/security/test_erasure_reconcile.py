@@ -151,7 +151,13 @@ def test_a_wrong_ledger_is_never_reconciled(ledger_dir, admin, user_a, tmp_path,
     other = tmp_path / "another-ledger"
     other.mkdir()
     settings.ERASURE_LEDGER_URL = other.as_uri()
-    for _ in range(2):  # another ledger, longer than what the database applied
+    # This database never appends to a chain it didn't apply (review round 3, LEDGER3-1)...
+    with pytest.raises(ledger.LedgerTampered):
+        services.erase(LeadFactory(owner=user_a).pk, operator_id=admin.pk)
+    # ...so another ledger, longer than what the database applied, is written as another
+    # database would have written it.
+    ledger.mark_applied(None)
+    for _ in range(2):
         services.erase(LeadFactory(owner=user_a).pk, operator_id=admin.pk)
     ledger.mark_applied(ledger.Entry(1, "lead_erased", "x", "t", "", "not-its-mac"))
     assert reconcile.reconcile() == "refused"

@@ -46,6 +46,22 @@ ENHANCEMENTS = _replace(  # 0c31aee: product enhancements
 )
 ADR_0027 = _replace(ENHANCEMENTS, pipeline="0007_search_customer_names")  # 5b05177
 ADR_0028 = _replace(ENHANCEMENTS, pipeline="0008_opportunity_expected_cpt")  # 989830b
+# 73ff1e3 (deployment preparation): the release the adversarial review's remediation upgrades,
+# whose pods still run beside its schema during a rolling deploy (docs/deployment.md). Every
+# app's leaf node, privacy included (`git ls-tree -r 73ff1e3 --name-only | grep migrations/0`).
+DEPLOYMENT_PREPARATION = (
+    ("activities", "0011_attachment_quota_index"),
+    ("ai", "0003_question_finished_index"),
+    ("audit", "0005_audit_details"),
+    ("auth", "0012_alter_user_first_name_max_length"),
+    ("contenttypes", "0002_remove_content_type_name"),
+    ("core", "0006_privacy_remediation"),
+    ("identity", "0007_mfa_cumulative_failures"),
+    ("leads", "0007_lead_erased_at"),
+    ("pipeline", "0010_stage_reference_indexes"),
+    ("privacy", "0002_export_file_purge"),
+    ("sessions", "0001_initial"),
+)
 
 
 def executor() -> MigrationExecutor:

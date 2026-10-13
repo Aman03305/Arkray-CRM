@@ -13,7 +13,11 @@ name: arkray
 
 x-backend-env: &backend-env
   DJANGO_SETTINGS_MODULE: config.settings.production
-  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
+  # From .env (scripts/init-env.sh generates it); unset, production settings refuse to start.
+  # Not `:?` (adversarial review of 73ff1e3, M4): Compose interpolates this file whole for
+  # the production-shaped stack too, so a required variable here would be required there,
+  # and filled from a developer's `.env`. That stack reads its own production-only names.
+  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-}
   DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,backend
   DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-http://localhost:3000}
   # Local containers serve plain HTTP on localhost; production terminates TLS at the proxy.

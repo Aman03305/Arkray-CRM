@@ -47,18 +47,35 @@ every one of its activities (tasks and meetings as well as notes) can't be writt
 no activity or file can be added for it (422 `lead_erased`, nothing written): otherwise the
 erasure could be undone (deep security audit M-1). Times, priority, completing, cancelling
 and archiving go on.
+
+Write budgets (review of 73ff1e3, M6; docs/reliability.md#write-budgets): one account could
+post a long note every 100 ms all day, so the indexing fell hours behind for everyone and a
+customer could collect enough activities to make their export or erasure fail. Creating is
+budgeted twice, both far above real use and `0` turning either off:
+- per person, ACTIVITY_MAX_CREATED_PER_USER_PER_DAY in any 24 hours, counted from the
+  activities they created (never deleted: archiving gives nothing back) through their own
+  index, one bounded statement whatever else they did (review round 1: counted from the audit
+  trail it read all their other events too), under a per-person advisory lock taken first in
+  the creating transaction (before the lead's: only creations take it, so no cycle): 429
+  `rate_limited` with `Retry-After`;
+- per customer, ACTIVITY_MAX_PER_CUSTOMER activities on one lead, archived ones included,
+  counted under the lead's lock: 422 `activity_limit_reached`.
+Editing, completing and archiving aren't budgeted (they create nothing; an edit's re-index is
+coalesced while it waits, and the outbox takes turns between users).
 """
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from django.db import IntegrityError, transaction
-from django.db.models import F, Q
+from django.conf import settings
+from django.db import IntegrityError, connection, transaction
+from django.db.models import F, Q, QuerySet
 from django.utils import timezone
 
 from arkray.audit import services as audit
@@ -71,6 +88,7 @@ from arkray.core.errors import (
     InvalidInputError,
     NotFoundError,
     PermissionDeniedError,
+    RateLimitedError,
 )
 from arkray.identity.models import User
 from arkray.identity.selectors import lock_assignable_user
@@ -132,6 +150,25 @@ ALREADY_CREATED_ELSEWHERE = (
 # holds): the text an erasure redacts. Times, priority, completing, cancelling, reopening and
 # archiving still change, and new activities can be added.
 HELD_FIELDS = frozenset({"title", "description", "location", "meeting_url"})
+# Write budgets (module docstring; review of 73ff1e3, M6).
+DAILY_BUDGET_REACHED = (
+    "You've added as many tasks, meetings and notes as one person can in a day. Try again later."
+)
+CUSTOMER_FULL = (
+    "This customer already has {limit:,} activities, the most one customer can have, so no "
+    "more can be added. Ask an administrator."
+)
+DAY = timedelta(days=1)
+# Advisory-lock namespace ("ARKD"): one person's creations are counted against their daily
+# budget one at a time (the two-key form of attachments' quota lock). Its own: "ARKB" is the
+# legal-hold barrier's (review round 1; tests/architecture/test_advisory_locks.py).
+_BUDGET_LOCK = 0x41524B44
+
+
+class ActivityLimitReached(BusinessRuleViolation):
+    """The customer has ACTIVITY_MAX_PER_CUSTOMER activities already (M6)."""
+
+    code = "activity_limit_reached"
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +317,53 @@ def _lifecycle(activity: Activity) -> TypeSpec:
     return spec
 
 
+def _created_today(actor_id: UUID, now: datetime) -> QuerySet[Activity]:
+    """What the person created in the 24 hours before `now`, newest first (activities are
+    never deleted, and archiving or editing doesn't change who created one or when): a range
+    of `activities_created_by_idx` (activities.0012), which no other write of theirs is in."""
+    return Activity.objects.filter(created_by_id=actor_id, created_at__gt=now - DAY).order_by(
+        "-created_at"
+    )
+
+
+def _charge_daily_budget(actor: User, now: datetime) -> None:
+    """Refuse a creation past ACTIVITY_MAX_CREATED_PER_USER_PER_DAY in any 24 hours (0: no
+    budget). The creator pays, also in someone else's workspace. Counted under a per-person
+    advisory lock held until the creation commits (which is what the next count sees), so
+    creations at once on different customers can't all pass. Taken first in the transaction,
+    before the lead's lock. One statement, reading at most `cap` index entries: the cap-th
+    newest creation in the window, if there is one (review round 1, QUEUES-3)."""
+    cap = settings.ACTIVITY_MAX_CREATED_PER_USER_PER_DAY
+    if cap <= 0:
+        return
+    digest = int.from_bytes(hashlib.sha256(str(actor.pk).encode()).digest()[:4], "big", signed=True)
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [_BUDGET_LOCK, digest])
+    cap_th = list(_created_today(actor.pk, now).values_list("created_at", flat=True)[cap - 1 : cap])
+    if not cap_th:
+        return
+    # Creating is possible again once the cap-th newest is more than a day old.
+    (counted,) = cap_th
+    raise RateLimitedError(
+        DAILY_BUDGET_REACHED, retry_after=max(60, int((counted + DAY - now).total_seconds()))
+    )
+
+
+def _activities_of(lead_id: UUID) -> int:
+    """How many activities the customer has, archived ones included: an export and an
+    erasure handle every one (an index-only count of activities_lead_idx)."""
+    return Activity.objects.filter(lead_id=lead_id).count()
+
+
+def _require_room(lead: Lead) -> None:
+    """Refuse a creation past ACTIVITY_MAX_PER_CUSTOMER (0: no budget). Called under the
+    lead's lock, which every creation on the customer takes first, so two at once can't both
+    take the last place."""
+    limit = settings.ACTIVITY_MAX_PER_CUSTOMER
+    if limit > 0 and _activities_of(lead.pk) >= limit:
+        raise ActivityLimitReached(CUSTOMER_FULL.format(limit=limit))
+
+
 def _replay(scope: AccessScope, activity_id: UUID) -> Activity:
     try:
         return selectors.activity_detail(scope, activity_id)
@@ -300,7 +384,9 @@ def create_activity(
 ) -> CreateResult:
     """Create a task, meeting or note about a lead (or one of its opportunities) in `scope`.
     It belongs to the lead's owner; `created_by` is the actor. Tasks start open, meetings
-    scheduled; a note is simply added. A timeline entry records it."""
+    scheduled; a note is simply added. A timeline entry records it. Within the write budgets
+    (module docstring): 429 past the actor's daily one, 422 `activity_limit_reached` past the
+    customer's."""
     authorize_write(actor, scope)
     spec = SPECS.get(activity_type)
     if spec is None:
@@ -329,12 +415,14 @@ def create_activity(
             return CreateResult(_replay(scope, earlier), replayed=True)
     try:
         with transaction.atomic():
+            _charge_daily_budget(actor, timezone.now())  # its lock first: the lock order
             lead, opportunity = _lock_link(scope, lead_id, opportunity_id)
             lead_services.require_not_erased(lead, lead_services.ERASED_NO_NEW)
             if lead.archived_at is not None:
                 raise BusinessRuleViolation(LEAD_ARCHIVED)
             if opportunity is not None and opportunity.archived_at is not None:
                 raise BusinessRuleViolation(OPPORTUNITY_ARCHIVED)
+            _require_room(lead)
             _require_assignable(lead.owner_id)
             now = timezone.now()
             activity = Activity.objects.create(

@@ -19,10 +19,8 @@ from uuid import UUID
 
 from django.db import connection, transaction
 from django.db.models import (
-    Case,
     CharField,
     Count,
-    Exists,
     F,
     OuterRef,
     Prefetch,
@@ -30,9 +28,8 @@ from django.db.models import (
     QuerySet,
     Subquery,
     Value,
-    When,
 )
-from django.db.models.functions import Coalesce, Concat, Upper
+from django.db.models.functions import Coalesce, Upper
 
 from arkray.core.access import AccessScope
 from arkray.core.errors import InvalidInputError, NotFoundError
@@ -45,14 +42,14 @@ from arkray.core.keyset import (
 )
 from arkray.core.knowledge import KnowledgeDocument, SourceType, compose
 from arkray.core.ranking import Matches, SearchQuery, top_matches
-from arkray.leads.models import Lead
 
-from . import metrics
+from . import customer, metrics
 from .models import (
     SEARCH_TEXT,
     CustomField,
     NegotiationPrice,
     Opportunity,
+    OpportunityCorrection,
     Pipeline,
     Stage,
     StageCategory,
@@ -175,15 +172,31 @@ class Board:
 
 # --- configuration ---------------------------------------------------------------------------
 def _with_stages(queryset: QuerySet[Pipeline]) -> QuerySet[Pipeline]:
-    """Stages in position order (retired ones included: opportunities and history may still
-    reference them): one query for any number of pipelines."""
+    """The active stages in position order: one query for any number of pipelines. Retired
+    stages are left out: what is loaded and sent would grow with every stage ever retired
+    (adversarial review of 73ff1e3, L10), a deal in a retired stage carries that stage itself,
+    and the board and the stage breakdown add a retired one that still holds a deal
+    (`_stages_holding`)."""
     return queryset.select_related("owner").prefetch_related(
-        Prefetch("stages", queryset=Stage.objects.order_by("position", "id"))
+        Prefetch("stages", queryset=Stage.objects.filter(is_active=True).order_by("position", "id"))
     )
 
 
+def _stages_holding(pipeline: Pipeline, per_stage: Collection[UUID]) -> list[Stage]:
+    """The pipeline's active stages (prefetched) and the retired ones among `per_stage` (the
+    stages holding the deals counted), in position order. Retired stages hold no current deal
+    (a stage is removed only once its deals are archived, and an archived deal isn't restored
+    into one), so the extra query runs only for data from before that rule."""
+    stages = list(pipeline.stages.all())
+    if missing := set(per_stage) - {stage.pk for stage in stages}:
+        stages += list(Stage.objects.filter(pk__in=missing))
+        stages.sort(key=lambda stage: (stage.position, str(stage.pk)))
+    return stages
+
+
 def _with_configuration(queryset: QuerySet[Pipeline]) -> QuerySet[Pipeline]:
-    """Stages and the active custom fields, in order: two queries for any number."""
+    """The active stages and the active custom fields, in order: two queries for any
+    number."""
     return _with_stages(queryset).prefetch_related(
         Prefetch(
             "fields", queryset=CustomField.objects.filter(is_active=True).order_by("position", "id")
@@ -194,9 +207,10 @@ def _with_configuration(queryset: QuerySet[Pipeline]) -> QuerySet[Pipeline]:
 def pipelines() -> list[Pipeline]:
     """The organisation's shared pipelines (the default first) with their stages: what
     every signed-in user may use (`/config/pipelines`, kept for compatibility). Personal
-    pipelines are listed per workspace (visible_pipelines)."""
+    pipelines are listed per workspace (visible_pipelines). Their custom fields aren't
+    loaded: a list never carries them (review round 1, DEALS-1)."""
     return list(
-        _with_configuration(Pipeline.objects.filter(owner__isnull=True)).order_by(
+        _with_stages(Pipeline.objects.filter(owner__isnull=True)).order_by(
             "-is_default", "name", "id"
         )
     )
@@ -220,11 +234,12 @@ def visible(scope: AccessScope) -> Q:
 
 def visible_pipelines(scope: AccessScope, *, archived: bool = False) -> list[Pipeline]:
     """The pipelines `scope` may see (active ones, or only archived ones), with their
-    configuration: shared first (the default first), then personal ones by owner. Bounded
-    (MAX_LISTED_PIPELINES)."""
+    active stages: shared first (the default first), then personal ones by owner. Bounded in
+    number (MAX_LISTED_PIPELINES) and in size: their custom fields aren't loaded, a list never
+    carries them (visible_pipeline does; review round 1, DEALS-1)."""
     queryset = Pipeline.objects.filter(visible(scope), is_active=not archived)
     return list(
-        _with_configuration(queryset).order_by(
+        _with_stages(queryset).order_by(
             "-is_default",
             F("owner_id").asc(nulls_first=True),
             "name",
@@ -337,18 +352,9 @@ def opportunity_list(scope: AccessScope, filters: OpportunityFilters) -> QuerySe
 # What a global search result shows of an opportunity: title, status, stage, the lead (only
 # if visible in the scope; the serializer decides) and the owner. No amounts.
 # What a restricted viewer's search may match (pipeline.customer.shown_title's words): the
-# account unless it is the person's own name, and the instrument.
-NEUTRAL_TEXT = Upper(
-    Concat(
-        Case(
-            When(account_name__iexact=F("customer_name"), then=Value("")),
-            default=F("account_name"),
-            output_field=CharField(),
-        ),
-        Value(" "),
-        "instrument_name",
-    )
-)
+# account unless it is the person's own name, and the instrument. Defined with the rest of
+# that rule (pipeline.customer, L6).
+NEUTRAL_TEXT = customer.SHOWN_TEXT
 
 _SEARCH_RESULT_FIELDS = (
     "id",
@@ -387,12 +393,9 @@ def search(scope: AccessScope, query: SearchQuery, *, limit: int) -> Matches[Opp
         # Per row, no join: an open deal's lead is always its owner's (database-enforced), so
         # only a closed one asks whether its lead is visible, and the passes keep the index
         # order they were designed for (tests/performance/test_search_query_plans.py).
-        lead_visible = Exists(
-            Lead.objects.filter(pk=OuterRef("lead_id"), owner_id__in=scope.owner_ids)
-        )
         scoped = scoped.alias(neutral_text=NEUTRAL_TEXT).filter(
             Q(status=StageCategory.OPEN)
-            | Q(lead_visible)
+            | Q(customer.lead_visible(scope))
             | Q(*(Q(neutral_text__contains=Upper(Value(term))) for term in query.terms))
         )
     return top_matches(
@@ -571,6 +574,7 @@ def stage_breakdown(scope: AccessScope, pipeline: Pipeline) -> list[StageTotal]:
     figures, without the cards (Ask Arkray's "deals by stage"). Retired stages only while
     they still hold opportunities. One query (plus the pipeline's prefetched stages)."""
     per_stage = _stage_aggregates(_filtered(scope, OpportunityFilters(pipeline_id=pipeline.pk)))
+    stages = _stages_holding(pipeline, per_stage)
     zero = Decimal("0.00")
     return [
         StageTotal(
@@ -579,7 +583,7 @@ def stage_breakdown(scope: AccessScope, pipeline: Pipeline) -> list[StageTotal]:
             total_value=per_stage.get(stage.pk, {}).get("total_value", zero),
             weighted_value=per_stage.get(stage.pk, {}).get("weighted_value", zero),
         )
-        for stage in pipeline.stages.all()
+        for stage in stages
         if stage.is_active or stage.pk in per_stage
     ]
 
@@ -648,8 +652,8 @@ def _board(
         raise ValueError("cards_per_stage out of range")
     filters = replace(filters, pipeline_id=pipeline.pk)
     base = _filtered(scope, filters)
-    stages: list[Stage] = list(pipeline.stages.all())
     per_stage = _stage_aggregates(base)
+    stages = _stages_holding(pipeline, per_stage)
     shown = [s for s in stages if s.is_active or s.pk in per_stage]
     totals = pipeline_totals(scope, filters)
 
@@ -702,8 +706,15 @@ NEGOTIATION_ORDERING = KeysetOrdering(
 def negotiation_history(scope: AccessScope, opportunity_id: UUID) -> QuerySet[NegotiationPrice]:
     """An opportunity's negotiated prices, newest first, if `scope` may see the opportunity
     (NotFoundError otherwise). Paginated by the caller."""
-    if not scope.apply(Opportunity.objects.filter(pk=opportunity_id)).exists():
-        raise NotFoundError()
+    return shown_negotiation_history(scope, opportunity_id)[0]
+
+
+def shown_negotiation_history(
+    scope: AccessScope, opportunity_id: UUID
+) -> tuple[QuerySet[NegotiationPrice], bool]:
+    """negotiation_history, and whether its free text is withheld from this viewer
+    (customer_hidden): one query for both."""
+    hidden = customer_hidden(scope, opportunity_id)
     return (
         NegotiationPrice.objects.filter(opportunity_id=opportunity_id)
         .select_related("actor")
@@ -719,7 +730,40 @@ def negotiation_history(scope: AccessScope, opportunity_id: UUID) -> QuerySet[Ne
             "occurred_at",
             *(f"actor__{f}" for f in _PERSON),
         )
+    ), hidden
+
+
+# --- corrections of closed deals ----------------------------------------------------------------
+CORRECTION_ORDERING = KeysetOrdering(
+    "-occurred_at", (SortKey("occurred_at", descending=True), SortKey("id", descending=True))
+)
+
+
+def deal_corrections(
+    scope: AccessScope, opportunity_id: UUID
+) -> tuple[QuerySet[OpportunityCorrection], bool]:
+    """An opportunity's corrections (services.correct_closed_deal), newest first, if `scope`
+    may see the opportunity (NotFoundError otherwise): whoever sees the deal sees how its
+    figures were corrected. And whether their reasons are withheld from this viewer
+    (customer_hidden). Paginated by the caller."""
+    hidden = customer_hidden(scope, opportunity_id)
+    rows = OpportunityCorrection.objects.filter(opportunity_id=opportunity_id)
+    return rows.select_related("actor"), hidden
+
+
+def customer_hidden(scope: AccessScope, opportunity_id: UUID) -> bool:
+    """Whether the viewer may NOT see the customer of an opportunity it may see (its lead
+    went to someone else: pipeline.customer), for the surfaces that show its histories. One
+    primary-key read, which is also the histories' visibility check: NotFoundError if the
+    opportunity isn't visible."""
+    lead_owner = (
+        scope.apply(Opportunity.objects.filter(pk=opportunity_id))
+        .values_list("lead__owner_id", flat=True)
+        .first()
     )
+    if lead_owner is None:
+        raise NotFoundError()
+    return not scope.permits_owner(lead_owner)
 
 
 # --- history -----------------------------------------------------------------------------------
@@ -731,8 +775,15 @@ HISTORY_ORDERING = KeysetOrdering(
 def stage_history(scope: AccessScope, opportunity_id: UUID) -> QuerySet[StageHistory]:
     """An opportunity's stage history, if `scope` may see the opportunity (NotFoundError
     otherwise). Newest first; paginated by the caller."""
-    if not scope.apply(Opportunity.objects.filter(pk=opportunity_id)).exists():
-        raise NotFoundError()
+    return shown_stage_history(scope, opportunity_id)[0]
+
+
+def shown_stage_history(
+    scope: AccessScope, opportunity_id: UUID
+) -> tuple[QuerySet[StageHistory], bool]:
+    """stage_history, and whether its free text (lost reasons) is withheld from this viewer
+    (customer_hidden): one query for both."""
+    hidden = customer_hidden(scope, opportunity_id)
     return (
         StageHistory.objects.filter(opportunity_id=opportunity_id)
         .select_related("actor")
@@ -747,11 +798,13 @@ def stage_history(scope: AccessScope, opportunity_id: UUID) -> QuerySet[StageHis
             "to_status",
             "value",
             "probability",
+            "expected_close_date",
+            "opportunity_date",
             "lost_reason",
             "occurred_at",
             *(f"actor__{f}" for f in _PERSON),
         )
-    )
+    ), hidden
 
 
 # --- Ask Arkray's semantic index (Phase 8, docs/rag-architecture.md) -------------------------
@@ -799,12 +852,12 @@ def knowledge_documents(
     ones have none). Retrieval re-reads every hit through this."""
     if not opportunity_ids:
         return []
-    queryset = scope.apply(Opportunity.objects.filter(pk__in=list(opportunity_ids)))
-    if not scope.is_organization_wide:
-        # A closed deal whose lead went to someone else: its title names the customer and
-        # its text was written about them, so retrieval never returns it to this workspace
-        # (pipeline.customer; the index is shared, so the filter is here, on every read).
-        queryset = queryset.filter(lead__owner_id__in=scope.owner_ids)
+    # A closed deal whose lead went to someone else: its title names the customer and its text
+    # was written about them, so retrieval never returns it to this workspace (pipeline.
+    # customer; the index is shared, so the filter is here, on every read).
+    queryset = scope.apply(Opportunity.objects.filter(pk__in=list(opportunity_ids))).filter(
+        customer.visible_leads(scope)
+    )
     return _knowledge(queryset)
 
 

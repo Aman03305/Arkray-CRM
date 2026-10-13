@@ -32,6 +32,7 @@ import {
 import { AccessAsUserDialog } from "./AccessAsUserDialog";
 import { ChangeEmailDialog } from "./ChangeEmailDialog";
 import { LifecycleDialog } from "./LifecycleDialog";
+import { ClearSignInLockDialog } from "./ClearSignInLockDialog";
 import { ResetMfaDialog } from "./ResetMfaDialog";
 import { SetPasswordDialog } from "./SetPasswordDialog";
 import { UserDetailsDrawer } from "./UserDetailsDrawer";
@@ -43,7 +44,7 @@ type OpenDialog =
   | { kind: "edit"; user: AdminUser }
   | { kind: "change-email"; user: AdminUser }
   | { kind: "deactivate" | "activate" | "resend"; user: AdminUser }
-  | { kind: "reset-mfa"; user: AdminUser }
+  | { kind: "reset-mfa" | "clear-sign-in-lock"; user: AdminUser }
   | { kind: "set-password" | "support"; user: AdminUser }
   | { kind: "export" | "pseudonymise"; user: AdminUser }
   | null;
@@ -274,6 +275,9 @@ export function UsersPage() {
       ) : null}
       {dialog?.kind === "reset-mfa" ? (
         <ResetMfaDialog user={dialog.user} onClose={() => setDialog(null)} onDone={onSaved} />
+      ) : null}
+      {dialog?.kind === "clear-sign-in-lock" ? (
+        <ClearSignInLockDialog user={dialog.user} onClose={() => setDialog(null)} onDone={onSaved} />
       ) : null}
       {dialog?.kind === "set-password" ? (
         <SetPasswordDialog user={dialog.user} onClose={() => setDialog(null)} onDone={onPasswordSet} />

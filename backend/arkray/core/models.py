@@ -100,6 +100,12 @@ class OutboxEvent(models.Model):
     correlation_id = models.CharField(max_length=64, blank=True, default="")
     created_at = models.DateTimeField(default=timezone.now)
     finished_at = models.DateTimeField(null=True, blank=True)
+    # Whose work this is (review of 73ff1e3, M6): the user whose request queued it, inherited by
+    # the follow-up work its handler queues; '' for system work. The relay takes turns between
+    # keys, so one account's backlog can't hold everyone else's work behind it (core.outbox).
+    # db_default: the previous release (which never names the column) can still insert; its
+    # events count as system work.
+    fairness_key = models.CharField(max_length=64, blank=True, default="", db_default="")
 
     class Meta:
         db_table = "core_outbox_event"
@@ -108,6 +114,14 @@ class OutboxEvent(models.Model):
                 fields=["queue", "available_at"],
                 condition=Q(status=OutboxStatus.PENDING),
                 name="outbox_pending_due_idx",
+            ),
+            # Fair claiming (review of 73ff1e3, M6): the keys with pending work, each key's oldest
+            # due events, and the metrics' per-key counts are index scans however long one
+            # key's backlog is (core.0008).
+            models.Index(
+                fields=["queue", "fairness_key", "available_at", "id"],
+                condition=Q(status=OutboxStatus.PENDING),
+                name="outbox_pending_fair_idx",
             ),
             models.Index(
                 fields=["queue", "locked_until"],

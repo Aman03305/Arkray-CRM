@@ -3,6 +3,17 @@
 import multiprocessing
 import os
 
+# Serving HTTP runs the production settings unless the caller names a module. config/wsgi.py's
+# own fallback comes too late: importing `config.wsgi` imports the `config` package first,
+# whose Celery app falls back to the development settings (config/settings_module.py;
+# adversarial review of 73ff1e3, L14). Gunicorn reads this file before it loads the
+# application and before `on_starting` sets Django up, so a server started without the
+# variable (outside the image, which also sets it) never runs DEBUG.
+# An empty value counts as unset (review round 1, INFRA-6: `setdefault` kept "", and the
+# Celery app's fallback then chose the development settings).
+if not os.environ.get("DJANGO_SETTINGS_MODULE", "").strip():
+    os.environ["DJANGO_SETTINGS_MODULE"] = "config.settings.production"
+
 bind = f"0.0.0.0:{os.environ.get('PORT', '8000')}"
 workers = int(os.environ.get("WEB_CONCURRENCY", min(multiprocessing.cpu_count() * 2 + 1, 8)))
 worker_class = "sync"
@@ -63,6 +74,16 @@ def on_starting(server: object) -> None:
     from arkray.core.ledger_gate import prime
 
     prime()
+
+
+def pre_fork(server: object, worker: object) -> None:
+    """The master's verified chain brought up to date before each worker forks, for at most
+    ledger_gate.REFRESH_BUDGET_S (the store only, no database): a worker recycled long after
+    the start (max_requests) inherits a recent state instead of reading every entry added
+    since inside its first checks (review round 2, LEDGER2-3)."""
+    from arkray.core.ledger_gate import refresh
+
+    refresh()
 
 
 def post_worker_init(worker: object) -> None:

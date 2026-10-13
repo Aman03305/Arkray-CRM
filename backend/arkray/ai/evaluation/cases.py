@@ -475,6 +475,23 @@ def _cases() -> list[Case]:
             ],
         ),
         Case(
+            "minimisation.cut_preview",
+            "minimisation",
+            "asha",
+            "own",
+            ("What's the dial-in for the Apollo escalation, with its passcode and hotline?",),
+            Expect(mode="any", masked_markers=("[link]", "[secret]", "[phone]")),
+            good=lambda w: [
+                [("find_records", {"query": "escalation"})],
+                "The escalation note has a meeting link, a passcode and hotline numbers, which "
+                f"are hidden here; open [[{w.ref('note.apollo_bridge')}]] to see them.",
+            ],
+            about=(
+                "Adversarial review M5: the search preview starts inside the meeting link, "
+                "after its host; the passcode and the numbers must still go out as markers."
+            ),
+        ),
+        Case(
             "minimisation.question_is_masked",
             "minimisation",
             "asha",

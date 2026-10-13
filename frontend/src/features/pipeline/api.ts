@@ -5,6 +5,7 @@
  * served from the cache under another user's workspace.
  */
 import { apiFetch } from "@/lib/api/client";
+import type { components } from "@/lib/api/schema.gen";
 import type {
   Board,
   FieldInput,
@@ -26,6 +27,16 @@ import type { IdempotencyKey } from "@/lib/random";
 import { type Workspace, workspaceApiPath, workspaceApiSegment } from "@/lib/workspace";
 
 import type { AgreedTerms } from "./AgreedTerms";
+
+/** One administrator's correction of a closed deal's figures (append-only, newest first). */
+export type OpportunityCorrection = components["schemas"]["OpportunityCorrection"];
+export type OpportunityCorrectionPage = components["schemas"]["OpportunityCorrectionPage"];
+export type OpportunityCorrectionRequest = components["schemas"]["OpportunityCorrectionInputRequest"];
+/** The figures a correction may change: a closed deal's probability is fixed (won 100 %, lost 0 %). */
+export type CorrectedField = components["schemas"]["CorrectedFieldEnum"];
+/** A pipeline as a list carries it: its flags and active stages, never its custom fields (one
+ * pipeline's own representation, `pipelineApi.pipeline`, has them: review round 1, DEALS-1). */
+export type PipelineListItem = components["schemas"]["PipelineListItem"];
 
 export const CARDS_PER_STAGE = 20;
 export const PAGE_SIZE = 25;
@@ -101,6 +112,7 @@ export const pipelineKeys = {
     ["pipeline", "pipelines", workspaceApiSegment(workspace), archived ? "archived" : "active"] as const,
   pipeline: (workspace: Workspace, id: string) => ["pipeline", "pipeline", workspaceApiSegment(workspace), id] as const,
   negotiation: (workspace: Workspace, id: string) => ["pipeline", "negotiation", workspaceApiSegment(workspace), id] as const,
+  corrections: (workspace: Workspace, id: string) => ["pipeline", "corrections", workspaceApiSegment(workspace), id] as const,
 };
 
 /** Extra details of a move (only for the targets that take them). */
@@ -181,6 +193,13 @@ export const pipelineApi = {
       method: "POST",
       body: { version, price: terms.price, agreed_cpt: terms.cpt },
     }),
+  /** How a closed deal's figures were corrected (newest first). */
+  corrections: (workspace: Workspace, id: string) =>
+    apiFetch<OpportunityCorrectionPage>(`${opportunity(workspace, id, "corrections")}?page_size=50`),
+  /** An administrator corrects a won or lost deal's value or dates, with a reason (appended to
+   * its corrections; a recent second factor is asked for by the API, StepUpProvider). */
+  correct: (workspace: Workspace, id: string, body: OpportunityCorrectionRequest) =>
+    apiFetch<Opportunity>(opportunity(workspace, id, "correct"), { method: "POST", body }),
   archive: (workspace: Workspace, id: string, version: number) =>
     apiFetch<Opportunity>(opportunity(workspace, id, "archive"), { method: "POST", body: { version } }),
   restore: (workspace: Workspace, id: string, version: number) =>

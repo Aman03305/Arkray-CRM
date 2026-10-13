@@ -38,7 +38,7 @@ A session without valid timestamps is treated as expired: deny by default.
 | Endpoint | Access | Behaviour |
 |---|---|---|
 | `GET /api/v1/auth/csrf` | public | sets the CSRF cookie (204) |
-| `POST /api/v1/auth/login` | public | `{email, password}` → the viewer (200), or, for an account with a second factor, `202 {"mfa_required": true, "expires_in": 300}` and nothing signed in yet (see [Two-step verification](#two-step-verification)). Every failure returns the identical `400 invalid_credentials` "Invalid email or password.": unknown email, wrong password, invited (no password yet), deactivated, malformed email. The hasher runs in every case, against a decoy hash when there is no usable one, so timing reveals nothing either. Throttled attempts get `429` with `Retry-After`. |
+| `POST /api/v1/auth/login` | public | `{email, password}` → the viewer (200), or, for an account with a second factor, `202 {"mfa_required": true, "expires_in": 300}` and nothing signed in yet (see [Two-step verification](#two-step-verification)). Every failure returns the identical `400 invalid_credentials` "Invalid email or password.": unknown email, wrong password, invited (no password yet), deactivated, malformed email. The hasher runs in every case, against a decoy hash when there is no usable one, and a failure does the same database work whether or not the email has an account (adversarial review of 73ff1e3, L1: an unknown email's audit rows are written in a savepoint and rolled back), so timing reveals nothing either. Throttled attempts get `429` with `Retry-After`; an account locked by the daily cap answers `429 sign_in_locked` to unrecognised browsers (below). |
 | `POST /api/v1/auth/login/mfa` | public (needs the pending challenge) | `{code}` or `{recovery_code}` → the viewer, like `login`. `400 invalid_mfa_code` / `400 mfa_challenge_expired` / `429` |
 | `GET /api/v1/auth/mfa` | signed in | `{enabled, confirmed_at, recovery_codes_remaining, required, can_disable}` |
 | `POST /api/v1/auth/mfa/setup` | signed in | `{current_password}` → `{secret, otpauth_uri, qr: {size, rows}}`, shown once; `409 mfa_already_enabled` |
@@ -53,6 +53,8 @@ A session without valid timestamps is treated as expired: deny by default.
 | `POST /api/v1/auth/password-reset/confirm` | public | `{token, new_password}` → 204; every session ends; the user then signs in |
 | `POST /api/v1/auth/invitations/verify` | public | `{token}` → `{email, first_name}` for a valid invitation (POST, so the secret never enters a URL on the API side) |
 | `POST /api/v1/auth/invitations/accept` | public | `{token, password}` → activates the account; the user then signs in |
+| `POST /api/v1/auth/sign-in-unlock/verify` | public (needs the emailed secret) | `{token}` → `{"email": "r***@example.com"}`: names the link's account, masked, before anything is done (the page shows it first); uses nothing up; throttled like the other link routes; `400 invalid_token` like them (adversarial review of 73ff1e3, its review round 1, IDENTITY-1) |
+| `POST /api/v1/auth/sign-in-unlock` | public (needs the emailed secret) | `{token}` → 204: lifts the account's daily sign-in lock and trusts the browser that opened the link, unless that browser already holds a valid trust for another account, which is never replaced (the lock is lifted all the same; IDENTITY-1) (page `/unlock-sign-in/<token>`, 24 h, one use; [Sign-in throttling](#sign-in-throttling)) |
 
 Invalid, used, superseded, revoked and expired links all get one answer:
 `400 invalid_token` "This link is invalid or has expired. Ask for a new one."
@@ -66,14 +68,15 @@ working during a Redis outage (tested). DRF's Redis-backed limits (`anon` 60/min
 | Rule | Policy |
 |---|---|
 | Key | keyed HMAC of the *submitted*, normalised email, so unknown emails are throttled exactly like real ones and no email is stored |
-| Per account and browser | 5 failures in 15 min → locked 1 min, doubling with each further failure, **capped at 15 min**. A browser that has signed in to the account before (signed `arkray_login_device` cookie, HttpOnly, `SameSite=Strict`, path `/api/v1/`, 90 days) has its **own** budget, so an attacker can't lock the owner out of their usual browser. The cookie holds keyed hashes and a random id only (nothing readable without the server's key; tested) and is **kept at sign-out** on purpose: clearing it would let an attacker's guesses lock a signed-out owner out (reviewed in the privacy remediation, ADR-0032). Unrecognised browsers share one budget. |
-| Per source | 50 failures in 15 min → unrecognised browsers from that source are blocked until the window moves (catches password spraying). The source is the trusted-proxy-aware client IP; an IPv6 address counts as its /64 (one subscriber); an unknown address (for example a proxy writing `unknown`) shares one bucket, so it fails closed. **Trusted browsers are exempt**, so a noisy neighbour behind the same office NAT can't lock the owner out. |
+| Per account and browser | 5 failures in 15 min → locked 1 min, doubling with each further failure, **capped at 15 min**. A browser that has signed in to the account before (signed `arkray_login_device` cookie, HttpOnly, `SameSite=Strict`, path `/api/v1/`, 90 days) has its **own** budget, so an attacker can't lock the owner out of their usual browser. The cookie holds keyed hashes and a random id only (nothing readable without the server's key; tested) and is **kept at sign-out** on purpose: clearing it would let an attacker's guesses lock a signed-out owner out (reviewed in the privacy remediation, ADR-0032). Unrecognised browsers share one budget **per network** (IPv4 /24, `LOGIN_NETWORK_IPV4_PREFIX`; IPv6 /64), so a storm from one network doesn't block the right password from another (adversarial review of 73ff1e3, L1; they shared one budget per account before). |
+| Per account and day | `LOGIN_DAILY_FAILURE_CAP` (50) failures from unrecognised browsers within `LOGIN_DAILY_WINDOW_S` (24 h) lock the account's sign-in from **unrecognised** browsers (`identity_login_lock`): `429 sign_in_locked` with `Retry-After`, refused before the password check and identical for an unknown email; trusted browsers keep working. The owner is emailed an unlock link (`POST /api/v1/auth/sign-in-unlock`, 24 h, `SIGN_IN_UNLOCK_TTL_S`), which lifts it and trusts the browser that opened it (never in place of another account's trust in that browser); an email change, a password set by an administrator or changed by the owner, a reset and a reactivation revoke a pending one (review round 1, IDENTITY-2); a password reset, an accepted invitation, an administrator-set password, an administrator's `POST /api/v1/admin/users/{id}/clear-sign-in-lock` (`users.manage`, step-up, never in a support session; the lock shows as `sign_in_locked_at` on the users list and detail) or `LOGIN_LOCK_MAX_AGE_S` (30 days, hourly housekeeping, for every identifier alike) lift it too (L1: about 552 guesses a day per account went on indefinitely before) |
+| Per source | 50 failures **from unrecognised browsers** in 15 min (colleagues' typos in their usual browsers don't count; L1) → unrecognised browsers from that source are blocked until the window moves (catches password spraying). The source is the trusted-proxy-aware client IP; an IPv6 address counts as its /64 (one subscriber); an unknown address (for example a proxy writing `unknown`) shares one bucket, so it fails closed. **Trusted browsers are exempt**, so a noisy neighbour behind the same office NAT can't lock the owner out. |
 | Refused attempts | refused **before** the password is checked and not recorded: no oracle, bounded storage |
 | Atomic reservations | each attempt first *reserves* a failure in a short transaction that holds advisory locks on the account and the source, checks both budgets and inserts the row; only then is the password checked (outside any transaction), and a correct password deletes the reservation. Parallel bursts can't exceed a budget, and nobody is refused just because another attempt is in flight. |
-| Resets | a successful sign-in clears that browser's bucket; a completed reset or activation clears the account's buckets |
+| Resets | a successful sign-in forgives that browser's failures (`forgiven`: they stop counting toward its lockout but still count toward the day; L1: deleting them let the owner's sign-in from a new browser reset the attacker's count); a completed reset or activation clears the account's buckets and its daily lock |
 | Password-reset requests | 20 per source per hour (durable, reserved atomically like sign-in); at most 3 reset emails per account per hour (in the job; suppression is audited) |
 | Key rotation | identifiers and trusted-browser cookies made with a key in `SECRET_KEY_FALLBACKS` still count and still match, so rotating the key neither lifts lockouts nor untrusts browsers |
-| Audit | crossing a threshold is audited once (`auth.login_throttled`, target = identifier prefix, never the email). Each failed sign-in of an **existing** account is audited too (`auth.login_failed`, reason `wrong_password`, `account_inactive`, `wrong_code`, `wrong_recovery_code` or `mfa_locked`; shown in the security events; bounded by this throttle, since refused attempts aren't recorded). An unknown email is a log line only. |
+| Audit | crossing a threshold is audited once (`auth.login_throttled`, target = identifier prefix, never the email). Each failed sign-in of an **existing** account is audited too (`auth.login_failed`, reason `wrong_password`, `account_inactive`, `wrong_code`, `wrong_recovery_code` or `mfa_locked`; shown in the security events; bounded by this throttle, since refused attempts aren't recorded). An unknown email is a log line only (its audit rows are written and rolled back, for equal work). The daily lock is audited `auth.sign_in_locked` and its lifting `auth.sign_in_unlocked` (by `email_link` or `administrator`), both in the security events; `arkray_sign_in_failures_last_hour` and `arkray_sign_in_locks_last_hour` raise `ArkraySignInFailureStorm` and `ArkraySignInLocked` ([runbooks.md](runbooks.md#security-events)). |
 | Second factor | every wrong code (sign-in, step-up, replacing recovery codes, disabling) counts as a failed sign-in of the account from that browser. A right password with a second factor still to come withdraws only its own reservation: earlier failures stand until the code is right. Beyond the throttle's window, wrong codes also accumulate on the device and lock it at 20 (see [Two-step verification](#two-step-verification)). |
 | Housekeeping | evidence older than 24 h is purged hourly (`identity.housekeeping`, which also clears expired sessions) |
 
@@ -113,11 +116,19 @@ both cases ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.md))
   (that would let one administrator sign in as another; see
   [Administrator account protection](#administrator-account-protection)), and for invited or
   deactivated users; audited as `auth.password_set_by_admin` (actor, user; never the
-  password);
+  password), and the account's own address is emailed that an administrator set a new
+  password (no password in it; adversarial review of 73ff1e3, L3); the notice carries the
+  address it was queued for and is sent whatever the account's status by then, so neither a
+  quick deactivation and reactivation nor an email change right after suppresses or redirects
+  it (review round 1, IDENTITY-3; the role-change and second-factor notices alike);
 - **administrators are always invited** (a password on create is refused for a role that
   manages users), and a user whose administrator-set password is still unchanged **can't be
   made an administrator** until they choose their own (422): otherwise set, promote would
-  hand one administrator another administrator's account (adversarial review);
+  hand one administrator another administrator's account (adversarial review); and once
+  they have chosen it, not for `ADMIN_PROMOTION_COOLING_OFF_S` (7 days) after an
+  administrator set their password, changed their email, reset their second factor or created
+  the account with a password (422 naming the date; adversarial review of 73ff1e3, L3:
+  "promote-then-shield", [Administrator account protection](#administrator-account-protection));
 - a sign-in with a password an administrator set (before the user changed it) is recorded as
   `auth.login_with_temporary_password` and shown in the security events: an administrator
   using it is visible there, before the user's own change;
@@ -184,15 +195,25 @@ the **whole address is lower-cased**, so `User@Example.com` and `user@example.co
 identity. A CHECK constraint (`email = lower(email)`) plus the unique index enforce this
 even for writes that bypass the ORM. Only **ASCII** addresses are accepted at the API, so
 Unicode look-alikes (an `admin@…` spelled with a Cyrillic "а") can't become a second
-identity. Nothing provider-specific is done: no Gmail dot or `+tag` stripping.
+identity. Only ASCII letters are folded (adversarial review of 73ff1e3: `str.lower()` turned a
+Kelvin sign, U+212A, into "k", so an address spelled with one signed in to the plain-"k"
+account): a non-ASCII address never matches an account at sign-in (it is an unknown email,
+with a throttle bucket of its own) or at a reset (nothing is sent), and accounts are created
+only with ASCII addresses, `createsuperuser` included. The pseudonyms' domain,
+`pseudonymised.invalid`, and its subdomains are reserved: an invitation, an email change or a
+new account at one is refused ("Addresses at pseudonymised.invalid are reserved for former
+users."; review round 1, IDENTITY-5). Nothing provider-specific is done: no Gmail dot or
+`+tag` stripping.
 
 ### Password policy
 
 Length and known-bad passwords rather than composition rules (NIST SP 800-63B): at
 least 12 characters, at most 128, not in Django's list of 20,000 common passwords, not
 entirely numeric, not similar to the user's email or name, and not containing the product
-name. Enforced through `AUTH_PASSWORD_VALIDATORS` on activation, reset and change, with
-the reasons returned per field. Passwords are never trimmed, logged or audited.
+name. Enforced through `AUTH_PASSWORD_VALIDATORS` on activation, reset and change, on the
+passwords administrators set, and on `manage.py createsuperuser` in both its modes
+(adversarial review of 73ff1e3, L11: `--noinput` accepted "a" for the first administrator),
+with the reasons returned per field. Passwords are never trimmed, logged or audited.
 
 ### Deactivation
 
@@ -243,13 +264,20 @@ depend on a status another administrator can change):
 | Deactivate, reactivate, resend invitation | allowed and audited (off-boarding; gives no credentials: reactivation restores the account's own password, invitations go to the account's own address). The last active administrator still can't be deactivated. |
 | Support session | refused (support sessions are for CRM users only) |
 | Pseudonymise (privacy) | 403 `permission_denied`, nothing changed (audit SEC-2): it replaces the account's email and password. Checked in `privacy.staff` under the same lock, on the locked row. Only an operator, on the server: `manage.py pseudonymise_user --allow-administrator` ([privacy.md](privacy.md#staff)). |
+| Anything on a pseudonymised former user (any role) | 422 `account_pseudonymised`: name, role, email, password, reactivation, invitation, MFA reset, clearing a sign-in lock, a support session; deactivating stays a no-op. The database holds the account to its pseudonym (adversarial review of 73ff1e3, L4) |
 
 The checks are in `identity.services` (`_refuse_for_another_administrator`), under the
 user-administration advisory lock, against the target's **locked** row, and before the
 version check (a stale page gets the reason, not a conflict). So a promotion racing an
 email change either commits first, and the email change is refused, or commits after it
 (tested with real concurrency in `tests/security/test_admin_takeover.py`). Promoting a
-user to administrator stays allowed (with the guard above). How an operator removes or
+user to administrator stays allowed (with the guard above), except within 7 days of an
+administrator's change of that account's credentials (**promote-then-shield**, adversarial
+review of 73ff1e3, L3: an administrator could set an ordinary user's password, sign in as
+them, change it and promote the account, which this table then put out of every other
+administrator's reach). The owner is emailed about an administrator-set password and every
+role change, and each promotion raises `ArkrayAdministratorPromoted`
+(`tests/security/test_admin_promotion_shield.py`). How an operator removes or
 changes an administrator when the policy is in the way: [security.md](security.md#administrator-account-protection).
 - A manager who is deactivated takes their **pending invitations** with them: they're revoked
   in the same transaction (counted in the audit event), so nobody can leave a pre-approved
@@ -266,11 +294,15 @@ changes an administrator when the policy is in the way: [security.md](security.m
 (primitives) and `identity.mfa_services` (use cases).
 
 - **Who**: available to everyone; **required for administrators** when
-  `MFA_REQUIRED_FOR_ADMINS` is on (production default; refused off without the local opt-in).
-  An administrator without a confirmed device reaches only `GET /auth/me`, sign-out, the
-  password change and `/auth/mfa`, `/auth/mfa/setup`, `/auth/mfa/confirm`
-  (`allowed_before_mfa_enrollment`): everything else answers `403 mfa_enrollment_required`.
-  The viewer says so (`mfa_enrollment_required`).
+  `MFA_REQUIRED_FOR_ADMINS` is on (production default; refused off without the local opt-in)
+  and **for every user** when `MFA_REQUIRED_FOR_ALL_USERS` is on (production default `true`;
+  `false` is accepted in production as the organisation's decision; adversarial review of
+  73ff1e3, L1, [ADR-0034](adr/0034-staging-security-remediation.md)). Someone who must have it
+  and has no confirmed device reaches only `GET /auth/me`, sign-out, the password change and
+  `/auth/mfa`, `/auth/mfa/setup`, `/auth/mfa/confirm` (`allowed_before_mfa_enrollment`):
+  everything else answers `403 mfa_enrollment_required`. The viewer says so
+  (`mfa_enrollment_required`), and `GET /auth/mfa` reports `required` and `can_disable`
+  (disabling is refused while it is required: "required for every account").
 - **Enrolment** verifies before it activates: setup (current password, throttled like a
   sign-in) creates an unconfirmed device and returns the secret, the `otpauth://` URI and the
   QR code as a module matrix (`{"size": n, "rows": ["1010…", …]}`, no quiet zone; the web app
@@ -338,9 +370,11 @@ changes an administrator when the policy is in the way: [security.md](security.m
   the operator's reason as an expiring detail), `mfa.recovery_codes_replaced`,
   `mfa.recovery_code_used`, `mfa.locked` (with the count; `until: mfa_reset` for the lock only an MFA reset lifts) and `mfa.unlocked` (by
   `password_reset` or `administrator`); all in the security events, and the changes, wrong
-  codes and the lock emailed to the account's own address. Never a secret, a code or a hash. Accepted (ADR-0033): an administrator can
-  reset an ordinary user's factor, set a temporary password and promote the account; that
-  gives nothing an invitation wouldn't, and every step is in the security events.
+  codes and the lock emailed to the account's own address. Never a secret, a code or a hash. Accepted in ADR-0033, **withdrawn by
+  [ADR-0034](adr/0034-staging-security-remediation.md)** (adversarial review of 73ff1e3, L3):
+  an administrator could reset an ordinary user's factor, set a temporary password and
+  promote the account; such a promotion now waits 7 days after the reset or the password
+  set, and the owner is emailed about each.
 
 ## Authorization model
 
@@ -564,6 +598,18 @@ The new owner and an administrator organisation-wide see everything. Tested befo
 the reassignment in `tests/security/test_historical_deal_privacy.py`. Conservative by
 default; whether a previous owner should keep the contact details is a product decision.
 
+**One rule for the deal's free text too** (adversarial review of 73ff1e3, L6; R118): the API
+used to return the description, lost reason, work load and CPTs verbatim while Ask Arkray
+withheld some of them. Now `pipeline/customer.py` defines what such a viewer doesn't get, once
+(`WITHHELD_TEXT`: description, lost reason, work load, Expected CPT, agreed CPT;
+`WITHHELD_HISTORY_TEXT`: the stage history's lost reasons, the agreed prices' CPTs and the
+corrections' reasons), and every surface applies it: the deal's page, lists, board cards,
+search results, `…/history`, `…/negotiated-prices`, `…/corrections` and Ask Arkray's tools.
+What they keep: the deal's id, value, probability, weighted value, stage and status, its dates,
+pipeline, owner and creator, the latest agreed price's amount and date, the instrument, the
+organisation (unless it is the person's own name), number, currency, date, yes/no and choice
+custom values, and the histories' figures, stage names, who and when.
+
 **Writes follow reads** (deep security audit M-2). A viewer who may not see a deal's
 customer can't write it either: an edit of such a deal that names the account, customer
 name, contact phone, contact email, address, or a free-text custom field (text or long text,
@@ -574,10 +620,10 @@ that may describe the customer (description, lost reason, work load, Expected CP
 instrument, custom values) is read-only for them too (403 `customer_restricted` on a
 change, checked before the erasure and legal-hold checks), so no answer reveals whether that
 customer was erased or is under a legal hold; sending the value they already see is not a
-change, so edit forms keep working. Value, probability and dates stay editable (this
-narrows the audit's M-2 note, which kept the description editable; independent review).
-The web app's deal drawer shows those fields read-only on such a deal, saying only the value,
-probability and dates can be changed there, and never sends them.
+change, so edit forms keep working. Its value, probability and dates are frozen too, as on
+every closed deal (422 `deal_closed`, adversarial review of 73ff1e3, M2:
+[Closed deals' figures](#closed-deals-figures)), so such a deal is read-only to its previous
+owner; the web app offers no edit panel for it.
 The other write paths such a viewer has don't touch the
 customer: a closed deal can't be moved (reopening a deal whose customer lives elsewhere is
 refused) or take agreed prices, activities can't be added to it, and corrections are a 404.
@@ -591,7 +637,23 @@ whoever may write in a workspace that sees the lead (its owner in their own work
 administrator) corrects its identity and contact fields; a 404 outside the scope (a closed
 deal's previous owner can't correct a customer they no longer see), a 409 on a stale
 version, a 422 for an erased lead. Deal copies that still hold the old value follow
-([privacy.md](privacy.md#correction)).
+([privacy.md](privacy.md#correction)). The answer's `opportunities` counts only the corrected
+deals the caller's scope sees; a copy on a deal outside it (a previous owner's closed deal)
+is corrected too and audited as the system's (`cause: lead.corrected`), so the count and the
+audit reveal nothing of deals out of sight (adversarial review of 73ff1e3, L5; an
+administrator organisation-wide still gets the full count).
+
+### Closed deals' figures
+
+Adversarial review of 73ff1e3, M2 ([pipeline.md](pipeline.md#closed-deals)): a won or lost
+deal's value, probability, expected close date and opportunity date can't be changed by the
+normal edit, **whoever asks** (its owner, a previous owner, an administrator in any
+workspace): 422 `deal_closed`. Reopening it (a move to an open stage) makes them editable.
+
+| Route | Access |
+|---|---|
+| `POST /api/v1/workspaces/{workspace}/opportunities/{id}/correct` | `crm.manage_any` (administrators; checked in the service too, before anything is looked up, so a sales user gets 403 even for their own deal), `authorize_write` for the workspace, a recent second factor (`requires_recent_mfa`), refused in a support session; a closed, non-archived deal whose customer isn't erased |
+| `GET /api/v1/workspaces/{workspace}/opportunities/{id}/corrections` | whoever sees the deal (its reasons blank for a viewer who may not see the customer) |
 
 ### Global search (Phase 7)
 
@@ -621,7 +683,10 @@ workspace the caller may not open). Questions and conversations are then looked 
 **the caller's own conversations in that workspace**: another person's question id, or the
 caller's own id from another workspace, is a 404 identical to a missing one. A conversation
 is bound to (actor, workspace kind, subject) by a CHECK constraint and never crosses
-workspaces.
+workspaces. Deleting one's own conversation always answers 204, whether or not a legal hold
+keeps it (a kept one is a hidden tombstone, 404 everywhere afterwards): the earlier 409
+`legal_hold` matched the caller's own question text against every hold in the organisation,
+whoever's customer it was (adversarial review of 73ff1e3, M1; [privacy.md](privacy.md#legal-holds)).
 
 Ask Arkray gets the same `AccessScope` as the page it is asked from, and its tools call the
 same scoped selectors. The model never receives a scope parameter it could alter (no tool
@@ -646,6 +711,7 @@ See [rag-architecture.md](rag-architecture.md#security-invariant).
 | Every route × {anonymous, sales user, admin, a view-only role (in another user's workspace and in `all`: reads pass, writes 403, or 404 for a missing record), a deactivated user's open session (401 everywhere)}; 403 without enumeration; CSRF on every unsafe route; self-escalation and mass assignment | `tests/security/test_authz_matrix.py` |
 | List page links (Phase 9): a cursor continues only its own list, for the same user, workspace and filters, before it expires; sealed (unreadable); every list including the board's columns and the user table | `tests/security/test_cursor_binding.py`, `tests/architecture/test_cursor_binding.py` |
 | Sign-in: identical failures (incl. timing), fixation, CSRF, throttling (trusted browsers, per IP, expiry, bounded cost) | `identity/tests/test_login.py`, `test_throttling.py` |
+| Adversarial review of 73ff1e3: per-network budgets, the daily cap and its unlocking (the verify step, another account's trust never replaced, the link revoked by credential changes), equal work for unknown emails (statements and paired timings), non-ASCII emails (L1); throttles before permissions (L2); promote-then-shield and the owner's notices (L3); final pseudonymisation, the backfill and the reserved domain (L4); two-step verification for every user (every gated route for every role in both modes); the password policy on every path, `createsuperuser` included (L11); closed deals' figures and their corrections (M2); the customer correction's count (L5); the deal's free text for a previous owner (L6) | `tests/security/test_sign_in_guessing.py`, `test_api_throttle_order.py`, `test_admin_promotion_shield.py`, `test_staff_pseudonymisation_is_final.py`, `test_mfa_for_all_users.py`, `identity/tests/test_password_policy_everywhere.py`, `tests/security/test_closed_deal_integrity.py`, `test_customer_correction.py`, `test_historical_deal_privacy.py` |
 | Sessions: idle/absolute limits, revocation on deactivation/reactivation/email/password change, logout | `identity/tests/test_sessions.py` |
 | Invitation and reset lifecycles: single use, expiry, supersession, purpose separation, mail outage, digest-only storage | `identity/tests/test_invitations.py`, `test_password_reset.py` |
 | Races run for real (threads): duplicate create, double activation, resend vs activation, double reset, mutual deactivation, admin deactivated mid-action, parallel guess bursts | `identity/tests/test_concurrency.py` |

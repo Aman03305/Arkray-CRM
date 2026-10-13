@@ -252,12 +252,17 @@ def test_replay_pseudonymises_a_restored_former_user_again(ledger_dir, admin, us
     before = ledger.applied()
     staff.pseudonymise(user_b.pk, operator_id=admin.pk)
     with connection.cursor() as cursor:  # the backup had the account active, named
+        # Taken before the pseudonymisation, so not marked either (review of 73ff1e3, L4: the
+        # mark is kept by a trigger, which a restore doesn't run; nor does this simulation).
+        cursor.execute("SET session_replication_role = replica")
         cursor.execute(
             "UPDATE identity_user SET first_name = 'Priya', last_name = 'Patel',"
             " email = 'priya.restored@example.test', status = 'active', is_active = true,"
-            " deactivated_at = NULL, password = 'md5$restored$x' WHERE id = %s",
+            " deactivated_at = NULL, password = 'md5$restored$x', pseudonymised_at = NULL"
+            " WHERE id = %s",
             [user_b.pk],
         )
+        cursor.execute("SET session_replication_role = origin")
     LedgerState.objects.filter(pk=1).update(applied_seq=before[0], applied_mac=before[1])
     assert replay.replay(operator=admin).counts() == {"reapplied": 1}
     restored = User.objects.get(pk=user_b.pk)
@@ -359,7 +364,10 @@ def test_a_failed_field_removal_leaves_nothing_in_the_ledger(ledger_dir, admin):
     assert entries(ledger_dir) == []  # the request itself writes none
     drain_outbox()
     found = entries(ledger_dir)
-    assert sorted(e["subject"] for e in found) == sorted([str(first.pk), str(second.pk)])
+    # One entry for the request, naming both fields (review round 1, LEDGER-2).
+    assert [sorted(e["subject"].split(",")) for e in found] == [
+        sorted([str(first.pk), str(second.pk)])
+    ]
     assert {e["kind"] for e in found} == {"custom_values_deleted"}
     assert ledger.applied()[0] == len(found)
     assert GATE.status() == "ok"
@@ -388,7 +396,9 @@ def test_a_failed_write_leaves_no_partial_entry(ledger_dir, admin, user_a, monke
 
 
 def test_an_s3_ledger_without_a_prefix_lists_the_bucket_root(settings):
-    """Backend review P2: s3://bucket listed Prefix="/" and never found an entry."""
+    """Backend review P2: s3://bucket listed Prefix="/" and never found an entry. (Since the
+    security review's M3 the head is found with small pages: MaxKeys 100, never the whole
+    prefix; tests/security/test_ledger_head_cost.py.)"""
     import boto3
 
     settings.ERASURE_LEDGER_KEY = KEY
@@ -408,7 +418,7 @@ def test_an_s3_ledger_without_a_prefix_lists_the_bucket_root(settings):
                     {"Key": "README.txt"},
                 ],
             },
-            {"Bucket": "arkray-ledger", "Prefix": ""},
+            {"Bucket": "arkray-ledger", "Prefix": "", "MaxKeys": 100},
         )
         stub.add_response(
             "get_object",
@@ -428,9 +438,9 @@ def test_the_gate_verifies_only_new_entries_after_its_first_check(ledger_dir, ad
     reads = []
     original = type(store).read
 
-    def counting(self, after=0):
+    def counting(self, after=0, *args, **kwargs):  # reads come in chunks (review round 2)
         reads.append(after)
-        return original(self, after)
+        return original(self, after, *args, **kwargs)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(type(store), "read", counting)
@@ -462,9 +472,9 @@ def test_a_primed_gate_reads_only_what_was_added_after_the_fork(ledger_dir, admi
     reads = []
     original = type(store).read
 
-    def counting(self, after=0):
+    def counting(self, after=0, *args, **kwargs):  # reads come in chunks (review round 2)
         reads.append(after)
-        return original(self, after)
+        return original(self, after, *args, **kwargs)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(type(store), "read", counting)
@@ -487,7 +497,7 @@ def test_a_failed_prime_leaves_the_full_check_to_the_first_request(ledger_dir, a
         patch.setattr(
             type(ledger.store()),
             "read",
-            lambda self, after=0: (_ for _ in ()).throw(ledger.LedgerUnavailable("down")),
+            lambda self, *args, **kwargs: (_ for _ in ()).throw(ledger.LedgerUnavailable("down")),
         )
         prime()  # logged, never raised: the master still starts
     assert GATE.status() == "ok"

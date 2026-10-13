@@ -43,11 +43,22 @@ class ApiView(APIView):
     query_param_methods: frozenset[str] = frozenset()
 
     def initial(self, request: Request, *args: Any, **kwargs: Any) -> None:
+        """DRF's `initial`, with the rate limits checked *before* the permissions (adversarial
+        review of 73ff1e3, L2): DRF checks permissions first, so a request refused 401 or 403
+        never reached a throttle, and 700 forbidden requests counted nothing while each held a
+        web worker. Anonymous callers are counted by address, signed-in ones by user."""
         if request.method not in SAFE_METHODS:
             enforce_csrf(request)
         else:
             refuse_foreign_site(request)
-        super().initial(request, *args, **kwargs)
+        self.format_kwarg = self.get_format_suffix(**kwargs)
+        negotiated = self.perform_content_negotiation(request)
+        request.accepted_renderer, request.accepted_media_type = negotiated
+        version, scheme = self.determine_version(request, *args, **kwargs)
+        request.version, request.versioning_scheme = version, scheme
+        self.perform_authentication(request)
+        self.check_throttles(request)
+        self.check_permissions(request)
         method = "GET" if request.method == "HEAD" else request.method
         if request.query_params and method not in self.query_param_methods:
             raise serializers.ValidationError(

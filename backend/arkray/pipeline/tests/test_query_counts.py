@@ -157,8 +157,8 @@ def test_history(user_a_client, user_a, stages):
 
 
 def test_pipeline_configuration(user_a_client, stages):
-    # + pipelines, stages, custom fields (product enhancement phase)
-    assert count(user_a_client, "/api/v1/config/pipelines")[0] == 5
+    # + pipelines, stages (a list never loads custom fields any more: review round 1, DEALS-1)
+    assert count(user_a_client, "/api/v1/config/pipelines")[0] == 4
 
 
 @pytest.mark.parametrize("n_open", [1, 10])

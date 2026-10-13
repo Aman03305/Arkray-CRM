@@ -67,6 +67,18 @@ security audit M-1). Value, probability, dates and stage moves without them go o
 Customers a viewer may not see (customer.py, a closed deal kept by its closer after the lead
 was reassigned): their customer copy and free-text custom values can't be written either
 (403 `customer_restricted`), whatever the values sent (deep security audit M-2).
+
+Closed deals (adversarial review of 73ff1e3, M2; docs/pipeline.md#closed-deals): a won or
+lost deal's figures are its sales record, which won revenue, the board's won and lost
+columns, Ask Arkray and every report read live. Its value, probability, expected close date
+and opportunity date (CLOSED_FROZEN) can't change through the normal edit (422 `deal_closed`,
+for every role, nothing written; the same values sent back are no change), nor can an agreed
+price be recorded on it. Reopening (a move to an open stage) makes them editable again, and
+closing freezes them again, each step in the stage history with the deal's value,
+probability and dates as they were then (review round 1, DEALS-2). An administrator corrects them
+instead (`correct_closed_deal`: crm.manage_any, a reason, the version, the row lock), which
+appends the figures before and after to the append-only correction history; its text, stages,
+owner and archive state follow their usual rules.
 """
 
 from __future__ import annotations
@@ -105,9 +117,11 @@ from arkray.leads.models import ADDRESS_LINE_MAX_LENGTH, NAME_MAX_LENGTH, Lead, 
 
 from . import customer, events, instruments, naming, selectors, validation
 from .models import (
+    CorrectedField,
     NegotiationPrice,
     NegotiationSource,
     Opportunity,
+    OpportunityCorrection,
     Pipeline,
     Stage,
     StageCategory,
@@ -125,6 +139,7 @@ AUDIT_OWNER_CHANGED = "opportunity.owner_changed"
 AUDIT_ARCHIVED = "opportunity.archived"
 AUDIT_RESTORED = "opportunity.restored"
 AUDIT_NEGOTIATED_PRICE = "opportunity.negotiated_price_recorded"
+AUDIT_CORRECTED = "opportunity.corrected"
 AUDIT_LEAD_CONVERTED = "lead.converted"
 
 IDEMPOTENT_CREATE = "pipeline.create_opportunity"
@@ -217,6 +232,41 @@ HELD_FIELDS = frozenset(
 # the price history too. (A hold lets agreed terms through: they only add to the history,
 # and the hold keeps the erasure from removing them.)
 ERASED_FROZEN = HELD_FIELDS | {"agreed_cpt"}
+# What a won or lost deal's normal edit can't change (adversarial review of 73ff1e3, M2): the
+# fields reporting and forecasting read of it. Its value (won revenue, the board's won and
+# lost column totals, Ask Arkray's lists and totals, sorts by value), probability (the
+# weighted figures; fixed while closed anyway), expected close date (the close-date filters
+# and the "closing this month / past due" questions) and opportunity date (when the deal
+# arose: its sales cycle, shown with every deal). Not its text, instrument or custom values:
+# no figure is computed from them (docs/pipeline.md#closed-deals). The agreed prices are
+# history of their own: none can be recorded on a closed deal (record_negotiated_price).
+CLOSED_FROZEN = frozenset({"value", "probability", "expected_close_date", "opportunity_date"})
+# What an administrator's correction may change of them (models.CorrectedField): the
+# probability of a closed deal is fixed (won 100 %, lost 0 %, database constraints).
+CORRECTABLE = tuple(str(field) for field in CorrectedField.values)
+DEAL_CLOSED = (
+    "This deal is {status}: its value, probability and dates are part of its sales record. "
+    "Reopen the deal to change them, or ask an administrator to correct them."
+)
+DEAL_CLOSED_TERMS = (
+    "This deal is {status}: its agreed prices are part of its sales record. Reopen the deal "
+    "to negotiate again."
+)
+CORRECTION_OPEN = (
+    "This deal is open: edit it instead. Only won and lost deals are corrected this way."
+)
+CORRECTION_NOTHING_NAMED = "Choose the value or a date to correct."
+CORRECTION_UNCHANGED = "These are the deal's current figures: there is nothing to correct."
+CORRECTION_ONLY = (
+    "Only a closed deal's value, expected close date and opportunity date can be corrected."
+)
+
+
+class DealClosed(BusinessRuleViolation):
+    """A change to a won or lost deal's figures through the normal edit (422 `deal_closed`,
+    nothing written; adversarial review of 73ff1e3, M2). `details.fields` lists them."""
+
+    code = "deal_closed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +340,24 @@ def _require_version(opportunity: Opportunity, version: int) -> None:
 def _require_not_archived(opportunity: Opportunity) -> None:
     if opportunity.archived_at is not None:
         raise BusinessRuleViolation(ARCHIVED_READ_ONLY)
+
+
+def _refuse_closed_changes(opportunity: Opportunity, requested: Mapping[str, Any]) -> None:
+    """DealClosed if the deal is won or lost and `requested` (cleaned values) would change one
+    of its CLOSED_FROZEN fields. Only a change counts: the stored value sent back (an edit
+    form, a retry) is none, and `probability: None` asks for the stage's default, which is
+    what a closed deal has (100 % won, 0 % lost)."""
+    if opportunity.is_open:
+        return
+    changed = []
+    for field in sorted(CLOSED_FROZEN & set(requested)):
+        value = requested[field]
+        if field == "probability" and value is None:
+            value = opportunity.stage.probability
+        if getattr(opportunity, field) != value:
+            changed.append(field)
+    if changed:
+        raise DealClosed(DEAL_CLOSED.format(status=opportunity.status), details={"fields": changed})
 
 
 def _require_assignable(owner_id: UUID) -> None:
@@ -473,6 +541,10 @@ def _history(
         to_status=to_stage.category,
         value=opportunity.value,
         probability=opportunity.probability,
+        # With the value and probability, every figure a closed deal freezes: a reopen, an
+        # edit and a new close leave the old and new ones here (review round 1, DEALS-2).
+        expected_close_date=opportunity.expected_close_date,
+        opportunity_date=opportunity.opportunity_date,
         lost_reason=opportunity.lost_reason,
         actor_id=actor_id,
         occurred_at=at,
@@ -989,7 +1061,10 @@ def update_opportunity(
     covers its lead, and (422 `lead_erased`) once its lead is erased, if a frozen field
     (HELD_FIELDS) would change; refused (403 `customer_restricted`) if the request names a
     customer field the viewer may not see (customer.refuse_hidden_writes), or would change
-    any of those frozen fields while the viewer may not see the customer."""
+    any of those frozen fields while the viewer may not see the customer. Refused (422
+    `deal_closed`) for every role if the deal is won or lost and its value, probability or a
+    date (CLOSED_FROZEN) would change: reopen it, or an administrator corrects it
+    (correct_closed_deal)."""
     authorize_write(actor, scope)
     cleaned = validation.clean_fields(changes)
     custom_changed: list[str] = []
@@ -1000,6 +1075,10 @@ def update_opportunity(
         customer.refuse_hidden_writes(scope, lead.owner_id, opportunity.pipeline_id, cleaned)
         _require_version(opportunity, version)
         _require_not_archived(opportunity)
+        # A won or lost deal's figures are its sales record (review of 73ff1e3, M2): refused
+        # before anything is written, whoever asks (the probability's own closed-stage rule,
+        # below, would answer 400 for one of them only).
+        _refuse_closed_changes(opportunity, cleaned)
         if problem := _known_instrument(cleaned, current=opportunity.instrument_name):
             raise InvalidInputError(details={"instrument_name": problem})
         if "custom_fields" in cleaned:
@@ -1295,7 +1374,12 @@ def record_negotiated_price(
             return selectors.opportunity_by_id(opportunity.pk)
         _require_version(opportunity, version)
         _require_not_archived(opportunity)
-        if not stage.is_negotiation or not opportunity.is_open:
+        if not opportunity.is_open:  # a closed deal's figures are frozen (review of 73ff1e3, M2)
+            raise DealClosed(
+                DEAL_CLOSED_TERMS.format(status=opportunity.status),
+                details={"fields": ["negotiated_price"]},
+            )
+        if not stage.is_negotiation:
             raise BusinessRuleViolation(NOT_IN_NEGOTIATION)
         # The agreed CPT is free text an erasure redacts (audit M-1).
         lead_services.refuse_erased_changes(lead, ["agreed_cpt"], ERASED_FROZEN)
@@ -1332,6 +1416,125 @@ def record_negotiated_price(
                 actor_id=actor.pk,
                 occurred_at=now,
                 fields=("negotiated_price", "agreed_cpt"),
+            )
+        )
+    return selectors.opportunity_by_id(opportunity.pk)
+
+
+# --- corrections of closed deals -----------------------------------------------------------------
+_CORRECTION_CLEANERS = {
+    "value": validation.clean_value,
+    "expected_close_date": validation.clean_expected_close_date,
+    "opportunity_date": validation.clean_opportunity_date,
+}
+
+
+def _clean_correction(reason: Any, changes: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    """The reason and the figures to correct, checked before anything is locked; every
+    problem at once."""
+    errors: dict[str, list[str]] = {}
+    text = ""
+    try:
+        text = validation.clean_correction_reason(reason)
+    except ValueError as exc:  # TextRejected included
+        errors["reason"] = [str(exc)]
+    cleaned: dict[str, Any] = {}
+    if unknown := set(changes) - set(CORRECTABLE):
+        errors["non_field_errors"] = [f"{CORRECTION_ONLY} ({', '.join(sorted(unknown))})"]
+    elif not changes:
+        errors["non_field_errors"] = [CORRECTION_NOTHING_NAMED]
+    for field in CORRECTABLE:
+        if field in changes:
+            try:
+                cleaned[field] = _CORRECTION_CLEANERS[field](changes[field])
+            except ValueError as exc:
+                errors[field] = [str(exc)]
+    if errors:
+        raise InvalidInputError(details=errors)
+    return text, cleaned
+
+
+def correct_closed_deal(
+    *,
+    actor: User,
+    scope: AccessScope,
+    opportunity_id: UUID,
+    version: int,
+    reason: Any,
+    changes: Mapping[str, Any],
+) -> Opportunity:
+    """An administrator's correction of a won or lost deal's figures (adversarial review of
+    73ff1e3, M2; docs/pipeline.md#closed-deals): its value, expected close date or opportunity
+    date (CORRECTABLE), which no normal edit changes while it is closed.
+
+    - Who: crm.manage_any (administrators), in a workspace where they may write and see the
+      deal (organisation-wide, or a user's); never a salesperson, not even on their own deal
+      (403 before anything is looked up). The API also asks for a recent second factor and
+      refuses a support session (pipeline.api.views).
+    - What: a reason (one line, required), the deal's version (409 otherwise, checked under
+      its row lock), at least one figure that actually changes. Refused (422) for an open deal
+      (edit it), an archived one (restore it) and an erased customer's (its reason would be
+      new free text about them: nothing new is added for an erased customer, deep security
+      audit M-1). A legal hold doesn't stop it: a hold freezes the customer's data, not the
+      money, and a correction overwrites none of the held text (core.holds).
+    - Recorded: the deal (a new version), one append-only OpportunityCorrection row with the
+      figures before and after, the reason, who and when; the audit event names the fields
+      and the row, never a figure or the reason; OpportunityUpdated, as an edit publishes. The
+      stage history keeps the value each transition happened at."""
+    if not has_capability(actor, Capability.CRM_MANAGE_ANY):
+        raise PermissionDeniedError()
+    authorize_write(actor, scope)
+    text, cleaned = _clean_correction(reason, changes)
+    with transaction.atomic():
+        opportunity, lead = _lock(scope, opportunity_id)
+        _require_version(opportunity, version)
+        _require_not_archived(opportunity)
+        if opportunity.is_open:
+            raise BusinessRuleViolation(CORRECTION_OPEN)
+        lead_services.require_not_erased(lead, lead_services.ERASED_NO_NEW)
+        changed = sorted(f for f in cleaned if getattr(opportunity, f) != cleaned[f])
+        if not changed:
+            raise InvalidInputError(details={"non_field_errors": [CORRECTION_UNCHANGED]})
+        before = {field: getattr(opportunity, field) for field in CORRECTABLE}
+        for field in changed:
+            setattr(opportunity, field, cleaned[field])
+        now = timezone.now()
+        opportunity.version += 1
+        opportunity.updated_at = now
+        opportunity.save(update_fields=[*changed, "version", "updated_at"])
+        correction = OpportunityCorrection.objects.create(
+            opportunity=opportunity,
+            fields=changed,
+            value_before=before["value"],
+            value_after=opportunity.value,
+            expected_close_date_before=before["expected_close_date"],
+            expected_close_date_after=opportunity.expected_close_date,
+            opportunity_date_before=before["opportunity_date"],
+            opportunity_date_after=opportunity.opportunity_date,
+            status=opportunity.status,
+            reason=text,
+            opportunity_version=opportunity.version,
+            actor_id=actor.pk,
+            subject_user_id=opportunity.owner_id if opportunity.owner_id != actor.pk else None,
+            occurred_at=now,
+        )
+        _audit(
+            AUDIT_CORRECTED,
+            actor.pk,
+            opportunity,
+            workspace=scope.kind.value,
+            subject=opportunity.owner_id,
+            fields=changed,
+            correction_id=str(correction.pk),
+        )
+        publish(
+            events.OpportunityUpdated(
+                opportunity_id=opportunity.pk,
+                lead_id=opportunity.lead_id,
+                owner_id=opportunity.owner_id,
+                actor_id=actor.pk,
+                occurred_at=now,
+                fields=tuple(changed),
             )
         )
     return selectors.opportunity_by_id(opportunity.pk)

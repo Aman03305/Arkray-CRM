@@ -10,7 +10,7 @@ import { forgetBoardState } from "@/features/pipeline/hooks";
 import { OpportunityView, PipelineView } from "@/features/workspace/views";
 import type { PipelineDto, PipelineList } from "@/lib/api/types";
 import { OPPORTUNITY_OPTIONS_ROUTE, salesViewer } from "@/test/fixtures";
-import { makeBoard, makeOpportunity, OPPORTUNITY_ID, PIPELINE, PIPELINE_ROUTES, STAGES } from "@/test/pipeline-fixtures";
+import { makeBoard, makeOpportunity, OPPORTUNITY_ID, PIPELINE, PIPELINE_ROUTES, pipelineRoutes, STAGES } from "@/test/pipeline-fixtures";
 import { apiError, mockApi, type RecordedCall, renderWithProviders } from "@/test/render";
 
 const nav = vi.hoisted(() => ({ pathname: "/pipeline", push: vi.fn(), replace: vi.fn() }));
@@ -52,7 +52,7 @@ async function openMySettings() {
 describe("pipeline settings", () => {
   it("P1: Escape on the nested archive confirmation closes only it; the edits stay", async () => {
     mockApi({
-      [`GET ${PIPELINES_URL}`]: { status: 200, body: LIST },
+      ...pipelineRoutes(PIPELINES_URL, LIST),
       [`GET ${BOARD}`]: { status: 200, body: makeBoard([], { pipeline: { id: MINE_ID, key: "pmine", name: MINE.name } }) },
     });
     renderWithProviders(<PipelineView />, { viewer: salesViewer });
@@ -71,7 +71,7 @@ describe("pipeline settings", () => {
   it("P1: a new pipeline and its fields are one request; a field without choices is caught first", async () => {
     const created: PipelineDto = { ...MINE, id: "new-id", name: "Tenders" };
     const api = mockApi({
-      [`GET ${PIPELINES_URL}`]: { status: 200, body: { results: [PIPELINE] } },
+      ...pipelineRoutes(PIPELINES_URL, { results: [PIPELINE] }),
       [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) },
       [`POST ${PIPELINES_URL}`]: { status: 201, body: created },
     });
@@ -97,7 +97,7 @@ describe("pipeline settings", () => {
   it("P2: after a partial save, the retry continues from what was saved, at its version", async () => {
     let stagesCalls = 0;
     const api = mockApi({
-      [`GET ${PIPELINES_URL}`]: { status: 200, body: LIST },
+      ...pipelineRoutes(PIPELINES_URL, LIST),
       [`GET ${BOARD}`]: { status: 200, body: makeBoard([], { pipeline: { id: MINE_ID, key: "pmine", name: MINE.name } }) },
       [`PATCH ${PIPELINES_URL}/${MINE_ID}`]: { status: 200, body: { ...MINE, name: "Renamed", version: 5 } },
       [`PUT ${PIPELINES_URL}/${MINE_ID}/stages`]: (call: RecordedCall) =>
@@ -120,7 +120,7 @@ describe("pipeline settings", () => {
   });
 
   it("P3: moving a stage to the top keeps the keyboard on that row", async () => {
-    mockApi({ [`GET ${PIPELINES_URL}`]: { status: 200, body: { results: [PIPELINE] } }, [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) } });
+    mockApi({ ...pipelineRoutes(PIPELINES_URL, { results: [PIPELINE] }), [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) } });
     renderWithProviders(<PipelineView />, { viewer: salesViewer });
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "New pipeline" }));
@@ -142,7 +142,7 @@ describe("creating an opportunity into a stage", () => {
     };
     const api = mockApi({
       ...OPPORTUNITY_OPTIONS_ROUTE,
-      [`GET ${PIPELINES_URL}`]: { status: 200, body: { results: [withField] } },
+      ...pipelineRoutes(PIPELINES_URL, { results: [withField] }),
       [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) },
       [`POST ${CREATE}`]: { status: 201, body: makeOpportunity() },
     });
@@ -178,12 +178,11 @@ describe("creating an opportunity into a stage", () => {
   it("P3 (review): a stage that became a negotiation stage after the panel opened is explained, and the fields appear", async () => {
     let retyped = false;
     const negotiationProposal = { ...STAGES.proposal, type: "negotiation" as const };
+    const current = () => (retyped ? { ...PIPELINE, stages: PIPELINE.stages.map((s) => (s.id === STAGES.proposal.id ? negotiationProposal : s)) } : PIPELINE);
     const api = mockApi({
       ...OPPORTUNITY_OPTIONS_ROUTE,
-      [`GET ${PIPELINES_URL}`]: () => ({
-        status: 200,
-        body: { results: [retyped ? { ...PIPELINE, stages: PIPELINE.stages.map((s) => (s.id === STAGES.proposal.id ? negotiationProposal : s)) } : PIPELINE] },
-      }),
+      [`GET ${PIPELINES_URL}`]: () => ({ status: 200, body: { results: [current()] } }),
+      [`GET ${PIPELINES_URL}/${PIPELINE.id}`]: () => ({ status: 200, body: current() }),
       [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) },
       [`POST ${CREATE}`]: () => {
         retyped = true; // an administrator retyped Proposal meanwhile

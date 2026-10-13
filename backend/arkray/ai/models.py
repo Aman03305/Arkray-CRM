@@ -10,7 +10,10 @@
   text the caller may not see now.
 - `Conversation` and `Question`: one person's questions in one workspace. Bound to the
   actor *and* the workspace (own, one user's, or the organisation's): a conversation
-  started in Rahul's workspace is never shown, continued or answered in Priya's.
+  started in Rahul's workspace is never shown, continued or answered in Priya's. One its
+  asker deleted while a legal hold keeps it is a tombstone (`forgotten_at`): gone for them
+  everywhere, kept as the hold's evidence until housekeeping finds no hold keeping it
+  (ai.service.forget_conversation; adversarial review M1).
 """
 
 from __future__ import annotations
@@ -102,6 +105,12 @@ class Conversation(UUIDPrimaryKeyModel):
     )
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(default=timezone.now)
+    # When its asker deleted it while a legal hold kept it (a tombstone): from then on it is
+    # never shown, continued or answered (ai.service.conversations_in), and housekeeping
+    # deletes it once no hold keeps it. NULL for every other conversation: one no hold
+    # keeps is deleted at once (adversarial review M1: the answer to a deletion is the same
+    # either way, so it tells nobody about a hold).
+    forgotten_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "ai_conversation"

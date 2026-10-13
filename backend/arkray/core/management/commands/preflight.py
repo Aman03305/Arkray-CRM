@@ -5,6 +5,7 @@ takes traffic (config.preflight; docs/deployment.md#preflight).
     manage.py preflight --base-url https://crm.example.com     and the edge's
     manage.py preflight --json                   the same as JSON
     manage.py preflight --only database,redis    some groups (or --skip scanner)
+    manage.py preflight --only credentials       the passwords alone, offline (no network)
     manage.py preflight --send-test-email ops@example.com      and send one email
 
 Run it inside the backend image with the deployment's own environment, in the scanning

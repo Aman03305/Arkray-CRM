@@ -258,12 +258,17 @@ def test_replay_pseudonymises_a_restored_administrator_again(ledger_dir, admin):
     before = ledger.applied()
     staff.pseudonymise(other.pk, operator_id=admin.pk, allow_administrator=True)
     with connection.cursor() as cursor:  # the backup had the account active, named
+        # Taken before the pseudonymisation, so not marked either (review of 73ff1e3, L4: the
+        # mark is kept by a trigger, which a restore doesn't run; nor does this simulation).
+        cursor.execute("SET session_replication_role = replica")
         cursor.execute(
             "UPDATE identity_user SET first_name = 'Bina', last_name = 'Admin',"
             " email = 'bina.restored@example.test', status = 'active', is_active = true,"
-            " deactivated_at = NULL, password = 'md5$restored$x' WHERE id = %s",
+            " deactivated_at = NULL, password = 'md5$restored$x', pseudonymised_at = NULL"
+            " WHERE id = %s",
             [other.pk],
         )
+        cursor.execute("SET session_replication_role = origin")
     LedgerState.objects.filter(pk=1).update(applied_seq=before[0], applied_mac=before[1])
     assert replay.replay(operator=admin).counts() == {"reapplied": 1}
     restored = User.objects.get(pk=other.pk)
@@ -374,7 +379,9 @@ class TestRaces:
             lambda: _promote(first, c),
         )
         assert isinstance(results[0], staff.StaffErasure), results[0]
-        assert isinstance(results[1], ConflictError), results[1]
+        # Refused for what it now is, before the version (review of 73ff1e3, L4; it was the
+        # version's 409 before).
+        assert isinstance(results[1], identity_services.AccountPseudonymisedError), results[1]
         c.refresh_from_db()
         assert staff.pseudonymised(c)
         assert c.role == Role.SALES_USER
@@ -433,9 +440,12 @@ class TestRaces:
                 lambda c=c, a=second: staff.pseudonymise(c.pk, operator_id=a.pk),
             )
             assert sum(isinstance(r, User | staff.StaffErasure) for r in results) == 1, results
+            # A promotion after the pseudonymisation is refused for what the account now is
+            # (review of 73ff1e3, L4: AccountPseudonymisedError; the version's 409 before).
+            refusals = (
+                PermissionDeniedError | ConflictError | identity_services.AccountPseudonymisedError
+            )
             for result in results:
-                assert isinstance(
-                    result, User | staff.StaffErasure | PermissionDeniedError | ConflictError
-                ), repr(result)
+                assert isinstance(result, User | staff.StaffErasure | refusals), repr(result)
             c.refresh_from_db()
             assert not (staff.pseudonymised(c) and c.role == Role.ADMIN)

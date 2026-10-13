@@ -100,7 +100,7 @@ nothing needs a persistent local disk:
 | Service | Render type | Image / start | Notes |
 |---|---|---|---|
 | API | Web Service (Docker) | backend image, default CMD | listens on `$PORT` (`gunicorn.conf.py`); set `WEB_CONCURRENCY` for the instance size; health check path `/health/ready` |
-| Frontend | Web Service (Docker) | frontend image | `API_ORIGIN` is a **build argument** (the `/api` rewrite is resolved at build time): put the API service's internal URL in it; in production prefer routing `/api` to the API at the edge |
+| Frontend | Web Service (Docker) | frontend image | `API_ORIGIN` is a **build argument** (the `/api/v1` rewrite is resolved at build time): put the API service's internal URL in it; in production prefer routing `/api` to the API at the edge |
 | Worker | Background Worker | `celery -A config worker --queues outbox,default,email --concurrency 2` | one worker can take all three queues; the reference stack splits them (`outbox,email` and `default`, [deployment.md](deployment.md#production-topology)) so the default worker's 18-minute grace period delays no email |
 | Index / AI workers | Background Worker | `--queues ai_index` / `--queues ai` | load the embedding model (about 0.5 GB each): only when Ask Arkray is enabled |
 | Beat | Background Worker | `celery -A config beat --schedule /tmp/celerybeat-schedule` | **exactly one** instance, never scaled out. `--schedule` must name a writable path: the image's working directory isn't writable by the app user and beat stops at start without it (`Errno 13`); losing the file on a restart is harmless ([deployment.md](deployment.md#worker-and-beat-health)) |

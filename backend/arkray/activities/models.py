@@ -254,6 +254,11 @@ class Activity(UUIDPrimaryKeyModel, TimeStampedModel):
                 F("id").desc(),
                 name="activities_owner_created_idx",
             ),
+            # The activities one person created in the last day: their daily write budget
+            # (activities.services; review of 73ff1e3, M6, round 1: counted from the audit
+            # trail it read every other event of theirs too). At most the budget's worth of
+            # entries per creation, whatever else they wrote (activities.0012).
+            models.Index(F("created_by"), F("created_at"), name="activities_created_by_idx"),
             # The same, organisation-wide (administrators).
             models.Index(
                 F("type"),
@@ -640,6 +645,11 @@ class Attachment(UUIDPrimaryKeyModel):
         User, on_delete=models.PROTECT, null=True, blank=True, related_name="+", db_index=False
     )
     purged_at = models.DateTimeField(null=True, blank=True)
+    # A file whose object the store wouldn't delete (attachments._purge_failed): how many
+    # attempts failed, and when the next one is due (null: now). On the row, not in the
+    # cache (review round 3, LEDGER3-3), so a cache outage never loses them.
+    purge_attempts = models.IntegerField(db_default=0, default=0)
+    purge_next_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "activities_attachment"

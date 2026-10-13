@@ -1,6 +1,6 @@
 # 0030. An administrator's credentials and standing are changed only by that administrator
 
-Status: Accepted (pending product confirmation of the off-boarding consequence below)
+Status: Accepted (pending product confirmation of the off-boarding consequence below); its residual narrowed by [0034](0034-staging-security-remediation.md) (a promotion waits 7 days after an administrator changed the account's credentials)
 Date: 2026-10-06
 
 ## Context

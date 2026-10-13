@@ -5,6 +5,8 @@ session revocation, resets and key rotation."""
 from __future__ import annotations
 
 import json
+import re
+from uuid import uuid4
 
 import pytest
 from django.conf import settings
@@ -47,7 +49,10 @@ def error_code(response):
 
 
 def failures() -> int:
-    return AuthThrottleEvent.objects.filter(kind=ThrottleKind.LOGIN_FAILURE).count()
+    """Failures that still count toward a lockout. A right password (or code) forgives a
+    browser's failures rather than deleting them: they still count toward the account's
+    daily cap (review of 73ff1e3, L1)."""
+    return AuthThrottleEvent.objects.filter(kind=ThrottleKind.LOGIN_FAILURE, forgiven=False).count()
 
 
 def set_up(client, clock) -> tuple[str, list[str]]:
@@ -422,6 +427,13 @@ def test_the_step_up_routes_are_exactly_these():
                 (f"{member}/resend-invitation", "POST"),
                 (f"{member}/set-password", "POST"),
                 (f"{member}/mfa/reset", "POST"),
+                # Lifting a sign-in lock (review of 73ff1e3, L1).
+                (f"{member}/clear-sign-in-lock", "POST"),
+                # Correcting a closed deal's figures (review of 73ff1e3, M2; pipeline).
+                (
+                    "api/v1/workspaces/<str:workspace>/opportunities/<uuid:opportunity_id>/correct",
+                    "POST",
+                ),
                 ("api/v1/admin/support-sessions", "POST"),
                 ("api/v1/admin/privacy/exports", "POST"),
                 ("api/v1/admin/privacy/users/<uuid:user_id>/pseudonymise", "POST"),
@@ -432,7 +444,10 @@ def test_the_step_up_routes_are_exactly_these():
 
 
 def call(client, method, route, target):
+    """The route for `target`; any other id is one nobody has (the step-up answers before
+    anything is looked up) and the workspace the caller's own."""
     path = "/" + route.replace("<uuid:user_id>", str(target.pk))
+    path = re.sub(r"<uuid:[a-z_]+>", lambda _: str(uuid4()), path).replace("<str:workspace>", "me")
     return getattr(client, method.lower())(path, {}, format="json")
 
 

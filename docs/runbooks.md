@@ -106,6 +106,15 @@ empty or 502 in its access log); gunicorn logs `WORKER TIMEOUT`; readiness 503;
    long notes (R70); scale `worker-index` temporarily.
 4. Many retries (`outbox_event_retry_scheduled`): a dependency is failing (SMTP for
    `email`); fix it, the backoff resumes by itself.
+5. One user's work is most of the backlog (`ArkrayQueueDominatedByOneUser`,
+   `arkray_outbox_top_key_share` near 1): `manage.py outbox_requeue --status` lists, per
+   queue, the pending events, how many users have some and the busiest users' ids (read only).
+   Others are still served in turn (the relay takes turns between users, adversarial review of
+   73ff1e3, M6), so this is about the account: a runaway script, a bulk import, or abuse. Talk
+   to them, lower `ACTIVITY_MAX_CREATED_PER_USER_PER_DAY` if needed, or deactivate the
+   account; its queued work drains at the workers' speed. If the alert recurs, scale
+   `worker-index` to 2 or more (each loads its own embedding model, about 0.5-1 GB): it halves
+   how long a newcomer's job can wait behind work already handed to the broker.
 
 ## Dead events
 
@@ -204,6 +213,24 @@ reconciliation re-indexes any source whose chunks drifted.
    support_session_id = '<id>' ORDER BY occurred_at`.
 5. `mfa.locked` / `ArkrayMfaLocked` / `ArkrayMfaLockedUntilReset`: see
    [Second factor locked](#second-factor-locked).
+6. `ArkraySignInLocked` / `auth.sign_in_locked` (adversarial review of 73ff1e3, L1): an
+   account reached 50 failed sign-ins from new browsers in a day, so its sign-in from new
+   browsers is locked (its trusted browsers still work). Look at the sources (`login_failed`
+   lines by address). The owner was emailed an unlock link (24 hours; it trusts the browser
+   that opens it). If they can't use it, confirm who is asking out of band, then *Clear
+   sign-in lock* on the Users page (step-up, audited `auth.sign_in_unlocked` by
+   `administrator`), or have them reset the password. Repeated locks mean the password is
+   under attack: advise a new one, and two-step verification where `MFA_REQUIRED_FOR_ALL_USERS`
+   is off. It lifts by itself after 30 days.
+7. `ArkraySignInFailureStorm`: more than 200 failed sign-ins of real accounts in an hour, for
+   10 minutes: guessing or password spraying. Check the source addresses (`login_failed`); if
+   one network dominates, block it at the edge or the CDN.
+8. `ArkrayAdministratorPromoted` (L3): confirm with the promoting administrator and the person
+   (`user.role_changed` in the security events). Not intended: demote with the operator
+   procedure ([security.md](security.md#administrator-account-protection)) or deactivate, and
+   treat it as a [Security incident](#security-incident). A promotion refused with "can't be
+   made an administrator until …" is the 7-day cooling-off after an administrator changed the
+   account's password, email or second factor: wait, or have the owner confirm the change.
 
 ## Administrator deactivated
 
@@ -570,7 +597,12 @@ Once per environment, before the first release ([deployment.md](deployment.md#re
 2. **WAL archiving before any data** ([Database backup](#database-backup)): `pgbackrest
    stanza-create` and `pgbackrest check` (or WAL-G's `wal-g wal-push` working), then the first
    full base backup.
-3. roles.sql as the superuser, then step 3 above.
+3. roles.sql as the superuser, then step 3 above. The superuser connects on the server's
+   local socket only, the owner from the release path only, the application role over TLS
+   (`infrastructure/postgres/pg_hba.conf`, which the production-shaped stack mounts;
+   adversarial review of 73ff1e3, M4). On that stack the `db-roles` job runs roles.sql over
+   the socket, and `scripts/prod-compose.sh <secrets> run --rm db-roles` runs it again;
+   roles.sql refuses role passwords under 32 characters or one for both roles.
 
 Drilled: `tests/drills/pitr_drill.py` provisions its database exactly this way (roles.sql with
 the roles renamed, migrate as the owner, the grant: 10 statements, `check`, `migrate --check`
@@ -610,6 +642,13 @@ The migrate job runs the new image as the **owner** (never through a transaction
    don't: look for invalid indexes, `SELECT indexrelid::regclass FROM pg_index WHERE NOT
    indisvalid;`). Fix forward, or [Deploy and roll back](#deploy-and-roll-back). Down-migrations past the RC are
    refused before anything changes.
+6. **The adversarial-review release** (on top of `73ff1e3`): if `identity.0008` logs
+   `pseudonym_domain_accounts_not_pseudonymised`, give each account it lists a real address on
+   the Users page: an administrator gave it an address at `pseudonymised.invalid` before this
+   release, and the migration left it live (those listed as moved aside held a former user's
+   pseudonym, which went back to its owner; review round 1, IDENTITY-4 and IDENTITY-5). Deploy
+   the workers before the web tier, or re-run the dead purge events afterwards
+   ([Erasure ledger behind](#erasure-ledger-behind)).
 
 Measured (2026-10-06): RC → current at 200,000 leads, 8.6 s of migrations (`pipeline.0006`
 7.0 s). The window is backup + migrations + smoke test.
@@ -697,6 +736,20 @@ WAL-G (a configuration file the PostgreSQL server reads through `--config`, beca
   --config /etc/wal-g/walg.json delete retain FULL 30 --confirm` (30 daily full backups and the
   WAL they need). Status: `wal-g --config /etc/wal-g/walg.json backup-list --detail`.
 
+**Their connection on the production-shaped stack** (`infrastructure/postgres/pg_hba.conf`;
+review round 1, INFRA-2): the tool runs beside the server, in its container, and PostgreSQL
+admits only the superuser there, on the local socket, with SCRAM (`local all arkray` and
+`local replication arkray`; nothing replicates over the network). So pgBackRest takes
+`pg1-user=arkray` and `pg1-socket-path=/var/run/postgresql` in its `[arkray]` stanza, WAL-G
+`"PGUSER": "arkray"` beside its `"PGHOST"`, and both the password from a `.pgpass` file:
+one line `*:*:*:arkray:<the superuser's password>` (the `*` database matches `replication`
+too), mode 600, owned by uid 999, mounted read-only (the root filesystem is read-only, so not
+in the home directory) and named by `PGPASSFILE` in the PostgreSQL service's environment.
+Checked live: `pg_basebackup -h /var/run/postgresql -U arkray` streamed a base backup over
+the socket; the same from the application's network, as the superuser or as `arkray_app`, was
+refused (`pg_hba.conf rejects replication connection`), and over the socket without a
+password too.
+
 Monitoring (both): `pg_stat_archiver` (alert when `failed_count` grows or `last_archived_time`
 is more than 5 minutes behind while there are writes: WAL then piles up in `pg_wal` and the
 RPO grows); the newest base backup's age; disk space of `pg_wal`. Lose the encryption
@@ -705,7 +758,22 @@ passphrase/key and the archive is unreadable: keep it with the backup key holder
 
 **Logical dumps** (both): `scripts/backup.sh` daily and before every release
 ([Backup encryption keys](#backup-encryption-keys)); `--prune` 30 days honouring
-`LEGAL_HOLD`. A dump restores into any PostgreSQL 16 ([Restore from backup](#restore-from-backup));
+`LEGAL_HOLD`. On the production-shaped stack the database admits the owner only from
+`db-owner` (review round 1, INFRA-1), so the dump runs in a one-off container of the pinned
+PostgreSQL image on that network, with the stack's CA, the backup host's keys and the owner's
+password read from the secrets file into that container alone (never the shell, never a
+command line); `/srv/arkray-backups` writable by uid 999:
+
+    project=arkray-prod
+    secrets=/secure/arkray-prod.env
+    image='pgvector/pgvector:0.8.7-pg16-trixie@sha256:40d828eda66737aaacb934387a337babf1455ebd56e9bdd13fc08e211257c972'
+    docker run --rm --user 999:999 --network "${project}_db-owner" \
+      --env-file <(grep '^ARKRAY_PROD_DB_OWNER_PASSWORD=' "$secrets") \
+      -v "${project}_tls-ca:/tls:ro" -v "$PWD/scripts:/scripts:ro" \
+      -v /secure/backup-keys:/keys:ro -v /srv/arkray-backups:/backups \
+      -e BACKUP_GPG_RECIPIENT_FILE=/keys/backup-public-key.asc \
+      -e BACKUP_GPG_SIGNING_KEY_FILE=/keys/backup-signing-key.asc -e HOME=/tmp \
+      --entrypoint bash "$image" -c 'DATABASE_URL="postgres://arkray_owner:${ARKRAY_PROD_DB_OWNER_PASSWORD}@postgres:5432/arkray?sslmode=verify-full&sslrootcert=/tls/ca.crt" exec bash /scripts/backup.sh /backups' A dump restores into any PostgreSQL 16 ([Restore from backup](#restore-from-backup));
 it is also the copy that survives a broken WAL archive.
 
 Drill: `tests/drills/pitr_drill.py` archives with a plain `archive_command` to a volume (the
@@ -726,7 +794,9 @@ changes, ended support sessions, used or revoked one-time links (step 7).
    transaction that committed after T.
 2. **Stop traffic and writes**: [Emergency maintenance](#emergency-maintenance) on; stop
    web, workers and beat. Leave the old database untouched (forensics).
-3. **Keep what will be lost**, if the old database is readable (owner):
+3. **Keep what will be lost**, if the old database is readable (owner; on the
+   production-shaped stack the superuser on the socket, `scripts/prod-compose.sh <secrets>
+   exec postgres psql -U arkray -d arkray`, since `pg_hba.conf` admits no one else there):
    `\copy (SELECT id, occurred_at, action, actor_id, target_type, target_id, subject_user_id
    FROM audit_event WHERE occurred_at > '<T>' ORDER BY id) TO 'after-T-events.csv' CSV HEADER`
    (ids only), and note the deals and activities created or changed after T if they must be
@@ -741,6 +811,10 @@ changes, ended support sessions, used or revoked one-time links (step 7).
      and `pg_stat_statements` are missing); set backup retention, deletion protection and
      monitoring as on the original. The new instance has a new endpoint. (Platforms that
      restore in place, such as Supabase's PITR, overwrite the database: do step 3 first.)
+   - *Self-hosted*: the recovered cluster starts with the same `hba_file`
+     (`infrastructure/postgres/pg_hba.conf`) and keeps the database's name, `arkray`, so the
+     roles connect as before; the archive tool connects as the superuser on the socket
+     ([Database backup](#database-backup)).
    - *Self-hosted (pgBackRest)*: on a new volume or host, PostgreSQL stopped:
      `pgbackrest --stanza=arkray --type=time "--target=<T>" --target-action=promote restore`
      (it picks the newest backup before T, writes `restore_command`, the target and
@@ -826,6 +900,59 @@ people's time).
    back: [empty them](#point-in-time-recovery), step 5). Any restore undoes the security
    changes made after the backup (deactivations, password, role and MFA changes, revoked
    links): redo them from the security events after T (R140).
+**On the production-shaped stack** (review round 1, INFRA-1: its `pg_hba.conf` admitted the
+roles to `arkray` alone, and the restore had nowhere to go). Steps 2 to 5 are these commands,
+run from the checkout with the stack's secrets file; `arkray_restored` is the one other
+database `pg_hba.conf` admits the owner (from `db-owner`) and the application role to, so no
+rule changes and no reload. Everything stops but the data services for the swap. The secrets
+reach containers through the secrets file or the services' own environment, never the shell
+or a command line:
+
+    project=arkray-prod
+    secrets=/secure/arkray-prod.env
+    prod=(scripts/prod-compose.sh "$secrets" --project "$project")
+    image='pgvector/pgvector:0.8.7-pg16-trixie@sha256:40d828eda66737aaacb934387a337babf1455ebd56e9bdd13fc08e211257c972'
+    # 2a. the empty database, its extensions and settings: roles.sql as the superuser, on the socket
+    "${prod[@]}" run --rm --no-deps -T db-roles psql -h /var/run/postgresql -U arkray -d postgres \
+      -v database=arkray_restored -f /deploy/roles.sql
+    # 2b. the restore, as the owner, from db-owner; the backup private key's keyring brought in
+    #     (writable: gpg locks it); a work area with room for the dump twice
+    docker run --rm --user 999:999 --network "${project}_db-owner" \
+      --env-file <(grep '^ARKRAY_PROD_DB_OWNER_PASSWORD=' "$secrets") \
+      -v "${project}_tls-ca:/tls:ro" -v "$PWD/scripts:/scripts:ro" -v /srv/arkray-backups:/backups:ro \
+      -v /secure/restore-keyring:/keyring -v /secure/backup-keys/backup-signing-public-key.asc:/signer.asc:ro \
+      -v /srv/arkray-restore-work:/work -e BACKUP_GNUPGHOME=/keyring -e BACKUP_SIGNER_KEY_FILE=/signer.asc \
+      -e RESTORE_WORK_DIR=/work -e HOME=/tmp --entrypoint bash "$image" -c \
+      'TARGET_DATABASE_URL="postgres://arkray_owner:${ARKRAY_PROD_DB_OWNER_PASSWORD}@postgres:5432/arkray_restored?sslmode=verify-full&sslrootcert=/tls/ca.crt" exec bash /scripts/restore.sh /backups/arkray-<stamp>.dump.gpg'
+    # 3-4. the grant, nothing unapplied, the replay (owner); the release check (application role):
+    #      each service's own DATABASE_URL, pointed at arkray_restored inside the container
+    restored='export DATABASE_URL="${DATABASE_URL/5432\/arkray\?/5432\/arkray_restored?}"'
+    "${prod[@]}" run --rm --no-deps -T -v "$PWD/restore-reports:/reports" migrate bash -c "$restored
+      python manage.py grant_app_privileges arkray_app && python manage.py migrate --check &&
+      python manage.py replay_erasures --by <admin email> --report /reports/restore-<date>.json"
+    "${prod[@]}" run --rm --no-deps -T backend bash -c "$restored
+      exec python manage.py check --deploy --database default"
+    # 5. the swap: stop what connects, set the current database aside, the restored one in its place
+    "${prod[@]}" stop backend worker worker-outbox worker-index worker-ai beat
+    "${prod[@]}" exec -T postgres sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" exec psql -U arkray -d postgres -v ON_ERROR_STOP=1' <<SQL
+    SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+      WHERE datname IN ('arkray', 'arkray_restored') AND pid <> pg_backend_pid();
+    ALTER DATABASE arkray RENAME TO arkray_replaced_$(date -u +%Y%m%d%H%M);
+    ALTER DATABASE arkray_restored RENAME TO arkray;
+    SQL
+    "${prod[@]}" up -d
+
+(`restore-reports/` writable by uid 10001, the image's user; the replay's `--dry-run` first, as
+in step 4.) The set-aside database keeps its name until the restore is accepted, then `DROP
+DATABASE arkray_replaced_<stamp>;` on the same socket (it holds data erased since the backup).
+Only the superuser reaches it meanwhile, inside the PostgreSQL container: the owner and the
+application role are refused on any name but `arkray` and `arkray_restored`. Verified live
+(2026-10-12, a throwaway project): with the earlier rules the restore stopped at `pg_hba.conf
+rejects connection ... database "arkray_restored"`; with these, the dump (signed, encrypted)
+restored as the owner, the grant, `migrate --check`, the release check as `arkray_app` and the
+replay passed, the swap brought the API back healthy on the restored rows, and the old
+database was refused to the owner.
+
 7. **The database backup is not a backup of the files** (product enhancement phase, R93): it
    holds pipelines, stages, custom field definitions and values, negotiated price history and
    attachment *metadata*, but the attachment bytes live in object storage. Restore the bucket
@@ -898,6 +1025,78 @@ and logs an error naming the command, when:
 Beat must run for this (one instance; [deployment.md](deployment.md)). Set
 `ERASURE_LEDGER_AUTO_RECONCILE_MAX=0` to require the operator every time.
 
+The worker containers' health check (`manage.py ledger_status`) keeps the chain it verified in
+its temporary directory (`/tmp/arkray-ledger-status-*.json`: positions and MACs, no personal
+data, signed with the ledger key) and re-verifies the whole chain at least hourly, a slice per
+probe (adversarial review of 73ff1e3, M3). After restoring or replacing the ledger, restart
+every backend process, then run `manage.py ledger_status --from-scratch` in one worker
+container: a restarted process (or a probe whose state file was deleted) starts from the
+newest signed checkpoint, and only the hourly pass, `--from-scratch` or `preflight --only
+ledger` read every entry. `--from-scratch` answers `tampered` (and keeps that verdict for the
+probes, logged as the security event) or clears an earlier one when the whole chain verifies;
+on a large ledger it may take minutes (one GET per entry). A previous
+release's `replay_erasures` can't apply `attachment_deleted` entries that name several files
+(it reports them failed and the API stays closed): replay with this release's image or later.
+
+Since the review round 1 (LEDGER-2): `manage.py ledger_status` answers
+`erasure_ledger_gate=verifying` (exit 1) while a container's first verification is spread over
+its probes, 5,000 entries each (from the newest checkpoint: usually one probe; the health
+checks' start period covers it); each probe stops after 15 s of verification and keeps its
+progress. **Checkpoints** live beside the entries, never among them (on S3 the sibling prefix
+`<prefix>.checkpoints/`, or `_checkpoints/` at a bucket root; a `checkpoints/` subdirectory on
+a volume; one per 1,000 entries, signed with the ledger key, no personal data): never edit or
+delete them by hand; a missing, invalid or unreadable one only makes a start read more (logged
+`erasure_ledger_checkpoint_unavailable`: give the ledger's credentials read and write on that
+prefix, [deployment.md](deployment.md#configuration)), and an old entry altered after its
+checkpoint was written is caught by the hourly pass from scratch, not at a process's start.
+
+**`tampered` from a health probe** (review round 2, LEDGER2-1; each such probe logs
+`erasure_ledger_tampered`, a security event that pages): the verdict is sticky until a pass over
+the whole chain from scratch succeeds, so the container stays unhealthy meanwhile. Check
+`ERASURE_LEDGER_URL`, the volume or bucket and the keys first (another environment's ledger
+or a wrong key list reads the same way), then treat it as a
+[Security incident](#security-incident): an entry altered or removed comes back from the
+bucket's versions or Object Lock copies, never by editing `core_erasure_ledger_state`; restart
+the backend processes afterwards (a web process that started from a checkpoint above the
+altered entry may still answer until then). The event can also come from gunicorn's master or
+the Celery parent, at start or before a fork (review round 3 and 4): that process then stays
+closed too. The verdict lives in the container's temporary directory: a restart loses it (the
+probes then start from the newest checkpoint and the pass from scratch follows; run
+`ledger_status --from-scratch` instead of waiting). An old entry replaced by something that
+isn't an entry (not JSON, an error page, JSON that isn't an object) is tampering like any
+mismatch; `erasure_ledger_malformed` (WARNING) now means only a **new** entry, beyond anything
+verified, that isn't JSON, for that check alone: if it repeats for the same entry, check the
+store and any proxy in front of it (one answering 200 with an error page). A probe that can't
+write its state logs `erasure_ledger_status_unsaved` (WARNING) and verifies from the first
+entry every time (never from a checkpoint): on a long ledger that container then answers
+`verifying` until its temporary directory is writable. On a platform without worker health
+checks, a daily `manage.py preflight --only ledger` (or `rotate_erasure_ledger_key --check`,
+or `ledger_status --from-scratch`) stands in for the hourly pass
+([deployment.md](deployment.md#worker-and-beat-health)).
+
+**`ahead`** (the ledger holds fewer entries than the database applied, or another entry where
+the database's last one was): erasures answer 503 and write nothing until the right ledger is
+back, so they never regrow a rolled-back ledger onto the database's position (review round 3,
+LEDGER3-1), and the gate's `ahead` stands under the same status (the alert keeps firing) until
+a read finds the right ledger, even while the store is slow or failing.
+
+An erasure's files are purged by one paged job (`activities.purge_deleted_attachments`, a
+minute of purging a run, then a continuation); a file the store won't delete is skipped and
+retried on its own, from 5 minutes doubling to 24 hours, its count and next try kept on its
+row (`activities.0013`; review round 3, LEDGER3-3: the backoff had lived in the cache), so any
+number of stuck files never hides the rest (`attachment_purge_failed`, ERROR from the sixth
+attempt: look at the bucket's permissions or Object Lock on that object); the job itself
+retries only when nothing could be purged or three different files failed in a row (the store
+is down). A dead job is re-run with `manage.py outbox_requeue --topic
+activities.purge_deleted_attachments --yes`, and the hourly attachment housekeeping purges what
+is left meanwhile. **During a rolling deploy** from a release before this one, a worker of the
+previous release fails a value-purge job naming several fields (`pipeline.purge_custom_values`
+with `field_ids`: retried, then dead after 8 attempts) and has no handler for the paged
+attachment-purge topic (dead): deploy the `default`-queue workers before the API, or re-run
+those dead events with `outbox_requeue` once every worker runs the new release, and let the
+outbox drain before a rollback
+([deployment.md](deployment.md#which-previous-release-can-run-beside-the-new-schema)).
+
 ## Rotate the erasure ledger key
 
 When: on a schedule your security policy sets, when someone who knew the key leaves, or at
@@ -944,14 +1143,18 @@ leak as a [security incident](#security-incident)). Which process holds which se
 rotation run `manage.py preflight` ([deployment.md](deployment.md#preflight)) in the scanning
 worker's container: it proves each new credential works without printing one. Keep retired
 secrets in the secret manager's history (versioned) until nothing can need them, then destroy
-them.
+them. Every new value is generated (`openssl rand -hex 32`: `config/credentials.py`'s rule,
+never a value used anywhere else). On the production-shaped stack the secrets file
+(`--env-file`) holds them under their `ARKRAY_PROD_*` names: change the value there, then
+`scripts/prod-compose.sh <it> up -d` recreates what reads it (the credential guard first); a database role's password changes in PostgreSQL first (below), since the database
+keeps the one it was given.
 
 | Secret | Lives in | Used by | Rotated wrongly |
 |---|---|---|---|
 | `DJANGO_SECRET_KEY` (+ `DJANGO_SECRET_KEY_FALLBACKS`) | secret manager | every backend process | without the old key in the fallbacks: everyone signed out, sealed page links and trusted-browser cookies void; old key removed before `mfa_reencrypt`: administrators' authenticators unreadable (`reset_mfa` each) |
 | `arkray_app` password (`DATABASE_URL`) | secret manager | api, workers, beat | processes not yet rolled can't open connections: errors, readiness 503 |
 | `arkray_owner` password | secret manager | the migrate job, restores, `replay_erasures` | the next migrate (the release) or restore fails |
-| database administrator (`POSTGRES_PASSWORD`, `ADMIN_DATABASE_URL`) | managed service / secret manager | provisioning (`roles.sql`) only | nothing running |
+| database administrator (`ADMIN_DATABASE_URL`; the production-shaped stack's `ARKRAY_PROD_DB_SUPERUSER_PASSWORD`) | managed service / secret manager | provisioning (`roles.sql`) only | nothing running |
 | backup role's password | backup host | `scripts/backup.sh` | the nightly backup fails |
 | Redis broker password (`CELERY_BROKER_URL`) | secret manager | every backend process | background work waits (durable in PostgreSQL); questions in flight fail |
 | Redis cache password (`REDIS_CACHE_URL`) | secret manager | every backend process | the cache is skipped: slower, rate limits per process (R127) |
@@ -982,10 +1185,13 @@ them.
   `DATABASE_URL` to the other, roll, then change the first one's password): not verified
   here; check `database.role` in preflight before relying on it.
 - **`arkray_owner`**: `\password arkray_owner` the same way; update the migrate job's and the
-  restore operator's copies (`ARKRAY_OWNER_PASSWORD` where the deployment keeps it). Nothing
-  long-running uses it.
+  restore operator's copies (`ARKRAY_PROD_DB_OWNER_PASSWORD` on the production-shaped stack).
+  Nothing long-running uses it.
 - **The database administrator**: the managed service's console (`\password` when
-  self-hosted); update `POSTGRES_PASSWORD` / `ADMIN_DATABASE_URL`. The application never uses it.
+  self-hosted: on the production-shaped stack `docker compose exec postgres psql -U arkray`,
+  the local socket being its only way in); update `ADMIN_DATABASE_URL`, or
+  `ARKRAY_PROD_DB_SUPERUSER_PASSWORD` in that stack's secrets file (its `POSTGRES_PASSWORD`
+  only seeds a new data directory). The application never uses it.
 - **The backup role**: `\password` it; update the backup host's `DATABASE_URL`; run
   `scripts/backup.sh` once by hand.
 - **Redis**: with ACLs, add the new password beside the old (`ACL SETUSER <user> >new`),
@@ -1083,7 +1289,12 @@ stops their erasure, pseudonymisation, audit-detail expiry, attachment purges an
 deletion until `manage.py legal_hold release --lead <id> --by <admin>`; `manage.py
 legal_hold list` shows what is held. For backups, create a file named `LEGAL_HOLD` in the
 backup directory: `backup.sh --prune` then deletes nothing. Record the matter outside the
-application; the reference is only its number.
+application; the reference is only its number. Ask Arkray conversations a hold keeps are
+kept even when their asker deletes them (hidden from them, `ai_conversation.forgotten_at`
+set) and are deleted by the first hourly housekeeping after the release
+([privacy.md](privacy.md#legal-holds)). Placing a hold while the previous release's pods
+still run (a rolling deploy of the release that added this) lets those pods answer a deletion
+409 and list kept conversations: finish the deploy first.
 
 ## Erasure request
 
@@ -1134,6 +1345,9 @@ longer needs to know who they were (its retention policy), pseudonymise them: `m
 pseudonymise_user <user id> --by <admin email>` (a dry run, then `--yes`) or the user's page
 ([privacy.md](privacy.md#staff)). A former **administrator** is pseudonymised only on the
 server, by an operator, with `--allow-administrator` added (the API refuses it, ADR-0030).
+Pseudonymisation is final (adversarial review of 73ff1e3, L4): the account can't be renamed,
+reactivated, re-invited or given a password again (422 `account_pseudonymised`); someone who
+comes back is invited as a new user.
 
 ## Minimise legacy audit details
 
@@ -1201,6 +1415,15 @@ Record that it was done (who, when, the cut-off) outside the application.
   [Lost second factor](#lost-second-factor).
 - A user locked out by failed sign-ins waits the lockout (at most 15 minutes) or resets
   their password; an administrator can reactivate a deactivated user on the Users page.
+- A user whose sign-in from new browsers is locked by the daily cap ("Too many failed
+  sign-ins for this account, so it can't be signed in to from a new browser for now", 50
+  failures in a day; a browser they used here before still works) uses
+  the unlock link emailed to them, or resets their password; an administrator can *Clear
+  sign-in lock* on the Users page after confirming who is asking (see
+  [Security events](#security-events), step 6).
+- With `MFA_REQUIRED_FOR_ALL_USERS` on (the production default), every user, not only
+  administrators, sets up two-step verification at their next sign-in; tell them before the
+  upgrade that turns it on.
 - A user whose two-step verification is locked (20 wrong codes in a row; they see "Too many
   wrong codes...") resets their password with Forgot password, which unlocks it; see
   [Second factor locked](#second-factor-locked).

@@ -150,12 +150,15 @@ def test_a_masking_regression_fails_the_minimisation_grader(world, tmp_path, mon
     monkeypatch.setattr(service, "user_text", lambda text: text)
     monkeypatch.setattr(answers, "user_text", lambda text: text)
     monkeypatch.setattr(retrieval, "user_text_slice", lambda text, start, end: text[start:end])
+    # A search hit's preview is masked on the whole note, then cut (adversarial review M5).
+    monkeypatch.setattr(formatting, "user_text_slice", lambda text, start, end: text[start:end])
     result = evaluate(world, tmp_path, only=("minimisation.",))
     caught = {c["id"] for c in result["cases"] if "payload_minimised" in c["mandatory_failed"]}
     assert caught == {
         "minimisation.contact_details",  # the contact note's preview, with the lead
         "minimisation.masked_description",
         "minimisation.masked_contact_note",
+        "minimisation.cut_preview",
         "minimisation.question_is_masked",
     }
     detail = " ".join(

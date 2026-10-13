@@ -386,8 +386,9 @@ failing, the fix restored).
   mutations caught); actionlint 1.7.12 (with shellcheck) on both workflows.
   `tests/architecture/test_compose_hardening.py` now also requires the Dockerfiles' BuildKit
   frontend (`# syntax=`) pinned by digest.
-- **Ask Arkray real-model evaluation (R69):** `arkray/ai/tests/test_evaluation.py` (13) and
-  `test_evaluation_units.py` (26): the whole `ai_eval` suite with well-behaved scripts passes
+- **Ask Arkray real-model evaluation (R69):** `arkray/ai/tests/test_evaluation.py` (12) and
+  `test_evaluation_units.py` (26): the whole `ai_eval` suite (37 cases since the adversarial
+  review of 73ff1e3 added `minimisation.cut_preview`) with well-behaved scripts passes
   every grader and reports NOT VERIFIED; adversarial scripts fail exactly the graders aimed at
   them; a masking regression fails `payload_minimised`; a dry run sends nothing; the spend and
   call caps stop the run before a call could cross them; the interlocks; the database guard.
@@ -404,6 +405,273 @@ failing, the fix restored).
   a new server, every table compared with T, the ledger gate and `replay_erasures`, sessions,
   release check, attachment reconciliation, vacuum; 20 checks, about 75 s; three mutations each
   fail it) and `tests/drills/resilience_drill.py` (14 drills, [staging-validation.md](staging-validation.md)).
+
+## Adversarial review of 73ff1e3 (2026-10-12)
+
+The fixes of the adversarial review of `73ff1e3` (6 Medium, 14 Low and its hardening
+suggestions; R148-R170 in the [risk register](risk-register.md),
+[ADR-0034](adr/0034-staging-security-remediation.md)), and of the independent review of those
+fixes (**review rounds 1 to 4**: every finding fixed, red first or by a mutation restoring
+the earlier behaviour; the test-integrity reviewers found no weakened test). Every new test runs in
+the default suite; each fix was seen failing against the unfixed code (red) and
+mutation-checked (the fix removed, its tests seen failing, the fix restored). Counts are
+collected test cases, after round 4 (rounds 3 and 4 reviewed the upload parsers and the
+erasure ledger again; round 3 also the AI masking).
+
+- **Legal holds and Ask Arkray (M1, R148):** `tests/security/test_ask_hold_oracle.py` (21):
+  deleting a conversation never reveals a legal hold: identical responses and query counts for
+  a colleague's held customer and a stranger, one's own held customer, a held asker and an
+  administrator in a held user's workspace; tombstones hidden everywhere (list, detail,
+  polling, continuing, a second deletion), their pending questions failed `forgotten` (no
+  bulkhead count, the worker skips them; round 1, AI-3: a question a previous release's pod
+  writes into a tombstone later is failed by the worker, and the asker's next question is
+  accepted), completed by housekeeping after the release, still
+  evidence for exports, erasures and pseudonymisation. `tests/security/test_hold_races.py`
+  (now 35) races deletion against a placement (stopped, arriving, barrier; lead and user
+  holds; no deadlock).
+- **Closed deals (M2, R149):** `tests/security/test_closed_deal_integrity.py` (63): a closed
+  deal's figures frozen for every role and edit path (422 `deal_closed`), reopen and close
+  again (round 1, DEALS-2: the stage history keeps both dates at every transition, through the
+  API too), the administrator's correction (reason, version, step-up, support session refused,
+  erased customer refused, legal hold allowed), the append-only history (ORM, trigger, the
+  application role's privileges), two corrections racing, a correction racing a reopen (one
+  wins, the other 409), moves, archiving and reassignment keeping their own rules, the stage history untouched, the
+  board, list and Ask Arkray's figures agree, an audit without amounts, erasure redacts and
+  the access export includes the reasons. `tests/integration/test_database_roles.py` finds the
+  new append-only table by its trigger. Frontend: `pipeline/closed-deal-corrections.test.tsx`
+  (11).
+- **Erasure ledger growth (M3, R150):** `tests/security/test_ledger_growth.py` (26): 50
+  repeated value-deletion requests add one entry; queued requests share a job; a purge that
+  removes nothing appends nothing; held values add no entry until deleted; a failed append
+  removes nothing; deleted files share one entry per purge (API and housekeeping), no held
+  file swept; replay of batched and single-file entries; races. Round 1: removing 30 fields
+  with their values is one job and one entry; replay of a batched custom-value entry; a job
+  the previous release queued still runs; the value-deletion budget (429 with `Retry-After`,
+  nothing queued or audited, the removal refused whole, another person unaffected); a database
+  error partway through a file batch keeps what was done; an erasure of 20 or 200 notes of 10
+  files costs the same statements and one job; round 3: files the store won't delete never
+  hold up an erasure, with the cache up or down. `tests/security/test_ledger_head_cost.py`
+  (66): a fake S3 holding 200,000 keys (and, since round 2, 200 checkpoint and 150 other
+  objects after the entries in every chain, at the same cost): a known head costs one LIST (`MaxKeys` ≤ 100) and one
+  GET, from scratch at most 2·log2(n)+2 LISTs, an append one LIST, one GET and one PUT;
+  truncation, rollback and regrowth, an altered head, a misnamed entry, a gap, the last
+  verified entry removed all close the gate; readiness and requests answer within 2 s while
+  the ledger is slow. Round 1, against a store slower than the wait (1.5 s a call): a
+  database behind it closes the gate and stays closed, a rolled-back ledger reads ahead, a
+  restore closes at once without reading the store, the behind path waits for one read only,
+  a restored database is closed while a huge ledger is slow; a process start reads from the
+  newest checkpoint (≤ 20 GETs for 5,010 entries); a checkpoint never hides a restore, and
+  one altered, re-signed or signed with another key is ignored; a whole chain verified holding
+  one chunk at a time (under 6 MB for 10,000 entries, 27.8 MB before). Round 3: the slow-store
+  tests run in real time over several intervals and hold `behind` and `ahead`; a decided verdict
+  stands while the store fails; an append never moves the database onto another chain (refused
+  with nothing written); the master's refresh is bounded as a whole on a slow store, uses a
+  short-timeout client of its own, stops its parallel GETs at the deadline and reports a
+  mismatch as the security event; a body that isn't JSON beyond what was verified is no lasting
+  verdict. Round 4: an entry verified before (by the process, its state or a checkpoint)
+  replaced by something that isn't an entry is tampering for good, in the gate, the master's
+  refresh and a master's start; the refresh writes no checkpoint past its deadline.
+  `tests/integration/test_ledger_status_state.py` (26): the worker probe reads only new
+  entries, re-verifies the whole chain hourly in slices, ignores a forged or foreign state
+  file; round 1: a first probe without a state file is bounded (50,000 entries: ≤ 5,000 + 20
+  GETs a probe, `verifying` until done) or starts from a checkpoint, the pass stays sliced
+  after a key rotation and completes while the ledger grows, a container started from a
+  checkpoint still finds an entry altered after it. Round 2: a tampered verdict stays (five
+  tampered probes in a row, in a new container too) until the whole chain verifies again, and
+  each logs the security event; every probe ends within its deadline on a slow store; a
+  recycled worker far behind opens within a bound; gunicorn's master refreshes before each
+  fork; unreadable checkpoints count as none; a file that can't be removed holds up no other;
+  a single-field deletion keeps the previous release's job format. Round 3: an operator's
+  `ledger_status --from-scratch` verifies the whole chain at once and clears the verdict only
+  over a sound chain; a probe reading a body that isn't JSON keeps no verdict; a state that
+  can't be kept never trusts a checkpoint; a probe never clears a tampered verdict kept
+  meanwhile. Round 4: an old entry that is no entry any more is kept as tampering (by the
+  probes and by `--from-scratch`), and a kept verdict is logged whatever the read that fails.
+  `tests/security/test_erasure_reconcile.py` (13; round 3: the wrong-ledger test's setup had
+  grown the other ledger by erasing against it, the append round 3 refuses; it now asserts that
+  refusal, then writes the other ledger as another database would, its own assertions
+  unchanged).
+  13 + 18 + 13 + 23 + 12 mutations caught (the first fixes, then rounds 1 to 4).
+- **Production secrets (M4, R151):** `tests/architecture/test_compose_credentials.py` (10): the
+  production overlay reads only production-only secret names `.env.example` never defines;
+  `docker compose config` with `.env.example` as the env file refuses the stack for each
+  secret left out; the guard covers every secret and every service waits for it; `pg_hba.conf`
+  simulated per role and network (round 1: the restore database `arkray_restored` tied to the
+  runbook, `scripts/restore.sh` and the template; physical replication treated as PostgreSQL
+  does, allowed only for the superuser on the socket). `tests/architecture/test_credentials.py`
+  (71): the one credential rule refuses every value the repository publishes, every template
+  placeholder and weak values (round 1: patterns, runs, joined words and common password words,
+  every value the reviewer tried), passes generated ones (20,000 seeded); the guard names
+  variables, never values; production settings refuse published development passwords;
+  preflight's `credentials` group; `roles.sql`'s length check equals the rule's;
+  `scripts/init-prod-env.sh`'s output passes the guard.
+  `tests/architecture/test_prod_compose_script.py` (3, round 1): the wrapper drops the shell's
+  `ARKRAY_PROD_*`, names the file and refuses one inside the checkout. CI job `compose` (and
+  `scripts/ci-local.sh --only compose`). Live (2026-10-12, a throwaway project): the connection
+  matrix in [deployment.md](deployment.md#verifying-a-release); round 1: the restore runbook end
+  to end on the hardened stack, and replication over the socket.
+- **AI masking (M5, R152):** `arkray/ai/tests/test_masking.py` (586: 40 phone shapes in 14
+  templates, PAN, kept values, chunk cuts, timed inputs), `test_masking_adversarial.py` (1,189:
+  other digit scripts, invisible characters inside numbers, HTML entities, %-escapes, line
+  breaks, numbers named as phones, 16 credential parameters in 10 shapes, links with user info
+  and app schemes, written passcodes and PINs, tokens, Aadhaar and cards, kept values, every
+  cut through a masked value; 34 crafted 10k inputs under 0.5 s and a 100k note under 2 s;
+  round 1: 200 keyword-blank-run inputs (40 keywords × 5 kinds of blank), each costing what
+  ordinary text of its length costs, a 300-case keyword × separator fuzz, a 400-case offset-map
+  fuzz, every pattern linear on blank runs without the view, and the AI-2 shapes both ways;
+  round 2: ids after a wide gap, Aadhaar, card and PAN groups 2-3 blanks apart, encoded blank
+  runs, the reviewer's over-masking corpus and the expansion bound; round 3: 226 sentence-boundary
+  cases (34 reference and amount words × 7 boundaries) over 6 number shapes, mixed card gaps,
+  spaced PIN and passcode digits, `Cell:`), `test_masking_cost.py` (6, round 1: a routed "open tasks" question over ten crafted tasks
+  masks in under 1 s, where it took 47 s; one search per text per tool call, nothing kept
+  outside one), `test_tools_masking.py` (10: `find_records` previews cut inside a link, a phone
+  and a passcode, list and record previews, pipeline and stage names, a record that left the
+  scope gets no preview); evaluation case `minimisation.cut_preview`. 7 + 10 + 15 + 13 mutations
+  caught; the reviewers' cut fuzz (1,500 trials) finds no leak, and every input stays linear.
+- **Fairness and write budgets (M6, R153):** `arkray/core/tests/test_outbox_fairness.py` (15:
+  one user's 50 queued jobs no longer delay another's one, claimed first or second; users with
+  backlogs take turns; follow-up work keeps its user's key; not-yet-due, dead and retried
+  events; the claim reads `outbox_pending_fair_idx`; the gauges and `outbox_requeue --status`),
+  `arkray/activities/tests/test_write_budgets.py` (13; round 1: the daily count's plan reads
+  `activities_created_by_idx` only, never the audit trail, and a refusal reads once;
+  `Retry-After` pinned with a fixed clock, TESTS-1), `tests/integration/test_write_budget_races.py`
+  (2: six creations at once on six customers with a budget of three: exactly three),
+  `arkray/ai/tests/test_index_lead_batches.py` (6), `tests/security/test_export_streaming.py`
+  (32: export memory flat as the customer grows, `data.json` byte-identical, the size cap,
+  formula cells behind whitespace; round 1: the cap counts the compressed archive, a customer
+  at the budgets fits (`TestAtTheBudget`), 14 formula look-alikes behind invisible or
+  full-width characters neutralised and 4 left alone), `arkray/privacy/tests/test_erasure_at_cap.py`
+  (3: a customer at the budget erased in about 2 s, statements of at most 1,000 rows, 60 s in
+  the worker replay), `tests/security/test_write_budgets.py` (3, end to end; round 1: max-length
+  Hindi notes posted through the API at 1/100 of the budget, then exported and erased),
+  `tests/architecture/test_advisory_locks.py` (4, round 1: no advisory-lock namespace names
+  two locks, R170).
+- **Sign-in and accounts (L1, L2, L3, L4, L9, L11; R154-R157, R161, R163):**
+  `tests/security/test_sign_in_guessing.py` (32: network buckets, the daily cap and its
+  unlocking, shared-address fairness, equal work by statement shapes and paired-timing
+  statistics, non-ASCII emails; round 1: an unlock link never takes a browser's trust from
+  another account, a credential change revokes a pending one, and the timing test's limit is
+  an absolute 1.5 ms median over 200 interleaved pairs), `test_api_throttle_order.py` (4),
+  `test_admin_promotion_shield.py` (19; round 1: a notice survives a deactivation, none for a
+  pseudonymised account), `test_staff_pseudonymisation_is_final.py` (31: API refusals, the
+  CHECK, the trigger, the backfill; round 1: its report, a squatter of a pseudonym moved aside,
+  a live account in the domain reported and never pseudonymised, the reserved domain),
+  `test_mfa_for_all_users.py` (283; round 1, TESTS-2: every gated route for a sales user and an
+  administrator, with the setting off and on),
+  `arkray/identity/tests/test_password_policy_everywhere.py` (13),
+  `tests/architecture/test_account_policy_settings.py` (8); frontend
+  `lib/safe-redirect.test.ts`, `features/auth/UnlockSignIn.test.tsx`.
+- **Deals (L5, L6, L10; R158, R118, R162):** `tests/security/test_customer_correction.py`
+  (+ the new owner learns nothing of the previous owner's deals), `test_historical_deal_privacy.py`
+  (31: the deal's free text on every API surface and in Ask Arkray's tools),
+  `tests/security/test_retired_stage_bounds.py` (6: the cap, the small-integer guard, payloads
+  list active stages only), `tests/security/test_pipeline_configuration_bounds.py` (9, round
+  1: the archived-pipeline and removed-field caps, restoring makes room, other owners never
+  count, 6 KB a pipeline on every list; `pipeline/tests/test_query_counts.py` pins the list at
+  one query fewer). `tests/security/test_activities_oracles.py` pins that a previous owner's
+  kept work answers the same whether or not its customer is held.
+- **Uploads and text (L7, L8, L12, R159, R160, R164, R167):**
+  `arkray/activities/tests/test_office_embedded.py` (52: embedded packages checked one level
+  deep, a bzip2 or LZMA member refused unread; round 1: embedding spoofing, an OOXML package
+  named as a picture, an OLE file under an image's name, in media or named `.xml`, a package
+  outside `/embeddings/`, altChunk or bzip2 inside an embedded package, one without content
+  types, the embedded packages' Word fields and formulas, the embedded budgets; rounds 3 and 4:
+  the end-record reader's short and empty cases assert, and where it finds the directory's end
+  agrees with `zipfile`'s start of the directory),
+  `test_spreadsheet_formulas.py` (181: fetching formulas refused in workbooks and CSV,
+  `HYPERLINK` kept; round 1: prefixed elements, Default-versus-Override discovery, shared and
+  array formulas, formulas split by a comment, CDATA or a processing instruction,
+  conditional-format, validation, x14 and pivot formulas, macro sheets, connections, query
+  tables and external links, CSV quote tricks, encodings and the reviewer's false positives,
+  the scan and CSV budgets and timings, a large ordinary workbook passing unparsed, a seeded
+  3,000-case differential fuzz of the CSV check against Python's csv module (600,000 offline
+  after round 2 and 600,000 more with round 3's value-only names, no difference); round 3,
+  `TestReviewRound3Formulas`: `WEBSERVICE`, `RTD`, `CALL`, `EXEC`, `REGISTER.ID` and the
+  `IMPORT*` functions passed as values or held by a defined name refused, range names such as
+  `Register` and `Image` ordinary, CSV cells passing one refused and ordinary ones passing),
+  `arkray/core/tests/test_text.py::TestBlankLookalikes` (4,237: blank-looking
+  characters refused, emoji and Indic joiners kept; round 1: every default-ignorable after a
+  letter, the variation-selector rules, the reviewer's whole legitimate list; round 2:
+  `TestReviewRound2`, 66, the curated selector bases and the Egyptian blanks; round 3:
+  `TestReviewRound3`, 33, selectors after →, ∑, ∞, ★, ✓, an emoji-default face or a playing
+  card refused while those with sequences (↔, ➡, ⭐, ✔, a red heart, a keycap, a
+  CJK compatibility variant, a Japanese ideographic variant, a Mongolian free variant) pass,
+  U+303F, a stray Tifinagh joiner and unassigned code points refused, newer emoji kept; round 4:
+  `TestReviewRound4`, 3, Tifinagh joiner pairs cost what plain letters cost). Two tests outside
+  the parsers follow from it: `arkray/pipeline/tests/test_custom_text_values.py` (3, round 4: a
+  custom text value over four times its limit is refused before it is cleaned, defence in
+  depth; one within the margin is still trimmed first), and
+  `tests/security/test_phase7_review_regressions.py` (58), whose `"ab"` + U+FE0F search query,
+  once "nothing to index", is now refused as invisible text before any lookup, in a test of
+  its own (a changed expectation, L12). Round 2 also:
+  `arkray/activities/tests/test_upload_parser_costs.py` (24 then; 90 now) holds every 10 MB upload shape the
+  reviews found (accented and Hindi CSVs, call logs, workbooks of spaced brackets or newlines,
+  a document with a worst-case embedded workbook, directory bombs outer and embedded) to 2 s
+  of process CPU and 40 MiB of traced memory, and the budget stops the costliest shapes; the
+  embedded tests cover renamed main parts and the end-record reader against `zipfile`'s on 7
+  shapes; the formula tests the reviewers' ordinary workbooks (quoted sheet names, structured
+  references) and call logs passing, eta shapes refused, and a fuzz reference of
+  `_formula_calls`' own shape with no difference allowed. Every upload parser draws on one
+  counted work pool per upload and answers "too large to check" past it. Round 3 adds to
+  `test_upload_parser_costs.py` every round-3 shape (small uploads that cost 4-6 s and 75-128 MiB
+  before) held to the same CPU (22) and memory (7) bounds, member floods past the budget, an
+  embedded package priced, the content-types and relationships parts' element cap, a part
+  named twice refused (4 spellings), content types read once a package, a formula of bare names
+  judged in linear time, and the CPU deadline (`TestUploadDeadline`: every check runs against
+  the clock, ordinary uploads far from it, 8 slow paths injected into the checks and slow reads
+  stopped, with a patched clock); round 4 the directory records (`TestReviewRound4Directories`,
+  `TestReviewRound4Records`: shapes too large under the units alone, ordinary records passing,
+  a name, extra field or comment just over 1 KiB too large, more records than entries refused
+  before `zipfile` reads them, the directory priced by its bytes).
+- **Infrastructure (L2, L13, L14, edge hardening; R155, R165, R166, R168, R169):**
+  `tests/architecture/test_edge_hardening.py` (24: API request rates per session, anonymous
+  address and address, session-cookie parsing, which bodies take a slot and whose, the TLS
+  policy, no version, the fixed redirect, stripped internal headers, `/_next/image`, the
+  `/api/v1` rewrite; round 1: pages take only body-less GET and HEAD, the small-body ceiling,
+  uploads without JSON-body slots, the header deadline, the added headers, the image location
+  in any letter case; `test_edge_limits.py`'s former check that a declared small body counts is
+  pinned here now as the spooled-body rule), `test_settings_module.py` (23: `ARKRAY_RUNTIME=production` makes an
+  unset settings module production's for `manage.py`, Celery and WSGI and refuses any other;
+  gunicorn's configuration defaults to production outside the image; round 1: `--settings=local`
+  or `test` refused under the runtime, an empty or blank variable counts as unset),
+  `test_ci_workflow.py` (`--source-ref`; round 1: deployment rules of exactly branch `main` and
+  tag `v*`, Dependabot's compose file-name pattern), `test_log_configuration.py` (every one-time
+  link page, `/unlock-sign-in/` included, redacted at the edge and sent `no-referrer`). Live
+  (2026-10-12, throwaway projects): the edge with a stub upstream (the L13 trickle, the L2
+  floods, an office at 149 requests a second, headers, TLS, the banner); round 1: the
+  reviewer's edge probes (256 trickled page POSTs, forged-session chunked bodies) and a
+  forged-session small-body probe (128 held, then 429).
+- **Rolling deploy from 73ff1e3:** `tests/integration/test_upgrade_from_release.py` now covers
+  `DEPLOYMENT_PREPARATION` (73ff1e3's leaf nodes): no NOT NULL column it can't fill, and inserts
+  through its own models into the outbox, `ai_conversation` and `identity_user`.
+- **Final gates on the merged tree** (2026-10-13, after the last code change, on this laptop;
+  `scripts/ci-local.sh`): secrets (gitleaks over every commit and the uncommitted tree),
+  workflows (actionlint, shellcheck) and the new `compose` job PASS; backend: ruff, format,
+  mypy strict (529 files), import-linter, migrations in sync, **14,202 tests passed, 0 failed,
+  96 % coverage**, pip-audit no known vulnerabilities (run directly: under `ci-local.sh` on
+  Windows its `/tmp` requirements path isn't converted); frontend: install, API types in sync,
+  eslint, typecheck, **1,036 tests passed**, production build, `pnpm audit` clean; images: both
+  builds, Trivy (no fixable HIGH/CRITICAL, no secret at any severity, both images), the
+  hardened smoke test, a release on a new database and the credential guard refusing
+  development values: 11 of 11 PASS. The CPU-time bounds of the upload and text tests scale
+  with a calibration of traced arkray code (`tests/cpu_scale.py`): they failed under `--cov`
+  on a loaded machine before (absolute bounds), and still fail with the quadratic mutations.
+- **Outside the default suite, on the merged tree** (2026-10-13): restore drill PASS (encrypted
+  backup, altered copy and planted plain dump refused, checksum, signature, restore, the
+  erasure-ledger replay); point-in-time recovery drill PASS, 20 of 20 checks (two erasures
+  re-applied by the replay after recovery); ClamAV drill PASS, 15 of 15 with the
+  end-to-end upload, scan and download (pinned image, the repository's clamd.conf); browser
+  regression on an isolated production-build stack 42 of 43 (8.2, the request reference,
+  needs the nginx edge this stack doesn't run, as before; 10.1, new: with
+  `MFA_REQUIRED_FOR_ALL_USERS` on, a sales user is gated in the UI and the API and sets up a
+  factor); **100-user capacity run** through the production-shaped stack's nginx
+  (credential guard, edge rates and write budgets in place; the virtual sales users run with
+  `MFA_REQUIRED_FOR_ALL_USERS` off, as they measure the CRM, not enrolment): 10/25/50/75/100
+  users, 600 s hold at 100 users, 87 requests/s, **0 errors, 0 rate-limited**, API p50 48 ms,
+  p95 162 ms, p99 277 ms (the previous release: p95 347 ms), 9-10 database connections;
+  881 creations without a duplicate, 0 lost updates, 0 deadlocks, 0 impossible states,
+  dashboard figures equal to the records for 97 users, 0 cross-user leaks. All of these migrate
+  every migration of this release on the 1M-lead benchmark copy first.
 
 ## What exists after the product enhancement phase
 

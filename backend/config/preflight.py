@@ -4,7 +4,9 @@ run inside the backend image with the deployment's own environment before it tak
 
 Production settings refuse an unsafe *configuration* at startup (config/settings/production.py);
 this checks that what the configuration points at is really there and really as safe:
-PostgreSQL (TLS actually in use, version, extensions, the runtime role, migrations, R63's
+the database's and Redis's passwords by the whole production credential rule
+(config/credentials.py; settings refuse only the published development values), PostgreSQL
+(TLS actually in use, version, extensions, the runtime role, migrations, R63's
 logging, timeouts, the connection budget), both Redis instances (TLS, a password actually
 required, eviction and persistence, two instances), SMTP (TLS with certificate and host name
 verified, AUTH), object storage (private, versioned, encrypted, Object Lock for the erasure
@@ -223,6 +225,53 @@ def _exempt(host: str) -> bool:
     """transport's rule: loopback, or a private name BACKEND_TLS_PRIVATE_HOSTS lists."""
     private = {name.strip().lower() for name in settings.BACKEND_TLS_PRIVATE_HOSTS}
     return transport.is_loopback(host) or host.strip().lower() in private
+
+
+# --- credentials --------------------------------------------------------------------------------
+def check_credentials(options: Options) -> Iterator[Result]:
+    """The database's and both Redis instances' passwords by the whole production rule
+    (config/credentials.py; adversarial review of 73ff1e3, M4): production settings refuse
+    only the development and placeholder values at startup. Offline: nothing is contacted."""
+    yield judge_credential(
+        "credentials.database",
+        "DATABASE_URL",
+        str(settings.DATABASES["default"].get("PASSWORD") or ""),
+    )
+    for role, setting in (("broker", "CELERY_BROKER_URL"), ("cache", "REDIS_CACHE_URL")):
+        url = str(getattr(settings, setting))
+        if urlsplit(url).scheme not in {"redis", "rediss", "unix"}:
+            yield Result(f"credentials.{role}", SKIP, f"{setting} isn't a Redis server")
+            continue
+        password = unquote(urlsplit(url).password or "")
+        yield judge_credential(f"credentials.{role}", setting, password, required=True)
+
+
+def judge_credential(check: str, setting: str, password: str, *, required: bool = False) -> Result:
+    from config import credentials
+
+    if not password:
+        if required:
+            return Result(check, FAIL, f"{setting} has no password: anyone who reaches it is in")
+        return Result(
+            check,
+            SKIP,
+            f"no password in {setting}: the server authenticates this client another way"
+            " (a client certificate, the platform's identity)",
+        )
+    problem = credentials.weakness(password)
+    if problem:
+        return Result(
+            check,
+            FAIL,
+            f"{setting}'s password {problem}: generate one for this environment"
+            " (config/credentials.py)",
+        )
+    return Result(
+        check,
+        PASS,
+        f"{setting}'s password: {credentials.MIN_LENGTH}+ characters, not a development or"
+        " placeholder value, not predictable",
+    )
 
 
 # --- PostgreSQL ---------------------------------------------------------------------------------
@@ -1572,6 +1621,7 @@ def judge_http_redirect(response: Response) -> Result:
 
 # --- output -------------------------------------------------------------------------------------
 GROUPS: dict[str, Callable[[Options], Iterable[Result]]] = {
+    "credentials": check_credentials,
     "database": check_database,
     "redis": check_redis,
     "smtp": check_smtp,

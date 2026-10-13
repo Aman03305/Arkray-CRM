@@ -234,6 +234,18 @@ One abusive user at a time, 8 parallel connections without pauses, while 50 norm
 
 No errors for the normal users in any phase; back to 74 ms p95 at once.
 
+**Write budgets and fair queues** (review of 73ff1e3, M6; added after these runs, not re-run
+under load): one account posting long notes within the 600 requests a minute kept the single
+indexing worker hours behind for everyone. Creating activities is now budgeted (1,000 per
+person in any 24 hours, 5,000 per customer, [reliability.md](reliability.md#write-budgets)) and
+the outbox takes turns between users ([reliability.md](reliability.md#fairness-between-users)).
+The load mix stays far inside both: its virtual users create about 70 activities an hour each
+(a 20-minute hold: about 25), and the benchmark data's busiest lead has 3,004 activities. The
+abusive account's own work still drains at the worker's speed; what changed is that it no
+longer delays anyone else's beyond one turn per user and the in-flight cap (for `ai_index`,
+100 full-length notes: about 12 minutes on one indexing process, [reliability.md](reliability.md#fairness-between-users)).
+A data-subject export of a customer at the budget was measured too ([reliability.md](reliability.md#export-sizing)).
+
 Since these runs the reference edge also limits requests in flight to 256 per client address
 (deep security audit H-1, [deployment.md](deployment.md#reverse-proxy)). The capacity test
 drives 100 users from one address (up to 6 connections each): at the recorded 89 requests a

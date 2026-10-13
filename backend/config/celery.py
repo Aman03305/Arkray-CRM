@@ -5,7 +5,6 @@ execution engine, PostgreSQL is the durable queue. See docs/reliability.md.
 """
 
 import logging
-import os
 import threading
 import time
 from typing import Any
@@ -13,7 +12,12 @@ from typing import Any
 from celery import Celery, Task
 from celery.signals import task_postrun, task_prerun, worker_init
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.local")
+from config.settings_module import LOCAL, choose_settings_module
+
+# Before the app below is created (Celery installs its Django fix-up only when the variable is
+# set): the development settings when nothing says otherwise, production's in the production
+# image and nothing else there (config/settings_module.py; adversarial review of 73ff1e3, L14).
+choose_settings_module(LOCAL)
 
 gate_logger = logging.getLogger("arkray.core.ledger_gate")
 

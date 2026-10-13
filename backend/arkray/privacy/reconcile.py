@@ -59,8 +59,11 @@ def reconcile() -> str:
     if not ledger.enabled():
         return "disabled"
     try:
-        last = ledger.head()
+        # The database's position first, then the head from there (one small read at any
+        # ledger size, security review M3): every entry it applied was written before its
+        # transaction committed, so a head read after it holds them all.
         applied_seq, applied_mac = ledger.applied()
+        last = ledger.head(applied_seq)
     except (ledger.LedgerError, DatabaseError):
         return "unavailable"  # the gate reports it; nothing to repair from here
     head_seq = last.seq if last else 0

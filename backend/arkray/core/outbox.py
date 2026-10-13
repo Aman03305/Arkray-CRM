@@ -24,6 +24,13 @@ Rules:
   `dead` and logged at ERROR for an operator. Nothing retries forever.
 - Raise `PermanentFailure` when retrying cannot help.
 - Payloads carry identifiers, not content (the handler reloads current state).
+- Fair between users (review of 73ff1e3, M6): each event carries a fairness key, the user whose
+  request queued it ('' for system work: beat, commands, the previous release), inherited by
+  the follow-up work its handler queues. The relay takes turns between keys instead of
+  claiming first-come, first-served (`_claim`), so one account's backlog (50 queued
+  re-indexings, a burst of long notes) can't hold everyone else's work behind it. Within one
+  key the order stays first-in, first-out; no handler relies on an order across keys (each
+  reloads the current state, and retries and several workers reorder events anyway).
 """
 
 from __future__ import annotations
@@ -33,7 +40,9 @@ import logging
 import random
 import re
 import uuid
+from collections import Counter
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -41,11 +50,11 @@ from uuid import UUID
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from django.db import transaction
-from django.db.models import F
+from django.db import connection, transaction
+from django.db.models import Count, F
 from django.utils import timezone
 
-from .context import current_correlation_id, update_context
+from .context import current_correlation_id, get_context, update_context
 from .logging import safe_exception_text
 from .models import OutboxEvent, OutboxStatus
 
@@ -53,6 +62,10 @@ logger = logging.getLogger(__name__)
 
 MAX_PAYLOAD_BYTES = 16 * 1024
 _ERROR_TEXT_LIMIT = 1000
+FAIRNESS_KEY_LENGTH = 64  # OutboxEvent.fairness_key
+# The fairness key of the event whose handler is running in this context: the work it queues
+# is the same user's (a continuation, the next batch), never a turn of its own as system work.
+_running_key: ContextVar[str | None] = ContextVar("arkray_outbox_fairness_key", default=None)
 
 HandlerFunc = Callable[[dict[str, Any]], None]
 Dispatcher = Callable[[OutboxEvent], None]
@@ -68,34 +81,63 @@ class OutboxHandler:
     func: HandlerFunc
     queue: str
     max_attempts: int
+    # Seconds the handler may run (Celery's soft limit; the hard one TIME_LIMIT_GRACE later)
+    # when the workers' default (CELERY_TASK_SOFT_TIME_LIMIT, 100 s) is too short for it: a
+    # data-subject export (review round 1, QUEUES-1). None: the default.
+    time_limit: int | None = None
 
 
 _HANDLERS: dict[str, OutboxHandler] = {}
 
 
+TIME_LIMIT_GRACE = 15  # seconds between a handler's soft and hard time limits
+
+
 def handler(
-    topic: str, *, queue: str = "default", max_attempts: int = 8
+    topic: str, *, queue: str = "default", max_attempts: int = 8, time_limit: int | None = None
 ) -> Callable[[HandlerFunc], HandlerFunc]:
-    """Register the handler for `topic`. Modules register handlers from AppConfig.ready()."""
+    """Register the handler for `topic`. Modules register handlers from AppConfig.ready().
+    `time_limit`: seconds it may run instead of the workers' default; its hard limit must end
+    before the running lease (OUTBOX_LEASE_SECONDS), or a slow run would be claimed again
+    while it still runs."""
 
     def register(func: HandlerFunc) -> HandlerFunc:
         if topic in _HANDLERS:
             raise ImproperlyConfigured(f"Duplicate outbox handler for topic {topic!r}.")
         if queue not in settings.OUTBOX_MAX_IN_FLIGHT:
             raise ImproperlyConfigured(f"Outbox queue {queue!r} is not configured.")
-        _HANDLERS[topic] = OutboxHandler(topic, func, queue, max_attempts)
+        if (
+            time_limit is not None
+            and time_limit + TIME_LIMIT_GRACE >= settings.OUTBOX_LEASE_SECONDS
+        ):
+            raise ImproperlyConfigured(
+                f"Outbox handler {topic!r}: its time limit must end before the running lease."
+            )
+        _HANDLERS[topic] = OutboxHandler(topic, func, queue, max_attempts, time_limit)
         return func
 
     return register
 
 
 # --- producing -----------------------------------------------------------------------------
+def current_fairness_key() -> str:
+    """Whose work is being queued here: the running event's key inside a handler (its
+    follow-up work stays that user's), else the signed-in user of the request, else '' (system
+    work: beat, management commands)."""
+    running = _running_key.get()
+    if running is not None:
+        return running
+    context = get_context()
+    return (context.user_id or "") if context is not None else ""
+
+
 def enqueue(
     topic: str,
     payload: dict[str, Any] | None = None,
     *,
     dedupe_key: str = "",
     delay_seconds: float = 0,
+    fairness_key: str | None = None,
 ) -> OutboxEvent | None:
     """Record background work. Call inside the transaction that makes the business change.
 
@@ -103,7 +145,11 @@ def enqueue(
     and has never been attempted; then None is returned. That event is row-locked until the
     caller's transaction ends, so the relay (SKIP LOCKED) cannot run it on pre-commit state.
     Coalescing is best-effort: if the candidate is locked by someone else, a new event is
-    written — duplicates are harmless because handlers are idempotent.
+    written — duplicates are harmless because handlers are idempotent. It ignores the
+    fairness key: two people's quick edits of one record are still one re-index.
+
+    `fairness_key`: whose turn the work takes (review of 73ff1e3, M6); by default
+    `current_fairness_key()`.
     """
     spec = _HANDLERS.get(topic)
     if spec is None:
@@ -111,6 +157,7 @@ def enqueue(
     payload = payload or {}
     if len(json.dumps(payload).encode()) > MAX_PAYLOAD_BYTES:
         raise ValueError("Outbox payloads carry identifiers, not content; payload too large.")
+    key = current_fairness_key() if fairness_key is None else fairness_key
 
     with transaction.atomic():  # a savepoint inside the caller's transaction
         if dedupe_key:
@@ -130,20 +177,35 @@ def enqueue(
             max_attempts=spec.max_attempts,
             available_at=timezone.now() + timedelta(seconds=delay_seconds),
             correlation_id=current_correlation_id()[:64],
+            fairness_key=key[:FAIRNESS_KEY_LENGTH],
         )
+
+
+def waiting(topic: str, dedupe_key: str) -> bool:
+    """Whether work of `topic` with `dedupe_key` is pending (due, or backing off after a
+    failure): it will run from its own start. A producer of follow-up work uses it to leave
+    its next step to fresh work that redoes it anyway (backpressure; ai.indexing). Work
+    already in flight doesn't count: it may be the caller's own event."""
+    return OutboxEvent.objects.filter(
+        topic=topic, dedupe_key=dedupe_key, status=OutboxStatus.PENDING
+    ).exists()
 
 
 # --- relaying ------------------------------------------------------------------------------
 def _dispatch_to_celery(event: OutboxEvent) -> None:
     from .tasks import process_outbox_event
 
-    process_outbox_event.apply_async(
-        args=(event.pk, str(event.claim_token)),
-        queue=event.queue,
+    options: dict[str, Any] = {
+        "queue": event.queue,
         # A message still queued when its dispatch lease ends is discarded by the worker;
         # by then the event has been (or will be) re-claimed under a new token.
-        expires=settings.OUTBOX_DISPATCH_LEASE_SECONDS,
-    )
+        "expires": settings.OUTBOX_DISPATCH_LEASE_SECONDS,
+    }
+    spec = _HANDLERS.get(event.topic)
+    if spec is not None and spec.time_limit is not None:  # else the workers' default
+        options["soft_time_limit"] = spec.time_limit
+        options["time_limit"] = spec.time_limit + TIME_LIMIT_GRACE
+    process_outbox_event.apply_async(args=(event.pk, str(event.claim_token)), **options)
 
 
 def _release(event_ids: list[int]) -> int:
@@ -184,23 +246,88 @@ def relay(*, dispatch: Dispatcher | None = None, now: datetime | None = None) ->
     return len(claimed)
 
 
+# The keys with pending work in a queue (a loose index scan: one probe per key, however long a
+# key's backlog), then each key's oldest due events, at most `per_key` of them, in index order
+# (outbox_pending_fair_idx, core.0008). 'pending' is a literal so the partial index applies.
+_FAIR_CANDIDATES = """
+WITH RECURSIVE pending_keys(fairness_key) AS (
+    (SELECT fairness_key FROM core_outbox_event
+      WHERE queue = %(queue)s AND status = 'pending'
+      ORDER BY fairness_key LIMIT 1)
+    UNION ALL
+    SELECT (SELECT e.fairness_key FROM core_outbox_event e
+             WHERE e.queue = %(queue)s AND e.status = 'pending'
+               AND e.fairness_key > k.fairness_key
+             ORDER BY e.fairness_key LIMIT 1)
+      FROM pending_keys k
+     WHERE k.fairness_key IS NOT NULL
+)
+SELECT due.id, k.fairness_key, due.available_at
+  FROM pending_keys k
+ CROSS JOIN LATERAL (
+       SELECT e.id, e.available_at FROM core_outbox_event e
+        WHERE e.queue = %(queue)s AND e.status = 'pending'
+          AND e.fairness_key = k.fairness_key AND e.available_at <= %(now)s
+        ORDER BY e.available_at, e.id
+        LIMIT %(per_key)s
+       ) AS due
+ WHERE k.fairness_key IS NOT NULL
+"""
+
+
+def _fair_order(queue: str, now: datetime, capacity: int, in_flight: Counter[str]) -> list[int]:
+    """Up to `capacity` due events of the queue, in the order the relay hands them out: keys
+    take turns. The k-th waiting event of a key that already has n events in flight is due in
+    turn n + k, and among equal turns the older event goes first (review of 73ff1e3, M6). So a
+    user whose work arrives behind another user's backlog is claimed within one claim per
+    user ahead of it, whose claims already in the broker count against them; a key alone
+    still gets every free slot (nothing is held back while there is room), and a key's own
+    events keep their first-in, first-out order."""
+    with connection.cursor() as cursor:
+        cursor.execute(_FAIR_CANDIDATES, {"queue": queue, "now": now, "per_key": capacity})
+        rows = cursor.fetchall()
+    by_key: dict[str, list[tuple[datetime, int]]] = {}
+    for event_id, key, available_at in rows:
+        by_key.setdefault(key, []).append((available_at, event_id))
+    ranked: list[tuple[int, datetime, int]] = []
+    for key, events in by_key.items():
+        for turn, (available_at, event_id) in enumerate(sorted(events), start=1):
+            ranked.append((in_flight[key] + turn, available_at, event_id))
+    ranked.sort()
+    return [event_id for _, _, event_id in ranked[:capacity]]
+
+
 def _claim(queue: str, max_in_flight: int, now: datetime) -> list[OutboxEvent]:
-    """Move up to the queue's free capacity of due events to in_flight under a new claim.
+    """Move up to the queue's free capacity of due events to in_flight under a new claim, in
+    the fair order (`_fair_order`), which is also the order they are dispatched in.
 
     The in-flight cap is what keeps broker queues bounded. It is a soft cap: two relays
-    racing may briefly exceed it, which is harmless.
+    racing may briefly exceed it, which is harmless. The candidates are read without locks,
+    then locked SKIP LOCKED and re-checked: one claimed by a concurrent relay, or held by a
+    producer coalescing into it (enqueue), is left for a later tick.
     """
     with transaction.atomic():
-        in_flight = OutboxEvent.objects.filter(queue=queue, status=OutboxStatus.IN_FLIGHT).count()
-        capacity = min(max_in_flight - in_flight, settings.OUTBOX_RELAY_BATCH_SIZE)
+        in_flight: Counter[str] = Counter(
+            dict(
+                OutboxEvent.objects.filter(queue=queue, status=OutboxStatus.IN_FLIGHT)
+                .values_list("fairness_key")
+                .annotate(count=Count("id"))
+                .order_by()
+            )
+        )
+        capacity = min(max_in_flight - in_flight.total(), settings.OUTBOX_RELAY_BATCH_SIZE)
         if capacity <= 0:
             return []
-        events = list(
-            OutboxEvent.objects.select_for_update(skip_locked=True)
-            .filter(queue=queue, status=OutboxStatus.PENDING, available_at__lte=now)
-            .order_by("available_at", "id")
-            .only("id", "topic", "queue")[:capacity]
-        )
+        order = _fair_order(queue, now, capacity, in_flight)
+        if not order:
+            return []
+        locked = {
+            event.pk: event
+            for event in OutboxEvent.objects.select_for_update(skip_locked=True)
+            .filter(pk__in=order, status=OutboxStatus.PENDING, available_at__lte=now)
+            .only("id", "topic", "queue", "fairness_key")
+        }
+        events = [locked[event_id] for event_id in order if event_id in locked]
         if events:
             token = uuid.uuid4()
             lease = now + timedelta(seconds=settings.OUTBOX_DISPATCH_LEASE_SECONDS)
@@ -288,6 +415,37 @@ def purge_done(*, finished_before: datetime) -> int:
     return purged
 
 
+@dataclass(frozen=True, slots=True)
+class QueueShares:
+    """One queue's pending work by fairness key, for an operator (`outbox_requeue --status`)."""
+
+    queue: str
+    pending: int
+    keys: int  # users (and system work, '') with pending work
+    busiest: list[tuple[str, int]]  # (fairness key, pending events), the largest first
+
+
+def pending_shares(*, top: int = 5) -> list[QueueShares]:
+    """Pending work per queue and key (one grouped read of the pending events' index)."""
+    per_key: dict[str, list[tuple[str, int]]] = {}
+    for queue, key, count in (
+        OutboxEvent.objects.filter(status=OutboxStatus.PENDING)
+        .values_list("queue", "fairness_key")
+        .annotate(count=Count("id"))
+        .order_by()
+    ):
+        per_key.setdefault(queue, []).append((key, count))
+    return [
+        QueueShares(
+            queue=queue,
+            pending=sum(count for _, count in keys),
+            keys=len(keys),
+            busiest=sorted(keys, key=lambda item: (-item[1], item[0]))[:top],
+        )
+        for queue, keys in sorted(per_key.items())
+    ]
+
+
 def redact_finished_payloads(topic: str, *, finished_before: datetime) -> int:
     """Blank the payloads of finished (done or dead) events of `topic`.
 
@@ -366,6 +524,8 @@ def process_event(event_id: int, claim_token: UUID | str) -> None:
         logger.error("outbox_event_dead", extra={**log, "reason": "attempts_exhausted"})
         return
 
+    # The work the handler queues is this event's user's (current_fairness_key).
+    running = _running_key.set(event.fairness_key)
     try:
         spec.func(event.payload)
     except PermanentFailure as exc:
@@ -375,6 +535,8 @@ def process_event(event_id: int, claim_token: UUID | str) -> None:
     except Exception as exc:  # noqa: BLE001 — every failure is recorded and retried (bounded)
         _record_failure(event, token, exc, log)
         return
+    finally:
+        _running_key.reset(running)
     _finish(event.pk, token, OutboxStatus.DONE)
 
 

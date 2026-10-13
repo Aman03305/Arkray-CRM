@@ -3,6 +3,7 @@
     manage.py outbox_requeue --id 123 --id 456          these events
     manage.py outbox_requeue --topic ai.index_source    every dead event of a topic
     manage.py outbox_requeue --queue email --since 2026-10-01T00:00:00+05:30
+    manage.py outbox_requeue --status                   pending work per queue and user
 
 Without `--yes` it is a dry run: it lists what would be re-queued and changes nothing. A
 re-queued event is pending again, due now, with a fresh attempt budget; handlers are
@@ -10,6 +11,11 @@ idempotent, so work that partly happened before is safe to run again. Skipped an
 events whose work is already pending or running again (the same topic and dedupe key), and
 events whose payload was blanked after its retention. For account emails prefer the Users
 page's *Resend invitation*: a re-queued email event mints a fresh link, sent now.
+
+`--status` changes nothing: per queue, the pending events, how many users they belong to and
+the busiest users' ids with their counts ('' is system work). The relay already takes turns
+between users (core.outbox, review of 73ff1e3, M6); this names whose backlog fills a queue when
+`arkray_outbox_top_key_share` alerts (docs/runbooks.md#outbox-backlog).
 """
 
 from __future__ import annotations
@@ -37,8 +43,14 @@ class Command(BaseCommand):
         )
         parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
         parser.add_argument("--yes", action="store_true", help="re-queue (otherwise a dry run)")
+        parser.add_argument(
+            "--status", action="store_true", help="show pending work per queue and user, only"
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
+        if options["status"]:
+            self._status()
+            return
         ids, topic, queue, since = options["ids"], options["topic"], options["queue"], None
         if not (ids or topic or queue or options["since"]):
             raise CommandError("Name the events: --id, --topic, --queue and/or --since.")
@@ -75,3 +87,15 @@ class Command(BaseCommand):
             f"Re-queued {len(result.requeued)}; skipped {len(result.superseded)} already"
             f" pending again and {len(result.redacted)} whose payload is gone."
         )
+
+    def _status(self) -> None:
+        shares = outbox.pending_shares()
+        if not shares:
+            self.stdout.write("No pending outbox work.")
+        for found in shares:
+            self.stdout.write(
+                f"{found.queue:<10} {found.pending:>8} pending from {found.keys} user(s)"
+            )
+            for key, count in found.busiest:
+                share = count / found.pending
+                self.stdout.write(f"  {key or '(system)':<38} {count:>8}  {share:>6.1%}")

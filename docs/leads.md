@@ -86,6 +86,30 @@ People's names don't fit a Western first/last pattern. Rules:
   AI prompts, the BOM); line/paragraph separators; private-use characters, lone surrogates
   and noncharacters. Zero-width joiner/non-joiner are **kept**: Malayalam, Devanagari and
   other Indic scripts need them.
+- Refused too, by code point, because they render blank or as a look-alike for a space
+  although they are letters, symbols or marks (adversarial review of 73ff1e3, L12): the Hangul
+  fillers (U+115F, U+1160, U+3164, U+FFA0), the Braille blank (U+2800), U+1D159, U+FFFC, the
+  combining grapheme joiner (U+034F) and the Khmer inherent vowels (U+17B4, U+17B5); the whole
+  tag block, its unassigned code points included; since its review round 1, every Unicode
+  default-ignorable code point except the zero-width joiner and non-joiner; and since round 2
+  the Egyptian blanks U+13441, U+13442 and U+16FE4.
+- A variation selector is accepted only where a sequence is defined (review rounds 2 and 3):
+  U+FE0E/U+FE0F after one of the 359 emoji with variation sequences (the official Unicode
+  `emoji-variation-sequences.txt`: ☎, ⚠, ↔ or ✔ take one; ✓, ★ or a letter never does), or after a keycap base (0-9, `#`, `*`) only when U+20E3 follows; U+FE00 after
+  `0` and the math symbols with standardized variants; U+FE00-FE02 only for the 1,002 CJK
+  compatibility sequences; ideographic variation selectors U+E0100-E013F after a CJK
+  ideograph; Mongolian ones after a Mongolian letter; never after another selector. So
+  `"City"` + U+FE0F + `"Lab"` is refused (a selector after a Latin letter renders as nothing).
+  Emoji (VS16, ZWJ sequences, keycaps, skin tones), country flags, Indic joiners, accents, CJK
+  with ideographic variants, Arabic, Thai, Korean and Mongolian pass (subdivision flags, built
+  from tag characters, stay refused as before; standardized variants of Myanmar, Phags-pa and
+  Egyptian letters, and registered ideographic variants above U+E013F, are refused, rare).
+- Refused as well since review round 3: U+303F, the Tifinagh joiner U+2D7F anywhere but
+  between two Tifinagh letters (checked one character at a time: round 4), and **code points
+  unassigned in the server's Unicode data** (Python's, Unicode 15.0), outside the emoji blocks:
+  characters added since (CJK Extension I, scripts such as Tulu-Tigalari and Garay) are refused
+  until the server's Python is upgraded; new emoji pass. The same rules apply to every text
+  write path (`core.text`), file names included.
 - A value with nothing visible in it (only joiners or combining marks) counts as empty, so
   an invisible "name" can't satisfy the name rule.
 

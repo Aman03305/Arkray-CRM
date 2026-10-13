@@ -71,18 +71,36 @@ def outbox() -> list[Gauge]:
         "Seconds since the oldest in-flight event was handed to the broker without a worker"
         " starting it (0 when none), per queue.",
     )
+    # Fairness between users (review of 73ff1e3, M6; core.outbox): how many users' work is
+    # waiting, and how much of it is the busiest one's. Counts only, never a user.
+    keys = Gauge(
+        "arkray_outbox_pending_keys",
+        "Users with pending outbox work (system work counting as one), per queue.",
+    )
+    share = Gauge(
+        "arkray_outbox_top_key_share",
+        "Share of the pending outbox events that belong to the busiest user (0 to 1; 0 when"
+        " none), per queue.",
+    )
     with connection.cursor() as cursor:
         # One branch per status, so each reads its own partial index; a single
         # `status IN (...)` scanned the whole table, done rows included (Phase 10 review).
+        # Pending work per fairness key, in the same query (the scrape's query count stays
+        # constant): an index-only read of outbox_pending_fair_idx.
         cursor.execute(
-            "(SELECT queue, 'pending', count(*) FROM core_outbox_event"
-            " WHERE status = 'pending' GROUP BY 1)"
-            " UNION ALL (SELECT queue, 'in_flight', count(*) FROM core_outbox_event"
+            "(SELECT queue, 'pending', fairness_key, count(*) FROM core_outbox_event"
+            " WHERE status = 'pending' GROUP BY queue, fairness_key)"
+            " UNION ALL (SELECT queue, 'in_flight', '', count(*) FROM core_outbox_event"
             " WHERE status = 'in_flight' GROUP BY 1)"
-            " UNION ALL (SELECT queue, 'dead', count(*) FROM core_outbox_event"
+            " UNION ALL (SELECT queue, 'dead', '', count(*) FROM core_outbox_event"
             " WHERE status = 'dead' GROUP BY 1)"
         )
-        found = {(queue, status): n for queue, status, n in cursor.fetchall()}
+        found: dict[tuple[str, str], int] = {}
+        per_key: dict[str, list[int]] = {}
+        for queue, status, _key, n in cursor.fetchall():
+            found[(queue, status)] = found.get((queue, status), 0) + n
+            if status == "pending":
+                per_key.setdefault(queue, []).append(n)
         cursor.execute(
             "SELECT queue, EXTRACT(EPOCH FROM now() - min(available_at))"
             " FROM core_outbox_event WHERE status = 'pending' AND available_at <= now()"
@@ -101,7 +119,10 @@ def outbox() -> list[Gauge]:
             events.add(found.get((queue, status), 0), queue=queue, status=status)
         age.add(round(oldest.get(queue, 0.0), 1), queue=queue)
         undelivered.add(round(waiting.get(queue, 0.0), 1), queue=queue)
-    return [events, age, undelivered]
+        counts = per_key.get(queue, [])
+        keys.add(len(counts), queue=queue)
+        share.add(round(max(counts) / sum(counts), 3) if counts else 0, queue=queue)
+    return [events, age, undelivered, keys, share]
 
 
 def database() -> list[Gauge]:
@@ -181,18 +202,18 @@ def erasure_ledger_gate() -> list[Gauge]:
     While it is closed every API request and readiness answer 503, which the platform's
     probes saw only as "not ready" (deployment preparation): this names the cause, so the
     alert can point at the right runbook. Checked as the readiness probe and every API request
-    check it (at most every ERASURE_LEDGER_CHECK_INTERVAL_S, one small query and one ledger
-    read, each bounded by its client's timeouts), in the scrape's own thread: a probe thread
-    would open a database connection that nothing ever closes. The label is the gate's
-    status word only (ok, disabled, settling, behind, ahead, diverged, tampered,
-    unavailable)."""
+    check it (at most every ERASURE_LEDGER_CHECK_INTERVAL_S, one small query in the scrape's
+    own thread, then the ledger read on the gate's store-only thread), waiting at most
+    CHECK_WAIT_S for that read like them (`bounded_status`; adversarial review of 73ff1e3, M3:
+    a large or slow ledger never holds a scrape). The label is the gate's status word only
+    (ok, disabled, settling, behind, ahead, diverged, tampered, unavailable)."""
     gauge = Gauge(
         "arkray_erasure_ledger_gate_open",
         "1 while this process's erasure-ledger gate is open; 0 while it closes the API"
         " (docs/runbooks.md#erasure-ledger-behind). The status label says why.",
     )
     try:
-        status = ledger_gate.GATE.status()
+        status = ledger_gate.bounded_status()
     except Exception as exc:  # noqa: BLE001 — the gate maps every ledger and database failure
         logger.warning(
             "metrics_gauge_failed", extra={"gauge": gauge.name, "exc_type": type(exc).__name__}

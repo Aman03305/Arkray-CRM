@@ -1,0 +1,86 @@
+# Dependency updates (adversarial review of 73ff1e3, L14: docs/security.md named Dependabot,
+# but nothing configured it, so the lockfiles, the action pins and the images' digests went
+# stale until Trivy or an audit failed). Weekly, one grouped pull request per ecosystem for
+# version updates, which CI tests like any other change (tests, pip-audit, pnpm audit, Trivy
+# on the images); security updates arrive on their own as soon as they are published. A new
+# release waits a week before it is proposed (cooldown): most hijacked or broken releases are
+# pulled within days. Moving a pin stays a reviewed change (docs/deployment.md#images).
+# tests/architecture/test_ci_workflow.py checks every ecosystem is covered.
+version: 2
+updates:
+  # backend/pyproject.toml and uv.lock (CI's `uv sync --locked` checks they agree).
+  - package-ecosystem: uv
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      backend:
+        applies-to: version-updates
+        patterns: ["*"]
+
+  # frontend/package.json and pnpm-lock.yaml.
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      frontend:
+        applies-to: version-updates
+        patterns: ["*"]
+
+  # The Dockerfiles' base images and the BuildKit frontend, pinned by tag and digest: both move.
+  - package-ecosystem: docker
+    directories:
+      - /backend
+      - /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      images:
+        applies-to: version-updates
+        patterns: ["*"]
+
+  # The Compose files' images: docker-compose.yml and infrastructure/compose.production.yml,
+  # both names Dependabot recognises (dependabot-core's docker_compose FILENAME_REGEX,
+  # `(docker-)?compose(-[\w]+)?(?>\.[\w-]+)?\.ya?ml`, checked in review round 1, INFRA-9;
+  # tests/architecture/test_ci_workflow.py applies it). Every pin stays a digest
+  # (tests/architecture/test_compose_hardening.py).
+  - package-ecosystem: docker-compose
+    directories:
+      - /
+      - /infrastructure
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      compose-images:
+        applies-to: version-updates
+        patterns: ["*"]
+
+  # The workflows' actions, pinned to a commit with its release in a comment: Dependabot
+  # moves both. The tool images their scripts name (Trivy, actionlint, gitleaks, PostgreSQL)
+  # aren't seen by it: move them by hand, in every workflow and scripts/ci-local.sh at once.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        applies-to: version-updates
+        patterns: ["*"]

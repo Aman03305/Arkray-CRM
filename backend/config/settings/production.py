@@ -3,11 +3,12 @@
 import ipaddress
 import os
 import re
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from django.core.exceptions import ImproperlyConfigured
 
 from arkray.core import transport
+from config.credentials import is_development_value
 
 from .base import *  # noqa: F403
 from .base import env
@@ -134,6 +135,13 @@ _mfa_required = os.environ.get("MFA_REQUIRED_FOR_ADMINS")
 if _mfa_required is not None and _mfa_required.strip().lower() not in {"true", "false", "1", "0"}:
     raise ImproperlyConfigured("MFA_REQUIRED_FOR_ADMINS must be true or false.")
 MFA_REQUIRED_FOR_ADMINS = env.bool("MFA_REQUIRED_FOR_ADMINS", default=True)
+# Two-step verification for every user (review of 73ff1e3, L1): on by default here, but an
+# organisational policy, so false is accepted (docs/deployment.md); an unrecognisable value
+# is refused like the administrators' setting.
+_mfa_everyone = os.environ.get("MFA_REQUIRED_FOR_ALL_USERS")
+if _mfa_everyone is not None and _mfa_everyone.strip().lower() not in {"true", "false", "1", "0"}:
+    raise ImproperlyConfigured("MFA_REQUIRED_FOR_ALL_USERS must be true or false.")
+MFA_REQUIRED_FOR_ALL_USERS = env.bool("MFA_REQUIRED_FOR_ALL_USERS", default=True)
 # Rate limits (R77): DRF parses them on the first request, so a typo would surface as
 # 500s there instead of here.
 _RATE = re.compile(r"[1-9][0-9]*/(s|sec|second|m|min|minute|h|hour|d|day)")
@@ -312,6 +320,25 @@ if _transport_problems and not _insecure_opt_in:
     raise ImproperlyConfigured(
         " ".join(_transport_problems)
         + " See docs/security.md#backend-tls (BACKEND_TLS_PRIVATE_HOSTS for container names)."
+    )
+# A database or Redis password the repository publishes (`arkray_dev_only_password`) or a
+# template's placeholder (`change-me-...`): adversarial review of 73ff1e3, M4, where the
+# production stack ran on `.env.example`'s superuser password. The whole strength rule is
+# the production stack's guard's and `manage.py preflight`'s (config/credentials.py); the
+# local stack's opt-in keeps its published password (and is refused for public names).
+_development_passwords = [
+    name
+    for name, password in (
+        ("DATABASE_URL", str(DATABASES["default"].get("PASSWORD") or "")),  # noqa: F405
+        ("CELERY_BROKER_URL", unquote(urlsplit(CELERY_BROKER_URL).password or "")),  # noqa: F405
+        ("REDIS_CACHE_URL", unquote(urlsplit(REDIS_CACHE_URL).password or "")),  # noqa: F405
+    )
+    if password and is_development_value(password)
+]
+if _development_passwords and not _insecure_opt_in:
+    raise ImproperlyConfigured(
+        f"{', '.join(_development_passwords)} carry a development or placeholder password:"
+        " generate one for this environment (config/credentials.py, scripts/init-prod-env.sh)."
     )
 if _insecure_opt_in and not all(_is_local_host(host) for host in ALLOWED_HOSTS):  # noqa: F405
     # The opt-in waives every check above at once (Redis without a password, the role

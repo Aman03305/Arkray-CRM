@@ -272,6 +272,30 @@ MFA_SETUP_MAX_ATTEMPTS = 5
 # The name authenticator apps show next to the account.
 MFA_ISSUER = "Arkray CRM"
 
+# --- Account takeover limits (review of 73ff1e3, L1 and L3; docs/authorization.md) ----------
+# Policy values the product owner confirms (one place). An unrecognised browser's failure
+# budget (LOGIN_ACCOUNT_FAILURE_THRESHOLD) is per account and network: an IPv4 /24, an IPv6
+# /64. LOGIN_DAILY_FAILURE_CAP failures from unrecognised browsers within LOGIN_DAILY_WINDOW_S
+# (whatever networks they came from, sign-ins in between notwithstanding) lock the account's
+# password sign-in from every unrecognised browser; browsers that signed in to it before
+# keep working. The owner is emailed an unlock link (SIGN_IN_UNLOCK_TTL_S); a password reset
+# or an administrator lifts it too, and it lifts by itself after LOGIN_LOCK_MAX_AGE_S. The
+# window must fit in AUTH_THROTTLE_RETENTION_S (system check arkray.E031).
+LOGIN_NETWORK_IPV4_PREFIX = 24
+LOGIN_DAILY_FAILURE_CAP = 50
+LOGIN_DAILY_WINDOW_S = 24 * 60 * 60
+LOGIN_LOCK_MAX_AGE_S = 30 * 24 * 60 * 60
+SIGN_IN_UNLOCK_TTL_S = 24 * 60 * 60
+# Two-step verification for every role, not only administrators (MFA_REQUIRED_FOR_ADMINS):
+# an organisational policy (docs/deployment.md). On by default in production; off here, for
+# development and tests (dedicated tests turn it on).
+MFA_REQUIRED_FOR_ALL_USERS = env.bool("MFA_REQUIRED_FOR_ALL_USERS", default=False)
+# An account whose password or email an administrator changed (or whose second factor an
+# administrator reset, or that an administrator created with a password) can't be made an
+# administrator for this long: promote-then-shield (L3) took over an ordinary account and
+# made it one no other administrator may repair (R100).
+ADMIN_PROMOTION_COOLING_OFF_S = 7 * 24 * 60 * 60
+
 # --- Security headers (API responses) ------------------------------------------------------
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "same-origin"
@@ -388,6 +412,8 @@ SPECTACULAR_SETTINGS = {
         "NegotiationSourceEnum": "arkray.pipeline.models.NegotiationSource",
         "ScanStatusEnum": "arkray.activities.models.ScanStatus",
         "MfaLockEnum": "arkray.identity.models.MfaLock",
+        # The figures a closed deal's correction may change (review of 73ff1e3, M2).
+        "CorrectedFieldEnum": "arkray.pipeline.models.CorrectedField",
     },
 }
 
@@ -540,6 +566,21 @@ OUTBOX_DONE_RETENTION_DAYS = env.int("OUTBOX_DONE_RETENTION_DAYS", default=7)
 OUTBOX_PURGE_BATCH = 5000
 OUTBOX_PURGE_MAX_BATCHES = 100  # per run: at most 500,000 rows an hour
 
+# --- Write budgets (review of 73ff1e3, M6; docs/reliability.md#write-budgets) ----------------
+# One account could post a 10,000-character note every 100 ms all day within the API's 600
+# requests a minute: the indexing worker fell hours behind for everyone, and one customer could
+# collect enough activities to make their export or erasure fail. Both budgets are far above
+# real use (the capacity mix's virtual users, much brisker than people, create about 70
+# activities an hour); 0 turns either off.
+# Tasks, meetings and notes one person may create in any 24 hours (429 with Retry-After),
+# counted from the activities they created (never deleted: archiving gives nothing back).
+ACTIVITY_MAX_CREATED_PER_USER_PER_DAY = env.int(
+    "ACTIVITY_MAX_CREATED_PER_USER_PER_DAY", default=1000
+)
+# Activities one customer (lead) may have, archived ones included (422
+# `activity_limit_reached`): the worst case of a data-rights export or erasure.
+ACTIVITY_MAX_PER_CUSTOMER = env.int("ACTIVITY_MAX_PER_CUSTOMER", default=5000)
+
 # --- Attachments (docs/activities.md#attachments) --------------------------------------------
 # Files on notes. The bytes live in private object storage, never in PostgreSQL: a private
 # directory locally (never served by a web server), private S3-compatible storage in
@@ -684,8 +725,9 @@ STORAGES = {
     "attachments": _ATTACHMENT_BACKEND,
     "exports": _EXPORT_BACKEND,
 }
-# How long a built export can be downloaded, its size cap (attachments beyond it are listed,
-# not included), and how many an administrator may have queued and request per hour.
+# How long a built export can be downloaded, its size cap (the archive as stored, compressed:
+# the data must fit; attachments are added while they fit, the rest listed), and how many an
+# administrator may have queued and request per hour.
 EXPORT_TTL_HOURS = env.int("EXPORT_TTL_HOURS", default=24)
 EXPORT_MAX_BYTES = env.int("EXPORT_MAX_BYTES", default=100 * 1024 * 1024)
 EXPORT_MAX_PENDING_PER_ADMIN = env.int("EXPORT_MAX_PENDING_PER_ADMIN", default=3)

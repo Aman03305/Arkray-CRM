@@ -154,10 +154,15 @@ def test_the_deals_own_text_is_withheld_but_its_figures_stay(admin, user_a, user
     assert content["untrusted_text"] is None
     assert "lost_reason" not in content
     assert content["value"]["amount"] == "950000.00"
-    assert content["negotiation_history"][0]["agreed_cpt"] == "Rs 18 per test"
+    # The agreed price stays; its CPT is free text, withheld with the customer as the API
+    # withholds it (adversarial review of 73ff1e3, L6: one rule, pipeline.customer).
+    assert content["negotiation_history"][0]["price"]["amount"] == "900000.00"
+    assert "agreed_cpt" not in content["negotiation_history"][0]
     history, _ = _run(own(user_a), "get_negotiation_history", {"ref": ref(deal)})
     assert history["title"] == NEUTRAL
     assert history["history"][0]["price"]["amount"] == "900000.00"
+    assert "agreed_cpt" not in history["history"][0]
+    assert history["latest_agreed_cpt"] is None
 
 
 def test_retrieval_never_quotes_the_deal_after_reassignment(admin, user_a, user_b, won):

@@ -24,6 +24,12 @@ misspelt name, an old address) is served here, narrowly:
   too. Audited by field names only (`lead.corrected`, `opportunity.customer_corrected`), and
   the domain events re-index Ask Arkray from the corrected text; search and the dashboard read
   the live columns.
+- **Nothing about deals the caller can't see** (adversarial review of 73ff1e3, L5): the
+  copies of deals outside the caller's workspace (a closed deal its previous owner kept after
+  the lead was reassigned) follow all the same, the customer being one person, but the answer
+  counts only the deals the caller can see (`opportunities`), and those other writes are
+  audited as the system's (no actor; `cause`: the lead's correction, which names who asked),
+  never as the caller's acts on records they can't see.
 """
 
 from __future__ import annotations
@@ -81,7 +87,7 @@ PHONES = ("phone", "mobile", "alternate_phone")
 class Correction:
     lead: Lead
     fields: tuple[str, ...]
-    opportunities: int  # how many deals' customer copies followed
+    opportunities: int  # how many deals the caller can see had their customer copy follow
 
 
 def _name(first: str, last: str) -> str:
@@ -193,13 +199,21 @@ def correct_customer(
                 fields=fields,
             )
         )
-        followed = _follow(actor, lead, before, after)
+        followed = _follow(actor, scope, lead, before, after)
     return Correction(lead_selectors.lead_by_id(lead.pk), fields, followed)
 
 
-def _follow(actor: User, lead: Lead, before: dict[str, Any], after: dict[str, Any]) -> int:
+def _follow(
+    actor: User, scope: AccessScope, lead: Lead, before: dict[str, Any], after: dict[str, Any]
+) -> int:
+    """Correct every copy of the lead's details on its deals (the lead is locked); how many
+    of the corrected deals the caller can see (L5)."""
     now = timezone.now()
     entries: list[audit.Entry] = []
+    seen = set(
+        scope.apply(Opportunity.objects.filter(lead_id=lead.pk)).values_list("pk", flat=True)
+    )
+    shown = 0
     copies = (
         Opportunity.objects.select_for_update(no_key=True, of=("self",))
         .filter(lead_id=lead.pk)
@@ -225,14 +239,20 @@ def _follow(actor: User, lead: Lead, before: dict[str, Any], after: dict[str, An
         opportunity.updated_at = now
         opportunity.save(update_fields=[*written, "version", "updated_at"])
         reported = tuple(sorted(written))
+        mine = opportunity.pk in seen
+        shown += mine
         entries.append(
             audit.Entry(
                 AUDIT_OPPORTUNITY_CORRECTED,
-                actor.pk,
+                actor.pk if mine else None,
                 "opportunity",
                 opportunity.pk,
-                opportunity.owner_id if opportunity.owner_id != actor.pk else None,
-                {"fields": list(reported), "lead_id": str(lead.pk)},
+                opportunity.owner_id if not mine or opportunity.owner_id != actor.pk else None,
+                {
+                    "fields": list(reported),
+                    "lead_id": str(lead.pk),
+                    **({} if mine else {"cause": AUDIT_LEAD_CORRECTED}),
+                },
             )
         )
         publish(
@@ -246,4 +266,4 @@ def _follow(actor: User, lead: Lead, before: dict[str, Any], after: dict[str, An
             )
         )
     audit.record_many(entries)
-    return len(entries)
+    return shown

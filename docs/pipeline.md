@@ -66,7 +66,12 @@ Seeing a pipeline never implies configuring it (403). A new pipeline belongs to 
 workspace it is created in: one's own; a user's (an administrator, `created_by` = the
 administrator); organisation-wide, a shared one (`config.manage`). Limits: 25 active pipelines
 per owner (and 25 shared), 20 active stages per pipeline, 30 custom fields, 50 choices per
-field. Names are plain text (no markup), bounded.
+field. Names are plain text (no markup), bounded. An owner keeps at most 25 archived pipelines
+(`MAX_ARCHIVED_PIPELINES_PER_OWNER`, the shared ones counting as one owner: archiving one more
+is a 422, "restore one and reuse it"), and a pipeline at most 100 removed custom fields
+(`MAX_ARCHIVED_FIELDS_PER_PIPELINE`: a removal that would keep more is a 422, nothing changed;
+renaming and adding still work) (adversarial review of 73ff1e3, its review round 1, DEALS-1
+and DEALS-3: neither had a limit, and lists grew with them).
 
 **API** (all under `/api/v1/workspaces/{ws}/`): `GET/POST pipelines` (`?archived=true` for
 archived ones), `GET/PATCH pipelines/{id}` (rename, `{version, name}`), `PUT
@@ -75,7 +80,12 @@ custom_fields}`, `POST pipelines/{id}/archive|restore {version}`. Every change r
 version the client saw (409 otherwise) and bumps it; audit: `pipeline.created`, `.renamed`,
 `.stages_changed` (stage keys added, changed, archived, deleted), `.fields_changed` (field
 ids), `.archived`, `.restored`. `GET /api/v1/config/pipelines` (kept for compatibility) lists
-the shared pipelines only.
+the shared pipelines only. Pipeline **lists** (`GET pipelines`, `/config/pipelines`) carry each
+pipeline's flags and active stages only, at most about 5 KB a pipeline; its custom fields come
+with the pipeline alone (`GET pipelines/{id}`, and every configuration response), which the
+web app loads for the one pipeline it shows or edits (review round 1, DEALS-1: a list carried
+every listed pipeline's whole configuration, about 200 KB for a maxed one, up to 500 listed;
+an API shape change, `PipelineListItem`).
 
 **Editing stages** is one operation, replacing the active stage list in order: stages with
 an `id` are renamed, retyped, re-probabilised and reordered; stages without one are added;
@@ -84,9 +94,15 @@ active stages left out are removed:
 - a stage holding **current (non-archived) opportunities** can't be removed (422 naming it and
   the count: move them first);
 - a stage anything references (an archived opportunity, stage history, a negotiated price) is
-  **archived** (kept, hidden, its position moved out of the board's range; history keeps the
-  name it recorded);
-- a stage nothing ever referenced is **deleted**;
+  **archived** (retired: kept, hidden, its position moved out of the board's range; history
+  keeps the name it recorded). A pipeline keeps at most `MAX_RETIRED_STAGES_PER_PIPELINE`
+  (100) retired stages: a change that would retire one more is refused whole (422 "This
+  pipeline already keeps N removed stages … the most a pipeline keeps (100). Keep this stage
+  (rename it if you like), or start a new pipeline."), counted under the pipeline's row lock, and a retired stage's position
+  never leaves its small-integer column (422, never a 500). Adversarial review of 73ff1e3,
+  L10: retirements piled up without limit, every stage edit failed with a 500 after about
+  22,700, and every pipeline payload carried every retired stage;
+- a stage nothing ever referenced is **deleted** (also at the cap);
 - a stage holding any opportunity can't change between open, won and lost (422; open ↔
   negotiation is fine); won is always 100 %, lost 0 %; at least one open stage remains.
 
@@ -131,7 +147,8 @@ A stage of type **negotiation** (an open stage, `is_negotiation`; its name is fr
 - **re-entering** after leaving negotiation asks for both again;
 - while negotiating, `POST …/opportunities/{id}/negotiated-prices {version, price,
   agreed_cpt}` records a revision; both are required and either may change (the same price
-  and CPT as the latest row in this stage is a harmless retry; 422 outside negotiation);
+  and CPT as the latest row in this stage is a harmless retry; 422 outside negotiation, and
+  422 `deal_closed` on a won or lost deal: [Closed deals](#closed-deals));
 - every price is **appended** with its CPT to `pipeline_negotiation_price` (append-only: ORM
   guard and a PostgreSQL trigger): price, agreed CPT, currency, the stage and its name then,
   source (`stage_entry`, `revision`, `creation`), the opportunity's version, actor, subject
@@ -171,8 +188,14 @@ A removed field is archived: its values stay on the deals, hidden, unless they a
 purpose (privacy remediation, [privacy.md](privacy.md#custom-fields)): `delete_removed_values`
 with the `PUT …/fields` that removes them, or `POST …/pipelines/{id}/fields/{field id}/delete-values`
 with `{"confirm_name": "<the field's name>"}` for an already removed field (202). The request
-is audited and recorded in the erasure ledger; a job removes the key from every deal of the
-pipeline in batches of 1,000 with one atomic `custom_fields - key` per row (`FOR UPDATE SKIP
+is audited, and queues one job for every field it names that a deal still holds a value of
+(none when nothing is left); a person may ask for at most 100 fields' values to be deleted in
+any 24 hours (`field_values.MAX_VALUE_DELETIONS_PER_USER_PER_DAY`; 429 `rate_limited` with
+`Retry-After`, the whole request refused, nothing changed: each deletion is written to the
+erasure ledger for good; adversarial review of 73ff1e3, M3, and its review round 1,
+LEDGER-2). The job removes the key from every deal of the
+pipeline in batches of 1,000, recording each batch's fields in one erasure-ledger entry in that
+batch's transaction with one atomic `custom_fields - key` per row (`FOR UPDATE SKIP
 LOCKED`, so a concurrent edit of the deal's other values is kept and a row another transaction
 holds is taken in a later batch), skips deals whose lead is under a legal hold, and audits the
 counts. Audit records the ids of changed fields, never values. Defining a field never changes
@@ -219,7 +242,10 @@ pipeline, checked at commit so a reorder can swap positions in one transaction),
   while it holds any. A stage's **category** (and pipeline) can't change while any
   opportunity uses it: the composite foreign key below refuses it.
 - Configuration API: `GET /api/v1/config/pipelines` (every signed-in user): pipelines with
-  their stages in order, retired ones flagged. The UI hard-codes no stage list.
+  their active stages in order. Retired stages aren't listed in any pipeline payload (a deal
+  in one carries its stage in its own payload; adversarial review of 73ff1e3, L10); the board
+  and Ask Arkray's stage breakdown add a retired stage only while it holds a counted deal. The
+  UI hard-codes no stage list.
 
 ### Opportunities
 
@@ -445,7 +471,8 @@ offers it as **Change owner** and says so.
   reopening) resets the probability to the new stage's default and clears the flag.
   Predictable, and a stale estimate never survives new information.
 - Won is always 100 % and lost 0 % (CHECKs on stages *and* opportunities; an override on a
-  closed opportunity is refused, and the flag can't be set while closed).
+  closed opportunity is refused, 422 `deal_closed` like its other figures, and the flag can't
+  be set while closed: [Closed deals](#closed-deals)).
 - Changing a stage's default later applies to opportunities entering it afterwards;
   existing ones keep what they adopted (no mass rewrite).
 
@@ -500,19 +527,83 @@ not archived (422), target stage active and of the same pipeline (400), lost rea
 for a lost target (400). Moving backwards between open stages is allowed.
 
 The UI asks for confirmation before closing (won/lost, with an optional reason for lost)
-and before reopening; open → open moves happen at once.
+and before reopening; open → open moves happen at once. A won or lost deal's value,
+probability and dates can't be edited (422 `deal_closed`): reopen it, or an administrator
+corrects them ([Closed deals](#closed-deals)).
 
 ## Stage history
 
 `pipeline_stage_history` (append-only: `AppendOnlyModel` + a PostgreSQL trigger refusing
 UPDATE and DELETE): one row per transition **and** one for the creation (`from_stage` NULL).
 Each row keeps `from_stage`/`to_stage` ids **and** copies of their names and categories
-(readable after a stage is renamed or retired), the value and probability entering the
-stage, the lost reason, the actor and the time. A CHECK keeps rows complete (a creation
+(readable after a stage is renamed or retired), the value, probability, expected close date
+and opportunity date entering the stage (the two dates since review round 1 of the
+adversarial review of 73ff1e3, DEALS-2, `pipeline.0012`; NULL on older rows), the lost reason,
+the actor and the time. A CHECK keeps rows complete (a creation
 has no "from"; any other row has a whole one). It is written in the transaction that
 moves the stage, under the opportunity's lock, so `from_stage` is always the true previous
 stage (tested under concurrency: every history is an unbroken chain ending in the current
 stage). `GET …/opportunities/{id}/history` pages it, newest first (50 per page).
+
+## Closed deals
+
+A won or lost deal is part of the sales record: won revenue, the board's Won column, the
+dashboard and Ask Arkray's figures, commissions and targets are computed from it. Its owner
+could `PATCH` a won deal's value from 100,000 to 9,999,999 with the current version, and the
+audit named the field only (adversarial review of 73ff1e3, M2; R149). Now:
+
+- **Frozen for the normal edit, whoever asks** (`services.CLOSED_FROZEN`): `value`,
+  `probability`, `expected_close_date` and `opportunity_date` of a won or lost deal can't be
+  changed through `PATCH …/opportunities/{id}`, by its owner, its previous owner or an
+  administrator in any workspace: 422 `deal_closed` ("This deal is won: its value,
+  probability and dates are part of its sales record. Reopen the deal to change them, or ask
+  an administrator to correct them."), `details.fields` naming the fields the request would
+  change, checked right after the version and archive checks and before anything is compared
+  or written. Only a change counts: the stored value sent back (an edit form, a retry) is no
+  change, and `probability: null` asks for the stage's default, which a closed deal already
+  has (100 or 0). A new agreed price on a closed deal is refused the same way
+  (`…/negotiated-prices`: 422 `deal_closed`). The deal's text, instrument and custom values
+  stay editable as before (no report computes from them); `closed_at` changes only by a
+  reopen and a close.
+- **Reopening** (a move to an open stage) makes the figures editable again; closing freezes
+  them again. The [stage history](#stage-history) records the value, probability and both
+  dates at every transition, so a reopen, an edit and a new close leave the old figures and
+  the new ones on record (review round 1, DEALS-2: the old dates were lost). Reopening needs
+  no reason and no step-up, and a salesperson may create a deal directly in Won or Lost:
+  both are open product decisions (R149).
+- **An administrator's correction**: `POST /api/v1/workspaces/{ws}/opportunities/{id}/correct
+  {version, reason, value?, expected_close_date?, opportunity_date?}` → 200 with the deal
+  (`services.correct_closed_deal`). It needs `crm.manage_any` (checked in the service too,
+  before anything is looked up: a salesperson gets 403 even for their own deal), a workspace
+  where the administrator may write and see the deal, a recent second factor (step-up,
+  ADR-0033), and is refused in a support session. A reason is required (one line, at most
+  300 characters, the usual text rules); the version is checked under the row lock (409
+  otherwise); at least one named figure must change (400 otherwise). Refused (422) for an open
+  deal (edit it instead), an archived one (restore it first) and an erased customer's
+  (`lead_erased`: the reason would be new free text about them). Allowed under a legal hold
+  (a hold freezes the customer's data, not the money, and a correction overwrites none of
+  the held text). The probability isn't correctable: the database fixes it at 100 or 0.
+- **History**: every correction appends one row to `pipeline_opportunity_correction`
+  (`pipeline.0011`; append-only by trigger like the stage history, so the application's
+  database role may only SELECT and INSERT): which fields changed, all three figures before
+  and after, the deal's status and new version, the reason, the actor, the owner as subject
+  when it isn't the actor, and the time. `GET …/opportunities/{id}/corrections` lists them,
+  newest first (keyset pages), for whoever sees the deal; the reason is blank for a viewer
+  who may not see the customer ([authorization.md](authorization.md#historical-deals)). The
+  audit event `opportunity.corrected` names the fields and the correction's id only, never a
+  figure or the reason; `OpportunityUpdated` is published as for an edit (Ask Arkray
+  re-indexes). The stage history is left as it was.
+- **Privacy**: an erasure redacts the correction reasons (their figures stay), and a
+  customer's subject-access export includes the corrections (table `deal_corrections`;
+  [privacy.md](privacy.md#erasure)).
+- **The web app**: the deal drawer shows a closed deal's value and dates read-only with
+  that note; administrators get **Correct** on a closed, non-archived deal's page (value, both
+  dates and a required reason; only what changed is sent, with the version shown) and the
+  History tab lists the corrections (old → new figures, reason, who, when).
+
+Product decisions, recorded as defaults: administrators correct, their own deals included
+(no four-eyes rule); the frozen fields are the four above; corrections go on under a hold
+and never for an erased customer (R149).
 
 ## Archive
 

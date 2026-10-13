@@ -33,9 +33,10 @@ import { leadHref, opportunityHref, sectionBack, type Workspace, workspaceApiSeg
 
 import { type AgreedTerms, AgreedTermsFields, parseAgreedTerms } from "./AgreedTerms";
 import { pipelineApi, pipelineKeys } from "./api";
+import { CorrectionDialog, CorrectionHistory } from "./Corrections";
 import { formatCustomValue } from "./CustomFields";
 import { isNegotiation, pipelinePermissions, useOpportunityWriteSync, usePipeline } from "./hooks";
-import { OpportunityDrawer } from "./OpportunityDrawer";
+import { closedFiguresNote, OpportunityDrawer } from "./OpportunityDrawer";
 import { Amount, CloseDate, OutcomeBadge, RestrictedCustomerNote, StageName } from "./PipelineBits";
 import { TransitionDialog } from "./TransitionDialog";
 import { moveErrorMessage, type MoveProblem, useMoveOpportunity } from "./useMoveOpportunity";
@@ -105,6 +106,7 @@ export function OpportunityDetailView({
   const [lifecycleDialog, setLifecycleDialog] = useState<"archive" | "restore" | null>(null);
   const [editing, setEditing] = useState(editOnOpen);
   const [priceDialog, setPriceDialog] = useState(false);
+  const [correctionDialog, setCorrectionDialog] = useState(false);
   const [ownerDialog, setOwnerDialog] = useState(false);
   const [tab, setTab] = useState<Tab>("overview");
   const detail = useQuery({
@@ -192,6 +194,12 @@ export function OpportunityDetailView({
   const stored = (opportunity.custom_fields ?? {}) as Record<string, unknown>;
   // A closed deal whose customer moved to someone else: its customer's details aren't sent.
   const restricted = opportunity.customer_restricted;
+  // Such a deal is read-only to this viewer: what may describe the customer can't change, nor
+  // can a closed deal's figures (below). Nothing is left to edit.
+  const canEdit = canChange && !restricted;
+  // A won or lost deal's value, probability and dates are its sales record: no edit changes
+  // them (422 `deal_closed`). Reopen it, or an administrator corrects them with a reason.
+  const canCorrect = permissions.canCorrect && !open && !archived;
 
   const confirmMove = (target: Stage, lostReason: string, terms?: AgreedTerms) => {
     setMoveError(null);
@@ -270,7 +278,7 @@ export function OpportunityDetailView({
                 {open ? "Move" : "Reopen"}
               </Button>
             ) : null}
-            {canChange ? (
+            {canEdit ? (
               <Button size="sm" icon={<Pencil aria-hidden="true" className="size-4" />} onClick={() => setEditing(true)}>
                 Edit
               </Button>
@@ -303,6 +311,10 @@ export function OpportunityDetailView({
                   inNegotiation && canChange ? (
                     <Button variant="secondary" size="sm" onClick={() => setPriceDialog(true)}>
                       Update price &amp; CPT
+                    </Button>
+                  ) : canCorrect ? (
+                    <Button variant="secondary" size="sm" onClick={() => setCorrectionDialog(true)}>
+                      Correct
                     </Button>
                   ) : null
                 }
@@ -340,6 +352,11 @@ export function OpportunityDetailView({
                     ...(opportunity.status === "lost" ? ([["Lost reason", opportunity.lost_reason || null]] as [string, ReactNode][]) : []),
                   ]}
                 />
+                {!open && canChange ? (
+                  <p className="mt-3 text-xs text-slate-500" data-closed-note>
+                    {closedFiguresNote(opportunity.status, { canCorrect })}
+                  </p>
+                ) : null}
               </Section>
               <Section title="Customer">
                 {restricted ? <RestrictedCustomerNote className="mb-3" /> : null}
@@ -440,13 +457,14 @@ export function OpportunityDetailView({
         ) : (
           <div className="space-y-4">
             <NegotiationHistory workspace={workspace} opportunityId={opportunity.id} version={opportunity.version} />
+            <CorrectionHistory workspace={workspace} opportunityId={opportunity.id} version={opportunity.version} />
             <StageHistory workspace={workspace} opportunityId={opportunity.id} version={opportunity.version} />
             <Timeline workspace={workspace} subject={{ kind: "opportunity", id: opportunity.id }} />
           </div>
         )}
       </div>
 
-      {editing && canChange ? (
+      {editing && canEdit ? (
         <OpportunityDrawer
           workspace={workspace}
           opportunity={opportunity}
@@ -508,6 +526,7 @@ export function OpportunityDetailView({
               ["pipeline", "detail", segment, updated.id],
               ["pipeline", "history", segment, updated.id],
               ["pipeline", "negotiation", segment, updated.id],
+              pipelineKeys.corrections(workspace, updated.id),
               timelineKeys.subject(workspace, { kind: "opportunity", id: updated.id }),
               ["activities", "current", segment, updated.id],
               activityKeys.dealNotes(workspace, updated.id),
@@ -515,6 +534,18 @@ export function OpportunityDetailView({
             const href = workspaceHref(workspace, "pipeline");
             setFlash(message, href);
             router.replace(href);
+          }}
+        />
+      ) : null}
+      {correctionDialog && canCorrect ? (
+        <CorrectionDialog
+          workspace={workspace}
+          opportunity={opportunity}
+          onClose={() => setCorrectionDialog(false)}
+          onSaved={(updated) => {
+            sync(updated);
+            setCorrectionDialog(false);
+            setNotice("Correction saved. The deal's history keeps the figures before and after.");
           }}
         />
       ) : null}

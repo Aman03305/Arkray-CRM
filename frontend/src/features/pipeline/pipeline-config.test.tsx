@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NewOpportunityView, PipelineView } from "@/features/workspace/views";
 import type { PipelineDto, PipelineList } from "@/lib/api/types";
 import { adminViewer, INSTRUMENT_NAMES, OPPORTUNITY_OPTIONS_ROUTE, PRIYA_ID, salesViewer } from "@/test/fixtures";
-import { makeBoard, makeOpportunity, PIPELINE, STAGES } from "@/test/pipeline-fixtures";
+import { makeBoard, makeOpportunity, PIPELINE, pipelineRoutes, STAGES } from "@/test/pipeline-fixtures";
 import { apiError, mockApi, renderWithProviders } from "@/test/render";
 
 import { forgetBoardState } from "./hooks";
@@ -56,7 +56,7 @@ beforeEach(() => {
 describe("choosing and configuring pipelines", () => {
   it("switches the board between the workspace's pipelines and offers settings only where allowed", async () => {
     const api = mockApi({
-      [`GET ${PIPELINES_URL}`]: { status: 200, body: LIST },
+      ...pipelineRoutes(PIPELINES_URL, LIST),
       [`GET ${BOARD}`]: (call) => ({
         status: 200,
         body: makeBoard([], { pipeline: call.query.get("pipeline") === MINE_ID ? { id: MINE_ID, key: "pmine", name: MINE.name } : { id: PIPELINE.id, key: "sales", name: PIPELINE.name } }),
@@ -76,7 +76,7 @@ describe("choosing and configuring pipelines", () => {
   it("creates a pipeline from an editable template, with stages reordered by buttons", async () => {
     const created: PipelineDto = { ...MINE, id: "new-id", name: "Diagnostics Sales", custom_fields: [] };
     const api = mockApi({
-      [`GET ${PIPELINES_URL}`]: { status: 200, body: { results: [PIPELINE] } },
+      ...pipelineRoutes(PIPELINES_URL, { results: [PIPELINE] }),
       [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) },
       [`POST ${PIPELINES_URL}`]: { status: 201, body: created },
     });
@@ -110,7 +110,7 @@ describe("choosing and configuring pipelines", () => {
 
   it("shows the server's reasons next to the stages and never loses the edit", async () => {
     mockApi({
-      [`GET ${PIPELINES_URL}`]: { status: 200, body: LIST },
+      ...pipelineRoutes(PIPELINES_URL, LIST),
       [`GET ${BOARD}`]: { status: 200, body: makeBoard([], { pipeline: { id: MINE_ID, key: "pmine", name: MINE.name } }) },
       [`PUT ${PIPELINES_URL}/${MINE_ID}/stages`]: apiError(422, "business_rule_violation", "“Proposal” has 2 opportunities. Move them to another stage before removing it."),
     });
@@ -131,7 +131,7 @@ describe("choosing and configuring pipelines", () => {
   ])("%s", async (_name, deleteValues) => {
     const FIELDS_URL = `${PIPELINES_URL}/${MINE_ID}/fields`;
     const api = mockApi({
-      [`GET ${PIPELINES_URL}`]: { status: 200, body: LIST },
+      ...pipelineRoutes(PIPELINES_URL, LIST),
       [`GET ${BOARD}`]: { status: 200, body: makeBoard([], { pipeline: { id: MINE_ID, key: "pmine", name: MINE.name } }) },
       [`PUT ${FIELDS_URL}`]: { status: 200, body: { ...MINE, version: 5, custom_fields: [MINE.custom_fields[1]!] } },
     });
@@ -160,7 +160,7 @@ describe("the new-opportunity panel", () => {
   it("opens over the board, groups the fields, takes the customer's details and sends exact values", async () => {
     const api = mockApi({
       ...OPPORTUNITY_OPTIONS_ROUTE,
-      [`GET ${PIPELINES_URL}`]: { status: 200, body: LIST },
+      ...pipelineRoutes(PIPELINES_URL, LIST),
       [`GET ${BOARD}`]: { status: 200, body: makeBoard([], { pipeline: { id: MINE_ID, key: "pmine", name: MINE.name } }) },
       // The server names the opportunity after its customer and instrument (ADR-0028).
       "POST /api/v1/workspaces/me/opportunities": { status: 201, body: makeOpportunity({ title: "Asha Mehta — Adams 8180 V" }) },
@@ -230,7 +230,7 @@ describe("the new-opportunity panel", () => {
     const created = "POST /api/v1/workspaces/me/opportunities";
     const api = mockApi({
       ...OPPORTUNITY_OPTIONS_ROUTE,
-      [`GET ${PIPELINES_URL}`]: { status: 200, body: { results: [PIPELINE] } },
+      ...pipelineRoutes(PIPELINES_URL, { results: [PIPELINE] }),
       [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) },
       [created]: { status: 201, body: makeOpportunity({ title: "Analyser" }) },
     });
@@ -267,7 +267,7 @@ describe("the new-opportunity panel", () => {
     let posts = 0;
     const api = mockApi({
       ...OPPORTUNITY_OPTIONS_ROUTE,
-      [`GET ${ALL}/pipelines`]: { status: 200, body: { results: [PIPELINE] } },
+      ...pipelineRoutes(`${ALL}/pipelines`, { results: [PIPELINE] }),
       [`GET ${ALL}/pipeline-board`]: { status: 200, body: makeBoard([]) },
       "GET /api/v1/assignees": {
         status: 200,
@@ -310,7 +310,7 @@ describe("the new-opportunity panel", () => {
 
   it("a negotiation stage at creation asks for the agreed price and CPT", async () => {
     mockApi({
-      [`GET ${PIPELINES_URL}`]: { status: 200, body: { results: [PIPELINE] } },
+      ...pipelineRoutes(PIPELINES_URL, { results: [PIPELINE] }),
       [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) },
     });
     renderWithProviders(<PipelineView />, { viewer: salesViewer });
@@ -326,7 +326,7 @@ describe("the new-opportunity panel", () => {
 
   it("the /new route opens the panel over the board and closing returns to the board", async () => {
     mockApi({
-      [`GET ${PIPELINES_URL}`]: { status: 200, body: { results: [PIPELINE] } },
+      ...pipelineRoutes(PIPELINES_URL, { results: [PIPELINE] }),
       [`GET ${BOARD}`]: { status: 200, body: makeBoard([]) },
     });
     nav.pathname = "/pipeline/new";

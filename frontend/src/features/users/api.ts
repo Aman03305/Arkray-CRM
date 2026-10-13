@@ -69,6 +69,8 @@ export const usersApi = {
     apiFetch<AdminUser>(user(id, "set-password"), { method: "POST", body }),
   /** Removes an ordinary user's two-step verification (ADR-0033; never an administrator's). */
   resetMfa: (id: string) => apiFetch<AdminUser>(user(id, "mfa/reset"), { method: "POST" }),
+  /** Lifts the lock too many failed sign-ins put on new browsers (review of 73ff1e3, L1). */
+  clearSignInLock: (id: string) => apiFetch<AdminUser>(user(id, "clear-sign-in-lock"), { method: "POST" }),
 };
 
 const SUPPORT_SESSIONS = "/api/v1/admin/support-sessions";

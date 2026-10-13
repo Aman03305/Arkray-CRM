@@ -9,7 +9,7 @@ import type { Board, Opportunity, OpportunityCard, OpportunityPage, PipelineDto,
 import { hasCapability, type Viewer } from "@/lib/viewer";
 import type { Workspace } from "@/lib/workspace";
 
-import { type BoardFilters, NO_BOARD_FILTERS, OPPORTUNITY_OPTIONS_KEY, pipelineApi, pipelineKeys } from "./api";
+import { type BoardFilters, NO_BOARD_FILTERS, OPPORTUNITY_OPTIONS_KEY, pipelineApi, pipelineKeys, type PipelineListItem } from "./api";
 import { moveCardInBoard } from "./transitions";
 
 /** The instruments an opportunity can be for (the server's one list, ADR-0028). */
@@ -24,7 +24,8 @@ export function useInstruments() {
   };
 }
 
-/** The pipelines this workspace may use, with their stages and custom fields. */
+/** The pipelines this workspace may use, with their stages (a list never carries custom
+ * fields: usePipeline loads one pipeline's). */
 export function usePipelines(workspace: Workspace) {
   return useQuery({
     queryKey: pipelineKeys.pipelines(workspace),
@@ -34,26 +35,27 @@ export function usePipelines(workspace: Workspace) {
 }
 
 /**
- * One pipeline of this workspace (an opportunity's): from the workspace's list when it is
- * there, else fetched on its own (an archived pipeline, or one holding a reassigned deal).
+ * One pipeline of this workspace with its whole configuration (its custom fields and their
+ * choices: an opportunity's, the one a new opportunity goes in, the one being configured),
+ * fetched on its own: the workspace's list carries no custom fields, so its size never grows
+ * with them (review round 1, DEALS-1). Archived pipelines too, and one holding a reassigned
+ * deal.
  */
-export function usePipeline(workspace: Workspace, id: string | undefined) {
-  const list = usePipelines(workspace);
-  const listed = id ? list.data?.results.find((p) => p.id === id) : undefined;
+export function usePipeline(workspace: Workspace, id: string | undefined): { data: PipelineDto | undefined; isPending: boolean } {
   const single = useQuery({
     queryKey: pipelineKeys.pipeline(workspace, id ?? ""),
     queryFn: () => pipelineApi.pipeline(workspace, id!),
-    enabled: Boolean(id) && list.isSuccess && !listed,
+    enabled: Boolean(id),
     staleTime: 5 * 60_000,
   });
-  return { data: listed ?? single.data, isPending: list.isPending || (!listed && single.isPending && Boolean(id)) };
+  return { data: id ? single.data : undefined, isPending: Boolean(id) && single.isPending };
 }
 
-export function defaultPipeline(pipelines: readonly PipelineDto[] | undefined): PipelineDto | undefined {
+export function defaultPipeline<P extends PipelineListItem>(pipelines: readonly P[] | undefined): P | undefined {
   return pipelines?.find((p) => p.is_default) ?? pipelines?.find((p) => p.is_active);
 }
 
-export function activeStages(pipeline: PipelineDto | undefined): Stage[] {
+export function activeStages(pipeline: PipelineListItem | undefined): Stage[] {
   return (pipeline?.stages ?? []).filter((s) => s.is_active);
 }
 
@@ -62,7 +64,7 @@ export function isNegotiation(stage: Pick<Stage, "type"> | undefined | null): bo
   return stage?.type === "negotiation";
 }
 
-export function firstOpenStage(pipeline: PipelineDto | undefined): Stage | undefined {
+export function firstOpenStage(pipeline: PipelineListItem | undefined): Stage | undefined {
   return activeStages(pipeline).find((s) => s.category === "open");
 }
 
@@ -73,6 +75,9 @@ export interface PipelinePermissions {
   canAssign: boolean;
   /** The organisation-wide workspace: a new opportunity's owner must be chosen. */
   choosesOwner: boolean;
+  /** Correct a won or lost deal's value or dates, with a reason (administrators,
+   * crm.manage_any; never in a support session: the API refuses it there). */
+  canCorrect: boolean;
 }
 
 /**
@@ -83,7 +88,12 @@ export interface PipelinePermissions {
  */
 export function pipelinePermissions(viewer: Viewer | null, workspace: Workspace): PipelinePermissions {
   const canWrite = hasCapability(viewer, workspace.kind === "self" ? "crm.access_own" : "crm.manage_any");
-  return { canWrite, canAssign: canWrite && hasCapability(viewer, "crm.assign_any"), choosesOwner: workspace.kind === "organization" };
+  return {
+    canWrite,
+    canAssign: canWrite && hasCapability(viewer, "crm.assign_any"),
+    choosesOwner: workspace.kind === "organization",
+    canCorrect: canWrite && hasCapability(viewer, "crm.manage_any") && !viewer?.supportSession,
+  };
 }
 
 /** The card as the server now has it (version included), from its full representation. */

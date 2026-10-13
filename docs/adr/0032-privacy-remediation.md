@@ -1,6 +1,6 @@
 # 0032. Privacy remediation: verified backend TLS, redacted logs, expiring audit details, data-subject rights, restore-safe erasure
 
-Status: Accepted (engineering); the product and legal decisions it names stay open
+Status: Accepted (engineering); the product and legal decisions it names stay open; amended by [0034](0034-staging-security-remediation.md) (pseudonymisation made final in the database; Ask conversations kept for a legal hold as hidden tombstones; one rule for a closed deal's previous owner)
 Date: 2026-10-10
 
 ## Context

@@ -72,6 +72,13 @@ Rules:
   rows returning to `pending` on retry or lease recovery (a relay-jamming bug found in the
   Phase 0 review), and duplicate events are harmless because handlers are idempotent. New work
   never coalesces into an event that is backing off after a failure.
+- **Fair between users** (review of 73ff1e3, M6). Every event carries a *fairness key*: the
+  user whose request queued it (`''` for system work: beat, commands, and the events the
+  previous release writes), inherited by whatever its handler queues (a continuation is the
+  same user's work, not a turn of its own). The relay takes turns between keys instead of
+  claiming first-come, first-served; within one key the order stays first-in, first-out. No
+  handler relies on an order across keys (each reloads the current state; retries and several
+  workers reordered events before). See [Fairness between users](#fairness-between-users).
 - **Traceable.** Events store the originating request's correlation id; worker logs for the
   event carry it (verified end to end in Phase 0).
 
@@ -115,6 +122,7 @@ run late or twice.
 | **Default-queue backlog** (for example a large import) | only that queue slows | relay runs on its own `outbox` queue; other queues keep draining | queue age per queue |
 | **Beat down** | nothing dispatched | same as broker down; run exactly one beat (see deployment) | oldest-pending age alert |
 | **A worker's erasure ledger gate closed** (a restore not yet replayed, a ledger unreadable past its grace period, or a worker that sees another ledger: final audit ARCH-1, the AI workers and beat without the ledger's volume) | that worker's work waits; nothing runs while closed | fail closed, never silently (`config/celery.py` GatedTask): a periodic tick is skipped (the next one runs); any other task (an outbox event's message, an Ask Arkray question) goes back to its queue after 60 s, doubling to at most 5 minutes, 12 times (about 50 minutes), where a worker whose gate is open may take it; then it is dropped: an outbox event returns to pending when its lease ends, a question has long expired (`timeout`). Tasks marked `ledger_gate_exempt` (the ledger's own reconciliation) run anyway | `background_task_skipped` / `background_task_deferred` / `background_task_dropped` (ERROR, the task's name and the gate's status; at most once a minute per task and process), `erasure_ledger_gate_closed`; the container turns unhealthy (`manage.py ledger_status`, [deployment.md](deployment.md#worker-and-beat-health)) |
+| **Erasure ledger store slow** (S3 latency, a grown ledger) | none while the last verified comparison is under an hour old | the database's position is read first: below the chain this process verified (the ledger only grows), the gate closes at once (behind) without reading the ledger. Otherwise each process's check (a request, the readiness probe, a task, the metrics gauge) reads the ledger on a thread of its own that touches only the store and waits at most 2 s (`ledger_gate.CHECK_WAIT_S`), never twice for one read; a finished read is used for one check interval (60 s) from when it ended, and decides "ahead" on its own (it records the database position from before it began); "behind" is confirmed from the database alone; meanwhile the gate answers from its last verified state; a process that never verified it (a new pod whose start-up verification failed) stays closed until its first read ends. Finding the head costs one small LIST and one GET at any size (adversarial review of 73ff1e3, M3, and its review round 1, LEDGER-1 and LEDGER-4: a store slower than the wait had kept a restored database's gate open for up to an hour). A failing store keeps a process open for `ERASURE_LEDGER_MAX_STALE_S` after its last verified comparison (R116), except a process that found the chain tampered with, which stays closed until a read of the whole chain from scratch succeeds (review round 2, LEDGER2-1), and a database below the chain the process verified (closed at once). A decided closed verdict (behind, ahead, diverged, tampered) ends that window and stands, under the same status, while a newer read is pending or the store fails, until another read decides (review round 3, LEDGER3-1: a rolled-back ledger on a slow store had reopened at every interval) | `erasure_ledger_gate_closed` (status `unavailable`) past `ERASURE_LEDGER_MAX_STALE_S`; `erasure_ledger_read_failed` |
 | **Poison event** | one event fails repeatedly | bounded attempts → `dead`; other events unaffected | dead-event alert |
 | **AI provider slow / down / rate-limited / malformed** | Ask Arkray summaries only | per-call 20 s timeout, one retry after a jittered 0.5-1 s (or after the `Retry-After` a 429, 503 or 529 asks for if it fits the question's remaining time; otherwise, or when it's unusable, the question falls back at once, Phase 10), a 30 s budget per question; a rejected key (401/403) counts toward the breaker without a retry; a response that isn't a Messages response (a proxy's HTML page, invalid JSON) counts as a failure, and any unexpected error while answering falls back too (Phase 9); 3 failures in a row open the breaker for 60 s; meanwhile (and for the failing question) the answer is the best-matching records; router questions never use the model | `ai_breaker_opened` (ERROR), `ai_provider_failed`, `ai_provider_bad_response`, `ai_answer_failed`; `arkray_ai_breaker_open` |
 | **Embedding model unavailable** (files missing, load or run failure) | note search only | indexing events back off in the outbox (`EmbeddingUnavailable`); `search_notes` says note search is unavailable; router and other tools keep working | outbox backlog / dead events on queue `ai_index` |
@@ -137,6 +145,11 @@ Every network call and every wait is bounded:
 | Gunicorn worker per request | 30 s |
 | DB connect / statement (web) / statement (workers) | 5 s / 10 s / 60 s |
 | DB lock wait / idle in transaction | 5 s / 60 s |
+| A lead's erasure, per statement (`privacy.services`) | 120 s from an operator's command; 60 s in the automatic replay's worker job, inside Celery's 100 s soft limit; its statements change at most 1,000 rows each (M6) |
+| Erasure-ledger read for a gate check (requests, readiness, tasks, the metrics gauge) | 2 s wait (`ledger_gate.CHECK_WAIT_S`); the read goes on in the background and the gate answers from its last verified state, checking again 5 s later (M3); a database behind the verified chain closes it without a read |
+| Process start: erasure-ledger verification | from the newest signed checkpoint (at most about 1,000 entries read); the whole chain only without one (or without access to the checkpoints), 1,000 entries in memory at a time (review round 1, LEDGER-2, LEDGER-3) |
+| gunicorn's master before each fork: bringing its verified chain up to date | at most 5 s (`ledger_gate.REFRESH_BUDGET_S`) plus one short store call: every call of the refresh runs under one deadline, through a client of its own that gives up after 1 s to connect and 2 s to answer, once, and writes no checkpoint past it (the store only, progress kept), so a worker recycled long after the start doesn't read every entry since inside its first checks (review rounds 2 to 4, LEDGER2-3, LEDGER3-2, LEDGER4-2) |
+| A worker container's health probe (`manage.py ledger_status`) | at most 5,000 entries or 15 s of verification a probe (`PROBE_BUDGET_S`, slices of 500, progress kept; review round 2, LEDGER2-4): a first verification and the hourly pass from scratch are spread over probes, `verifying` meanwhile (inside the health checks' 120 s start period) |
 | Redis cache connect / socket | 1 s / 1 s, no retries, circuit breaker (15 s doubling to 120 s) |
 | Metrics scrape's Redis probes (broker, cache) | 2 s each, then reported down |
 | Redis broker socket | 5 s |
@@ -144,6 +157,7 @@ Every network call and every wait is bounded:
 | Attachment storage liveness probe (metrics) | 2 s, cached 30 s per process |
 | SMTP | 10 s |
 | Celery task soft / hard limit | 100 s / 120 s |
+| A data-subject export's build (`privacy.build_export`, its own outbox time limit) | 240 s / 255 s, inside the outbox's 300 s running lease ([Export sizing](#export-sizing)) |
 | Outbox dispatch lease / running lease | 30 min / 300 s |
 | LLM call / whole Ask Arkray question (model loop) | 20 s / 30 s |
 | Ask Arkray question unanswered (worker down, backlog) | 90 s, then `timeout` |
@@ -217,6 +231,114 @@ the worker count it answers 503 while the API still serves.
   a user with no pause between requests is answered 429 with `Retry-After`.
 - Imports and exports run in workers in batches, never inside a web request.
 - Statement timeouts cap the cost of any single query.
+- One account can't hold everyone else's background work behind its own, and nothing it
+  writes can grow a customer past what that customer's export and erasure handle (review of
+  73ff1e3, M6; below).
+- The erasure ledger grows only with data really removed: a repeated value-deletion request
+  adds nothing, files purged together share an entry, and checking the ledger costs one small
+  read at any size (review of 73ff1e3, M3; [privacy.md](privacy.md#restore-safe-erasure)).
+
+### Fairness between users
+
+The review's case: one sales account posts long notes as fast as the API allows (600 requests
+a minute); the outbox claimed first-come, first-served and the indexing worker runs one job at
+a time, so everyone else's new notes waited behind the backlog and Ask Arkray answered from a
+stale index for hours. Now:
+
+- **Claims take turns** (`core/outbox.py`, `_claim`). The k-th waiting event of a user who
+  already has n events in flight goes in turn n + k; among equal turns the older event goes
+  first. A user alone still gets every free slot (nothing is held back while there is room).
+  The users with pending work are found by a loose index scan and each one's oldest due events
+  read in index order (`outbox_pending_fair_idx`, `core.0008`): a claim costs one probe per
+  user with work, however long one backlog is.
+- **The bound.** A newcomer's event is claimed within one claim per user ahead of it (user B's
+  one job behind user A's 50 is the first or second claimed; it was the 51st). Claimed events
+  wait in the broker in claim order, so it then waits behind at most the queue's in-flight cap
+  of earlier claims (`OUTBOX_MAX_IN_FLIGHT`: `ai_index` 100), never behind a whole backlog.
+  A full-length note (10,000 characters) is 13 chunks, 6.5-8.7 s at R70's 1.5-2 chunks a
+  second, so behind 100 of them the wait is about 100 x 7.5 s, **about 12 minutes** of stale
+  Ask answers on one indexing process (review round 1 measured it), against hours before.
+  More `ai_index` concurrency or a lower cap shortens it (a lower cap also lowers the queue's
+  ceiling, cap / 5 s); budgeting edits too, or a per-user re-index rate, would bound what one
+  account can put in flight: an owner's decision (the notes of review round 1).
+- **Large jobs are split.** A lead's re-sync (`ai.index_lead`, after a reassignment or an
+  erasure) handles at most 200 sources a job and queues a continuation from where it stopped,
+  which takes its turn like any other work; it is dropped while a fresh re-sync of the lead is
+  waiting (that one redoes the whole lead) and coalesced with a duplicate of itself.
+- **Producers are budgeted** ([Write budgets](#write-budgets)), and re-indexing a record is
+  still coalesced while it waits, so a burst of edits to one note is one job.
+- **Visible.** `arkray_outbox_pending_keys` and `arkray_outbox_top_key_share` per queue
+  ([observability.md](observability.md#metrics-built-phase-10); counts only, never a user), the
+  `ArkrayQueueDominatedByOneUser` alert (one user's work over 80 % of a backlog above 500 for
+  30 minutes), and `manage.py outbox_requeue --status`, which names the users whose backlog it
+  is (read only).
+
+Tests: `arkray/core/tests/test_outbox_fairness.py` (turns, the bound, the key following the
+work, every existing guarantee: claim tokens, retries, not-yet-due and dead events, the index
+plan), `arkray/ai/tests/test_index_lead_batches.py`, `tests/security/test_write_budgets.py`.
+
+### Write budgets
+
+`activities.services.create_activity`, inside the creating transaction:
+
+| Budget | Default | Counted | Refusal |
+|---|---|---|---|
+| `ACTIVITY_MAX_CREATED_PER_USER_PER_DAY` | 1,000 | tasks, meetings and notes the person created in any 24 hours: the activities themselves (never deleted, so archiving gives nothing back; an administrator spends their own budget in someone's workspace), one statement reading at most the budget's worth of `activities_created_by_idx` (`activities.0012`) whatever else the person wrote (review round 1: counted from the audit trail, 400,000 audited edits cost 66-85 ms a creation); under a per-person advisory lock (namespace "ARKD", its own) taken first in the transaction | 429 `rate_limited` with `Retry-After` (when the cap-th newest is a day old, at least 60 s) |
+| `ACTIVITY_MAX_PER_CUSTOMER` | 5,000 | activities on the lead, archived ones included, under the lead's lock (which every creation on it takes first) | 422 `activity_limit_reached` |
+
+`0` turns either off. Nothing is written when one refuses (no activity, audit event, timeline
+entry or re-index).
+
+One more budget, outside activities: a person may ask for at most
+`MAX_VALUE_DELETIONS_PER_USER_PER_DAY` (100) custom fields' stored values to be deleted in any
+24 hours (`pipeline.field_values`, counted from their append-only deletion-request audit
+events under a per-person advisory lock, "ARKV"; each request writes the erasure ledger for
+good): 429 `rate_limited` with `Retry-After`, nothing changed (adversarial review of 73ff1e3,
+its review round 1, LEDGER-2; `0` turns it off). Edits, completions and archives aren't budgeted: they create nothing, and
+a record's re-index is coalesced while it waits.
+
+Why these numbers: the capacity mix's virtual users act about every 2 s, much brisker than
+people, and create about 70 activities an hour; a heavy salesperson's day is in the tens.
+5,000 activities is three a working day on one customer for six years. At the budget the
+customer's data-rights requests were measured: the erasure in about 2 s (5,000 activities,
+8,000 index chunks; no statement over 5 s, `arkray/privacy/tests/test_erasure_at_cap.py`), and
+the export's memory flat: 3.9 MB at 300 notes of 8,000 characters, 4.2 MB at 1,500, 5.3 MB at
+5,000; it peaked at 82 MB at 1,500 before it streamed (`tests/security/test_export_streaming.py`).
+Data written before the budgets existed is kept; only new activities on a customer already
+past the budget are refused.
+
+### Export sizing
+
+A data-subject export (`privacy.exports`, review round 1, QUEUES-1 and QUEUES-5) is one ZIP,
+written straight into the worker's temporary directory and bounded by `EXPORT_MAX_BYTES`
+(100 MB) **as stored, compressed**. Three places hold it, each sized from that one number:
+
+| Where | Holds | Sized |
+|---|---|---|
+| The `worker` container's `/tmp` (a tmpfs, memory) | per Celery process, the archive being built (nothing else is spooled: the CSVs are a second pass over the same snapshot) beside one attachment copied in | 2 processes x (100 MB + `ATTACHMENT_MAX_BYTES` 10 MB) = 220 MB of the 256 MB tmpfs (`tests/architecture/test_compose_production.py`) |
+| The exports store | the finished archive until it expires | at most 100 MB each; 3 queued and 20 an hour per administrator |
+| The edge's export spool (a disk volume) | a download, spooled whole | 112 MB each, 4 at once (`tests/architecture/test_edge_limits.py`) |
+
+What a customer within the budgets needs (measured at a tenth of the budget and scaled, the
+archive as built; `tests/security/test_export_streaming.py::TestAtTheBudget` holds the
+scaled case at 1/100):
+
+| Customer | Archive | Build |
+|---|---|---|
+| 5,000 notes of 10,000 characters of Hindi (words in random order, through the service: their timeline with them) | about 39 MB (7.8 kB a note: JSON and CSV) | about 30 s |
+| 5,000 notes of 10,000 random letters and digits (text that hardly compresses) | about 76 MB (15 kB a note) | about 12 s |
+| a deal moved between stages, per move (its history row and timeline entry) | about 21 B | about 11,000 rows a second |
+
+So every customer within the activity budget fits, and uncompressed counting had refused them
+(104.5 MB for 5,000 notes of 10,000 ASCII characters, from about 1,929 Hindi ones). What does
+not fit: notes of random characters from a large alphabet (random CJK or emoji: two to four
+bytes a character that don't compress) at the budget, about 150-200 MB; such an export fails
+`too_large`, and an operator can raise `EXPORT_MAX_BYTES` with the worker's `/tmp` and the
+edge's spool for it. Stage moves aren't budgeted: 100 MB holds about 5 million moves (140
+hours of a script at the API's 600 a minute); the build's own time limit (240 s for this job,
+`EXPORT_TIME_LIMIT_S`, within the outbox's 300 s running lease; other jobs keep Celery's
+100 s) is reached first, at about 1.3 million moves (36 hours of such a script). Bounding a
+deal's history is an owner's decision (the notes of review round 1).
 
 ## Attachment storage
 

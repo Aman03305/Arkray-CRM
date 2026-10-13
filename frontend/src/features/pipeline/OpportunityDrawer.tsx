@@ -13,8 +13,8 @@ import { DuplicateNotice } from "@/features/leads/DuplicateNotice";
 import { OwnerSelect } from "@/features/users/OwnerSelect";
 import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
 import type { CustomField, Opportunity, OpportunityCreateRequest } from "@/lib/api/types";
-import { businessToday } from "@/lib/format";
-import { formatPercent } from "@/lib/money";
+import { businessToday, formatDateOnly } from "@/lib/format";
+import { formatInr, formatPercent } from "@/lib/money";
 import { type IdempotencyKey, newIdempotencyKey } from "@/lib/random";
 import { useViewer } from "@/lib/viewer-context";
 import type { Workspace } from "@/lib/workspace";
@@ -25,6 +25,7 @@ import { CustomFieldInputs, formatCustomValue } from "./CustomFields";
 import {
   changedCustomValues,
   changedFields,
+  closedDraft,
   createRequest,
   customDraft,
   customRequest,
@@ -119,20 +120,26 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
   const submitting = useRef(false);
 
   const usable = (pipelines.data?.results ?? []).filter((p) => p.is_active);
-  // Editing: the deal's own pipeline, also when archived (its fields stay editable).
-  const own = usePipeline(workspace, editing ? opportunity.pipeline.id : undefined);
-  const pipeline = editing ? own.data : (usable.find((p) => p.id === pipelineId) ?? defaultPipeline(usable));
+  // Editing: the deal's own pipeline, also when archived (its fields stay editable). Creating:
+  // the one chosen from the list. Its custom fields come with it alone (a list carries none).
+  const listed = editing ? undefined : (usable.find((p) => p.id === pipelineId) ?? defaultPipeline(usable));
+  const configured = usePipeline(workspace, editing ? opportunity.pipeline.id : listed?.id);
+  const pipeline = editing ? configured.data : listed;
   const stages = activeStages(pipeline);
   const stage = editing ? opportunity.stage : (stages.find((s) => s.id === stageId) ?? firstOpenStage(pipeline));
   const closed = stage ? stage.category !== "open" : false;
   const lost = stage?.category === "lost";
-  const fields = pipeline?.custom_fields ?? NO_FIELDS;
+  const fields = (configured.data?.id === pipeline?.id ? configured.data?.custom_fields : undefined) ?? NO_FIELDS;
   // A closed deal whose customer moved to someone else: the customer's details (and free-text
   // custom values) aren't sent to this viewer, and nothing else that may describe the customer
   // (instrument, work load, Expected CPT, description, lost reason, custom values) can be
   // changed: the server refuses it (403 `customer_restricted`). Shown read-only, and never part
   // of the update; the value, probability and dates stay editable.
   const restricted = editing && opportunity.customer_restricted;
+  // A won or lost deal's value and dates are its sales record: shown read-only, never part of
+  // the update (the server refuses a change: 422 `deal_closed`). Reopen it to change them, or
+  // an administrator corrects them (the deal page's "Correct").
+  const frozen = editing && closed;
   const editableFields = restricted ? NO_FIELDS : fields;
   const shownFields = restricted ? fields.filter((f) => f.type !== "text" && f.type !== "long_text") : fields;
   const storedCustom = (opportunity?.custom_fields ?? {}) as Record<string, unknown>;
@@ -217,9 +224,10 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
   }
 
   // What an edit sends: only what this viewer may change (a restricted deal: value,
-  // probability and dates; the rest as it was, so never sent).
+  // probability and dates; a closed deal: not those; the rest as it was, so never sent).
   function editedDraft(): Draft {
-    return restricted ? restrictedDraft(base, manualDraft()) : manualDraft();
+    const mine = restricted ? restrictedDraft(base, manualDraft()) : manualDraft();
+    return frozen ? closedDraft(base, mine) : mine;
   }
 
   useEffect(() => {
@@ -256,8 +264,9 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
       delete problems.account_name;
       delete problems.customer_name;
     }
-    // Never created into a pipeline nobody chose: the list must have loaded (review).
-    if (!editing && !pipeline) {
+    // Never created into a pipeline nobody chose: the list must have loaded (review), and
+    // the chosen pipeline's custom fields, or a required one would go unasked.
+    if (!editing && (!pipeline || configured.data?.id !== pipeline.id)) {
       problems.pipeline = [pipelines.isError ? "Pipelines couldn't be loaded. Try again." : "Pipelines are still loading."];
     }
     if (!editing && isNegotiation(stage)) {
@@ -460,32 +469,48 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
             />
           )}
           {restricted ? <ReadOnly label={FIELD_LABELS.work_load} value={draft.work_load} /> : text("work_load", 100, { optional: true, placeholder: "e.g. 300 tests/day" })}
-          {text("value", 20, { label: `${FIELD_LABELS.value} (₹)`, inputMode: "decimal" })}
+          {frozen ? (
+            <ReadOnly label={`${FIELD_LABELS.value} (₹)`} value={formatInr(opportunity.value)} />
+          ) : (
+            text("value", 20, { label: `${FIELD_LABELS.value} (₹)`, inputMode: "decimal" })
+          )}
           {restricted ? <ReadOnly label={FIELD_LABELS.expected_cpt} value={draft.expected_cpt} /> : text("expected_cpt", 100, { optional: true })}
         </Group>
 
         <Group title="Timeline">
-          <TextField
-            label={FIELD_LABELS.opportunity_date}
-            name="opportunity_date"
-            type="date"
-            min="2000-01-01"
-            max="2099-12-31"
-            value={draft.opportunity_date}
-            onChange={(e) => set("opportunity_date")(e.target.value)}
-            errors={errors.opportunity_date}
-          />
-          <TextField
-            label={FIELD_LABELS.expected_close_date}
-            name="expected_close_date"
-            type="date"
-            min="2000-01-01"
-            max="2099-12-31"
-            optional
-            value={draft.expected_close_date}
-            onChange={(e) => set("expected_close_date")(e.target.value)}
-            errors={errors.expected_close_date}
-          />
+          {frozen ? (
+            <>
+              <p className="text-sm text-slate-600 sm:col-span-2" data-closed-note>
+                {closedFiguresNote(opportunity.status)}
+              </p>
+              <ReadOnly label={FIELD_LABELS.opportunity_date} value={formatDateOnly(opportunity.opportunity_date, "")} />
+              <ReadOnly label={FIELD_LABELS.expected_close_date} value={formatDateOnly(opportunity.expected_close_date, "")} />
+            </>
+          ) : (
+            <>
+              <TextField
+                label={FIELD_LABELS.opportunity_date}
+                name="opportunity_date"
+                type="date"
+                min="2000-01-01"
+                max="2099-12-31"
+                value={draft.opportunity_date}
+                onChange={(e) => set("opportunity_date")(e.target.value)}
+                errors={errors.opportunity_date}
+              />
+              <TextField
+                label={FIELD_LABELS.expected_close_date}
+                name="expected_close_date"
+                type="date"
+                min="2000-01-01"
+                max="2099-12-31"
+                optional
+                value={draft.expected_close_date}
+                onChange={(e) => set("expected_close_date")(e.target.value)}
+                errors={errors.expected_close_date}
+              />
+            </>
+          )}
         </Group>
 
         <Group title="Pipeline">
@@ -608,8 +633,16 @@ function keyRefused(error: unknown): boolean {
 }
 const KEY_REFUSED = "This couldn't be sent. Please try again.";
 
-/** Under the restricted-customer note in the edit panel: why most details are read-only. */
-export const RESTRICTED_DETAILS_NOTE = "Only the value, probability and dates can be changed here: the other details may describe the customer.";
+/** Under the restricted-customer note in the edit panel: why the details are read-only. */
+export const RESTRICTED_DETAILS_NOTE = "The details that may describe the customer can't be changed here.";
+
+/** Why a won or lost deal's value, probability and dates are read-only (review of 73ff1e3, M2). */
+export function closedFiguresNote(status: string, { canCorrect = false }: { canCorrect?: boolean } = {}): string {
+  const outcome = status === "lost" ? "lost" : "won";
+  return canCorrect
+    ? `This deal is ${outcome}: reopen it to change its value, probability or dates, or use Correct to fix them with a reason.`
+    : `This deal is ${outcome}: reopen it to change its value, probability or dates, or ask an administrator to correct them.`;
+}
 
 /** A detail shown, not offered for editing (a restricted deal's). */
 function ReadOnly({ label, value, wide = false }: { label: string; value: string; wide?: boolean }) {

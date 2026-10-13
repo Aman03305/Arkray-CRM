@@ -108,17 +108,30 @@ export function changedFields(before: Draft, after: Draft): DraftField[] {
 }
 
 /**
- * What a viewer who may no longer see a deal's customer (`customer_restricted`) may still
- * change: its value, probability and dates. Everything else may describe the customer (their
- * details, the instrument, work load, Expected CPT, description, lost reason, custom values),
- * and the server refuses a change to it (403 `customer_restricted`,
- * docs/authorization.md#historical-deals).
+ * What a viewer who may no longer see a deal's customer (`customer_restricted`) could still
+ * change if the deal were open: its value, probability and dates. Everything else may
+ * describe the customer (their details, the instrument, work load, Expected CPT, description,
+ * lost reason, custom values), and the server refuses a change to it (403
+ * `customer_restricted`, docs/authorization.md#historical-deals). Such a deal is always closed,
+ * and a closed deal's figures are frozen too (CLOSED_FROZEN): it is read-only to them.
  */
 export const RESTRICTED_EDITABLE: ReadonlySet<DraftField> = new Set(["opportunity_date", "value", "probability", "expected_close_date"]);
 
 /** `draft` with every field such a viewer may not change put back as it was (`base`): never sent. */
 export function restrictedDraft(base: Draft, draft: Draft): Draft {
   return Object.fromEntries(DRAFT_FIELDS.map((f) => [f, RESTRICTED_EDITABLE.has(f) ? draft[f] : base[f]])) as Draft;
+}
+
+/**
+ * A won or lost deal's figures: its sales record, which no edit changes (422 `deal_closed`,
+ * adversarial review of 73ff1e3, M2). Reopening the deal makes them editable again; an
+ * administrator corrects them with a reason instead (CorrectionDialog).
+ */
+export const CLOSED_FROZEN: ReadonlySet<DraftField> = new Set(["value", "probability", "opportunity_date", "expected_close_date"]);
+
+/** `draft` with a closed deal's frozen figures put back as they were (`base`): never sent. */
+export function closedDraft(base: Draft, draft: Draft): Draft {
+  return Object.fromEntries(DRAFT_FIELDS.map((f) => [f, CLOSED_FROZEN.has(f) ? base[f] : draft[f]])) as Draft;
 }
 
 export type Problems = Partial<

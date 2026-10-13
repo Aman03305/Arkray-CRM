@@ -96,7 +96,9 @@ Conventions:
   question id, mode, tool names, record count, outcome; `support_session_id` when it was
   asked inside a support session, deep security audit L-13), and `ai.conversation_deleted`
   when a user forgets a conversation (actor, conversation id, subject when delegated;
-  metadata: the number of questions; deep security audit M-5), and `ai.question_queued` per
+  metadata: the number of questions and `retained`, whether a legal hold kept it as a
+  tombstone, never which hold; deep security audit M-5, adversarial review of 73ff1e3, M1;
+  no screen shows it), and `ai.question_queued` per
 question handed to the ai workers (ids only: `question_id`; what the daily cap counts,
 deep security audit L-12).
 - Django's 4xx duplicates are suppressed (the access log has them); 5xx are logged with
@@ -130,6 +132,35 @@ deep security audit L-12).
   provider's request id) or `failed` (`kind`, latency); a call's latency includes its retry.
 - Operations (Phase 10): `outbox_events_requeued` (counts and ids) from
   `manage.py outbox_requeue`.
+- Adversarial review of 73ff1e3 (ids, codes and counts only). Logs: `sign_in_locked` (the
+  identifier's 12-character key, never the email), `attachment_formula_check_refused`
+  (`rule`), `erasure_ledger_read_failed` (the exception's type);
+  `pseudonym_domain_accounts_not_pseudonymised` (WARNING, once, in the migrate job running
+  `identity.0008`: the ids of live accounts at the pseudonym domain it left alone, and of those
+  it moved aside; [runbooks.md](runbooks.md#schema-migration-for-a-release)). `manage.py
+  ledger_status` prints `erasure_ledger_gate=verifying` (exit 1) while a container's first
+  verification is spread over its probes (review round 1, LEDGER-2). Review round 2:
+  `erasure_ledger_tampered` (ERROR, `security: true`, `status`) from **every** health probe
+  while a tampered verdict holds (it is sticky until a pass over the whole chain from scratch
+  succeeds: LEDGER2-1), `erasure_ledger_checkpoint_unavailable` (WARNING, `operation` read or
+  write: the store refused a checkpoint, so starts verify the whole chain; LEDGER2-7),
+  `erasure_ledger_refresh_failed` (WARNING, the exception's type: gunicorn's master couldn't
+  bring its verified chain up to date before a fork; LEDGER2-3) and `attachment_purge_failed`
+  (WARNING, ERROR from the sixth attempt: one file the store won't delete, backing off on its
+  own; LEDGER2-5; since round 3 its count lives on the file's row). Review rounds 3 and 4:
+  `erasure_ledger_tampered` also from gunicorn's master (its refresh before a fork, or `prime`
+  at start) and the Celery parent, which then stay closed; `erasure_ledger_malformed` (WARNING:
+  a **new** entry, beyond anything verified, that isn't JSON, a passing fault; an old one that
+  isn't an entry any more is tampering); `erasure_ledger_status_unsaved` (WARNING: a probe
+  couldn't keep its state, so it verifies from the first entry every time). There is
+  deliberately no metric for checkpoint failures, a malformed body or an unsaved state (a
+  counter would see the web process only): the log lines are the signal. Audit:
+  `opportunity.corrected` (the workspace, the corrected field names and the correction's id;
+  the figures and the reason live in `pipeline_opportunity_correction`, M2),
+  `auth.sign_in_locked` and `auth.sign_in_unlocked` (`by`: `email_link` or `administrator`;
+  L1, both in the security events), and `opportunity.customer_corrected` entries for deals
+  outside the corrector's scope are written as the system's, with `cause: lead.corrected`
+  (L5).
 - Startup (Phase 11): `database_role_refused` (CRITICAL, a worker on a privileged database
   role, then exit), `database_role_privileged` (the same, warned where the check is off),
   `database_role_unchecked` (the database was unreachable at start),
@@ -204,6 +235,8 @@ at scrape time in a bounded number of queries, `config/metrics.py`):
 | `arkray_outbox_events` | `queue`, `status` (pending, in_flight, dead) | background work waiting, running, failed for good |
 | `arkray_outbox_oldest_due_seconds` | `queue` | age of the oldest due pending event (backed-off events don't count) |
 | `arkray_outbox_oldest_undelivered_seconds` | `queue` | how long the oldest event handed to the broker has waited without a worker starting it: a queue whose workers are down (whole-software audit: such events sat in flight, invisible to the other figures) |
+| `arkray_outbox_pending_keys` | `queue` | how many users have pending work in the queue (system work counts as one): the relay takes turns between them (review of 73ff1e3, M6; [reliability.md](reliability.md#fairness-between-users)) |
+| `arkray_outbox_top_key_share` | `queue` | the busiest user's share of the queue's pending events, 0 to 1 (0 when none): near 1 on a large backlog, one account's work is most of it; `manage.py outbox_requeue --status` names whose. Counts from the same query as `arkray_outbox_events` (one grouped read of the pending events' index), never a user |
 | `arkray_db_up` | — | the database answered this scrape (0: the database-backed gauges are left out, the rest still reported) |
 | `arkray_db_connections` | `state` | this database's connections (pg_stat_activity) |
 | `arkray_db_server_connections` | — | client connections to the whole server, every database and state (idle ones hold slots too) |
@@ -216,6 +249,9 @@ at scrape time in a bounded number of queries, `config/metrics.py`):
 | `arkray_administrator_deactivations_last_hour` | — | administrator accounts deactivated in the last hour (`user.deactivated` audit events recording an administrator's role; one database count, no cache read; ADR-0033) |
 | `arkray_mfa_lockouts_last_hour` | — | second factors locked by too many wrong codes in the last hour (`mfa.locked` audit events, both kinds; counted in the same database query as the administrator deactivations, no cache read; deep security audit M-4) |
 | `arkray_mfa_locked_until_reset_last_hour` | — | second factors locked until an MFA reset in the last hour (`mfa.locked` with `until: mfa_reset`; the same database query, no cache read; R133) |
+| `arkray_administrator_promotions_last_hour` | — | accounts made administrators in the last hour (`user.role_changed` to an administrator's role; the same database query; adversarial review of 73ff1e3, L3) |
+| `arkray_sign_in_failures_last_hour` | — | failed sign-ins of existing accounts in the last hour (`auth.login_failed`: wrong passwords and codes, inactive accounts; unknown emails aren't audited, so aren't counted; the same database query; L1) |
+| `arkray_sign_in_locks_last_hour` | — | accounts whose daily cap of failed sign-ins locked their sign-in from new browsers in the last hour (`auth.sign_in_locked`; the same database query; L1) |
 | `arkray_erasure_ledger_gate_open` | `status` | 1 while this process's erasure-ledger gate is open (`ok`, `disabled`, `settling`), 0 while it closes the API (`behind`, `ahead`, `diverged`, `tampered`, `unavailable`); checked as readiness checks it, in the scrape's thread (deployment preparation) |
 | `arkray_attachments` | `state` (uploading, failed, pending_scan) | attachment rows still in progress, failed with their object not yet removed, waiting for a malware scan |
 | `arkray_attachment_oldest_seconds` | `state` (uploading, unpurged, pending_scan) | age of the oldest unfinished upload; of the oldest failed or deleted file whose object isn't removed yet; of the oldest stored file still waiting for its malware scan |
@@ -287,6 +323,7 @@ The metric-based rows are shipped as Prometheus rules in `infrastructure/alerts/
 | Worker failures | `outbox_event_retry_scheduled` / `outbox_event_dead` rate above baseline; a worker absent from the broker (log platform, process supervisor) | runbooks: workers |
 | AI failure rate | `arkray_ai_breaker_open` = 1 for 15 min, or `ai_unavailable` + `timeout` > 20 % of questions in an hour | runbooks: Ask Arkray degraded |
 | RAG indexing backlog | `arkray_outbox_events{queue="ai_index",status="pending"}` > 1,000 for 30 min, or its oldest due > 1 h | runbooks: re-indexing |
+| One user's backlog | `arkray_outbox_top_key_share` > 0.8 on a queue with more than 500 pending events for 30 min (`ArkrayQueueDominatedByOneUser`, ticket): a runaway script or an abusive account; others are still served in turn (M6) | runbooks: outbox backlog; `outbox_requeue --status` |
 | Index health (R64) | a trigram index > 1.5 × its size after the last rebuild (weekly check) | runbooks: index bloat |
 | Security | login failure spike; lockout spike; `workspace.accessed` volume anomaly (audit) | runbooks: security events |
 | Support sessions and passwords | any `support_session.started` outside support hours, or more than a handful a day; `auth.login_with_temporary_password` by an address the user never used (audit, security events feed) | runbooks: security events |
@@ -296,6 +333,11 @@ The metric-based rows are shipped as Prometheus rules in `infrastructure/alerts/
 | Administrator deactivated | any administrator account deactivated in the last hour (`ArkrayAdministratorDeactivated`, ticket) | runbooks: administrator deactivated |
 | Second factor locked | any `mfa.locked` in the last hour (`ArkrayMfaLocked`, ticket): someone probably has that user's password | runbooks: second factor locked |
 | Second factor locked until an MFA reset | any `mfa.locked` with `until: mfa_reset` in the last hour (`ArkrayMfaLockedUntilReset`, ticket): someone probably has that user's password and mailbox | runbooks: second factor locked |
+| Administrator promoted | any account made an administrator in the last hour (`ArkrayAdministratorPromoted`, ticket): confirm it was intended (adversarial review of 73ff1e3, L3: promote-then-shield) | runbooks: security events |
+| Sign-in failure storm | more than 200 failed sign-ins of existing accounts in the last hour, for 10 minutes (`ArkraySignInFailureStorm`, ticket): guessing or password spraying (L1) | runbooks: security events |
+| Sign-in locked | any account locked from new browsers by the daily cap in the last hour (`ArkraySignInLocked`, ticket): someone guessed that account's password about 50 times (L1) | runbooks: security events |
 | Erasure-ledger gate closed | `arkray_erasure_ledger_gate_open` 0 on any pod for 2 min (`ArkrayErasureLedgerGateClosed`, page): the API answers 503 until the ledger and the database agree | runbooks: erasure ledger behind |
+| Erasure ledger tampered with | any `erasure_ledger_tampered` line from **any backend process** (log platform: a Celery container's health check, every probe while the verdict holds; gunicorn's master or the Celery parent at start or before a fork), **page**: an entry was altered, removed or replaced; a web process started from a checkpoint above it may still answer (adversarial review of 73ff1e3, review rounds 2 to 4) | runbooks: erasure ledger behind |
+| Erasure-ledger checkpoints unavailable | `erasure_ledger_checkpoint_unavailable` repeating for an hour (log platform), ticket: the ledger's credentials can't read or write its checkpoints, so every start reads the whole chain | runbooks: erasure ledger behind |
 | Attachment reconciliation | mismatches > 0, outcome 2, no whole pass for 48 h (`ArkrayAttachmentReconcile*`); an upload unfinished for over an hour (`ArkrayAttachmentUploadStuck`); a file waiting over an hour for its malware scan, so not downloadable (`ArkrayAttachmentScanOverdue`) | runbooks: attachment reconciliation |
 | Malware | any `attachment_malware_blocked`; `pending_scans` growing for an hour (scanner down: files don't download) | runbooks: file storage |

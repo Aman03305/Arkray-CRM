@@ -154,6 +154,52 @@ def send_mfa_notice(*, to: str, first_name: str, change: str) -> None:
     _send(to, f"{PRODUCT_NAME}: {subject}", f"Hello {first_name},\n\n{what}\n\n{advice}")
 
 
+def send_sign_in_locked(*, to: str, first_name: str, link: str, expires_at: datetime) -> None:
+    """The daily failure cap locked the account's sign-in from new browsers (adversarial
+    review of 73ff1e3, L1): the owner is told, with the way back. Never a password."""
+    _send(
+        to,
+        f"{PRODUCT_NAME}: too many failed sign-ins to your account",
+        f"Hello {first_name},\n\n"
+        f"There were many failed sign-in attempts to your {PRODUCT_NAME} account, so signing "
+        "in to it from a browser it hasn't been used in before is locked for now. Browsers "
+        "you've signed in from before still work.\n\n"
+        f"To lift the lock (and trust the browser you open it in), use this link:\n{link}\n\n"
+        f"This link can be used once and expires on {_business_time(expires_at)}. Resetting "
+        "your password (Forgot password on the sign-in page) lifts the lock too.\n\n"
+        "If these attempts weren't you, someone may be guessing your password: choose a "
+        "strong one you don't use anywhere else, and tell your administrator.\n",
+    )
+
+
+_ACCOUNT_NOTICES = {
+    # Adversarial review of 73ff1e3, L3: an administrator's change was silent.
+    "password_set_by_admin": (
+        "An administrator set a new password for your account",
+        "An administrator set a new, temporary password for your account; you were signed out"
+        " everywhere, and you'll choose your own the next time you sign in.",
+    ),
+    "role_changed": (
+        "Your role was changed",
+        "An administrator changed your role to {role}. You were signed out everywhere.",
+    ),
+}
+
+
+def send_account_notice(
+    *, to: str, first_name: str, change: str, role_label: str | None = None
+) -> None:
+    """Tell the account's own address about a change an administrator made to it. Never a
+    password."""
+    subject, what = _ACCOUNT_NOTICES[change]
+    _send(
+        to,
+        f"{PRODUCT_NAME}: {subject}",
+        f"Hello {first_name},\n\n{what.format(role=role_label or 'another role')}\n\n"
+        "If you didn't expect this, tell your administrator, or another one, now.\n",
+    )
+
+
 def send_email_changed_notice(*, to: str, first_name: str, new_email: str) -> None:
     _send(
         to,

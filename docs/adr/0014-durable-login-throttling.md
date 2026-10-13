@@ -1,6 +1,6 @@
 # 0014. Durable login throttling with per-browser budgets
 
-Status: Accepted
+Status: Accepted; amended by [0034](0034-staging-security-remediation.md) (unrecognised browsers per account and network, a daily cap with an emailed unlock, a success forgives without deleting, equal work for unknown emails)
 Date: 2026-09-30
 
 ## Context

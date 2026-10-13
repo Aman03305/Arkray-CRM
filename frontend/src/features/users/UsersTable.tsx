@@ -13,15 +13,26 @@ import { userWorkspaceHref } from "@/lib/workspace";
 
 import { UserStatus } from "./UserStatus";
 
-export type UserAction = "edit" | "change-email" | "resend" | "reset-mfa" | "deactivate" | "activate";
+export type UserAction =
+  | "edit"
+  | "change-email"
+  | "resend"
+  | "reset-mfa"
+  | "clear-sign-in-lock"
+  | "deactivate"
+  | "activate";
 
 export function actionsFor(user: AdminUser, isSelf: boolean): UserAction[] {
+  // A pseudonymised former user is never changed again (review of 73ff1e3, L4; the API refuses).
+  if (user.pseudonymised_at) return [];
   const actions: UserAction[] = ["edit"];
   // Another administrator changes their own email in Settings (the API refuses it).
   if (isSelf || user.role !== "admin") actions.push("change-email");
   if (user.status === "invited") actions.push("resend");
   // Never an administrator's (ADR-0033: an operator does that on the server); the API refuses it.
   if (user.mfa_enabled && user.role !== "admin" && !isSelf) actions.push("reset-mfa");
+  // Too many failed sign-ins locked it from new browsers (review of 73ff1e3, L1).
+  if (user.sign_in_locked_at) actions.push("clear-sign-in-lock");
   if (user.status === "deactivated") actions.push("activate");
   else if (!isSelf) actions.push("deactivate"); // the API refuses self-deactivation too
   return actions;
@@ -32,6 +43,7 @@ const ACTION_LABELS: Record<UserAction, { label: string; tone?: "danger" }> = {
   "change-email": { label: "Change email" },
   resend: { label: "Resend invitation" },
   "reset-mfa": { label: "Reset two-step verification" },
+  "clear-sign-in-lock": { label: "Clear sign-in lock" },
   activate: { label: "Reactivate" },
   deactivate: { label: "Deactivate", tone: "danger" },
 };

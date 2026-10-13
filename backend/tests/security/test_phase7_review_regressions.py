@@ -71,7 +71,6 @@ class TestWordsAnIndexCanLookUp:
             "on" + chr(0x0308),
             "ng" + chr(0x0331),
             "on" + chr(0x20DD),
-            "ab" + chr(0xFE0F),
             "on" + chr(0x200D),
             chr(0x094D) * 3,
         ],
@@ -80,6 +79,17 @@ class TestWordsAnIndexCanLookUp:
         response = signed_in(user_a).get(SEARCH.format("me"), {"q": q})
         assert response.status_code == 400, q
         assert response.json()["error"]["details"]["q"] == [NOTHING_TO_INDEX]
+
+    def test_a_variation_selector_after_a_letter_is_refused_before_any_lookup(self, user_a):
+        """ "ab" + VS16 was one of the queries above (no trigrams: "nothing to index"). A
+        variation selector after a letter now renders nothing and is refused as invisible
+        text by core.text (adversarial review of 73ff1e3, L12 and its review rounds), earlier
+        still: the same 400, before the search runs."""
+        response = signed_in(user_a).get(SEARCH.format("me"), {"q": "ab" + chr(0xFE0F)})
+        assert response.status_code == 400
+        assert response.json()["error"]["details"]["q"] == [
+            "Remove the invisible or control characters from this text."
+        ]
 
     @pytest.mark.parametrize(
         ("q", "terms"),

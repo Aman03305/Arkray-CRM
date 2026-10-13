@@ -262,6 +262,14 @@ def test_a_release_requires_ci_success_for_exactly_that_commit():
     assert "for environment in staging production; do" in script
     assert 'select(.type == "required_reviewers")' in script
     assert '[[ "$reviewers" -ge 1 ]] ||' in script
+    # Only chosen branches and tags may deploy (L14): a copy of this file on another branch
+    # can drop the checks above, not the environment's own policy.
+    # Exactly main and v*, by custom rules (review round 1, INFRA-8: `!= null` let
+    # "protected branches" or a `*` rule through).
+    assert '.custom_branch_policies and (.protected_branches | not) then "custom"' in script
+    assert '[[ "$policy" == custom ]] ||' in script
+    assert "/deployment-branch-policies" in script
+    assert '[[ "$rules" == "branch:main tag:v*" ]] ||' in script
     assert script.rstrip().endswith('>> "$GITHUB_STEP_SUMMARY"')
     assert 'echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"' in script
 
@@ -332,7 +340,12 @@ def test_production_verifies_the_attestations_of_the_exact_digests():
     )
     assert "^ghcr\\.io/$owner/arkray-(backend|frontend)@sha256:[0-9a-f]{64}$" in script
     assert '--signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"' in script
-    assert '--source-digest "$RELEASE_SHA" --deny-self-hosted-runners' in script
+    # Bound to this run's exact ref, which verify allowed (adversarial review of 73ff1e3, L14).
+    assert (
+        '--source-digest "$RELEASE_SHA" --source-ref "$GITHUB_REF" --deny-self-hosted-runners'
+        in script
+    )
+    assert script.index("refs/heads/main | refs/tags/v*) ;;") < script.index("verify=(")
     assert 'gh attestation verify "oci://$image" "${verify[@]}"\n' in script
     assert '"${verify[@]}" --predicate-type https://cyclonedx.org/bom' in script
     assert 'echo "docker pull $image"' in script
@@ -380,3 +393,90 @@ def test_the_local_runner_runs_cis_gates_with_cis_pins_and_environment():
     assert '"$src/infrastructure/postgres/roles.sql"' in local
     assert "scripts/check.sh backend" in local
     assert "scripts/check.sh frontend" in local
+
+
+# --- development credentials never reach the production stack (adversarial review M4) ------
+COMPOSE_STEP = "Refuse development credentials in the production stack"
+GUARD_STEP = "Check the credential guard in the image"
+REQUIRED_SECRETS = re.compile(r"grep -oE '(.+?)' \| sed -E '(.+?)' \| sort -u\)")
+
+
+def test_ci_refuses_the_production_stack_with_the_development_env_file():
+    """For each secret the overlay requires, CI leaves it out, with `.env.example` copied to
+    `.env`, and Compose must refuse naming it; the local runner does the same with
+    `--env-file .env.example` (a developer's own `.env` untouched)."""
+    ci = _load(CI_WORKFLOW)
+    job = ci["jobs"]["compose"]
+    assert isinstance(job["timeout-minutes"], int)
+    script = _run(ci, COMPOSE_STEP, "compose")
+    assert script.index("cp .env.example .env") < script.index("docker compose")
+    for line in (
+        "-f docker-compose.yml -f infrastructure/compose.production.yml --profile app",
+        'docker compose "${files[@]}" config --quiet',
+        'if (configure "$missing") 2> "$RUNNER_TEMP/compose.err"; then',
+        'grep -q "$missing" "$RUNNER_TEMP/compose.err"',
+        '(configure "")',
+    ):
+        assert line in script, line
+    local = CI_LOCAL.read_text(encoding="utf-8")
+    assert "JOBS=(secrets workflows compose backend frontend images)" in local
+    assert 'docker compose --env-file .env.example "${files[@]}" config --quiet' in local
+    assert "-f docker-compose.yml -f infrastructure/compose.production.yml --profile app" in local
+    assert 'grep -q "$missing" "$errors"' in local
+    # The same extraction of the required names in both.
+    in_ci, in_local = REQUIRED_SECRETS.search(script), REQUIRED_SECRETS.search(local)
+    assert in_ci
+    assert in_local
+    assert in_ci.groups() == in_local.groups()
+
+
+def test_ci_checks_the_credential_guard_in_the_image():
+    from config.credentials import COMPOSE_SECRETS
+
+    script = _run(_load(CI_WORKFLOW), GUARD_STEP, "images")
+    names = set(re.findall(r"\bARKRAY_PROD_[A-Z_]+\b", script.split("guard=(")[0]))
+    assert names == {secret.name for secret in COMPOSE_SECRETS if secret.required}
+    assert "--network none --read-only --cap-drop ALL" in script
+    assert script.count("arkray-backend:ci python -m config.credentials") == 2
+    assert "export ARKRAY_PROD_DB_SUPERUSER_PASSWORD=arkray_dev_only_password" in script
+    local = CI_LOCAL.read_text(encoding="utf-8")
+    assert (
+        'gate "images: the credential guard refuses development values" credential_guard' in local
+    )
+    assert local.count('"$BACKEND_IMAGE" python -m config.credentials') == 2
+
+
+# --- Dependabot (adversarial review of 73ff1e3, L14) ----------------------------------------
+def test_dependabot_covers_every_ecosystem_weekly_and_grouped():
+    """docs/security.md named Dependabot; nothing configured it. Every dependency the
+    repository pins: Python (uv), the frontend (npm/pnpm), the Dockerfiles' and Compose
+    files' images, the workflows' actions."""
+    config = _load(ROOT / ".github" / "dependabot.yml")
+    assert config["version"] == 2
+    found = {}
+    for update in config["updates"]:
+        directories = update.get("directories") or [update["directory"]]
+        found[update["package-ecosystem"]] = directories
+        assert update["schedule"]["interval"] == "weekly", update["package-ecosystem"]
+        assert update["groups"], update["package-ecosystem"]
+        assert update["cooldown"]["default-days"] >= 3, update["package-ecosystem"]
+        for group in update["groups"].values():
+            assert group["applies-to"] == "version-updates"
+            assert group["patterns"] == ["*"]
+        for directory in directories:
+            assert (ROOT / directory.lstrip("/")).is_dir(), directory
+    assert found == {
+        "uv": ["/backend"],
+        "npm": ["/frontend"],
+        "docker": ["/backend", "/frontend"],
+        "docker-compose": ["/", "/infrastructure"],
+        "github-actions": ["/"],
+    }
+    assert (ROOT / "backend" / "uv.lock").is_file()
+    assert (ROOT / "frontend" / "pnpm-lock.yaml").is_file()
+    # Each docker-compose directory holds a file Dependabot recognises by name (its
+    # FILENAME_REGEX, matched anywhere in the name; review round 1, INFRA-9).
+    compose_name = re.compile(r"(docker-)?compose(-[\w]+)?(?>\.[\w-]+)?\.ya?ml", re.I)
+    for directory in found["docker-compose"]:
+        names = [path.name for path in (ROOT / directory.lstrip("/")).iterdir() if path.is_file()]
+        assert [name for name in names if compose_name.search(name)], directory

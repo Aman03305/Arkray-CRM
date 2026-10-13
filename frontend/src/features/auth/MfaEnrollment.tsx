@@ -8,10 +8,11 @@ import { MfaSetupFlow } from "./MfaSetupFlow";
 import { useSignOut } from "./useSignOut";
 
 /**
- * Shown instead of the app while two-step verification is required for the viewer's role
- * but not set up (ADR-0033): the API refuses everything else meanwhile (403
- * `mfa_enrollment_required`). `onDone` runs once the recovery codes are saved; the session
- * gate then fetches the viewer again and the app opens.
+ * Shown instead of the app while two-step verification is required for the viewer but not set
+ * up (ADR-0033: administrators; every account when the organisation requires it, review of
+ * 73ff1e3 L1). The API says so (`mfa_enrollment_required`), not the role, and refuses
+ * everything else meanwhile (403 `mfa_enrollment_required`). `onDone` runs once the recovery
+ * codes are saved; the session gate then fetches the viewer again and the app opens.
  */
 export function MfaEnrollment({ onDone }: { onDone: () => void }) {
   const signOut = useSignOut();
@@ -19,7 +20,7 @@ export function MfaEnrollment({ onDone }: { onDone: () => void }) {
   return (
     <AuthCard
       title="Set up two-step verification"
-      subtitle="Your role needs a second step at sign-in: a code from an app on your phone. It takes a minute."
+      subtitle="Your account needs a second step at sign-in: a code from an app on your phone. It takes a minute."
       footer={
         <button
           type="button"

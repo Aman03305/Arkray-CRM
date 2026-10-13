@@ -50,9 +50,22 @@ export const PIPELINE: PipelineDto = {
 
 export const PIPELINES: PipelineList = { results: [PIPELINE] };
 
-/** The pipelines of the workspaces tests use (own, organisation, Rahul's, Priya's). */
+/** A pipelines list at `listPath` and each of its pipelines on its own at `${listPath}/{id}`: the
+ * web app loads a pipeline's custom fields from the latter only (review round 1, DEALS-1). */
+export function pipelineRoutes(listPath: string, list: PipelineList) {
+  return {
+    [`GET ${listPath}`]: { status: 200, body: list },
+    ...Object.fromEntries(list.results.map((pipeline) => [`GET ${listPath}/${pipeline.id}`, { status: 200, body: pipeline }])),
+  };
+}
+
+/** The pipelines of the workspaces tests use (own, organisation, Rahul's, Priya's): the list,
+ * and the pipeline on its own (its custom fields come only with it: review round 1, DEALS-1). */
 export const PIPELINE_ROUTES = Object.fromEntries(
-  ["me", "all", RAHUL_ID, PRIYA_ID].map((workspace) => [`GET /api/v1/workspaces/${workspace}/pipelines`, { status: 200, body: PIPELINES }]),
+  ["me", "all", RAHUL_ID, PRIYA_ID].flatMap((workspace) => [
+    [`GET /api/v1/workspaces/${workspace}/pipelines`, { status: 200, body: PIPELINES }],
+    [`GET /api/v1/workspaces/${workspace}/pipelines/${PIPELINE_ID}`, { status: 200, body: PIPELINE }],
+  ]),
 );
 
 export function makeCard(overrides: Partial<OpportunityCard> = {}): OpportunityCard {

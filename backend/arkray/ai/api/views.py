@@ -11,8 +11,9 @@ GET  .../ask             what Ask Arkray can do right now
 GET  .../ask/questions/{id}           one question (poll until answered or failed)
 GET  .../ask/conversations            the caller's recent conversations here
 GET  .../ask/conversations/{id}       one conversation with its questions
-DELETE .../ask/conversations/{id}     forget it (with its questions and answers; 409
-                                      `legal_hold` while a legal hold keeps it)
+DELETE .../ask/conversations/{id}     forget it, with its questions and answers (204
+                                      whatever the legal holds: one a hold keeps is kept
+                                      hidden until its release, ai.service)
 
 Listed in tests/authz_matrix.py. Questions are rate limited per user (API_THROTTLE_ASK)
 on top of the PostgreSQL-counted bulkheads in ai.service.
@@ -196,15 +197,10 @@ class ConversationView(ApiView):
         }
         return Response(data)
 
-    @extend_schema(
-        operation_id="ask_conversation_delete",
-        responses={
-            204: None,
-            404: NOT_FOUND,
-            409: OpenApiResponse(description="A legal hold keeps it (`legal_hold`)."),
-        },
-    )
+    @extend_schema(operation_id="ask_conversation_delete", responses={204: None, 404: NOT_FOUND})
     def delete(self, request: Request, workspace: str, conversation_id: UUID) -> Response:
+        # Always 204 for one of the caller's conversations, whether or not a legal hold keeps
+        # it (adversarial review M1: a 409 told them about the hold; ai.service).
         actor = _actor(request)
         scope = resolve_workspace(actor, workspace)
         service.forget_conversation(actor, scope, conversation_id)

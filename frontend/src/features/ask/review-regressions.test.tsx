@@ -284,6 +284,29 @@ describe("forgetting", () => {
     expect(screen.getByText("A 1")).toBeInTheDocument();
   });
 
+  it("a forgotten conversation leaves the list, with nothing to tell it apart (adversarial review M1)", async () => {
+    // The server answers 204 whether or not a legal hold keeps the conversation's records:
+    // the flow ends the same way every time, with no message.
+    let forgotten = false;
+    const { api, user } = await openConversation({
+      "GET /api/v1/workspaces/me/ask/conversations": () => ({
+        status: 200,
+        body: forgotten ? [] : [{ id: "c-1", title: "CONV", created_at: "", updated_at: "" }],
+      }),
+      "DELETE /api/v1/workspaces/me/ask/conversations/c-1": () => {
+        forgotten = true;
+        return { status: 204 };
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Forget" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Forget" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "CONV" })).not.toBeInTheDocument());
+    expect(screen.queryByText("A 1")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(api.callsTo("DELETE", "/api/v1/workspaces/me/ask/conversations/c-1")).toHaveLength(1);
+  });
+
   it("an already-forgotten conversation (404) counts as forgotten", async () => {
     const { user } = await openConversation({
       "DELETE /api/v1/workspaces/me/ask/conversations/c-1": apiError(404, "not_found", "Not found."),

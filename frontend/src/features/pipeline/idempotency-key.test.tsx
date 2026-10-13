@@ -10,7 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 import { isIdempotencyKey } from "@/lib/random";
 import type { Workspace } from "@/lib/workspace";
 import { salesViewer } from "@/test/fixtures";
-import { makeOpportunity, PIPELINE } from "@/test/pipeline-fixtures";
+import { makeOpportunity, PIPELINE, pipelineRoutes } from "@/test/pipeline-fixtures";
 import { apiError, mockApi, renderWithProviders } from "@/test/render";
 
 import { OpportunityDrawer } from "./OpportunityDrawer";
@@ -27,7 +27,7 @@ type Reply = Parameters<typeof mockApi>[0][string];
 
 function routes(create: Reply) {
   return mockApi({
-    "GET /api/v1/workspaces/me/pipelines": { status: 200, body: { results: [PIPELINE] } },
+    ...pipelineRoutes("/api/v1/workspaces/me/pipelines", { results: [PIPELINE] }),
     "GET /api/v1/config/opportunity-options": { status: 200, body: { instruments: [{ name: "Adams 8180 T" }] } },
     "GET /api/v1/workspaces/me/leads/duplicates": { status: 200, body: { results: [] } },
     [`POST ${CREATE}`]: create,

@@ -19,8 +19,13 @@ the schema owner's credentials before traffic resumes:
    - `user_pseudonymised`: pseudonymised again (`privacy.staff`), deactivated with it if the
      backup had the account active;
    - `custom_values_deleted`: the field's values deleted again (`pipeline.field_values`),
-     on the deals of the entry's `owner` only when it names one;
+     on the deals of the entry's `owner` only when it names one; an entry naming several
+     fields (one per request since review round 1) is applied field by field, as below;
    - `attachment_deleted`: the file deleted again, its object purged and its name forgotten;
+     an entry naming a batch (core.ledger: ids separated by commas, security review M3) is
+     applied file by file, every one tried before a failure is reported, and one the
+     backup never had counts as missing; entries naming one file (every earlier release's)
+     read as before;
    - `key_rotated`: nothing to apply (the key change is checked by the verification);
 3. reads the ledger again and applies what was added meanwhile (re-erasing a lead queues
    its files' purges, and each purge appends an entry), until it has reached the head; then,
@@ -174,11 +179,30 @@ def _user(entry: ledger.Entry, operator: User | None, dry_run: bool) -> str:
     return REAPPLIED
 
 
+# A batch's outcome: the first of these any of its subjects had.
+_PRECEDENCE = (REAPPLIED, WOULD, ALREADY, MISSING)
+
+
 def _custom_values(entry: ledger.Entry, operator: User | None, dry_run: bool) -> str:
-    found = CustomField.objects.filter(pk=UUID(entry.subject)).first()
+    """One field, or each of a batch's (review round 1: one entry per request), on the
+    deals of the entry's owner when it names one; as `_attachment` for a batch."""
+    owner_id = UUID(entry.owner) if entry.owner else None
+    outcomes: list[str] = []
+    failure: Exception | None = None
+    for subject in entry.subjects() or [entry.subject]:
+        try:
+            outcomes.append(_field(UUID(subject), owner_id, dry_run))
+        except Exception as exc:  # noqa: BLE001 — every field tried; the first failure raised
+            failure = failure or exc
+    if failure is not None:
+        raise failure
+    return next(outcome for outcome in _PRECEDENCE if outcome in outcomes)
+
+
+def _field(field_id: UUID, owner_id: UUID | None, dry_run: bool) -> str:
+    found = CustomField.objects.filter(pk=field_id).first()
     if found is None:
         return MISSING
-    owner_id = UUID(entry.owner) if entry.owner else None
     if not field_values.holding(found, owner_id).exists():
         return ALREADY
     if dry_run:
@@ -194,7 +218,22 @@ def _key_rotated(entry: ledger.Entry, operator: User | None, dry_run: bool) -> s
 
 
 def _attachment(entry: ledger.Entry, operator: User | None, dry_run: bool) -> str:
-    row = Attachment.objects.filter(pk=UUID(entry.subject)).first()
+    """One file, or each of a batch's (module docstring); the first failure is raised once
+    every file was tried (the state stays behind, a rerun applies the rest again)."""
+    outcomes: list[str] = []
+    failure: Exception | None = None
+    for subject in entry.subjects() or [entry.subject]:
+        try:
+            outcomes.append(_file(UUID(subject), operator, dry_run))
+        except Exception as exc:  # noqa: BLE001 — every file tried; the first failure raised
+            failure = failure or exc
+    if failure is not None:
+        raise failure
+    return next(outcome for outcome in _PRECEDENCE if outcome in outcomes)
+
+
+def _file(attachment_id: UUID, operator: User | None, dry_run: bool) -> str:
+    row = Attachment.objects.filter(pk=attachment_id).first()
     if row is None:
         return MISSING
     done = (
@@ -298,7 +337,7 @@ def replay(
             # Holding the append lock: no erasure can add an entry until this commits, so
             # the head read here is the head when the state is recorded.
             ledger.lock()
-            head = ledger.head()
+            head = ledger.head(last.seq if last is not None else 0)
             if head is None or (last is not None and head.seq == last.seq):
                 if head is not None and last is not None and head.mac != last.mac:
                     raise ledger.LedgerTampered("The ledger changed under the replay.")

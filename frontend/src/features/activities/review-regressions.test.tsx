@@ -531,6 +531,7 @@ describe("a change of owner out of the viewed workspace (live walkthrough)", () 
       [`GET ${RAHULS_DEAL}`]: { status: 200, body: makeOpportunity() },
       [`GET ${RAHULS_DEAL}/history`]: { status: 200, body: page([]) },
       [`GET ${RAHULS_DEAL}/negotiated-prices`]: { status: 200, body: page([]) },
+      [`GET ${RAHULS_DEAL}/corrections`]: { status: 200, body: page([]) },
       [`GET ${RAHULS_DEAL}/timeline`]: { status: 200, body: page([makeEntry()]) },
       [`GET ${RAHUL}/activities`]: { status: 200, body: page([asListItem(makeActivity())]) },
       "GET /api/v1/assignees": {
@@ -565,6 +566,8 @@ describe("a change of owner out of the viewed workspace (live walkthrough)", () 
     // Each was requested once, before the change: here they would now be 404s.
     expect(api.callsTo("GET", shown)).toHaveLength(1);
     expect(api.callsTo("GET", RAHULS_DEAL)).toHaveLength(1);
+    // The History tab's corrections list (closed-deal corrections) too: once, never after.
+    expect(api.callsTo("GET", `${RAHULS_DEAL}/corrections`)).toHaveLength(tab === "History" ? 1 : 0);
     expect(screen.queryByText(/couldn't be loaded/)).not.toBeInTheDocument();
     // While the page is still on screen its data stays (stale, not refetched)...
     expect(view.client.getQueryState(cached)!.isInvalidated).toBe(true);
@@ -575,5 +578,6 @@ describe("a change of owner out of the viewed workspace (live walkthrough)", () 
     expect(view.client.getQueryState(cached)).toBeUndefined();
     expect(view.client.getQueryState(["pipeline", "detail", RAHUL_ID, OPPORTUNITY_ID])).toBeUndefined();
     expect(view.client.getQueryState(["activities", "deal-notes", RAHUL_ID, OPPORTUNITY_ID])).toBeUndefined();
+    expect(view.client.getQueryCache().findAll({ queryKey: ["pipeline", "corrections", RAHUL_ID, OPPORTUNITY_ID] })).toHaveLength(0);
   });
 });

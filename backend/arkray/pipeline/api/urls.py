@@ -43,6 +43,14 @@ workspace_urlpatterns = [
         views.OpportunityNegotiatedPricesView.as_view(),
         name="opportunity-negotiated-prices",
     ),
+    path(
+        f"{OPPORTUNITY}/correct", views.OpportunityCorrectView.as_view(), name="opportunity-correct"
+    ),
+    path(
+        f"{OPPORTUNITY}/corrections",
+        views.OpportunityCorrectionsView.as_view(),
+        name="opportunity-corrections",
+    ),
     path("leads/<uuid:lead_id>/convert", views.LeadConvertView.as_view(), name="lead-convert"),
     path(
         "leads/<uuid:lead_id>/correction",

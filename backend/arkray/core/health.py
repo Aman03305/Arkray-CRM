@@ -5,7 +5,11 @@
 - /health/ready — the instance should receive traffic. PostgreSQL is required, and the
   database must match the erasure ledger (core.ledger_gate: never serve a restored backup
   before its erasures are re-applied); Redis is optional (the CRM degrades gracefully
-  without it), so a Redis failure reports "degraded" but stays ready.
+  without it), so a Redis failure reports "degraded" but stays ready. The ledger part waits
+  at most ledger_gate.CHECK_WAIT_S whatever the ledger's size or its store's speed
+  (security review M3: a grown ledger made each check take seconds, and the probe failed):
+  past it the gate answers from this process's last verified state, read on in the
+  background.
 
 Responses deliberately contain no hostnames, versions or error messages.
 """

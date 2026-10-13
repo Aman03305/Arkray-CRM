@@ -16,17 +16,29 @@
 # and process limit, and a health check (the one-shot jobs exit instead). Attachments are
 # scanned by a ClamAV daemon only the scanning worker can reach (R94).
 #
-#   export DJANGO_SECRET_KEY=... POSTGRES_PASSWORD=... ARKRAY_OWNER_PASSWORD=... \
-#          ARKRAY_APP_PASSWORD=... REDIS_PASSWORD=... METRICS_TOKEN=... ERASURE_LEDGER_KEY=...
-#   docker compose -p arkray-prod -f docker-compose.yml -f infrastructure/compose.production.yml \
-#       --profile app up -d --build
+#   scripts/init-prod-env.sh /secure/arkray-prod.env     # once: every secret generated, 0600
+#   scripts/prod-compose.sh /secure/arkray-prod.env up -d --build
+#   (docker compose --env-file <file> -p arkray-prod -f docker-compose.yml -f this file
+#    --profile app, every ARKRAY_PROD_* unset first: an exported one wins over the file)
 #   open https://localhost:8443   (Mailpit's inbox: http://localhost:58125)
+#
+# Secrets (adversarial review of 73ff1e3, M4): only under production-only names,
+# ARKRAY_PROD_* (config/credentials.py lists them), which no development file defines, read
+# from the file `--env-file` names: Compose then never reads the repository's `.env` (with
+# `.env.example`'s published superuser password, the stack once started on it). Nothing
+# starts until `credential-guard` has refused development, placeholder, weak and reused
+# values. PostgreSQL reads infrastructure/postgres/pg_hba.conf: the superuser only on its
+# local socket (the role setup's), arkray_owner only from `db-owner` (the migrate job's
+# network), arkray_app over TLS, SCRAM everywhere, everything else rejected.
 #
 # A separate project (-p) with its own volumes: it never touches the development stack.
 # The limits suit this rehearsal and a small organisation's single host; size real ones from
 # docs/capacity.md.
 
 x-production-env: &production-env
+  # Every secret under its production-only name (the development file's DJANGO_SECRET_KEY,
+  # POSTGRES_PASSWORD, METRICS_TOKEN and ERASURE_LEDGER_KEY never reach these containers).
+  DJANGO_SECRET_KEY: ${ARKRAY_PROD_DJANGO_SECRET_KEY:?set ARKRAY_PROD_DJANGO_SECRET_KEY (scripts/init-prod-env.sh)}
   DJANGO_ALLOW_INSECURE_LOCAL_HTTP: "false"
   DJANGO_SECURE_COOKIES: "true"
   DJANGO_SECURE_SSL_REDIRECT: "true"
@@ -43,15 +55,15 @@ x-production-env: &production-env
   TRUSTED_PROXY_ADDRESSES: "10.252.17.10"
   FORWARDED_ALLOW_IPS: "10.252.17.10"
   TRUST_INCOMING_REQUEST_ID: "true"
-  DATABASE_URL: "postgres://arkray_app:${ARKRAY_APP_PASSWORD:?set ARKRAY_APP_PASSWORD}@postgres:5432/arkray?sslmode=verify-full&sslrootcert=/tls/ca.crt"
-  CELERY_BROKER_URL: "rediss://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0?ssl_cert_reqs=required&ssl_ca_certs=/tls/ca.crt"
+  DATABASE_URL: "postgres://arkray_app:${ARKRAY_PROD_DB_APP_PASSWORD:?set ARKRAY_PROD_DB_APP_PASSWORD}@postgres:5432/arkray?sslmode=verify-full&sslrootcert=/tls/ca.crt"
+  CELERY_BROKER_URL: "rediss://:${ARKRAY_PROD_REDIS_PASSWORD:?set ARKRAY_PROD_REDIS_PASSWORD}@redis:6379/0?ssl_cert_reqs=required&ssl_ca_certs=/tls/ca.crt"
   # The cache on an instance of its own, never written to disk: rate-limit keys hold client
   # addresses (privacy remediation P3).
-  REDIS_CACHE_URL: "rediss://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis-cache:6379/0?ssl_cert_reqs=required&ssl_ca_certs=/tls/ca.crt"
+  REDIS_CACHE_URL: "rediss://:${ARKRAY_PROD_REDIS_PASSWORD:?set ARKRAY_PROD_REDIS_PASSWORD}@redis-cache:6379/0?ssl_cert_reqs=required&ssl_ca_certs=/tls/ca.crt"
   EMAIL_URL: smtp+tls://mailpit:1025
   EMAIL_TLS_CA_FILE: /tls/ca.crt
   ERASURE_LEDGER_URL: file:///var/lib/arkray/ledger
-  ERASURE_LEDGER_KEY: ${ERASURE_LEDGER_KEY:?set ERASURE_LEDGER_KEY (at least 32 characters)}
+  ERASURE_LEDGER_KEY: ${ARKRAY_PROD_ERASURE_LEDGER_KEY:?set ARKRAY_PROD_ERASURE_LEDGER_KEY (at least 32 characters)}
   EXPORT_ROOT: /var/lib/arkray/exports
   DB_REQUIRE_RESTRICTED_ROLE: "true"
   # Pinned, not interpolated: Compose reads the repository's .env for this project too, and
@@ -62,7 +74,7 @@ x-production-env: &production-env
   AI_LLM_PROVIDER: none
   LOG_LEVEL: INFO
   # Required: the metrics endpoint (and the alerts on it) exists only with a token.
-  METRICS_TOKEN: ${METRICS_TOKEN:?set METRICS_TOKEN (at least 32 characters)}
+  METRICS_TOKEN: ${ARKRAY_PROD_METRICS_TOKEN:?set ARKRAY_PROD_METRICS_TOKEN (at least 32 characters)}
   # This rehearsal keeps attachments on a private volume (pinned, like every setting here);
   # a real deployment normally points ATTACHMENT_STORAGE=s3 at a private bucket.
   ATTACHMENT_STORAGE: filesystem
@@ -91,10 +103,13 @@ services:
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: arkray  # the administrator, pinned like every setting (not from .env)
-      # No default superuser password here (Phase 11 review): any container on the network
-      # that knew it could connect as the superuser and rewrite the audit trail.
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (the superuser's)}
-    command: ["postgres", "-c", "log_min_error_statement=panic", "-c", "log_error_verbosity=terse", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "ssl=on", "-c", "ssl_cert_file=/tls/server.crt", "-c", "ssl_key_file=/tls/server.key", "-c", "ssl_min_protocol_version=TLSv1.2"]
+      # No default superuser password here (Phase 11 review), and never the development
+      # file's POSTGRES_PASSWORD (M4: `.env.example` publishes it): a production-only name.
+      POSTGRES_PASSWORD: ${ARKRAY_PROD_DB_SUPERUSER_PASSWORD:?set ARKRAY_PROD_DB_SUPERUSER_PASSWORD (the superuser's)}
+    # Who may connect from where (M4): infrastructure/postgres/pg_hba.conf, not the image's
+    # `host all all all scram-sha-256`. The superuser only on the local socket, the owner
+    # only from `db-owner`, the application role over TLS; SCRAM verifiers only.
+    command: ["postgres", "-c", "hba_file=/etc/postgresql/pg_hba.conf", "-c", "password_encryption=scram-sha-256", "-c", "log_min_error_statement=panic", "-c", "log_error_verbosity=terse", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "ssl=on", "-c", "ssl_cert_file=/tls/server.crt", "-c", "ssl_key_file=/tls/server.key", "-c", "ssl_min_protocol_version=TLSv1.2"]
     # As the postgres user from the start (the image supports it): its entrypoint then
     # needs no capability to change owners or switch users (R128).
     user: "999:999"
@@ -103,10 +118,9 @@ services:
     # to the container, and without `size=` it may grow to half the HOST's memory, whatever
     # the limit below. Sized to what the process writes there, with headroom; at most half of
     # the container's limit together (tests/architecture/test_compose_production.py).
-    # PostgreSQL's own temporary files are in its data directory; here only its socket/lock.
+    # PostgreSQL's own temporary files are in its data directory.
     tmpfs:
       - /tmp:size=16m
-      - /var/run/postgresql:uid=999,gid=999,mode=3775,size=1m
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
@@ -115,14 +129,23 @@ services:
         limits: {cpus: "2.0", memory: 2g, pids: 512}
     volumes:
       - tls-postgres:/tls:ro
+      - ./infrastructure/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      # The socket (and its lock file) on a volume of its own, mounted by the role setup
+      # alone (db-roles): the superuser's only way in. A few bytes; the image's ownership.
+      - postgres-socket:/var/run/postgresql
+    networks:
+      - default  # the application role, from the API and the workers
+      - db-owner  # the owner, from the migrate job alone
     depends_on:
+      credential-guard:
+        condition: service_completed_successfully
       backend-tls:
         condition: service_completed_successfully
     ports: !reset []
 
   redis:
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+      REDIS_PASSWORD: ${ARKRAY_PROD_REDIS_PASSWORD:?set ARKRAY_PROD_REDIS_PASSWORD}
     # TLS only (no plain port): the broker's messages and the password never cross in clear.
     command: ["sh", "-c", "exec redis-server --port 0 --tls-port 6379 --tls-cert-file /tls/server.crt --tls-key-file /tls/server.key --tls-ca-cert-file /tls/ca.crt --tls-auth-clients no --appendonly yes --maxmemory-policy noeviction --requirepass \"$$REDIS_PASSWORD\""]
     user: "999:1000"  # redis:redis; /data and the TLS key are theirs
@@ -138,6 +161,8 @@ services:
     volumes:
       - tls-redis:/tls:ro
     depends_on:
+      credential-guard:
+        condition: service_completed_successfully
       backend-tls:
         condition: service_completed_successfully
     healthcheck:
@@ -151,7 +176,7 @@ services:
     image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     logging: *logging
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+      REDIS_PASSWORD: ${ARKRAY_PROD_REDIS_PASSWORD:?set ARKRAY_PROD_REDIS_PASSWORD}
     command: ["sh", "-c", "exec redis-server --port 0 --tls-port 6379 --tls-cert-file /tls/server.crt --tls-key-file /tls/server.key --tls-ca-cert-file /tls/ca.crt --tls-auth-clients no --save '' --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass \"$$REDIS_PASSWORD\""]
     user: "999:1000"
     read_only: true
@@ -168,6 +193,8 @@ services:
     volumes:
       - tls-redis:/tls:ro
     depends_on:
+      credential-guard:
+        condition: service_completed_successfully
       backend-tls:
         condition: service_completed_successfully
     healthcheck:
@@ -203,6 +230,8 @@ services:
     volumes:
       - tls-mailpit:/tls:ro
     depends_on:
+      credential-guard:
+        condition: service_completed_successfully
       backend-tls:
         condition: service_completed_successfully
     ports: !override
@@ -233,14 +262,19 @@ services:
       - tls-redis:/out/redis
       - tls-mailpit:/out/mailpit
       - tls-ca-key:/out/ca-key
+    depends_on:
+      credential-guard:
+        condition: service_completed_successfully
     command: ["sh", "-c", "[ -f /out/ca/ca.crt ] || (cd /out && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 -subj '/CN=Arkray local backend CA' -keyout ca-key/ca.key -out ca/ca.crt && for s in postgres:postgres redis:redis,redis-cache mailpit:mailpit; do n=$${s%%:*}; sans=$$(echo $${s#*:} | sed 's/[^,]*/DNS:&/g'); openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=$$n -keyout /tmp/$$n.key -out /tmp/$$n.csr && printf 'subjectAltName=%s' $$sans > /tmp/$$n.cnf && openssl x509 -req -in /tmp/$$n.csr -CA ca/ca.crt -CAkey ca-key/ca.key -CAcreateserial -CAserial /tmp/ca.srl -days 30 -extfile /tmp/$$n.cnf -out $$n/server.crt && cp /tmp/$$n.key $$n/server.key && cp ca/ca.crt $$n/ca.crt && rm /tmp/$$n.key /tmp/$$n.csr /tmp/$$n.cnf; done && chmod 600 postgres/server.key redis/server.key mailpit/server.key ca-key/ca.key && chown 999:999 postgres/server.key && chown 999:1000 redis/server.key && chown 65534:65534 mailpit/server.key)"]
 
-  # Once, as the database superuser: the database, both roles, extensions, R63's logging.
-  db-roles:
-    profiles: ["app"]
-    image: pgvector/pgvector:0.8.7-pg16-trixie@sha256:40d828eda66737aaacb934387a337babf1455ebd56e9bdd13fc08e211257c972
+  # Once, before anything else (adversarial review of 73ff1e3, M4): every production secret
+  # present, none a development or placeholder value, weak, or used twice
+  # (config/credentials.py), or nothing starts; it names the variables, never a value. No
+  # network: it holds every secret and needs nothing but its environment.
+  credential-guard:
+    build: ./backend
     logging: *logging
-    user: "999:999"
+    network_mode: none
     read_only: true
     tmpfs:
       - /tmp:size=8m
@@ -251,25 +285,58 @@ services:
       resources:
         limits: {cpus: "0.5", memory: 128m, pids: 32}
     environment:
-      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
-      OWNER_PASSWORD: ${ARKRAY_OWNER_PASSWORD:?set ARKRAY_OWNER_PASSWORD}
-      APP_PASSWORD: ${ARKRAY_APP_PASSWORD:?set ARKRAY_APP_PASSWORD}
-      PGSSLMODE: verify-full
-      PGSSLROOTCERT: /tls/ca.crt
+      ARKRAY_PROD_DB_SUPERUSER_PASSWORD: ${ARKRAY_PROD_DB_SUPERUSER_PASSWORD:?set ARKRAY_PROD_DB_SUPERUSER_PASSWORD}
+      ARKRAY_PROD_DB_OWNER_PASSWORD: ${ARKRAY_PROD_DB_OWNER_PASSWORD:?set ARKRAY_PROD_DB_OWNER_PASSWORD}
+      ARKRAY_PROD_DB_APP_PASSWORD: ${ARKRAY_PROD_DB_APP_PASSWORD:?set ARKRAY_PROD_DB_APP_PASSWORD}
+      ARKRAY_PROD_REDIS_PASSWORD: ${ARKRAY_PROD_REDIS_PASSWORD:?set ARKRAY_PROD_REDIS_PASSWORD}
+      ARKRAY_PROD_DJANGO_SECRET_KEY: ${ARKRAY_PROD_DJANGO_SECRET_KEY:?set ARKRAY_PROD_DJANGO_SECRET_KEY}
+      ARKRAY_PROD_METRICS_TOKEN: ${ARKRAY_PROD_METRICS_TOKEN:?set ARKRAY_PROD_METRICS_TOKEN}
+      ARKRAY_PROD_ERASURE_LEDGER_KEY: ${ARKRAY_PROD_ERASURE_LEDGER_KEY:?set ARKRAY_PROD_ERASURE_LEDGER_KEY}
+      ARKRAY_PROD_ANTHROPIC_API_KEY: ${ARKRAY_PROD_ANTHROPIC_API_KEY:-}
+    command: ["python", "-m", "config.credentials"]
+
+  # Once, as the database superuser: the database, both roles, extensions, R63's logging.
+  # Through the server's local socket (the shared `postgres-socket` volume): pg_hba.conf
+  # admits the superuser nowhere else, and this container has no network at all (M4).
+  db-roles:
+    profiles: ["app"]
+    image: pgvector/pgvector:0.8.7-pg16-trixie@sha256:40d828eda66737aaacb934387a337babf1455ebd56e9bdd13fc08e211257c972
+    logging: *logging
+    user: "999:999"
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 128m, pids: 32}
+    environment:
+      PGPASSWORD: ${ARKRAY_PROD_DB_SUPERUSER_PASSWORD:?set ARKRAY_PROD_DB_SUPERUSER_PASSWORD}
+      OWNER_PASSWORD: ${ARKRAY_PROD_DB_OWNER_PASSWORD:?set ARKRAY_PROD_DB_OWNER_PASSWORD}
+      APP_PASSWORD: ${ARKRAY_PROD_DB_APP_PASSWORD:?set ARKRAY_PROD_DB_APP_PASSWORD}
     volumes:
       - ./infrastructure/postgres:/deploy:ro
-      - tls-ca:/tls:ro
+      - postgres-socket:/var/run/postgresql
     # The passwords stay in the environment (roles.sql reads them with \getenv), off the
     # command line.
-    command: ["psql", "-h", "postgres", "-U", "arkray", "-d", "postgres", "-v", "database=arkray", "-f", "/deploy/roles.sql"]
+    command: ["psql", "-h", "/var/run/postgresql", "-U", "arkray", "-d", "postgres", "-v", "database=arkray", "-f", "/deploy/roles.sql"]
     depends_on:
+      credential-guard:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
 
+  # On `db-owner` alone (M4): the one network pg_hba.conf admits arkray_owner from. Not on
+  # `default` too, where `postgres` could resolve to the server's other address. It needs
+  # nothing else: no Redis, no SMTP. `docker compose run --rm migrate python manage.py
+  # replay_erasures` (docs/runbooks.md) runs here too, as the owner.
   migrate:
     environment:
       <<: *production-env
-      DATABASE_URL: "postgres://arkray_owner:${ARKRAY_OWNER_PASSWORD:?set ARKRAY_OWNER_PASSWORD}@postgres:5432/arkray?sslmode=verify-full&sslrootcert=/tls/ca.crt"
+      DATABASE_URL: "postgres://arkray_owner:${ARKRAY_PROD_DB_OWNER_PASSWORD:?set ARKRAY_PROD_DB_OWNER_PASSWORD}@postgres:5432/arkray?sslmode=verify-full&sslrootcert=/tls/ca.crt"
     deploy:
       resources:
         limits: {cpus: "1.0", memory: 512m, pids: 64}
@@ -277,8 +344,12 @@ services:
       - /tmp:size=16m
     volumes:
       - tls-ca:/tls:ro
+    networks:
+      - db-owner
     command: ["sh", "-c", "python manage.py migrate --noinput && python manage.py grant_app_privileges arkray_app"]
     depends_on:
+      credential-guard:
+        condition: service_completed_successfully
       db-roles:
         condition: service_completed_successfully
 
@@ -304,6 +375,9 @@ services:
       - default  # PostgreSQL, Redis, the ledger's peers
       - api  # nginx, at its fixed address
     ports: !reset []
+    depends_on:
+      credential-guard:
+        condition: service_completed_successfully
 
   # The scanning worker: the only container on the `scanner` network with ClamAV.
   worker:
@@ -322,6 +396,9 @@ services:
       - scanner
     volumes:
       - tls-ca:/tls:ro
+    depends_on:
+      credential-guard:
+        condition: service_completed_successfully
 
   worker-outbox:
     environment:
@@ -334,6 +411,9 @@ services:
       - /tmp:size=32m
     volumes:
       - tls-ca:/tls:ro
+    depends_on:
+      credential-guard:
+        condition: service_completed_successfully
 
   worker-index:
     environment:
@@ -347,11 +427,17 @@ services:
       - /tmp:size=64m
     volumes:
       - tls-ca:/tls:ro
+    depends_on:
+      credential-guard:
+        condition: service_completed_successfully
 
   worker-ai:
     environment:
       <<: *production-env
       DB_STATEMENT_TIMEOUT_MS: "60000"
+      # Never a developer's key from `.env`: a production-only name, empty while the provider
+      # is pinned to none above.
+      ANTHROPIC_API_KEY: ${ARKRAY_PROD_ANTHROPIC_API_KEY:-}
     deploy:
       resources:
         limits: {cpus: "1.0", memory: 1g, pids: 128}
@@ -359,6 +445,9 @@ services:
       - /tmp:size=32m
     volumes:
       - tls-ca:/tls:ro
+    depends_on:
+      credential-guard:
+        condition: service_completed_successfully
 
   beat:
     environment:
@@ -371,6 +460,9 @@ services:
       - /tmp:size=8m
     volumes:
       - tls-ca:/tls:ro
+    depends_on:
+      credential-guard:
+        condition: service_completed_successfully
 
   frontend:
     deploy:
@@ -386,6 +478,9 @@ services:
     networks:
       - web
     ports: !reset []
+    depends_on:
+      credential-guard:
+        condition: service_completed_successfully
 
   # The malware scanner for attachments (R94): clamd and freshclam (signature updates) from
   # the ClamAV project's image. Reachable on port 3310 only over `scanner`, an internal
@@ -440,6 +535,9 @@ services:
       start_interval: 10s
     stop_grace_period: 30s
     restart: unless-stopped
+    depends_on:
+      credential-guard:
+        condition: service_completed_successfully
 
   certs:
     profiles: ["app"]
@@ -460,6 +558,9 @@ services:
       - certs:/certs
     # The key readable by its owner only (nginx's master reads it as root).
     command: ["sh", "-c", "([ -f /certs/tls.crt ] || openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj /CN=localhost -addext subjectAltName=DNS:localhost -keyout /certs/tls.key -out /certs/tls.crt) && chmod 600 /certs/tls.key"]
+    depends_on:
+      credential-guard:
+        condition: service_completed_successfully
 
   nginx:
     profiles: ["app"]
@@ -475,12 +576,13 @@ services:
     # (4 uploads of 11 MB, one 16 MB response) with room for others; when it is full nginx
     # refuses what needs it (503 JSON) and the rest keeps working. /var/run holds the pid
     # file, /tmp nothing nginx writes.
-    # JSON request bodies over 16 KB have an area of their own (/var/cache/nginx-body, 16 MB:
-    # 8 per client x 1 MB is half of it), so a flood of them never takes the uploads' area
-    # (independent review of H-1, P2-2).
+    # JSON request bodies over 16 KB have an area of their own (/var/cache/nginx-body, 40 MB:
+    # an address's 16 body slots x 1 MB stay under half of it, the 8 of one session under a
+    # fifth; adversarial review of 73ff1e3, L13), so a flood of them never takes the uploads'
+    # area (independent review of H-1, P2-2).
     tmpfs:
       - /var/cache/nginx:size=64m
-      - /var/cache/nginx-body:size=16m
+      - /var/cache/nginx-body:size=40m
       - /var/run:size=1m
       - /tmp:size=1m
     cap_drop: [ALL]
@@ -522,6 +624,8 @@ services:
       retries: 3
       start_period: 5s
     depends_on:
+      credential-guard:
+        condition: service_completed_successfully
       certs:
         condition: service_completed_successfully
       backend:
@@ -537,6 +641,13 @@ networks:
     ipam:
       config:
         - subnet: 10.252.17.0/28
+  # PostgreSQL and the migrate job only (M4): the one place pg_hba.conf admits arkray_owner
+  # from (its subnet is written there). No route out.
+  db-owner:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.252.17.16/28
   # nginx and the web tier only.
   web:
     internal: true
@@ -557,3 +668,4 @@ volumes:
   tls-mailpit:
   clamav-db:
   edge-export-spool:
+  postgres-socket:

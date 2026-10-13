@@ -33,7 +33,10 @@ PASSWORD = "/api/v1/auth/password/change"
 
 
 def failures() -> int:
-    return AuthThrottleEvent.objects.filter(kind=ThrottleKind.LOGIN_FAILURE).count()
+    """Failures that still count toward a lockout. A right password (or code) forgives a
+    browser's failures rather than deleting them: they still count toward the account's
+    daily cap (review of 73ff1e3, L1)."""
+    return AuthThrottleEvent.objects.filter(kind=ThrottleKind.LOGIN_FAILURE, forgiven=False).count()
 
 
 def error_code(response):
@@ -240,12 +243,14 @@ class TestOwnerNotices:
         signed_in(admin).post(f"/api/v1/admin/users/{user_a.pk}/mfa/reset", format="json")
         drain_outbox()
         assert [m.to for m in mail.outbox] == [[user_a.email]] * 4
-        subjects = [m.subject for m in mail.outbox]
+        # In any order: since the review of 73ff1e3 (M6) the outbox takes turns between the
+        # people whose work it is, so the administrator's reset notice may go out first.
+        subjects = sorted(m.subject for m in mail.outbox)
         assert subjects == [
-            "Arkray CRM: Two-step verification was turned on",
             "Arkray CRM: A recovery code was used",
             "Arkray CRM: New recovery codes",
             "Arkray CRM: Two-step verification was reset",
+            "Arkray CRM: Two-step verification was turned on",
         ]
         bodies = "\n".join(str(m.body) for m in mail.outbox)
         for value in [secret, *codes, *new]:

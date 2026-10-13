@@ -132,6 +132,10 @@ SECURITY_ACTIONS: dict[str, tuple[str, ...]] = {
     "auth.password_changed": (),
     "auth.password_reset_completed": (),
     "auth.password_set_by_admin": (),
+    # The daily failure cap locked sign-in from new browsers, and what lifted it (review of
+    # 73ff1e3, L1): `by` email_link or administrator.
+    "auth.sign_in_locked": ("failures",),
+    "auth.sign_in_unlocked": ("by",),
     "user.created": ("role", "activation"),
     "user.deactivated": ("role",),
     # `reset_link`: an administrator reactivated by another must set a new password (R126).

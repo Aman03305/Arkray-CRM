@@ -234,3 +234,47 @@ groups:
         annotations:
           summary: "A user's two-step verification was locked until an MFA reset in the last hour: their password and probably their mailbox are known to someone else."
           runbook: docs/runbooks.md#second-factor-locked
+
+      # --- account takeover (review of 73ff1e3, L1 and L3) ------------------------------------
+      # Promoting an account an administrator took over put it out of every other
+      # administrator's reach (R100, promote-then-shield): every promotion is worth a look.
+      # A database-wide count (max over pods); it stays raised for an hour after each one.
+      - alert: ArkrayAdministratorPromoted
+        expr: max(arkray_administrator_promotions_last_hour) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "An account was made an administrator in the last hour: confirm it was intended (security events: user.role_changed)."
+          runbook: docs/runbooks.md#security-events
+
+      # Failed sign-ins of real accounts far above people mistyping (every account and address
+      # together; auth.login_failed audit events): guessing or password spraying is going on.
+      # Per account and per address the throttle bounds it; this is for a human to look.
+      - alert: ArkraySignInFailureStorm
+        expr: max(arkray_sign_in_failures_last_hour) > 200
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "More than 200 failed sign-ins in the last hour, for 10 minutes: password guessing or spraying is going on."
+          runbook: docs/runbooks.md#security-events
+
+      # An account reached the daily cap of failed sign-ins from new browsers and is locked
+      # from them until its owner's emailed link, a reset or an administrator lifts it
+      # (auth.sign_in_locked). It stays raised for an hour after each one.
+      - alert: ArkraySignInLocked
+        expr: max(arkray_sign_in_locks_last_hour) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "An account's sign-in from new browsers was locked by too many failed sign-ins in the last hour: someone is guessing its password."
+          runbook: docs/runbooks.md#security-events
+
+      # One user's work is most of a large backlog (review of 73ff1e3, M6): a runaway script or
+      # an abusive account. The relay takes turns between users, so others are still served
+      # first; this is for a human to find whose it is (`manage.py outbox_requeue --status`)
+      # and whether its write budget needs lowering. Never a user in the metric itself.
+      - alert: ArkrayQueueDominatedByOneUser
+        expr: arkray_outbox_top_key_share > 0.8 and on (queue) arkray_outbox_events{status="pending"} > 500
+        for: 30m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Queue {{ $labels.queue }}: one user's work has been over 80 % of a backlog of more than 500 events for 30 minutes."
+          runbook: docs/runbooks.md#outbox-backlog

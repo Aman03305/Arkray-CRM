@@ -250,3 +250,54 @@ def test_a_lead_under_legal_hold_cannot_be_corrected(admin, user_a, customer):
     assert customer["lead"].email == OLD_EMAIL
     LegalHold.objects.filter(pk=hold.pk).update(released_at=hold.placed_at, released_by=admin.pk)
     assert correct(signed_in(user_a), customer["lead"], email=NEW_EMAIL).status_code == 200
+
+
+# --- adversarial review of 73ff1e3, L5: the count is the caller's ---------------------------------
+def test_the_new_owner_learns_nothing_of_the_previous_owners_deals(admin, user_a, user_b, customer):
+    """After a reassignment the customer's closed deals stay with their previous owner, out
+    of the new owner's sight. A correction by the new owner still corrects their copies (the
+    customer is one person), but its answer counts only the deals the caller can see (it said
+    `opportunities: 4` here while user B could see 1), and the writes to deals outside the
+    caller's workspace are audited as the system's, not as B's acts on records B can't see."""
+    lead = customer["lead"]
+    lead_services.reassign_lead(
+        actor=admin,
+        scope=AccessScope.organization(admin.pk),
+        lead_id=lead.pk,
+        version=lead.version,
+        owner_id=user_b.pk,
+    )
+    extra = [
+        OpportunityFactory(
+            lead=lead,
+            owner=user_a,
+            stage_key=key,
+            account_name="Apollo Labs",
+            customer_name="Ravi Kumaar",
+            contact_email=OLD_EMAIL,
+        )
+        for key in ("won", "lost")
+    ]
+    hidden = [customer["won"], *extra]
+    visible = (
+        Opportunity.objects.filter(lead=lead, owner=user_b, contact_email=OLD_EMAIL)
+        .values_list("pk", flat=True)
+        .get()
+    )
+    response = correct(signed_in(user_b), lead, email=NEW_EMAIL)
+    assert response.status_code == 200, response.content
+    assert response.json()["opportunities"] == 1  # B's open deal only, never A's three
+    for deal in [*hidden, Opportunity.objects.get(pk=visible)]:
+        assert Opportunity.objects.get(pk=deal.pk).contact_email == NEW_EMAIL  # copies follow
+    copies = AuditEvent.objects.filter(action=corrections.AUDIT_OPPORTUNITY_CORRECTED)
+    by_target = {event.target_id: event for event in copies}
+    assert set(by_target) == {str(visible), *(str(deal.pk) for deal in hidden)}
+    assert by_target[str(visible)].actor_id == user_b.pk
+    for deal in hidden:
+        event = by_target[str(deal.pk)]
+        assert (event.actor_type, event.actor_id) == ("system", None)
+        assert event.metadata["fields"] == ["contact_email"]
+        assert event.metadata["cause"] == corrections.AUDIT_LEAD_CORRECTED
+    # The same correction organisation-wide counts every deal the administrator sees.
+    again = correct(signed_in(admin), lead, workspace="all", email=OLD_EMAIL)
+    assert again.json()["opportunities"] == 4

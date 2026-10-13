@@ -294,7 +294,13 @@ def test_each_link_goes_only_to_its_own_account_and_no_email_carries_a_password(
         for link, owner in run.links.items():
             if link in text:
                 assert message.to == [owner]
-    assert sorted(m.to[0] for m in mail.outbox) == sorted(run.links.values())
+    with_links = [m for m in mail.outbox if any(link in str(m.body) for link in run.links)]
+    assert sorted(m.to[0] for m in with_links) == sorted(run.links.values())
+    # And the notice an administrator's password set sends the account's own address (review
+    # of 73ff1e3, L3): no link, no password (checked above).
+    assert [(m.to, m.subject) for m in mail.outbox if m not in with_links] == [
+        ([RAHUL], "Arkray CRM: An administrator set a new password for your account")
+    ]
 
 
 def text_columns() -> list[tuple[str, str]]:
@@ -382,6 +388,8 @@ USER_SERIALIZER_FIELDS = {
         "password_changed_at",
         "mfa_enabled",
         "mfa_lock",  # R133: what unlocks a locked factor (null or a choice), never a count
+        "sign_in_locked_at",  # review of 73ff1e3, L1: when, never what was typed
+        "pseudonymised_at",  # review of 73ff1e3, L4
         "version",
     },
     "arkray.identity.api.serializers.WorkspaceSubjectSerializer": {"id", "full_name", "status"},

@@ -29,13 +29,14 @@ import hashlib
 import logging
 import time
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import IO
+from typing import IO, Any
 from uuid import UUID
 
 from django.conf import settings
-from django.db import connection, transaction
+from django.db import DatabaseError, connection, transaction
 from django.db.models import Q, QuerySet, Sum
 from django.utils import timezone
 
@@ -67,6 +68,8 @@ logger = logging.getLogger(__name__)
 
 TOPIC_SCAN = "activities.scan_attachment"
 TOPIC_PURGE = "activities.purge_attachment"
+# Every deleted file still waiting for its purge, in batches (`purge_deleted`).
+TOPIC_PURGE_DELETED = "activities.purge_deleted_attachments"
 AUDIT_UPLOADED = "attachment.uploaded"
 AUDIT_DELETED = "attachment.deleted"
 AUDIT_REJECTED = "attachment.rejected"
@@ -97,6 +100,23 @@ AUDIT_METADATA_REMOVED = "attachment.metadata_removed"
 # Files stored while no scanner was configured, queued for scanning per housekeeping run once
 # one is (until then they are not downloadable: only clean files are, with a scanner).
 SCAN_BACKLOG_BATCH = 500
+# A purge takes the other deleted files waiting for theirs with it, recorded in one ledger
+# entry (`purge`; security review M3): at most this many files in one transaction...
+PURGE_BATCH = ledger.MAX_SUBJECTS
+# ...and no further file once its storage calls have taken this long (each file's lead hold
+# lock is held until the transaction commits, so a hold being placed on it waits that long).
+PURGE_BATCH_BUDGET_S = 2.0
+# A paged purge job (`purge_deleted`) runs this long at most, then queues its continuation
+# (inside Celery's 100 s soft limit).
+PURGE_JOB_BUDGET_S = 60.0
+# A file whose object the store wouldn't delete is tried again after PURGE_RETRY_FIRST,
+# doubling to PURGE_RETRY_MAX (`_purge_failed`, kept on its row); from PURGE_ALERT_AFTER
+# failed attempts each further one logs at ERROR; a run stops after PURGE_FAILURES_IN_A_ROW
+# different files failed in a row (the store is down, not one file).
+PURGE_RETRY_FIRST = timedelta(minutes=5)
+PURGE_RETRY_MAX = timedelta(hours=24)
+PURGE_ALERT_AFTER = 6
+PURGE_FAILURES_IN_A_ROW = 3
 
 
 class FileTooLarge(DomainError):
@@ -567,39 +587,200 @@ def purge(attachment_id: UUID, *, replaying: bool = False, unless_held: bool = F
     ATTACHMENT_STORAGE_DEADLINE_S). No row is locked meanwhile (review P3-4): an erasure
     rewriting the lead's files never waits for a purge's storage calls, and the purge's one
     row lock is its last write. One purge of a file at a time: a second one (an outbox
-    retry, housekeeping) finds the file claimed and skips it, without waiting."""
+    retry, housekeeping) finds the file claimed and skips it, without waiting.
+
+    **One ledger entry per batch** (security review M3: the ledger is write-once, and each
+    deleted file appended an entry of its own, so deleting files grew it without limit): a
+    purge of a file someone deleted (or an erasure did) takes the other deleted files
+    waiting for their purge with it, oldest first, each claimed and checked under its lead's
+    hold lock as above, at most PURGE_BATCH of them and none more once the storage calls
+    have taken PURGE_BATCH_BUDGET_S; their rows are marked at the end (rows locked in id
+    order, after every storage call) and one `attachment_deleted` entry names them all,
+    appended last, so the entry and the rows commit together (a failed append rolls them
+    back: the objects are gone, which the retry counts as removed). A storage failure after
+    the first file ends the batch with what is done; the rest wait for their own job or the
+    housekeeping. Files deleted together (an erasure, a burst of deletions) share an entry;
+    the replay and the automatic reconciliation purge one file at a time."""
+    return attachment_id in _purge(attachment_id, replaying=replaying, unless_held=unless_held)
+
+
+def _purge(attachment_id: UUID, *, replaying: bool = False, unless_held: bool = False) -> set[UUID]:
+    """`purge`, returning every file it purged (the batch's, `attachment_id` first)."""
     found = Attachment.objects.filter(pk=attachment_id, purged_at__isnull=True).first()
     if found is None or not _purgeable(found):  # the common case, without a lock: nothing to do
-        return False
+        return set()
     checked = not replaying or unless_held
     with transaction.atomic():
-        if not _claim_purge(attachment_id):
-            return False  # being purged right now
-        if checked:
-            lead_id = Activity.objects.filter(pk=found.note_id).values_list("lead_id", flat=True)[0]
-            try:
-                holds.refuse_if_held(HoldSubject.LEAD, lead_id)
-            except holds.UnderLegalHold:
-                if unless_held:
-                    raise
-                return False  # kept, object and all, until the hold is released (housekeeping)
-        # Read again after the locks: purged meanwhile (by the purge that held the claim).
-        attachment = Attachment.objects.filter(pk=attachment_id, purged_at__isnull=True).first()
-        if attachment is None or not _purgeable(attachment):
-            return False
-        storage.delete(attachment.storage_key)
-        if settings.ATTACHMENT_S3_PURGE_VERSIONS:
-            storage.delete_versions(attachment.storage_key)
-        forget = Attachment.objects.filter(removed_for_good(), pk=attachment.pk).exists()
-        updated = Attachment.objects.filter(pk=attachment.pk, purged_at__isnull=True).update(
-            purged_at=timezone.now(),
-            **({"original_name": REMOVED_NAME, "sha256": ERASED_SHA256} if forget else {}),
+        if not _remove_object(found, checked=checked, unless_held=unless_held):
+            return set()  # being purged right now, or kept under a hold
+        removed = [attachment_id]
+        if not replaying and found.deleted_at is not None:
+            started = time.monotonic()
+            for other in _waiting(exclude={attachment_id}, limit=PURGE_BATCH - 1):
+                if len(removed) >= PURGE_BATCH or time.monotonic() - started > PURGE_BATCH_BUDGET_S:
+                    break
+                # Each in a savepoint of its own (review round 1, LEDGER-5): a lock timeout on
+                # one file's hold lock rolled back the rows of the files whose objects were
+                # already gone. Any failure ends the batch with what is done, recorded.
+                try:
+                    with transaction.atomic():
+                        taken = _remove_object(other, checked=True, unless_held=False)
+                except (storage.StorageUnavailable, DatabaseError):
+                    break  # the rest wait for their own job (or the housekeeping)
+                if taken:
+                    removed.append(other.pk)
+        purged = _mark_purged(removed)
+        recorded = [pk for pk, deleted in purged.items() if deleted]
+        if recorded and not replaying:
+            # Files someone deleted (or an erasure did): a restored backup must not show
+            # them again, names and all (core.ledger; privacy.replay deletes them again).
+            # Last: the ledger's append lock after every other (core.holds rule 3).
+            ledger.append("attachment_deleted", ledger.joined(recorded))
+    return set(purged)
+
+
+def _due(now: datetime | None = None) -> Q:
+    """Not backing off after a failed delete (`_purge_failed`): never failed, or due again."""
+    return Q(purge_next_at__isnull=True) | Q(purge_next_at__lte=now or timezone.now())
+
+
+def _waiting(*, exclude: Collection[UUID], limit: int) -> list[Attachment]:
+    """Files deleted (by a person or an erasure) whose purge hasn't run, oldest first, but
+    those in `exclude` and those backing off after a failed delete (`_purge_failed`, in the
+    query: any number of them never hide the rest; review round 3, LEDGER3-3): a sift
+    (`_remove_object` decides each under its lead's hold lock), read from the
+    housekeeping's partial index."""
+    rows = (
+        Attachment.objects.filter(purged_at__isnull=True, deleted_at__isnull=False)
+        .filter(_due())
+        .exclude(state=AttachmentState.UPLOADING)
+    )
+    held = _held_notes()
+    if held is not None:
+        rows = rows.exclude(held)
+    return list(rows.exclude(pk__in=list(exclude)).order_by("created_at")[:limit])
+
+
+def _purge_failed(attachment_id: UUID, exc: storage.StorageUnavailable) -> None:
+    """A file whose object the store wouldn't delete (an outage, or for good: Object Lock on
+    a version, access denied) is left for later, PURGE_RETRY_FIRST doubling to
+    PURGE_RETRY_MAX, so it never holds up the others (review round 2, LEDGER2-5). The count
+    and the next try are kept on its row, in their own short transaction (review round 3,
+    LEDGER3-3: in the cache, an outage of it lost them, and the count never reached the
+    alert). Logged by id and reason, at ERROR from PURGE_ALERT_AFTER attempts on."""
+    with transaction.atomic():
+        found = (
+            Attachment.objects.select_for_update()
+            .filter(pk=attachment_id)
+            .values_list("purge_attempts", flat=True)
+            .first()
         )
-        if updated and attachment.deleted_at is not None and not replaying:
-            # A file someone deleted (or an erasure did): a restored backup must not show it
-            # again, name and all (core.ledger; privacy.replay deletes it again).
-            ledger.append("attachment_deleted", attachment.pk)
+        attempts = (found or 0) + 1
+        delay = min(PURGE_RETRY_FIRST * (1 << min(attempts - 1, 16)), PURGE_RETRY_MAX)
+        Attachment.objects.filter(pk=attachment_id).update(
+            purge_attempts=attempts, purge_next_at=timezone.now() + delay
+        )
+    logger.log(
+        logging.ERROR if attempts >= PURGE_ALERT_AFTER else logging.WARNING,
+        "attachment_purge_failed",
+        extra={"attachment_id": str(attachment_id), "reason": exc.error_class, "attempt": attempts},
+    )
+
+
+def purge_deleted(budget_s: float | None = None) -> int:
+    """Every file deleted by a person or an erasure whose purge hasn't run, a batch at a time
+    (`purge`: one transaction and one ledger entry each), oldest first, until none is left
+    or `budget_s` (PURGE_JOB_BUDGET_S) is spent; then it queues its own continuation. The
+    job an erasure queues for its files (`erase_for_notes`). Returns how many it purged.
+    A file the store won't delete is skipped and backs off (`_purge_failed`); the job
+    retries (StorageUnavailable) only when nothing was purged or PURGE_FAILURES_IN_A_ROW
+    failed in a row (the store is down, not one file: review round 2, LEDGER2-5)."""
+    budget = PURGE_JOB_BUDGET_S if budget_s is None else budget_s
+    started, done, in_a_row = time.monotonic(), 0, 0
+    skipped: set[UUID] = set()  # being purged elsewhere, kept by a hold, or failing
+    failure: storage.StorageUnavailable | None = None
+    while time.monotonic() - started < budget:
+        waiting = _waiting(exclude=skipped, limit=1)
+        if not waiting:
+            break
+        first = waiting[0].pk
+        try:
+            purged = _purge(first)
+        except storage.StorageUnavailable as exc:
+            _purge_failed(first, exc)
+            skipped.add(first)  # a different file each time: `_waiting` excludes it
+            failure, in_a_row = exc, in_a_row + 1
+            if in_a_row >= PURGE_FAILURES_IN_A_ROW:
+                raise
+            continue
+        in_a_row = 0
+        if first not in purged:
+            skipped.add(first)
+        done += len(purged)
+    else:
+        with transaction.atomic():
+            outbox.enqueue(TOPIC_PURGE_DELETED, {}, dedupe_key=TOPIC_PURGE_DELETED)
+    if failure is not None and not done:
+        raise failure
+    return done
+
+
+@outbox.handler(TOPIC_PURGE_DELETED, queue="default")
+def purge_deleted_job(payload: dict[str, Any]) -> None:
+    purge_deleted()
+
+
+def _remove_object(found: Attachment, *, checked: bool, unless_held: bool) -> bool:
+    """One file's object removed from storage, inside the purge's transaction (`purge`):
+    its claim, then its lead's hold lock (SHARED, until the transaction commits) when
+    `checked`, then the row read again, then the storage calls. False if another purge has
+    it, it was purged meanwhile, or a hold keeps it (UnderLegalHold with `unless_held`)."""
+    if not _claim_purge(found.pk):
+        return False  # being purged right now
+    if checked:
+        lead_id = Activity.objects.filter(pk=found.note_id).values_list("lead_id", flat=True)[0]
+        try:
+            holds.refuse_if_held(HoldSubject.LEAD, lead_id)
+        except holds.UnderLegalHold:
+            if unless_held:
+                raise
+            return False  # kept, object and all, until the hold is released (housekeeping)
+    # Read again after the locks: purged meanwhile (by the purge that held the claim).
+    attachment = Attachment.objects.filter(pk=found.pk, purged_at__isnull=True).first()
+    if attachment is None or not _purgeable(attachment):
+        return False
+    storage.delete(attachment.storage_key)
+    if settings.ATTACHMENT_S3_PURGE_VERSIONS:
+        storage.delete_versions(attachment.storage_key)
     return True
+
+
+def _mark_purged(attachment_ids: list[UUID]) -> dict[UUID, bool]:
+    """The rows of files whose objects are gone, marked purged (and their names and hashes
+    forgotten when they were removed for good), each locked only now, in id order (no row
+    lock is held across a storage call; review P3-4). Returns them, each with whether
+    someone (or an erasure) deleted it, as the rows say at that point."""
+    if not attachment_ids:
+        return {}
+    locked = dict(
+        Attachment.objects.select_for_update()
+        .filter(pk__in=attachment_ids, purged_at__isnull=True)
+        .order_by("pk")
+        .values_list("pk", "deleted_at")
+    )
+    forget = set(
+        Attachment.objects.filter(removed_for_good(), pk__in=list(locked)).values_list(
+            "pk", flat=True
+        )
+    )
+    now = timezone.now()
+    Attachment.objects.filter(pk__in=list(forget)).update(
+        purged_at=now, original_name=REMOVED_NAME, sha256=ERASED_SHA256
+    )
+    Attachment.objects.filter(pk__in=[pk for pk in locked if pk not in forget]).update(
+        purged_at=now
+    )
+    return {pk: deleted_at is not None for pk, deleted_at in locked.items()}
 
 
 def forget_purged(*, actor_id: UUID | None, dry_run: bool = True) -> int:
@@ -719,21 +900,36 @@ def housekeeping(now: datetime) -> dict[str, int]:
     abandoned = Attachment.objects.filter(
         state=AttachmentState.UPLOADING, created_at__lt=now - ABANDONED_AFTER
     ).update(state=AttachmentState.FAILED)
-    purged = failed = 0
-    leftovers = Attachment.objects.filter(purged_at__isnull=True).filter(
-        Q(deleted_at__isnull=False)
-        | Q(state=AttachmentState.FAILED)
-        | Q(scan_status=ScanStatus.REJECTED)
+    failed = 0
+    leftovers = (
+        Attachment.objects.filter(purged_at__isnull=True)
+        .filter(
+            Q(deleted_at__isnull=False)
+            | Q(state=AttachmentState.FAILED)
+            | Q(scan_status=ScanStatus.REJECTED)
+        )
+        .filter(_due(now))  # backing off after a failed delete: later (`_purge_failed`)
     )
     held = _held_notes()  # a sift: purge() decides for each file, under its lead's hold lock
     if held is not None:
         leftovers = leftovers.exclude(held)
-    for attachment_id in leftovers.order_by("created_at").values_list("pk", flat=True)[:1000]:
+    done: set[UUID] = set()
+    candidates = list(leftovers.order_by("created_at").values_list("pk", flat=True)[:1000])
+    in_a_row = 0
+    for attachment_id in candidates:
+        if attachment_id in done:
+            continue  # purged with an earlier file's batch
         try:
-            purged += purge(attachment_id)
-        except storage.StorageUnavailable:
-            failed += 1
-            break
+            done |= _purge(attachment_id)
+            in_a_row = 0
+        except storage.StorageUnavailable as exc:
+            # One file the store won't delete is left for later, the rest go on (review
+            # round 2, LEDGER2-5); several in a row: the store is down, next run.
+            _purge_failed(attachment_id, exc)
+            failed, in_a_row = failed + 1, in_a_row + 1
+            if in_a_row >= PURGE_FAILURES_IN_A_ROW:
+                break
+    purged = len(done)
     queued, unscannable = _follow_scanner_setting()
     pending_scans = Attachment.objects.filter(
         scan_status=ScanStatus.PENDING, state=AttachmentState.STORED
@@ -777,19 +973,20 @@ def _follow_scanner_setting() -> tuple[int, int]:
 
 def erase_for_notes(note_ids: list[UUID], now: datetime) -> int:
     """Personal-data erasure (arkray.privacy): every file of these notes is deleted (its
-    name blanked to a placeholder) and its object queued for removal. Returns how many."""
-    targets = list(
-        Attachment.objects.filter(note_id__in=note_ids, purged_at__isnull=True).values_list(
-            "pk", flat=True
-        )
-    )
+    name blanked to a placeholder) and their objects queued for removal by one paged job
+    (`purge_deleted`). Returns how many. The same few statements at any number of files
+    (QUEUES-2: a job per file, a savepoint, an insert and a release each, made an erasure
+    grow with its files: 66.8 s at 5,000, beyond the automatic replay's time limit at the
+    activity budget's 50,000)."""
     # The name and the content's fingerprint go too (a hash identifies a known document).
     erased = {"original_name": "erased", "sha256": ERASED_SHA256}
-    Attachment.objects.filter(pk__in=targets).update(**erased, deleted_at=now)
+    count = Attachment.objects.filter(note_id__in=note_ids, purged_at__isnull=True).update(
+        **erased, deleted_at=now
+    )
     Attachment.objects.filter(note_id__in=note_ids, purged_at__isnull=False).update(**erased)
-    for attachment_id in targets:
-        outbox.enqueue(TOPIC_PURGE, {"attachment_id": str(attachment_id)})
-    return len(targets)
+    if count:
+        outbox.enqueue(TOPIC_PURGE_DELETED, {}, dedupe_key=TOPIC_PURGE_DELETED)
+    return count
 
 
 # --- reconciliation repairs (reconcile.py) --------------------------------------------------------

@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from django.core.cache import cache
 from django.utils import timezone
 
 from arkray.audit.models import AuditEvent
@@ -210,6 +211,8 @@ ALLOWED_DURING_SUPPORT = {
     "api/v1/auth/password-reset/confirm": "needs the emailed one-time secret",
     "api/v1/auth/invitations/verify": "needs the emailed one-time secret",
     "api/v1/auth/invitations/accept": "needs the emailed one-time secret",
+    "api/v1/auth/sign-in-unlock": "needs the emailed one-time secret (review of 73ff1e3, L1)",
+    "api/v1/auth/sign-in-unlock/verify": "needs the emailed one-time secret (review round 1)",
     "api/v1/admin/support-sessions/current": "exit",
     "api/v1/workspaces/<str:workspace>": "describes the target's workspace (others: 403)",
     "api/v1/assignees": "owner pickers in the target's CRM",
@@ -281,6 +284,9 @@ class TestAttacksDuringASession:
             for target in (user_a, other, other_admin, admin):
                 path = "/" + route.replace("<uuid:user_id>", str(target.pk))
                 for method in methods_of(view_class):
+                    # Refused requests count against the rate limits since the review of
+                    # 73ff1e3 (L2): a fresh window for each, as the other route sweeps do.
+                    cache.clear()
                     response = getattr(admin_client, method)(
                         path, attack_body(route, target, other), format="json"
                     )

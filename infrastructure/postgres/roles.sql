@@ -7,7 +7,14 @@
 --
 -- The passwords come from the environment (psql 15 or newer: \getenv), never from psql's
 -- command line, where any local user could read them in the process list (secret-exposure
--- audit).
+-- audit). They must be generated for the environment: at least 32 characters
+-- (config/credentials.py's MIN_LENGTH, which the production stack's guard applies with the
+-- rest of its rule) and different from each other; anything else is refused before a role
+-- is created (adversarial review of 73ff1e3, M4). Both are stored as SCRAM verifiers.
+--
+-- The production-shaped stack (infrastructure/compose.production.yml) runs this in its
+-- db-roles job over the server's local socket, the only place its pg_hba.conf admits the
+-- superuser; by hand there: `docker compose ... run --rm db-roles`.
 --
 -- arkray_owner owns the schema and runs `migrate` (then `grant_app_privileges arkray_app`).
 -- arkray_app runs the web servers and workers: no superuser, owns nothing, so the
@@ -35,6 +42,18 @@ BEGIN
 EXCEPTION WHEN insufficient_privilege THEN
     RAISE WARNING 'could not set log_statement = none: make sure the server does not log DDL while this runs';
 END $$;
+
+-- Generated for this environment (M4): long enough, and not one password for both roles.
+-- pg_stat_statements keeps this statement's shape only, never its values.
+SELECT length(:'owner_password') >= 32 AND length(:'app_password') >= 32
+    AND :'owner_password' <> :'app_password' AS passwords_acceptable \gset
+\if :passwords_acceptable
+\else
+DO $$ BEGIN RAISE EXCEPTION 'OWNER_PASSWORD and APP_PASSWORD must each be generated for this environment: at least 32 characters, and different (config/credentials.py)'; END $$;
+\endif
+
+-- SCRAM verifiers only (pg_hba.conf accepts nothing else), whatever the server's default.
+SET password_encryption = 'scram-sha-256';
 
 SELECT format('CREATE ROLE arkray_owner LOGIN PASSWORD %L', :'owner_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'arkray_owner') \gexec

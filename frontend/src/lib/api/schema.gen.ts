@@ -197,6 +197,26 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/admin/users/{user_id}/clear-sign-in-lock": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Lift the lock too many failed sign-ins in a day placed on the account's sign-in from
+         *     new browsers (L1), when the owner can't use the emailed link. Audited.
+         */
+        readonly post: operations["admin_users_clear_sign_in_lock"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/admin/users/{user_id}/deactivate": {
         readonly parameters: {
             readonly query?: never;
@@ -567,6 +587,51 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         readonly post: operations["auth_password_change_create"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/sign-in-unlock": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description The link mailed to the owner when too many failed sign-ins in a day locked the account
+         *     from new browsers (adversarial review of 73ff1e3, L1): lifts the lock, and this browser is
+         *     trusted for the account from now on (its own failure budget; a new storm can't lock it
+         *     out), unless it is trusted for another account: that trust is never replaced (review
+         *     round 1, IDENTITY-1). POST so the secret never enters a URL on the API side.
+         */
+        readonly post: operations["auth_sign_in_unlock"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/sign-in-unlock/verify": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Whose account an unlock link is for, masked (r***@example.com), without using it: the
+         *     page says it before the button is pressed, so nobody unlocks someone else's account in
+         *     their own browser by mistake (review round 1, IDENTITY-1). POST so the secret never enters
+         *     a URL on the API side.
+         */
+        readonly post: operations["auth_sign_in_unlock_verify"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -1204,6 +1269,49 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/correct": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description An administrator corrects a won or lost deal's value or dates, which no edit changes
+         *     while it is closed (adversarial review of 73ff1e3, M2): with a reason, at the version
+         *     last seen, appended to the deal's corrections. crm.manage_any, a recent second factor
+         *     (ADR-0033), and never in a support session (the administrator's own context, as for user
+         *     administration).
+         */
+        readonly post: operations["opportunities_correct"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/corrections": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * @description How a closed deal's figures were corrected (append-only, newest first): whoever sees
+         *     the deal sees them, each with its reason as pipeline.customer allows.
+         */
+        readonly get: operations["opportunities_corrections"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/history": {
         readonly parameters: {
             readonly query?: never;
@@ -1720,6 +1828,16 @@ export interface components {
             readonly mfa_enabled: boolean;
             /** @description Null while codes are accepted. Otherwise too many wrong codes locked the second factor (no code is accepted, the right one included) and this says what unlocks it: `password_reset` (a password reset by email, a password set by an administrator, or an MFA reset) or `mfa_reset` (only an MFA reset: too many wrong codes since the last right one, across new passwords; R133). */
             readonly mfa_lock: (components["schemas"]["MfaLockEnum"] | components["schemas"]["NullEnum"]) | null;
+            /**
+             * Format: date-time
+             * @description Null, or when too many failed sign-ins in a day locked this account's sign-in from browsers it hasn't been used in (those it has keep working). The owner was emailed an unlock link; a password reset or POST .../clear-sign-in-lock lifts it.
+             */
+            readonly sign_in_locked_at: string | null;
+            /**
+             * Format: date-time
+             * @description Null, or when this former user was pseudonymised: then nothing about the account can be changed any more (422 `account_pseudonymised`).
+             */
+            readonly pseudonymised_at: string | null;
             readonly version: number;
         };
         /** @description One keyset-paginated page of users (follow `next` / `previous` as given). */
@@ -1916,6 +2034,20 @@ export interface components {
             readonly lead: components["schemas"]["Lead"];
             readonly opportunity: components["schemas"]["Opportunity"];
         };
+        /**
+         * @description * `value` - Value
+         *     * `expected_close_date` - Expected close date
+         *     * `opportunity_date` - Opportunity date
+         * @enum {string}
+         */
+        readonly CorrectedFieldEnum: "value" | "expected_close_date" | "opportunity_date";
+        readonly CorrectionChange: {
+            readonly field: components["schemas"]["CorrectedFieldEnum"];
+            /** @description As the deal had it: an amount ("100000.00") or a date. */
+            readonly before: string | null;
+            /** @description As corrected (null: no date). */
+            readonly after: string | null;
+        };
         readonly CustomField: {
             /** Format: uuid */
             readonly id: string;
@@ -1951,7 +2083,7 @@ export interface components {
             readonly lead: components["schemas"]["Lead"];
             /** @description The lead fields that changed. */
             readonly corrected: readonly string[];
-            /** @description How many of the customer's deals had their copy of these details corrected. */
+            /** @description How many of the customer's deals that you can see had their copy of these details corrected (copies on deals outside this workspace follow too, uncounted). */
             readonly opportunities: number;
         };
         /** @description The workspace's figures and its short lists, all read at the same moment. */
@@ -2477,7 +2609,7 @@ export interface components {
             readonly created_at: string;
             /** Format: date-time */
             readonly updated_at: string;
-            /** @description True when the viewer can't see the deal's customer (its lead was reassigned and this is a closed deal they worked): the customer's name, phone, email and address are blank, the title and account show only the organisation and instrument, and free-text custom values are left out (docs/authorization.md#historical-deals). */
+            /** @description True when the viewer can't see the deal's customer (its lead was reassigned and this is a closed deal they worked): the customer's name, phone, email and address are blank, the title and account show only the organisation and instrument, the deal's free text (description, lost reason, work load, Expected CPT, agreed CPT) is blank, and free-text custom values are left out (docs/authorization.md#historical-deals). */
             readonly customer_restricted: boolean;
             readonly pipeline: components["schemas"]["PipelineRef"];
             readonly stage: components["schemas"]["Stage"];
@@ -2541,8 +2673,47 @@ export interface components {
             readonly created_at: string;
             /** Format: date-time */
             readonly updated_at: string;
-            /** @description True when the viewer can't see the deal's customer (its lead was reassigned and this is a closed deal they worked): the customer's name, phone, email and address are blank, the title and account show only the organisation and instrument, and free-text custom values are left out (docs/authorization.md#historical-deals). */
+            /** @description True when the viewer can't see the deal's customer (its lead was reassigned and this is a closed deal they worked): the customer's name, phone, email and address are blank, the title and account show only the organisation and instrument, the deal's free text (description, lost reason, work load, Expected CPT, agreed CPT) is blank, and free-text custom values are left out (docs/authorization.md#historical-deals). */
             readonly customer_restricted: boolean;
+        };
+        /**
+         * @description One administrator's correction of a closed deal's figures (append-only; newest first
+         *     in its list). Its reason is blank for a viewer who may not see the deal's customer
+         *     (pipeline.customer) and once an erasure has redacted it.
+         */
+        readonly OpportunityCorrection: {
+            /** Format: uuid */
+            readonly id: string;
+            /** @description The figures this correction changed. */
+            readonly fields: readonly components["schemas"]["CorrectedFieldEnum"][];
+            readonly changes: readonly components["schemas"]["CorrectionChange"][];
+            readonly status: components["schemas"]["StageCategoryEnum"];
+            /** @description Why it was corrected (one line). */
+            readonly reason: string;
+            readonly actor: components["schemas"]["UserRef"];
+            /** Format: date-time */
+            readonly occurred_at: string;
+        };
+        /**
+         * @description An administrator's correction of a won or lost deal: the figures to correct (at least
+         *     one, and at least one must change), why, and the deal's version as last seen. A closed
+         *     deal's probability is fixed (won 100 %, lost 0 %), so it isn't one of them.
+         */
+        readonly OpportunityCorrectionInputRequest: {
+            readonly version: number;
+            /** @description Why the deal is corrected: required, one line (kept in its history). */
+            readonly reason: string;
+            /** @description Amount in the organisation currency (INR), e.g. "1250000.00". */
+            readonly value?: string | number;
+            /** Format: date */
+            readonly expected_close_date?: string | null;
+            /** Format: date */
+            readonly opportunity_date?: string;
+        };
+        readonly OpportunityCorrectionPage: {
+            readonly results: readonly components["schemas"]["OpportunityCorrection"][];
+            readonly next: string | null;
+            readonly previous: string | null;
         };
         /**
          * @description The opportunity's customer, instrument and custom details (all optional here; the
@@ -2756,10 +2927,8 @@ export interface components {
             readonly full_name: string;
         };
         /**
-         * @description A pipeline with its stages in order (retired ones flagged) and its active custom
-         *     fields: the board columns, stage choices and form fields come from here, never from
-         *     hard-coded lists. `owner` is null for a shared (organisation) pipeline; `can_manage`
-         *     says whether the caller may configure it in this workspace.
+         * @description One pipeline with its whole configuration: its active stages and its active custom
+         *     fields (with their choices), what its forms and settings need.
          */
         readonly Pipeline: {
             /** Format: uuid */
@@ -2780,7 +2949,30 @@ export interface components {
             readonly custom_fields?: readonly components["schemas"]["FieldInputRequest"][];
         };
         readonly PipelineList: {
-            readonly results: readonly components["schemas"]["Pipeline"][];
+            readonly results: readonly components["schemas"]["PipelineListItem"][];
+        };
+        /**
+         * @description A pipeline as a list shows it: its flags and its active stages in order (the board's
+         *     and the forms' stage choices come from here, never from hard-coded lists), never its
+         *     custom fields: one pipeline's own representation has them (`GET …/pipelines/{id}`). A
+         *     list then grows by a few kilobytes per pipeline whatever its configuration (30 choice
+         *     fields of 50 long options made one pipeline 200 KB and an archived list of 150 of them
+         *     30 MB: review round 1 of the 73ff1e3 remediation, DEALS-1). Retired stages are left out
+         *     too: the board's columns and a deal's own stage carry one where it matters (L10).
+         *     `owner` is null for a shared (organisation) pipeline; `can_manage` says whether the
+         *     caller may configure it in this workspace.
+         */
+        readonly PipelineListItem: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly key: string;
+            readonly name: string;
+            readonly owner: components["schemas"]["UserRef"] | null;
+            readonly is_default: boolean;
+            readonly is_active: boolean;
+            readonly version: number;
+            readonly can_manage: boolean;
+            readonly stages: readonly components["schemas"]["Stage"][];
         };
         readonly PipelineRef: {
             /** Format: uuid */
@@ -3024,6 +3216,13 @@ export interface components {
             readonly version: number;
             readonly new_password: string;
         };
+        readonly SignInUnlockPreview: {
+            /** @description The account's address, masked: r***@example.com. */
+            readonly email: string;
+        };
+        readonly SignInUnlockRequest: {
+            readonly token: string;
+        };
         readonly SourceRef: {
             readonly key: string;
             readonly name: string;
@@ -3071,6 +3270,16 @@ export interface components {
             readonly value: string;
             /** Format: decimal */
             readonly probability: string;
+            /**
+             * Format: date
+             * @description The deal's expected close date as it entered the stage (null: none, or a row recorded before the dates were kept).
+             */
+            readonly expected_close_date: string | null;
+            /**
+             * Format: date
+             * @description The deal's opportunity date as it entered the stage (null on rows recorded before the dates were kept).
+             */
+            readonly opportunity_date: string | null;
             readonly lost_reason: string;
             readonly actor: components["schemas"]["UserRef"];
             /** Format: date-time */
@@ -3603,6 +3812,27 @@ export interface operations {
             };
         };
     };
+    readonly admin_users_clear_sign_in_lock: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly user_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AdminUser"];
+                };
+            };
+        };
+    };
     readonly admin_users_deactivate_create: {
         readonly parameters: {
             readonly query?: never;
@@ -4065,6 +4295,51 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    readonly auth_sign_in_unlock: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["SignInUnlockRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description No response body */
+            readonly 204: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly auth_sign_in_unlock_verify: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["SignInUnlockRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SignInUnlockPreview"];
+                };
             };
         };
     };
@@ -4705,13 +4980,6 @@ export interface operations {
             };
             /** @description Not found, or outside this workspace. */
             readonly 404: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description A legal hold keeps it (`legal_hold`). */
-            readonly 409: {
                 headers: {
                     readonly [name: string]: unknown;
                 };
@@ -5513,6 +5781,71 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["Opportunity"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly opportunities_correct: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly opportunity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["OpportunityCorrectionInputRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Opportunity"];
+                };
+            };
+            /** @description Not found, or outside this workspace. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly opportunities_corrections: {
+        readonly parameters: {
+            readonly query?: {
+                readonly cursor?: string;
+                readonly page_size?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly opportunity_id: string;
+                readonly workspace: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["OpportunityCorrectionPage"];
                 };
             };
             /** @description Not found, or outside this workspace. */

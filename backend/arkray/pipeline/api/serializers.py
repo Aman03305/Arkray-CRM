@@ -16,7 +16,7 @@ the stage, and stage changes, archiving and conversion are their own audited ope
 from __future__ import annotations
 
 from datetime import date
-from decimal import ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from drf_spectacular.utils import extend_schema_field
@@ -103,14 +103,18 @@ class CustomFieldSerializer(serializers.ModelSerializer[m.CustomField]):
         read_only_fields = fields
 
 
-class PipelineSerializer(serializers.ModelSerializer[m.Pipeline]):
-    """A pipeline with its stages in order (retired ones flagged) and its active custom
-    fields: the board columns, stage choices and form fields come from here, never from
-    hard-coded lists. `owner` is null for a shared (organisation) pipeline; `can_manage`
-    says whether the caller may configure it in this workspace."""
+class PipelineListItemSerializer(serializers.ModelSerializer[m.Pipeline]):
+    """A pipeline as a list shows it: its flags and its active stages in order (the board's
+    and the forms' stage choices come from here, never from hard-coded lists), never its
+    custom fields: one pipeline's own representation has them (`GET …/pipelines/{id}`). A
+    list then grows by a few kilobytes per pipeline whatever its configuration (30 choice
+    fields of 50 long options made one pipeline 200 KB and an archived list of 150 of them
+    30 MB: review round 1 of the 73ff1e3 remediation, DEALS-1). Retired stages are left out
+    too: the board's columns and a deal's own stage carry one where it matters (L10).
+    `owner` is null for a shared (organisation) pipeline; `can_manage` says whether the
+    caller may configure it in this workspace."""
 
     stages = StageSerializer(many=True, read_only=True)
-    custom_fields = CustomFieldSerializer(source="fields", many=True, read_only=True)
     owner = UserRefSerializer(read_only=True, allow_null=True)
     can_manage = serializers.SerializerMethodField()
 
@@ -126,7 +130,6 @@ class PipelineSerializer(serializers.ModelSerializer[m.Pipeline]):
             "version",
             "can_manage",
             "stages",
-            "custom_fields",
         ]
         read_only_fields = fields
 
@@ -135,6 +138,17 @@ class PipelineSerializer(serializers.ModelSerializer[m.Pipeline]):
         if actor is None or scope is None:
             return False
         return configuration.can_manage(actor, scope, pipeline)
+
+
+class PipelineSerializer(PipelineListItemSerializer):
+    """One pipeline with its whole configuration: its active stages and its active custom
+    fields (with their choices), what its forms and settings need."""
+
+    custom_fields = CustomFieldSerializer(source="fields", many=True, read_only=True)
+
+    class Meta(PipelineListItemSerializer.Meta):
+        fields = [*PipelineListItemSerializer.Meta.fields, "custom_fields"]
+        read_only_fields = fields
 
 
 class InstrumentSerializer(serializers.Serializer[Any]):
@@ -148,7 +162,7 @@ class OpportunityOptionsSerializer(serializers.Serializer[Any]):
 
 
 class PipelineListSerializer(serializers.Serializer[Any]):
-    results = PipelineSerializer(many=True)
+    results = PipelineListItemSerializer(many=True)
 
 
 class LeadRefSerializer(serializers.Serializer[Any]):
@@ -240,8 +254,9 @@ CARD_FIELDS = [
 _RESTRICTED_HELP = (
     "True when the viewer can't see the deal's customer (its lead was reassigned and this is "
     "a closed deal they worked): the customer's name, phone, email and address are blank, the "
-    "title and account show only the organisation and instrument, and free-text custom values "
-    "are left out (docs/authorization.md#historical-deals)."
+    "title and account show only the organisation and instrument, the deal's free text "
+    "(description, lost reason, work load, Expected CPT, agreed CPT) is blank, and free-text "
+    "custom values are left out (docs/authorization.md#historical-deals)."
 )
 
 
@@ -376,11 +391,23 @@ class StageHistorySerializer(serializers.ModelSerializer[m.StageHistory]):
             "to_status",
             "value",
             "probability",
+            "expected_close_date",
+            "opportunity_date",
             "lost_reason",
             "actor",
             "occurred_at",
         ]
         read_only_fields = fields
+        extra_kwargs = {
+            "expected_close_date": {
+                "help_text": "The deal's expected close date as it entered the stage (null: "
+                "none, or a row recorded before the dates were kept)."
+            },
+            "opportunity_date": {
+                "help_text": "The deal's opportunity date as it entered the stage (null on rows "
+                "recorded before the dates were kept)."
+            },
+        }
 
 
 class StageHistoryPageSerializer(serializers.Serializer[Any]):
@@ -417,6 +444,61 @@ class NegotiationPriceSerializer(serializers.ModelSerializer[m.NegotiationPrice]
 
 class NegotiationPricePageSerializer(serializers.Serializer[Any]):
     results = NegotiationPriceSerializer(many=True)
+    next = serializers.CharField(allow_null=True)
+    previous = serializers.CharField(allow_null=True)
+
+
+class CorrectionChangeSerializer(serializers.Serializer[Any]):
+    field = serializers.ChoiceField(choices=m.CorrectedField.choices)
+    before = serializers.CharField(
+        allow_null=True, help_text='As the deal had it: an amount ("100000.00") or a date.'
+    )
+    after = serializers.CharField(allow_null=True, help_text="As corrected (null: no date).")
+
+
+def _figure(value: Any) -> str | None:
+    """A corrected figure as the API speaks it: amounts as decimal strings, dates in ISO."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return format(value.quantize(m.HUNDREDTH), "f")
+    return str(value.isoformat())
+
+
+class OpportunityCorrectionSerializer(serializers.ModelSerializer[m.OpportunityCorrection]):
+    """One administrator's correction of a closed deal's figures (append-only; newest first
+    in its list). Its reason is blank for a viewer who may not see the deal's customer
+    (pipeline.customer) and once an erasure has redacted it."""
+
+    # DRF pops declared fields off the class; the base `fields` attribute is unaffected.
+    fields = serializers.ListField(  # type: ignore[assignment]
+        child=serializers.ChoiceField(choices=m.CorrectedField.choices),
+        read_only=True,
+        help_text="The figures this correction changed.",
+    )
+    changes = serializers.SerializerMethodField()
+    actor = UserRefSerializer(read_only=True)
+    reason = serializers.CharField(read_only=True, help_text="Why it was corrected (one line).")
+
+    class Meta:
+        model = m.OpportunityCorrection
+        fields = ["id", "fields", "changes", "status", "reason", "actor", "occurred_at"]
+        read_only_fields = fields
+
+    @extend_schema_field(CorrectionChangeSerializer(many=True))
+    def get_changes(self, row: m.OpportunityCorrection) -> list[dict[str, Any]]:
+        return [
+            {
+                "field": field,
+                "before": _figure(getattr(row, f"{field}_before")),
+                "after": _figure(getattr(row, f"{field}_after")),
+            }
+            for field in row.fields
+        ]
+
+
+class OpportunityCorrectionPageSerializer(serializers.Serializer[Any]):
+    results = OpportunityCorrectionSerializer(many=True)
     next = serializers.CharField(allow_null=True)
     previous = serializers.CharField(allow_null=True)
 
@@ -582,6 +664,23 @@ class NegotiatedPriceInputSerializer(StrictInputSerializer):
     version = serializers.IntegerField(min_value=1)
     price = _value(help_text='The agreed (negotiated) price (INR), e.g. "1050000.00".')
     agreed_cpt = _cpt("The agreed CPT with this price.", allow_blank=False, required=True)
+
+
+class OpportunityCorrectionInputSerializer(StrictInputSerializer):
+    """An administrator's correction of a won or lost deal: the figures to correct (at least
+    one, and at least one must change), why, and the deal's version as last seen. A closed
+    deal's probability is fixed (won 100 %, lost 0 %), so it isn't one of them."""
+
+    version = serializers.IntegerField(min_value=1)
+    reason = serializers.CharField(
+        max_length=m.CORRECTION_REASON_MAX_LENGTH,
+        allow_blank=True,
+        trim_whitespace=False,
+        help_text="Why the deal is corrected: required, one line (kept in its history).",
+    )
+    value = _value(required=False)
+    expected_close_date = serializers.DateField(allow_null=True, required=False)
+    opportunity_date = serializers.DateField(required=False)
 
 
 # --- input: configuration -------------------------------------------------------------------
@@ -774,5 +873,6 @@ class CustomerCorrectionResultSerializer(serializers.Serializer[Any]):
         child=serializers.CharField(), help_text="The lead fields that changed."
     )
     opportunities = serializers.IntegerField(
-        help_text="How many of the customer's deals had their copy of these details corrected."
+        help_text="How many of the customer's deals that you can see had their copy of these "
+        "details corrected (copies on deals outside this workspace follow too, uncounted)."
     )

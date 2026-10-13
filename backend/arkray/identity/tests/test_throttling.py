@@ -75,13 +75,15 @@ class TestCheck:
         assert LoginThrottle([IDENTIFIER], "", "198.51.100.1").check() is None
 
     def test_cost_is_bounded_under_attack(self):
-        """At most two index-served, LIMITed queries, however much evidence piles up."""
+        """At most three index-served, LIMITed queries, however much evidence piles up: an
+        unrecognised browser also asks whether the account's daily cap locked it (review of
+        73ff1e3, L1; a unique-index lookup)."""
         failures(2000, identifier=login_identifier("sprayed@example.test"))
         failures(2000)
         for identifier in (login_identifier("fresh@example.test"), IDENTIFIER):
             with CaptureQueriesContext(connection) as queries:
                 assert LoginThrottle([identifier], "", "203.0.113.5").check() is not None
-            assert 1 <= len(queries) <= 2
+            assert 1 <= len(queries) <= 3
             assert all("LIMIT" in q["sql"] for q in queries)
 
     def test_the_account_query_uses_the_partial_index(self):

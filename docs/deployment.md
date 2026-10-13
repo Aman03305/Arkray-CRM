@@ -58,17 +58,50 @@ restart, which costs nothing (the relay ticks every 5 s; the slower entries are 
 fire at their time whatever happened before). `manage.py ledger_status` prints this
 process's view of the erasure ledger gate and exits 1 unless it is open; with
 `--ping-worker <name>` the worker started with `--hostname <name>@%h` on the same host must
-also answer a ping through the broker within 5 s. It is a short Django process (it reads and
-verifies the ledger and queries the database once), so probe every 60 s with a 30 s timeout,
-not every few seconds; both Compose files do (`start_period` 120 s). Unhealthy means the
+also answer a ping through the broker within 5 s. It is a short Django process: it reads the
+ledger's head and the entries added since the previous probe (the chain verified so far is
+kept in the container's temporary directory, signed with the ledger key; the whole chain is
+re-verified at least hourly, 5,000 entries per probe: adversarial review of 73ff1e3, M3,
+where every probe re-verified the whole chain) and queries the database once, so probe every
+60 s with a 30 s timeout, not every few seconds. A container's first probe starts from the
+ledger's newest signed checkpoint (its review round 1, LEDGER-2) and, when more than 5,000
+entries are left to verify, answers `verifying` (unhealthy) until a later probe finishes;
+the start period covers the usual case; each probe verifies in slices of 500 entries and
+stops after 15 s of verification, keeping each slice as it ends (review round 2, LEDGER2-4):
+on a store slower than about 200 ms per GET one slice can carry a probe past the health
+check's 30 s timeout (later probes still progress), so on such a store raise the Celery health
+check's timeout (60 s, say) or move the ledger closer. From its first tampered verdict a
+container answers `tampered` (unhealthy) at every probe, each logging `erasure_ledger_tampered`
+(a security event), until a pass over the whole chain from scratch succeeds (LEDGER2-1); the
+verdict lives in the container's temporary directory and a restart loses it (the pass from
+scratch then follows over the next probes; `manage.py ledger_status --from-scratch` verifies
+every entry at once). Both Compose files probe this way (`start_period` 120 s). **On a
+platform without worker health checks** (Render and similar) nothing runs the hourly pass from
+scratch, so an entry altered below the newest checkpoint would be found only by
+`replay_erasures`, `manage.py rotate_erasure_ledger_key --check`, `manage.py preflight --only
+ledger` or `manage.py ledger_status --from-scratch`: schedule one of them daily there.
+
+gunicorn's `pre_fork` hook refreshes the master's verified chain from the store before each
+fork: at most 5 s plus one short call (connect 1 s, read 2 s, one attempt; review rounds 2 and
+3, LEDGER2-3 and LEDGER3-2), during which the arbiter handles no signals; on a store that slow
+the refresh gives up and the workers verify on their own from the newest checkpoint. A
+mismatch it meets, or one the master or the Celery parent meets at start, is the same
+`erasure_ledger_tampered` security event, and that process stays closed.
+
+Unhealthy means the
 worker refuses or can't take work: its gate is closed (it logs `background_task_skipped`,
 `background_task_deferred` or `background_task_dropped` at ERROR, [reliability.md](reliability.md#failure-and-degradation-matrix)),
 the worker is hung or dead, or the broker is down (every worker at once). Docker only reports
 it; an orchestrator's liveness probe restarts the container, which helps a hung worker but
 not a closed gate: alert on it instead (`erasure_ledger_gate_closed`).
 
-The WSGI entry point defaults to production settings, so a deployment that forgets
-`DJANGO_SETTINGS_MODULE` never serves with `DEBUG=True`.
+The backend image sets `ARKRAY_RUNTIME=production`: every process in it (gunicorn, the
+workers, beat, `manage.py` commands, a cron job) that forgets `DJANGO_SETTINGS_MODULE` runs
+production settings, never `DEBUG=True` or without the role check, and one that names another
+settings module is refused (adversarial review of 73ff1e3, L14: `manage.py` and the Celery
+app fall back to the development settings, and the WSGI entry point's production fallback was
+overridden by the Celery app's import). A host installation outside the image sets
+`ARKRAY_RUNTIME=production` in every service unit.
 
 - Route `/api` and `/health` to the api service **at the proxy**, so browser traffic never
   hops through Next.js in production. The Next.js `/api` rewrite is for development and the
@@ -128,9 +161,14 @@ The WSGI entry point defaults to production settings, so a deployment that forge
 reference stack runs 1.30, the stable series). What the
 application depends on, whatever proxy or load balancer is used:
 
-- **TLS terminates here**; plain HTTP only redirects; a request for any other host name
-  ends at the TLS handshake. HSTS is sent once, for pages and API, without
-  `includeSubDomains` (add it, and preload, only when every subdomain is HTTPS).
+- **TLS terminates here**; plain HTTP only redirects, to the one public name (never the
+  client's `Host`: a 308 is cacheable); a request for any other host name ends at the TLS
+  handshake. TLS 1.2 with forward-secret AEAD suites only (ECDHE with AES-GCM or
+  ChaCha20-Poly1305) and TLS 1.3, no session tickets (their key would live as long as the
+  process), and no answer names nginx's version, the default server's included (adversarial
+  review of 73ff1e3: a `Host` the site doesn't serve got `Server: nginx/1.30.5`). HSTS is sent
+  once, for pages and API, without `includeSubDomains` (add it, and preload, only when every
+  subdomain is HTTPS).
 - **The error log keeps critical events only**: nginx writes the whole request line, query
   string and one-time link included, into every error it logs (Phase 11 review: an
   oversized request to an invitation link put its token there). Upstream failures still
@@ -141,9 +179,18 @@ application depends on, whatever proxy or load balancer is used:
   addresses. Verified: a client's `X-Forwarded-For: 6.6.6.6` never reaches a log.
 - **`X-Request-ID` is minted here** (set `TRUST_INCOMING_REQUEST_ID=true`): the same id is
   in the proxy's log line and in every application line for the request.
+- **Request headers only proxies or Next.js set are dropped**: `X-Forwarded-Host`,
+  `X-Forwarded-Port`, `X-Forwarded-Prefix` and Next.js's internal `X-Middleware-*`,
+  `X-Nextjs-*`, `X-Invoke-*` and matched-path headers (Next 16's names: CVE-2025-29927 skipped
+  middleware with `x-middleware-subrequest`); the browser sends none of them. **Next.js's
+  image optimizer** (`/_next/image`) answers 404 at the edge and in Next.js
+  (`images.unoptimized`), and the web tier's own `/api` rewrite (development's) reaches
+  `/api/v1` only.
 - **No query strings, one-time links or Referer in the access log** (R61): searches travel
   in query strings, invitation and reset links carry secrets until used. The reference log
-  format writes the path only and redacts `/activate/*` and `/reset-password/*`. Verified:
+  format writes the path only and redacts `/activate/*`, `/reset-password/*` and
+  `/unlock-sign-in/*` (the emailed sign-in unlock link, adversarial review of 73ff1e3, L1;
+  `test_log_configuration.py` derives every one-time link page from the web app). Verified:
   a search term and a reset token appear in no log.
 - **`/api/` goes to Django directly** (matched case-insensitively), everything else to
   Next.js; one origin, so the
@@ -157,10 +204,13 @@ application depends on, whatever proxy or load balancer is used:
   (`/api/v1/auth/login`, `password-reset`, `invitations`: 5 a second, bursts of 30, answered
   429 in the API's JSON shape with `Retry-After`), so a flood from one address is refused before
   it takes a gunicorn worker: in the capacity test it had raised every other user's p99 to 3.2 s
-  ([capacity.md](capacity.md#abuse)). Django's own limits stay the authority. There is
-  deliberately **no** global per-address *rate* limit: an office shares one address (the limit
-  on requests *in flight* below is far above what an office reaches). A platform edge
-  without nginx needs an equivalent rule. **An IPv6 client counts as its /64** (R127), like
+  ([capacity.md](capacity.md#abuse)). Django's own limits stay the authority. **Every API
+  route has a rate too** (adversarial review of 73ff1e3, L2: DRF checks permissions before
+  its throttles, so refused requests were never counted): 20 a second per signed-in session
+  (bursts of 200), 10 a second per address without a session (bursts of 100), and a
+  per-address ceiling of 300 a second (bursts of 1,000), twice what 100 users from one
+  address reached at twice their pace ([operations.md](operations.md#edge-rate-limits)). A
+  platform edge without nginx needs equivalent rules. **An IPv6 client counts as its /64** (R127), like
   in Django: the `$arkray_client_key` map turns nginx's text of the address into its first
   four groups (an IPv4 address stays as it is), so one host can't rotate through its /64
   for fresh budgets ([operations.md](operations.md#edge-rate-limits)). The limit lives in
@@ -172,7 +222,7 @@ application depends on, whatever proxy or load balancer is used:
   OOM-killed (256 MB) and cut every user off. Now:
   - **Every tmpfs of the edge has a size**: uploads and slowly read responses in
     `/var/cache/nginx` (64 MB), JSON bodies over 16 KB in an area of their own
-    (`/var/cache/nginx-body`, 16 MB), `/var/run` and `/tmp` 1 MB (82 MB in all, at most half
+    (`/var/cache/nginx-body`, 40 MB), `/var/run` and `/tmp` 1 MB (106 MB in all, at most half
     the memory limit). A full area refuses only what needs it (503 in the API's JSON shape).
   - **An attachment upload's body is read only after Django confirms the request's
     session**: nginx's `auth_request` asks `GET /api/v1/auth/me` (an internal subrequest with
@@ -182,12 +232,24 @@ application depends on, whatever proxy or load balancer is used:
     The check is one extra cheap request per upload (3 SELECTs, no write, no audit event),
     counted against the user's API rate.
   - **Per client** (`$arkray_client_key`, the sign-in limit's key): at most **256 requests in
-    flight** anywhere, **8 requests with a body** (a GET, HEAD or OPTIONS without a declared
-    body doesn't count; uploads count too) and **4 attachment uploads** (a zone of their
-    own), refused 429 in the API's JSON shape with `Retry-After` (a page: a minimal HTML 429
-    with the request id).
-  - Headers and bodies that stall for **15 s**, and clients that stop reading for **30 s**,
-    are dropped.
+    flight** anywhere and **4 attachment uploads** (a zone of their own); **JSON bodies that
+    can reach a temp area** (declared over 16 KB, or undeclared) **8 per session** (its
+    cookie; per address without one) and **16 per address**; **small bodies** (16 KB or less,
+    kept in memory) **128 per address**, half the request slots, so whatever a client's bodies
+    hold its address keeps room for reads and page loads. **Pages** take only GET and HEAD
+    without a body (anything else 405, before a slot is taken), and uploads don't wait for the
+    JSON bodies' slots (adversarial review of 73ff1e3, L13, and its review round 1, INFRA-3).
+    Refused 429 in the API's JSON shape with `Retry-After` (a page: a minimal HTML 429 with
+    the request id).
+  - Headers that don't arrive whole within **10 s**, bodies that stall for **10 s**, and
+    clients that stop reading for **30 s**, are dropped.
+  - **What one person on a shared address can still do** (nginx bounds the time between two
+    reads of a body, never a whole body, and a session cookie can be forged before anything
+    checks it): hold that address's small-body slots (its sign-ins and saves get 429), its
+    JSON-body and upload slots, and with enough slow-header connections everyone's
+    (`worker_connections`). Where many people share one address, a front proxy with a total
+    request deadline and a per-address connection cap is a production requirement
+    ([operations.md](operations.md#edge-rate-limits)).
   - No one API response is spooled beyond **16 MB** (`proxy_max_temp_file_size`: every 10 MB
     attachment still fits whole, so a slow download frees its gunicorn worker at once; 0
     would hold a sync worker for every slow download). **Data-export downloads** (up to
@@ -233,7 +295,7 @@ application depends on, whatever proxy or load balancer is used:
    **1a. Publish with the release workflow** (`.github/workflows/release.yml`, Actions -> Release
    -> Run workflow, on `main` or a `v*` tag on main, with that commit's full SHA). It refuses
    unless CI concluded `success` for exactly that commit and both environments below require
-   reviewers. After the **staging** environment's reviewers approve, it builds both images
+   reviewers and allow exactly `main` and `v*` to deploy. After the **staging** environment's reviewers approve, it builds both images
    from the commit, reruns CI's scan, smoke and fresh-database steps on them unchanged,
    pushes `ghcr.io/<owner>/arkray-backend:<sha>` and `arkray-frontend:<sha>`, and attests
    their digests (build provenance and a CycloneDX SBOM, signed through Sigstore; the
@@ -242,8 +304,11 @@ application depends on, whatever proxy or load balancer is used:
    those digests and lists them, with `docker pull ...@sha256:` lines, in the run's summary.
    It deploys nothing: deploy those digests (never the tags) with the steps below, and check
    them again where they run:
-   `gh attestation verify oci://ghcr.io/<owner>/arkray-backend@sha256:<digest> --repo <owner>/Arkray-CRM --signer-workflow <owner>/Arkray-CRM/.github/workflows/release.yml --source-digest <sha>`
-   (add `--predicate-type https://cyclonedx.org/bom` for the SBOM). A published tag is never
+   `gh attestation verify oci://ghcr.io/<owner>/arkray-backend@sha256:<digest> --repo <owner>/Arkray-CRM --signer-workflow <owner>/Arkray-CRM/.github/workflows/release.yml --source-digest <sha> --source-ref <refs/heads/main or refs/tags/vX.Y.Z, the run's ref> --deny-self-hosted-runners`
+   (add `--predicate-type https://cyclonedx.org/bom` for the SBOM; the run's summary prints
+   these commands filled in). Both environments must allow exactly the branch `main` and
+   the tag pattern `v*` (Settings -> Environments -> Deployment branches and tags ->
+   Selected): the release refuses "protected branches", no rule or any other rule. A published tag is never
    overwritten; a release that failed after pushing is finished by deleting that package
    version in GHCR and starting again.
 2. **Once per environment**, a database administrator runs `infrastructure/postgres/roles.sql`
@@ -265,7 +330,10 @@ application depends on, whatever proxy or load balancer is used:
    (worker-default: it alone reaches ClamAV) and with the application's credentials:
    `manage.py preflight --base-url https://crm.example.com`. Any FAIL stops the rollout
    ([Preflight](#preflight)).
-5. Roll out api, workers and web (rolling update; readiness gates traffic). The web server
+5. Roll out the workers that take the `default` and `outbox` queues (worker-default,
+   worker-outbox) first, then api, the other workers and web (rolling update; readiness gates
+   traffic): a worker of an older release may not run a job format the new API queues (the
+   release notes say so; from `73ff1e3`, see [below](#which-previous-release-can-run-beside-the-new-schema)). The web server
    and the workers check their database role at start and refuse to run as a superuser or a
    role that owns the append-only tables (`DB_REQUIRE_RESTRICTED_ROLE`, on in production).
 6. Beat restarts last.
@@ -288,9 +356,59 @@ previous release's own models (the migrations' historical models at its leaf nod
 | `0c31aee` (product enhancements) | `pipeline.0006`, `identity.0004`, `activities.0010`, `audit.0004` | rolling deploy possible: since then only `expected_cpt` and `agreed_cpt` are new, both with a database default |
 | `5b05177` (ADR-0027) | `pipeline.0007` | rolling deploy possible (same) |
 | `989830b` (ADR-0028) | `pipeline.0008` | rolling deploy possible (`agreed_cpt` keeps its default) |
+| `73ff1e3` (deployment preparation) | `activities.0011`, `ai.0003`, `core.0006`, `identity.0007`, `pipeline.0010` (`audit.0005`, `leads.0007`, `privacy.0002`) | rolling deploy possible: every column since (`ai.0004`, `core.0007`, `identity.0008`, `pipeline.0012`, `activities.0013`) is nullable or has a database default, `pipeline.0011` and `identity.0008` add tables of their own, and `activities.0012` and `core.0008` add indexes only (concurrently); but its pods and workers don't know the new rules or job formats (below: the deploy order and the rollback) |
 
 Every new migration is checked the same way before a rolling deploy is planned (add the
 release to `CANNOT_INSERT` in that test).
+
+**The adversarial-review release on top of `73ff1e3`** (leaf nodes before it: `ai.0003`,
+`core.0006`, `identity.0007`, `pipeline.0010`) adds `ai.0004` (`ai_conversation.forgotten_at`,
+nullable), `core.0007` (`core_outbox_event.fairness_key`, database default `''`) and `core.0008`
+(an index built concurrently), `identity.0008` (`identity_user.pseudonymised_at`, nullable,
+with a CHECK and a trigger on marked rows and a backfill; `identity_auth_throttle_event.forgiven`,
+database default false; the new `identity_login_lock` table; a new account-token purpose) and
+`pipeline.0011` (the new `pipeline_opportunity_correction` table), and since its review round 1
+`pipeline.0012` (`pipeline_stage_history.expected_close_date` and `opportunity_date`, nullable)
+and `activities.0012` (an index built concurrently), and since its review round 3
+`activities.0013` (`activities_attachment.purge_attempts`, database default 0, and
+`purge_next_at`, nullable: a file the store won't delete keeps its backoff on its row; catalog
+only, under the usual timeouts; the previous release keeps inserting and ignores them). Every new column is nullable or has a
+database default, so `73ff1e3` can still insert: pinned in
+`tests/integration/test_upgrade_from_release.py` (`DEPLOYMENT_PREPARATION`, 73ff1e3's leaf
+nodes: no NOT NULL column it can't fill, and inserts through its own models into the outbox,
+`ai_conversation` and `identity_user`). Its code doesn't know what they mean, though, so
+while its pods still run:
+
+- they list an Ask Arkray conversation a new pod kept as a tombstone for a legal hold, and
+  answer deleting a held one with the old 409 `legal_hold` (the oracle this release closes);
+  a question they add to a tombstone is failed by the new worker, never answered or counted;
+- **its workers** fail a value-deletion job that names several fields
+  (`pipeline.purge_custom_values` with `field_ids`, queued by a field removal; it retries, then
+  goes dead after 8 attempts; a job naming one field, as every `delete-values` request queues,
+  keeps the previous format: review round 2, LEDGER2-6) and have no handler for the new paged
+  attachment purge (`activities.purge_deleted_attachments`: dead at once), so **deploy the
+  `default`-queue workers (worker-default, worker-outbox) before the API and the web** (the
+  new ones still run jobs the previous release queued); after a roll-forward, re-run dead
+  events of those topics with `manage.py outbox_requeue --topic <topic> --yes`; the hourly
+  attachment housekeeping purges deleted files meanwhile
+  ([runbooks.md](runbooks.md#erasure-ledger-behind));
+- they let a won or lost deal's value and dates be edited, and record no correction;
+- they don't enforce the daily sign-in cap (a success there still deletes a browser's
+  failures) nor the promotion cooling-off, and a pseudonymisation they carry out isn't marked
+  final until `pseudonymise_user` runs again with the new image;
+- their outbox events carry no fairness key (they count as system work), and a lead re-sync
+  they queue starts at the beginning;
+- they can verify the ledger's batched `attachment_deleted` entries but not replay them: run
+  `replay_erasures` with the new image only.
+
+Prefer a **stopped deploy** for this release when a legal hold is active (or accept those
+minutes), and in any case don't place a hold, pseudonymise anyone or correct a closed deal
+until every pod runs the new release. Rolling back to `73ff1e3` without a restore works on
+the new schema, with the same gaps. **Before a rollback**, let the outbox drain (no pending
+`pipeline.purge_custom_values` or `activities.purge_deleted_attachments` events: the previous
+workers can't run them), and know that the previous release's `replay_erasures` can't apply
+ledger entries naming several fields or files (it reports them failed and the API stays
+closed): replay with this release's image.
 
 ### Before an upgrade
 
@@ -351,11 +469,49 @@ database roles (migrations as the owner, everything else as `arkray_app`), Redis
 password, read-only containers, no insecure opt-in, only the proxy published:
 
 ```
-export DJANGO_SECRET_KEY=... POSTGRES_PASSWORD=... ARKRAY_OWNER_PASSWORD=... \
-       ARKRAY_APP_PASSWORD=... REDIS_PASSWORD=... METRICS_TOKEN=... ERASURE_LEDGER_KEY=...
-docker compose -p arkray-prod -f docker-compose.yml -f infrastructure/compose.production.yml \
-    --profile app up -d --build
+scripts/init-prod-env.sh /secure/arkray-prod.env      # once: every secret generated, owner-only
+scripts/prod-compose.sh /secure/arkray-prod.env up -d --build
 ```
+
+**Its secrets never come from the repository** (adversarial review of 73ff1e3, M4: the
+overlay took the superuser's password from `${POSTGRES_PASSWORD:?}`, which Compose filled
+from the checkout's `.env`, that is `.env.example`'s published development value):
+
+- every secret it reads has a production-only name, `ARKRAY_PROD_*`
+  (`ARKRAY_PROD_DB_SUPERUSER_PASSWORD`, `ARKRAY_PROD_DB_OWNER_PASSWORD`,
+  `ARKRAY_PROD_DB_APP_PASSWORD`, `ARKRAY_PROD_REDIS_PASSWORD`, `ARKRAY_PROD_DJANGO_SECRET_KEY`,
+  `ARKRAY_PROD_METRICS_TOKEN`, `ARKRAY_PROD_ERASURE_LEDGER_KEY`, and the optional
+  `ARKRAY_PROD_ANTHROPIC_API_KEY`; `config/credentials.py`), which no development file
+  defines, in a file outside the checkout that `--env-file` names: Compose then reads that
+  file **instead of** `.env`. `scripts/prod-compose.sh <file> <command>` runs Compose that way
+  for this stack, after unsetting every `ARKRAY_PROD_*` in its own process: a variable
+  exported in the shell wins over `--env-file`, so one left behind (`set -a; . file`, another
+  environment's file) would replace the file's value without a word (review round 1,
+  INFRA-5). Never load the file into a shell;
+- `credential-guard` (`python -m config.credentials`, no network) runs first and every other
+  service waits for it to succeed: a missing secret, a value the repository publishes or a
+  template's placeholder, a weak one (under 32 characters, too few or too unevenly used
+  characters, predictable, a repeated part, a keyboard or alphabet run, words and numbers
+  joined, a common password word: every value is generated, never chosen) or one value used
+  for two secrets stops the whole stack, naming the variable, never printing a value;
+- PostgreSQL reads `infrastructure/postgres/pg_hba.conf`: the superuser only on its local
+  socket (inside its container, and the one-shot `db-roles` job, the only other container
+  that mounts the socket's volume), physical replication included, `arkray_owner` only from
+  `db-owner` (an internal network, `10.252.17.16/28`, that only `migrate` and an operator's
+  one-off backup or restore container join), `arkray_app` over TLS from the networks the
+  server is on, both to `arkray` and `arkray_restored` only (the restore's database, renamed
+  into place afterwards: review round 1, INFRA-1); SCRAM everywhere; everything else rejected;
+- CI runs `docker compose config` with `.env.example` copied to `.env` and every production
+  secret given but one, for each one: Compose must refuse (`.github/workflows/ci.yml`, job
+  `compose`; `scripts/ci-local.sh --only compose`).
+
+Verified live (2026-10-12, a throwaway project): with the development superuser password
+the guard exited 1 and nothing started; with generated secrets, from the API's container
+the superuser and the owner were refused (`pg_hba.conf rejects connection`) and
+`arkray_app` connected over TLS (plain TCP refused); from the migrate job the owner
+connected; a `pg_dump` as the owner worked from `db-owner` and was refused from `default`;
+the superuser connected on the socket and was refused over loopback TCP; `replay_erasures`
+ran as the owner from `db-owner`.
 
 Every container of the backend image mounts the one `ledger` volume (`x-ledger-volume`;
 `tests/architecture/test_compose_ledger.py` fails on a service with `ERASURE_LEDGER_URL` and
@@ -366,12 +522,17 @@ uid 10001, the root filesystem being read-only):
 `docker compose ... run --rm -v ./restore-reports:/reports migrate python manage.py
 replay_erasures --by <admin> --report /reports/<date>.json`.
 
-What it doesn't reproduce (whole-software audit): one Redis serves as both broker and
-cache (production: two instances, the cache evicting), and one worker consumes `outbox`,
-`default` and `email` (production may split them). Drills of those topologies need the
-production manifests. Its settings are pinned in the overlay, never taken from the
-repository's `.env` (tested: a developer's `AI_ENABLED=false` there once switched Ask
-Arkray off on a backend recreated alone).
+Its settings are pinned in the overlay, never taken from the repository's `.env` (tested:
+a developer's `AI_ENABLED=false` there once switched Ask Arkray off on a backend recreated
+alone), and its secrets have names of their own (above). A backup on it runs as the owner
+from `db-owner` (a one-off container of the PostgreSQL image on that network, with the
+`tls-ca` volume, `sslmode=verify-full`); `scripts/backup.sh` and `scripts/restore.sh` are
+unchanged: they connect with whatever `DATABASE_URL` / `TARGET_DATABASE_URL` they are given
+(`verify-full` across hosts, or a Unix socket), but on this stack the database admits them only
+as the owner, from `db-owner`, to `arkray` or `arkray_restored`: run them as
+[runbooks.md](runbooks.md#restore-from-backup) writes it (one-off containers of the PostgreSQL
+image on that network; the restore into `arkray_restored`, then a rename into place). Checked
+live end to end (review round 1, INFRA-1).
 
 Phase 11 ran the release on it ([testing.md](testing.md#what-exists-after-phase-11)): sign-in
 and every page over HTTPS at desktop, tablet and phone widths (nonce CSP, HSTS, `__Host-`
@@ -396,6 +557,7 @@ credentials can't read. SKIP says why the check doesn't apply (a loopback hop ne
 
 | Group | Checks |
 |---|---|
+| `credentials` | offline: the passwords in `DATABASE_URL`, `CELERY_BROKER_URL` and `REDIS_CACHE_URL` by the whole production rule (`config/credentials.py`: 32+ characters, enough different ones used evenly, not predictable, no repeated part, keyboard or alphabet run, joined words or common password word, never a value the repository publishes or a template's placeholder); FAIL for a weak one or a Redis URL without one, SKIP for a database URL without one (a client certificate or the platform's identity). Production settings themselves refuse only the published development values (adversarial review of 73ff1e3, M4) |
 | `database` | connects; **TLS actually in use** (libpq's own state; `pg_stat_ssl` names the protocol) unless every host is loopback, a socket or a listed private name, and `sslmode=verify-full` when required; PostgreSQL 16; `vector`, `pg_trgm`, `btree_gin`; the runtime role restricted (R74, the release check's rule); no migration unapplied (and none the image doesn't know); R63's logging; statement, lock and idle timeouts set; `max_connections` against the [connection budget](reliability.md#connection-budget) (`--connections N`: the planned total; 16, the documented starting topology, by default) |
 | `redis` | broker and cache: `PING` over the configured URL (TLS verified as the application connects); a `PING` **without** the password must be refused; `maxmemory-policy` `noeviction` (broker) and an evicting one (cache), the broker's AOF and the cache's lack of persistence, where `CONFIG` is allowed; two separate instances (by `run_id`) |
 | `smtp` | connect, STARTTLS or implicit TLS with the certificate and host name verified (the application's own backend), EHLO, AUTH; sends nothing unless `--send-test-email <address>` |
@@ -436,9 +598,11 @@ then checks the live environment it describes ([Preflight](#preflight)).
 | Variable | Required | Default and notes |
 |---|---|---|
 | `DJANGO_SETTINGS_MODULE` | yes | `config.settings.production` (the image's default) |
+| `ARKRAY_RUNTIME` | no | `production` in the image (its Dockerfile): an unset `DJANGO_SETTINGS_MODULE` means production's, any other module or value is refused (`config/settings_module.py`) |
 | `DJANGO_SECRET_KEY` | yes | at least 50 characters with at least 5 distinct ones, production-only (not `dev-`, `test-` or `django-insecure-`); startup fails otherwise. Rotation: [runbooks.md](runbooks.md#rotate-a-secret) |
 | `DJANGO_SECRET_KEY_FALLBACKS` | no | comma-separated earlier keys, during a rotation only: sessions, sealed page links and trusted-browser cookies signed with them keep working until they're removed; each must be as strong as the key |
 | `MFA_REQUIRED_FOR_ADMINS` | no | `true` in production: administrators must set up two-step verification (TOTP, [ADR-0033](adr/0033-administrator-mfa-and-reactivation.md)) at their next sign-in and give a code again (step-up) for user administration, support sessions, export requests and pseudonymisation; `false` is refused unless `DJANGO_ALLOW_INSECURE_LOCAL_HTTP=true`. The authenticator secrets are encrypted with a key derived from `DJANGO_SECRET_KEY`: before retiring a key from `DJANGO_SECRET_KEY_FALLBACKS`, run `manage.py mfa_reencrypt` ([runbooks.md](runbooks.md#lost-second-factor)). Wrong codes lock the factor at `MFA_MAX_CONSECUTIVE_FAILURES` (20 in a row) and the owner is emailed about a wrong code at most every `MFA_FAILURE_NOTICE_INTERVAL_S` (6 hours) and when it locks: both fixed in `config/settings/base.py`, not environment variables (deep security audit M-4, [runbooks.md](runbooks.md#second-factor-locked)) |
+| `MFA_REQUIRED_FOR_ALL_USERS` | no | `true` in production (`false` in development and tests): **every** user, not only administrators, must set up two-step verification at their next sign-in (the web app follows the viewer's `mfa_enrollment_required`) and can't turn it off; `false` keeps it optional for ordinary users (administrators still need it, `MFA_REQUIRED_FOR_ADMINS`). An organisational policy, so `false` is accepted in production; anything other than `true`/`false` is refused at startup (review of 73ff1e3, L1: a phished or reused password alone no longer opens an ordinary account). Turning it on in an existing deployment asks each user to enrol at their next sign-in: tell them first. Related fixed policy values in `config/settings/base.py` (not environment variables): `LOGIN_DAILY_FAILURE_CAP` (50 failed sign-ins from new browsers in `LOGIN_DAILY_WINDOW_S`, 24 h, lock the account's sign-in from new browsers until the owner's emailed link, a reset or an administrator; it lifts after `LOGIN_LOCK_MAX_AGE_S`, 30 days), `SIGN_IN_UNLOCK_TTL_S` (the link, 24 h) and `ADMIN_PROMOTION_COOLING_OFF_S` (7 days: an account whose password, email or second factor an administrator changed can't be made an administrator meanwhile, L3) |
 | `DJANGO_ALLOWED_HOSTS` | yes | the public host(s) **and** the probes' host |
 | `DJANGO_CSRF_TRUSTED_ORIGINS` | yes | `https://crm.example.com`; production refuses `http://` origins and wildcards (`https://*.example.com`) |
 | `APP_BASE_URL` | **yes** | the public web URL for emailed links, `https://crm.example.com`; startup fails if unset or not `https://` |
@@ -482,6 +646,8 @@ value on the server alone made the API and the screens disagree (whole-software 
 | `CELERY_BROKER_URL` | yes | the broker Redis, with a password and verified TLS: `rediss://:password@host:6380/0?ssl_cert_reqs=required` (`&ssl_ca_certs=/path/ca.crt` for a private CA); startup fails without them |
 | `REDIS_CACHE_URL` | yes | the cache Redis, **a separate instance with no persistence** (`--save '' --appendonly no`: its rate-limit keys hold client addresses), with a password and the same TLS parameters |
 | `OUTBOX_DONE_RETENTION_DAYS` | no | 7: finished background work kept for investigation, then purged hourly |
+| `ACTIVITY_MAX_CREATED_PER_USER_PER_DAY` | no | 1,000: tasks, meetings and notes one person may create in any 24 hours, counted from the activities they created (never deleted, so archiving gives nothing back; an administrator spends their own budget in someone's workspace) through `activities_created_by_idx`, one bounded statement whatever else they did; over it, 429 `rate_limited` with `Retry-After`; `0` turns it off (review of 73ff1e3, M6: one account kept the indexing worker hours behind for everyone; [reliability.md](reliability.md#write-budgets)) |
+| `ACTIVITY_MAX_PER_CUSTOMER` | no | 5,000: activities one customer (lead) may have, archived ones included, the worst case of their data-rights export and erasure; over it, 422 `activity_limit_reached`; `0` turns it off (M6) |
 | `EMAIL_URL` | **yes** | `smtp+tls://user:pass@smtp.example.com:587` (STARTTLS; `smtps://` means the same) or `smtp+ssl://...:465` (implicit TLS); startup fails if unset, a console, file, in-memory or dummy backend (they would put one-time account links in logs or on disk, or drop them), or plain `smtp://` to a remote relay |
 | `EMAIL_TLS_CA_FILE` | no | a private CA (PEM) for the relay's certificate; otherwise the system store. Certificates and host names are always verified, TLS 1.2+ |
 | `DEFAULT_FROM_EMAIL` | **yes** | the sender, on a domain with SPF, DKIM and DMARC ([Email](#email)); production refuses to start without it, or with a reserved domain (`.local`, `.localhost`, `.internal`, `.invalid`, `.test`, `.example`) |
@@ -570,13 +736,13 @@ therefore reach the rate times the number of API processes its requests land on
 
 | Variable | Notes |
 |---|---|
-| `API_ORIGIN` | where Next.js proxies `/api` when the edge proxy doesn't route it (development and the local stack); in production the proxy routes `/api` to Django directly |
+| `API_ORIGIN` | where Next.js proxies `/api/v1` (nothing else under `/api`) when the edge proxy doesn't route it (development and the local stack); in production the proxy routes `/api` to Django directly |
 
 **Privacy (ADR-0032; [privacy.md](privacy.md))**
 
 | Variable | Required | Default and notes |
 |---|---|---|
-| `ERASURE_LEDGER_URL` | **yes** | where erasures are recorded outside the database: `file:///var/lib/arkray/ledger` (a volume of its own, never in a database backup) or `s3://bucket/prefix` (a bucket of its own, versioned, Object Lock in compliance mode). Startup fails without it |
+| `ERASURE_LEDGER_URL` | **yes** | where erasures are recorded outside the database: `file:///var/lib/arkray/ledger` (a volume of its own, never in a database backup) or `s3://bucket/prefix` (a bucket of its own, versioned, Object Lock in compliance mode). Startup fails without it. Beside the entries, never among them, the ledger keeps signed verification checkpoints (adversarial review of 73ff1e3, its review rounds 1 and 2, LEDGER-2 and LEDGER2-2): in a bucket under the sibling prefix `<prefix>.checkpoints/<seq>.<key id>.json` (no listing of `<prefix>/` returns them), or `_checkpoints/` at a bucket root; on a volume a `checkpoints/` subdirectory (mode 0700). One per 1,000 entries per key, written once (`If-None-Match: *`) and read by name, never listed or deleted: the ledger's S3 credentials need `s3:PutObject` and `s3:GetObject` there as on the entries, so an IAM policy on `<bucket>/<prefix>*` covers both, one on `<prefix>/*` alone does not; Object Lock retains them like entries (a few hundred bytes each). Without that access starts verify the whole chain (slower; logged `erasure_ledger_checkpoint_unavailable`) and nothing else changes; after a key rotation no checkpoint carries the new key's id yet, so the first start reads the whole chain once. Give the ledger a bucket of its own, or at least a prefix: at a bucket root, other objects whose names begin with a digit sort among the entries and cost the head search a listing page each (anything else sorts after the entries and costs nothing, `_checkpoints/` included; review round 3) |
 | `ERASURE_LEDGER_KEY` | **yes** | the ledger's HMAC key: at least 32 characters, not the Django secret, not a `dev-`/`test-` key. Keep it with the ledger's own secrets, the same in every process. Rotate it with `ERASURE_LEDGER_VERIFY_KEYS` (old entries keep verifying under the old key; [runbooks.md](runbooks.md#rotate-the-erasure-ledger-key)), never by swapping the key alone |
 | `ERASURE_LEDGER_S3_ENDPOINT_URL`, `ERASURE_LEDGER_S3_REGION`, `ERASURE_LEDGER_S3_CA_BUNDLE` | no | an S3 ledger's endpoint (https only), region and private CA bundle |
 | `ERASURE_LEDGER_CHECK_INTERVAL_S`, `ERASURE_LEDGER_MAX_STALE_S` | no | 60 s: how often each process compares the database with the ledger; 1 h: how long it stays open through a ledger outage after a verified state |
@@ -585,7 +751,7 @@ therefore reach the rate times the number of API processes its requests land on
 | `AUDIT_DETAIL_RETENTION_DAYS` | no | 90: how long audit events' personal details (security events' client addresses, old/new emails, reset requesters' addresses, support reasons) are kept; a policy the organisation sets |
 | `EXPORT_ROOT` | no | `var/exports`: the private directory for data-subject export files (filesystem storage); a volume of its own |
 | `EXPORT_S3_PREFIX` | no | `exports`: their prefix in the attachments bucket with `ATTACHMENT_STORAGE=s3` (outside the attachments' prefix, which reconciliation walks). The application's S3 credentials need `s3:ListBucketVersions` and `s3:DeleteObjectVersion` on this prefix **in every case** (not only with `ATTACHMENT_S3_PURGE_VERSIONS`): an expired or erased subject's export is removed with every version. A bucket-wide default Object Lock retention must not cover this prefix (it would keep exports past their expiry) |
-| `EXPORT_TTL_HOURS`, `EXPORT_MAX_BYTES` | no | 24 h; 100 MB (attachments beyond it are listed, not included) |
+| `EXPORT_TTL_HOURS`, `EXPORT_MAX_BYTES` | no | 24 h; 100 MB: the archive as stored (compressed), which is also what the worker's temporary space, the store and the edge's download spool hold for it; the customer's data must fit (`too_large` otherwise), attached files are added while they fit and the rest listed. A customer within the budgets fits with room to spare ([reliability.md](reliability.md#export-sizing)); raising it means raising the worker's `/tmp` and the edge's export spool with it |
 | `EXPORT_MAX_PENDING_PER_ADMIN`, `EXPORT_MAX_PER_HOUR` | no | 3; 20 per administrator |
 | `LOG_EXCEPTION_MESSAGES` | no | `false`; exception messages in log tracebacks, for local development only: production refuses it |
 
@@ -601,6 +767,15 @@ therefore reach the rate times the number of API processes its requests land on
   their trigger). Verified live: as `arkray_app`, UPDATE, DELETE, TRUNCATE, disabling the
   trigger, `session_replication_role` and DDL are all refused; started as the owner, the
   web server and a worker refuse to run.
+- **Each role only where it belongs** (adversarial review of 73ff1e3, M4): `arkray_app`
+  from the application's network over TLS; `arkray_owner` from the release path only (the
+  migrate job, restores); the administrator from the provisioning host only, never with
+  credentials any application host holds. Self-hosted: `infrastructure/postgres/pg_hba.conf`
+  (the production-shaped stack mounts it: the superuser on the local socket only, SCRAM
+  everywhere, everything else rejected); managed: the provider's network rules and
+  security groups. Every role password generated for the environment (32+ characters;
+  `roles.sql` refuses shorter or shared ones, `manage.py preflight` judges the
+  application's).
 - PgBouncer in transaction mode once replicas × workers approaches the connection budget;
   set `DB_TRANSACTION_POOLER=true` when it is in place ([Database poolers](#database-poolers)).
 - **TLS, verified**: `sslmode=verify-full` with the provider's CA (`sslrootcert`), the pooler
@@ -823,8 +998,12 @@ The kill switch is `AI_ENABLED=false` (it also stops queued questions).
   outbox batches). Rebuilding the RAG index:
   [operations.md](operations.md#rebuild-the-rag-index).
 - **First administrator:** `manage.py createsuperuser` (asks for email, first and last name,
-  password; `--noinput` with `DJANGO_SUPERUSER_PASSWORD`). Everyone else is invited from the
-  Users page.
+  password; `--noinput` with `DJANGO_SUPERUSER_PASSWORD`). The password policy applies (at
+  least 12 characters, not a common password, not like the name or email; review of 73ff1e3,
+  L11: `--noinput` accepted "a"), and an ASCII email. Use a long random password, pass it
+  only through the environment of that one command, and **sign in and set up two-step
+  verification at once**: until then, whoever knows the password can enrol first. Everyone
+  else is invited from the Users page.
 - **Erasure requests:** `manage.py erase_lead <id> --by <admin email> [--yes]`
   ([privacy.md](privacy.md#erasure)).
 - **Every operational procedure:** [runbooks.md](runbooks.md).

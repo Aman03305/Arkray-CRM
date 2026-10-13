@@ -1,22 +1,22 @@
 /**
  * A closed deal whose customer was reassigned to someone else after it closed
  * (docs/authorization.md#historical-deals): the API leaves out the customer's name, contacts,
- * address and free-text custom values and says so (`customer_restricted`). The deal says it
- * once, plainly, instead of showing rows of empty fields, and its edit panel neither offers
- * nor sends what it can't show.
+ * address, free-text custom values and the deal's other free text (review of 73ff1e3, L6) and
+ * says so (`customer_restricted`). The deal says it once, plainly, instead of showing rows of
+ * empty fields. Nothing of it may change for this viewer (what may describe the customer, and
+ * a closed deal's figures: review of 73ff1e3, M2), so no edit panel is offered.
  */
-import { screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EditOpportunityView, OpportunityView, PipelineView } from "@/features/workspace/views";
 import type { PipelineDto } from "@/lib/api/types";
 import { OPPORTUNITY_OPTIONS_ROUTE, salesViewer } from "@/test/fixtures";
-import { makeBoard, makeCard, makeOpportunity, OPPORTUNITY_ID, PIPELINE, STAGES } from "@/test/pipeline-fixtures";
+import { makeBoard, makeCard, makeOpportunity, OPPORTUNITY_ID, PIPELINE, pipelineRoutes, STAGES } from "@/test/pipeline-fixtures";
 import { mockApi, renderWithProviders, type RecordedCall } from "@/test/render";
 
 import { forgetBoardState } from "./hooks";
-import { RESTRICTED_DETAILS_NOTE } from "./OpportunityDrawer";
+import { closedFiguresNote, RESTRICTED_DETAILS_NOTE } from "./OpportunityDrawer";
 import { RESTRICTED_CUSTOMER_NOTE } from "./PipelineBits";
 
 const nav = vi.hoisted(() => ({ pathname: "/pipeline/x", push: vi.fn(), replace: vi.fn() }));
@@ -34,7 +34,7 @@ const WITH_FIELDS: PipelineDto = {
   ],
 };
 const CONFIG = {
-  "GET /api/v1/workspaces/me/pipelines": { status: 200, body: { results: [WITH_FIELDS] } },
+  ...pipelineRoutes("/api/v1/workspaces/me/pipelines", { results: [WITH_FIELDS] }),
   [`GET ${ME}/history`]: { status: 200, body: { results: [], next: null, previous: null } },
   [`GET ${ME}/negotiated-prices`]: { status: 200, body: { results: [], next: null, previous: null } },
   ...OPPORTUNITY_OPTIONS_ROUTE,
@@ -53,6 +53,11 @@ const RESTRICTED = makeOpportunity({
   contact_phone: "",
   contact_email: "",
   address: "",
+  // The deal's free text is withheld from this viewer too (review of 73ff1e3, L6).
+  description: "",
+  work_load: "",
+  expected_cpt: "",
+  agreed_cpt: "",
   custom_fields: { "f-units": "4" },
 });
 
@@ -90,7 +95,10 @@ describe("a deal whose customer the viewer may no longer see", () => {
     expect(within(customer).getByRole("link", { name: "asha@apollo.example" })).toBeInTheDocument();
   });
 
-  it("its edit panel doesn't offer the hidden details, and saving sends only what changed", async () => {
+  it("is read-only to them: no Edit, and the edit route opens no panel", async () => {
+    // It offered the value, probability and dates (the rest read-only, review P3-2); a closed
+    // deal's figures are frozen for everyone now (review of 73ff1e3, M2): nothing is left to
+    // edit. The note says how they change.
     nav.pathname = `/pipeline/${OPPORTUNITY_ID}/edit`;
     const api = mockApi({
       ...CONFIG,
@@ -98,40 +106,27 @@ describe("a deal whose customer the viewer may no longer see", () => {
       [`PATCH ${ME}`]: (call: RecordedCall) => ({ status: 200, body: { ...RESTRICTED, version: 3, value: (call.body as { value: string }).value } }),
     });
     renderWithProviders(<EditOpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
-    const user = userEvent.setup();
-    const drawer = await screen.findByRole("dialog", { name: "Edit opportunity" });
-    const customer = within(drawer).getByRole("region", { name: "Customer" });
-    expect(customer).toHaveTextContent(RESTRICTED_CUSTOMER_NOTE);
-    expect(customer).toHaveTextContent(RESTRICTED_DETAILS_NOTE);
-    expect(within(customer).queryByRole("textbox")).not.toBeInTheDocument();
-    // The hidden free-text field isn't offered (nor required).
-    expect(within(drawer).queryByLabelText(/Lab contact notes/)).not.toBeInTheDocument();
-    const value = within(drawer).getByLabelText(/^Installation price/);
-    await user.clear(value);
-    await user.type(value, "950000");
-    await user.click(within(drawer).getByRole("button", { name: "Save changes" }));
-    await waitFor(() => expect(api.callsTo("PATCH", ME)).toHaveLength(1));
-    expect(api.callsTo("PATCH", ME)[0]!.body).toEqual({ version: 2, value: "950000" });
+    expect(await screen.findByRole("heading", { level: 1, name: "Apollo Diagnostics — HbA1c analyser" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Edit opportunity" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
+    expect(screen.getByText(closedFiguresNote("won"))).toBeInTheDocument();
+    expect(screen.queryByText(RESTRICTED_DETAILS_NOTE)).not.toBeInTheDocument();
+    expect(api.callsTo("PATCH", ME)).toHaveLength(0);
   });
 
-  it("its edit panel shows what may describe the customer read-only (the server refuses a change)", async () => {
-    // Review P3-2 (docs/authorization.md#historical-deals): instrument, work load, Expected
-    // CPT, lost reason, description and custom values can't be changed by this viewer.
-    nav.pathname = `/pipeline/${OPPORTUNITY_ID}/edit`;
-    const lostDeal = { ...RESTRICTED, status: "lost" as const, stage: STAGES.lost, probability: "0.00", lost_reason: "Chose a rival", expected_cpt: "Rs 18" };
+  it("shows what may describe the customer as the API sends it: withheld, never as inputs", async () => {
+    // Review P3-2 and review of 73ff1e3, L6: the work load, Expected CPT, lost reason,
+    // description and free-text custom values come blank for this viewer (as Ask Arkray
+    // withholds them); the instrument (one of a fixed list) and other values stay.
+    const lostDeal = { ...RESTRICTED, status: "lost" as const, stage: STAGES.lost, probability: "0.00" };
     mockApi({ ...CONFIG, [`GET ${ME}`]: { status: 200, body: lostDeal } });
-    renderWithProviders(<EditOpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
-    const drawer = await screen.findByRole("dialog", { name: "Edit opportunity" });
-    for (const label of [/^Instrument name/, /^Work load/, /^Expected CPT/, /^Lost reason/, /^Description/, /^Units/]) {
-      expect(within(drawer).queryByLabelText(label)).not.toBeInTheDocument();
-    }
-    // Shown as they are, not as inputs.
-    for (const text of ["HbA1c analyser", "300 tests/day", "Rs 18", "Chose a rival", "Two analysers for the central lab.", "4"]) {
-      expect(within(drawer).getByText(text)).toBeInTheDocument();
-    }
-    // The value, probability and dates stay editable.
-    expect(within(drawer).getByLabelText(/^Installation price/)).toBeInTheDocument();
-    expect(within(drawer).getByLabelText(/^Opportunity date/)).toBeInTheDocument();
+    renderWithProviders(<OpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
+    const instrument = await screen.findByRole("region", { name: "Instrument" });
+    expect(within(instrument).getByText("HbA1c analyser")).toBeInTheDocument();
+    expect(within(instrument).queryByText("300 tests/day")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Description" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(within(await screen.findByRole("region", { name: "More details" })).getByText("4")).toBeInTheDocument();
   });
 
   it("a deal whose customer is visible offers them all for editing", async () => {
@@ -139,6 +134,8 @@ describe("a deal whose customer the viewer may no longer see", () => {
     mockApi({ ...CONFIG, [`GET ${ME}`]: { status: 200, body: makeOpportunity({ custom_fields: { "f-units": "4" } }) } });
     renderWithProviders(<EditOpportunityView opportunityId={OPPORTUNITY_ID} />, { viewer: salesViewer });
     const drawer = await screen.findByRole("dialog", { name: "Edit opportunity" });
+    // The pipeline's custom fields come with the pipeline alone (review round 1, DEALS-1).
+    await within(drawer).findByLabelText(/^Units/);
     for (const label of [/^Work load/, /^Expected CPT/, /^Description/, /^Units/, /Lab contact notes/]) {
       expect(within(drawer).getByLabelText(label)).toBeInTheDocument();
     }
@@ -156,7 +153,7 @@ describe("a deal whose customer the viewer may no longer see", () => {
       customer_restricted: true,
     });
     mockApi({
-      "GET /api/v1/workspaces/me/pipelines": { status: 200, body: { results: [PIPELINE] } },
+      ...pipelineRoutes("/api/v1/workspaces/me/pipelines", { results: [PIPELINE] }),
       "GET /api/v1/workspaces/me/pipeline-board": { status: 200, body: makeBoard([card]) },
     });
     renderWithProviders(<PipelineView />, { viewer: salesViewer });

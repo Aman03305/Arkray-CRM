@@ -20,6 +20,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
+from django.contrib.postgres.fields import ArrayField
 from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db import models
 from django.db.models import Case, F, Func, Q, Value, When
@@ -60,12 +61,32 @@ AGREED_CPT_MAX_LENGTH = CPT_MAX_LENGTH
 # without limit (docs/pipeline.md#configuration).
 MAX_PIPELINES_PER_OWNER = 25
 MAX_STAGES_PER_PIPELINE = 20
+# Removed stages a pipeline keeps because something references them (a deal, its stage
+# history, an agreed price: never again unreferenced, the histories being append-only). A
+# removal that would retire one more is refused (configuration.replace_stages): retired rows
+# grew without limit, their smallint positions overflowed (a 500 on every stage edit after
+# about 22,700) and every pipeline payload carried them (adversarial review of 73ff1e3, L10).
+# Generous for real use (a pipeline whose stages were reworked a hundred times is better
+# started afresh); a product decision (docs/pipeline.md#stages).
+MAX_RETIRED_STAGES_PER_PIPELINE = 100
+# Archived pipelines one owner (or the organisation) keeps: archiving one more is refused
+# (configuration.archive_pipeline). Only active ones counted towards MAX_PIPELINES_PER_OWNER,
+# so a salesperson could create and archive pipelines without limit, two requests each, and
+# lists carried them all (review round 1 of the 73ff1e3 remediation, DEALS-1). Archived
+# pipelines are kept (their deals and history reference them); restoring one makes room.
+MAX_ARCHIVED_PIPELINES_PER_OWNER = 25
 MAX_FIELDS_PER_PIPELINE = 30
+# Removed custom fields a pipeline keeps (archived, their values kept hidden): removing one
+# more is refused (configuration.replace_fields). They piled up without limit, and every
+# restricted view of a deal reads the pipeline's free-text fields in any state (DEALS-3).
+MAX_ARCHIVED_FIELDS_PER_PIPELINE = 100
 MAX_FIELD_OPTIONS = 50
 FIELD_NAME_MAX_LENGTH = 60
 FIELD_OPTION_MAX_LENGTH = 100
 # The serialised custom values of one opportunity (bytes of JSON).
 CUSTOM_VALUES_MAX_BYTES = 32 * 1024
+# Why an administrator corrected a closed deal's figures (OpportunityCorrection): one line.
+CORRECTION_REASON_MAX_LENGTH = 300
 
 # Money: NUMERIC(14, 2), i.e. up to 999,999,999,999.99 (just under ₹1 lakh crore) in the
 # organisation currency (settings.CRM_CURRENCY). Never a float anywhere.
@@ -548,6 +569,14 @@ class StageHistory(AppendOnlyModel):
     probability = models.DecimalField(
         max_digits=PROBABILITY_DIGITS, decimal_places=PROBABILITY_PLACES
     )
+    # Its dates then too, so every figure a closed deal freezes (services.CLOSED_FROZEN) is
+    # kept with each transition: reopen, edit and close again leave the figures it was won at
+    # and the new ones in append-only rows (review round 1 of the 73ff1e3 remediation,
+    # DEALS-2). NULL on rows from before, and on rows the previous release writes during a
+    # rolling deploy (it doesn't name the columns); an expected close date may also be NULL
+    # because the deal had none.
+    expected_close_date = models.DateField(null=True, blank=True)
+    opportunity_date = models.DateField(null=True, blank=True)
     lost_reason = models.CharField(max_length=LOST_REASON_MAX_LENGTH, blank=True, default="")
     actor = models.ForeignKey(User, on_delete=models.PROTECT, related_name="+", db_index=False)
     occurred_at = models.DateTimeField(default=timezone.now)
@@ -661,6 +690,81 @@ class NegotiationPrice(AppendOnlyModel):
 
     def __str__(self) -> str:
         return f"NegotiationPrice({self.pk})"  # never the price: this string can reach logs
+
+
+class CorrectedField(models.TextChoices):
+    """What an administrator's correction of a closed deal may change: the figures reporting
+    and forecasting read of it (services.CLOSED_FROZEN) that a closed deal can still differ
+    in. Its probability is fixed while closed (won 100 %, lost 0 %: database constraints)."""
+
+    VALUE = "value", "Value"
+    EXPECTED_CLOSE_DATE = "expected_close_date", "Expected close date"
+    OPPORTUNITY_DATE = "opportunity_date", "Opportunity date"
+
+
+class OpportunityCorrection(UUIDPrimaryKeyModel, AppendOnlyModel):
+    """One administrator's correction of a won or lost deal's figures (adversarial review of
+    73ff1e3, M2; docs/pipeline.md#closed-deals). Insert-only (ORM guard + PostgreSQL trigger;
+    the application role may only read and insert it): a correction never overwrites an
+    earlier one, so 1,00,000 -> 95,000 -> 92,500 stays readable. Each row keeps the deal's
+    correctable figures as they were before and after (`fields` names the ones that
+    changed), why (`reason`, one line; free text about a customer's deal: an erasure of the
+    lead blanks it, an access request exports it), who and when. Written in the transaction
+    that changes the deal, under its lock, at the version it produced."""
+
+    opportunity = models.ForeignKey(
+        Opportunity, on_delete=models.PROTECT, related_name="+", db_index=False
+    )
+    fields = ArrayField(models.CharField(max_length=32, choices=CorrectedField.choices))
+    value_before = models.DecimalField(max_digits=MONEY_DIGITS, decimal_places=MONEY_PLACES)
+    value_after = models.DecimalField(max_digits=MONEY_DIGITS, decimal_places=MONEY_PLACES)
+    expected_close_date_before = models.DateField(null=True, blank=True)
+    expected_close_date_after = models.DateField(null=True, blank=True)
+    opportunity_date_before = models.DateField()
+    opportunity_date_after = models.DateField()
+    # The deal's outcome when corrected (won or lost: open deals are edited, not corrected).
+    status = models.CharField(max_length=8, choices=StageCategory.choices)
+    # Blank only once an erasure has redacted it (the services require one).
+    reason = models.CharField(max_length=CORRECTION_REASON_MAX_LENGTH, blank=True)
+    # The opportunity's version after the correction.
+    opportunity_version = models.PositiveIntegerField()
+    # Who corrected it, and whose deal it was when that was someone else (always, but for an
+    # administrator correcting a deal of their own).
+    actor = models.ForeignKey(User, on_delete=models.PROTECT, related_name="+", db_index=False)
+    subject_user = models.ForeignKey(
+        User, on_delete=models.PROTECT, null=True, blank=True, related_name="+", db_index=False
+    )
+    occurred_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "pipeline_opportunity_correction"
+        indexes = [
+            # A deal's corrections, newest first (its page; an erasure's and an export's).
+            models.Index(
+                F("opportunity"),
+                F("occurred_at").desc(),
+                F("id").desc(),
+                name="pipeline_correction_opp_idx",
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(fields__len__gte=1)
+                & Q(fields__contained_by=[str(value) for value in CorrectedField.values]),
+                name="pipeline_correction_fields_valid",
+            ),
+            models.CheckConstraint(
+                condition=Q(value_before__gte=Decimal("0"), value_after__gte=Decimal("0")),
+                name="pipeline_correction_value_valid",
+            ),
+            models.CheckConstraint(
+                condition=Q(status__in=[str(value) for value in CLOSED]),
+                name="pipeline_correction_closed_only",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"OpportunityCorrection({self.pk})"  # never an amount: this can reach logs
 
 
 class FieldType(models.TextChoices):

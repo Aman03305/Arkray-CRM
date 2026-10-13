@@ -16,7 +16,10 @@
   (ai.formatting); the model only repeats them. Records returned carry a `ref`
   ("lead:<uuid>") that an answer may cite; only refs registered here become links.
 - **User-written text is data.** Descriptions, notes and retrieved passages are returned
-  under `untrusted_text`, which the system prompt tells the model never to follow.
+  under `untrusted_text`, which the system prompt tells the model never to follow. Every
+  user-written string is masked (formatting.user_text: links, emails, phone numbers,
+  passcodes, identity numbers), a preview on the whole text before it is cut (full_texts;
+  adversarial review M5). Pipeline and stage names are typed by users too.
 - **A deal is named as the asker may see it.** A closed deal whose customer the asker no
   longer sees (pipeline.customer) is named without them by every tool, in its content *and*
   in the label its citation carries (`_deal`, the one place that decides), and its free text
@@ -228,7 +231,7 @@ def _named_pipeline(ctx: ToolContext, name: str) -> Pipeline:
     pipelines = _pipelines(ctx)
     matched = [p for p in pipelines if p.name.casefold() == name.casefold()]
     if not matched:
-        names = ", ".join(sorted({p.name for p in pipelines if p.is_active}))
+        names = ", ".join(sorted({fmt.user_text(p.name) for p in pipelines if p.is_active}))
         raise ToolError(f"No pipeline is called {name!r}. Pipelines: {names}.")
     active = [p for p in matched if p.is_active]
     if len(matched) > 1 and len(active) == 1:
@@ -276,7 +279,7 @@ def _opportunity_row(
     row: dict[str, Any] = {
         "ref": deal.ref,
         "title": fmt.label(title),
-        "stage": stage.name if stage else None,
+        "stage": fmt.label(stage.name) if stage else None,
         "status": found.status,
         "value": fmt.money(found.value),
         "probability": fmt.percent(found.probability),
@@ -305,7 +308,31 @@ def _opportunity_row(
     return row
 
 
-def _activity_row(ctx: ToolContext, activity: Activity) -> dict[str, Any]:
+def full_texts(ctx: ToolContext, activities: list[Activity]) -> dict[UUID, str]:
+    """The whole text of the activities shown with a preview, re-read through the scope in
+    one query (adversarial review M5). A list or a search hit carries only a preview cut by
+    PostgreSQL (activities.selectors: 240 characters, from 60 before a search word), and a
+    fragment masked on its own can start in the middle of a meeting link (its passcode
+    with no host to recognise it by) or of a phone number: so the preview the model sees is
+    cut from the whole text after masking it (formatting.clip). An activity that has left
+    the scope since the list was read has no text here, and its row no preview."""
+    ids = [a.pk for a in activities if getattr(a, "text_preview", None)]
+    if not ids:
+        return {}
+    return dict(
+        ctx.scope.apply(Activity.objects.filter(pk__in=ids)).values_list("pk", "description")
+    )
+
+
+def _activity_rows(ctx: ToolContext, activities: Any) -> list[dict[str, Any]]:
+    found = list(activities)
+    texts = full_texts(ctx, found)
+    return [_activity_row(ctx, activity, texts) for activity in found]
+
+
+def _activity_row(
+    ctx: ToolContext, activity: Activity, texts: dict[UUID, str] | None = None
+) -> dict[str, Any]:
     kind = str(activity.type)
     label = activity.title or kind.capitalize()
     row: dict[str, Any] = {
@@ -326,9 +353,12 @@ def _activity_row(ctx: ToolContext, activity: Activity) -> dict[str, Any]:
         row["ends"] = fmt.when(activity.ends_at)
     else:
         row["written"] = fmt.when(activity.created_at)
-    preview = getattr(activity, "text_preview", None)
-    if preview:
-        row["untrusted_text"] = fmt.clip(preview, PREVIEW_LIMIT)
+    text = (texts or {}).get(activity.pk) if getattr(activity, "text_preview", None) else None
+    if text:
+        # Masked whole, then cut where the database cut it (a search hit's preview starts
+        # PREVIEW_CONTEXT before the search word: preview_start, 1-based).
+        start = int(getattr(activity, "preview_start", 1) or 1) - 1
+        row["untrusted_text"] = fmt.clip(text, PREVIEW_LIMIT, start=start)
     owner = _person(ctx, activity.owner)
     if owner:
         row["owner"] = owner
@@ -402,10 +432,12 @@ def get_pipeline_summary(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
         stage_rows += len(breakdown)
         pipelines.append(
             {
-                "pipeline": pipeline.name if pipeline.is_active else f"{pipeline.name} (retired)",
+                "pipeline": fmt.user_text(
+                    pipeline.name if pipeline.is_active else f"{pipeline.name} (retired)"
+                ),
                 "stages": [
                     {
-                        "stage": row.stage.name,
+                        "stage": fmt.user_text(row.stage.name),
                         "category": row.stage.category,
                         "type": row.stage.stage_type,
                         "opportunities": row.count,
@@ -417,7 +449,7 @@ def get_pipeline_summary(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
             }
         )
     return {
-        "pipeline": chosen.name if chosen else "all pipelines",
+        "pipeline": fmt.user_text(chosen.name) if chosen else "all pipelines",
         "pipeline_value": fmt.money(totals.pipeline_value),
         "weighted_pipeline": fmt.money(totals.weighted_pipeline),
         "open_opportunities": totals.open_count,
@@ -505,7 +537,7 @@ def list_opportunities(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
     if stage_name is not None:
         matched = [s for s in stages.values() if s.name.casefold() == stage_name.casefold()]
         if not matched:
-            names = sorted({s.name for s in stages.values() if s.is_active})
+            names = sorted({fmt.user_text(s.name) for s in stages.values() if s.is_active})
             raise ToolError(f"No stage is called {stage_name!r}. Stages: {', '.join(names)}.")
         queryset = queryset.filter(stage_id__in=[s.pk for s in matched])
         categories = {s.category for s in matched}
@@ -635,7 +667,7 @@ def list_tasks(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         "filter": which,
         "total_matching": total,
         "shown": len(rows),
-        "tasks": [_activity_row(ctx, task) for task in rows],
+        "tasks": _activity_rows(ctx, rows),
     }
 
 
@@ -691,7 +723,7 @@ def _meetings(
         "to": fmt.day(last),
         "total_matching": total,
         "shown": len(rows),
-        "meetings": [_activity_row(ctx, meeting) for meeting in rows],
+        "meetings": _activity_rows(ctx, rows),
     }
 
 
@@ -724,9 +756,9 @@ def find_records(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
             for lead in found.leads.items
         ],
         "opportunities": [_found_deal(ctx, o, stages) for o in found.opportunities.items],
-        "tasks": [_activity_row(ctx, a) for a in found.tasks.items],
-        "meetings": [_activity_row(ctx, a) for a in found.meetings.items],
-        "notes": [_activity_row(ctx, a) for a in found.notes.items],
+        "tasks": _activity_rows(ctx, found.tasks.items),
+        "meetings": _activity_rows(ctx, found.meetings.items),
+        "notes": _activity_rows(ctx, found.notes.items),
         "more_available": any(
             group.has_more
             for group in (
@@ -747,7 +779,7 @@ def _found_deal(ctx: ToolContext, found: Opportunity, stages: dict[UUID, Stage])
         "ref": deal.ref,
         "title": fmt.label(deal.title),
         "status": found.status,
-        "stage": stage.name if stage else None,
+        "stage": fmt.label(stage.name) if stage else None,
         "lead": _lead_link(ctx, found.lead),
     }
     if not deal.known:
@@ -772,7 +804,7 @@ def _recent_activities(ctx: ToolContext, filters: ActivityFilters) -> list[dict[
     rows = activity_selectors.activity_list(ctx.scope, filters, now=ctx.now).order_by(
         "-created_at", "-id"
     )[:RECENT_ACTIVITY_LIMIT]
-    return [_activity_row(ctx, row) for row in rows]
+    return _activity_rows(ctx, rows)
 
 
 def _lead_details(ctx: ToolContext, lead_id: UUID) -> dict[str, Any]:
@@ -803,10 +835,14 @@ def _opportunity_details(ctx: ToolContext, opportunity_id: UUID) -> dict[str, An
     stages = _stage_names(ctx)
     row = _opportunity_row(ctx, card, stages)
     row["archived"] = found.archived_at is not None
-    if row.get("customer_restricted"):
-        # Its description and lost reason were written about the customer this workspace
-        # no longer sees: never sent, as retrieval never returns them (pipeline selectors'
-        # knowledge_documents). Amounts, stages, prices and CPTs stay.
+    restricted = bool(row.get("customer_restricted"))
+    if restricted:
+        # Its free text (pipeline.customer.WITHHELD_TEXT: description, lost reason, work
+        # load, Expected CPT, agreed CPTs) was written about the customer this workspace no
+        # longer sees: never sent, as the API blanks it and retrieval never returns it
+        # (pipeline selectors' knowledge_documents). One rule on every surface (adversarial
+        # review of 73ff1e3, L6: these tools still sent the work load and the CPTs).
+        # Amounts, stages and prices stay.
         row["untrusted_text"] = None
     else:
         row["untrusted_text"] = (
@@ -816,20 +852,25 @@ def _opportunity_details(ctx: ToolContext, opportunity_id: UUID) -> dict[str, An
             row["lost_reason"] = {"untrusted_text": fmt.clip(found.lost_reason, TEXT_LIMIT)}
     history = pipeline_selectors.stage_history(ctx.scope, opportunity_id)[:STAGE_HISTORY_LIMIT]
     row["stage_history"] = [
-        {"from": h.from_stage_name or None, "to": h.to_stage_name, "on": fmt.when(h.occurred_at)}
+        {
+            "from": fmt.label(h.from_stage_name or None),
+            "to": fmt.label(h.to_stage_name),
+            "on": fmt.when(h.occurred_at),
+        }
         for h in history
     ]
     row["opportunity_date"] = fmt.day(found.opportunity_date)
-    if found.work_load:
-        row["work_load"] = fmt.label(found.work_load)
-    if found.expected_cpt:
-        # Free text as the salesperson wrote it: the CRM defines no unit for CPT.
-        row["expected_cpt"] = fmt.label(found.expected_cpt)
-    # Recorded with the latest agreed price, read from the history (ADR-0029); free text.
-    agreed_cpt: str = found.agreed_cpt  # type: ignore[attr-defined]
-    if agreed_cpt:
-        row["agreed_cpt"] = fmt.label(agreed_cpt)
-    row["negotiation_history"] = _negotiation_rows(ctx, opportunity_id)
+    if not restricted:
+        if found.work_load:
+            row["work_load"] = fmt.label(found.work_load)
+        if found.expected_cpt:
+            # Free text as the salesperson wrote it: the CRM defines no unit for CPT.
+            row["expected_cpt"] = fmt.label(found.expected_cpt)
+        # Recorded with the latest agreed price, read from the history (ADR-0029); free text.
+        agreed_cpt: str = found.agreed_cpt  # type: ignore[attr-defined]
+        if agreed_cpt:
+            row["agreed_cpt"] = fmt.label(agreed_cpt)
+    row["negotiation_history"] = _negotiation_rows(ctx, opportunity_id, withheld=restricted)
     row["recent_activities"] = _recent_activities(
         ctx, ActivityFilters(opportunity_id=opportunity_id)
     )
@@ -839,14 +880,23 @@ def _opportunity_details(ctx: ToolContext, opportunity_id: UUID) -> dict[str, An
 NEGOTIATION_HISTORY_LIMIT = 20
 
 
-def _negotiation_rows(ctx: ToolContext, opportunity_id: UUID) -> list[dict[str, Any]]:
+def _negotiation_rows(
+    ctx: ToolContext, opportunity_id: UUID, *, withheld: bool
+) -> list[dict[str, Any]]:
+    """The agreed prices, newest first. `withheld`: the deal's customer is hidden from this
+    workspace, so its agreed CPTs (free text, pipeline.customer.WITHHELD_HISTORY_TEXT) are
+    left out; the amounts stay."""
     prices = pipeline_selectors.negotiation_history(ctx.scope, opportunity_id).order_by(
         "-occurred_at", "-id"
     )[:NEGOTIATION_HISTORY_LIMIT]
     return [
         {
             "price": fmt.money(price.price),
-            **({"agreed_cpt": fmt.label(price.agreed_cpt)} if price.agreed_cpt else {}),
+            **(
+                {"agreed_cpt": fmt.label(price.agreed_cpt)}
+                if price.agreed_cpt and not withheld
+                else {}
+            ),
             "stage": fmt.label(price.stage_name),
             "recorded": fmt.when(price.occurred_at),
             # Whoever recorded it, by name, unless it was the person asking: an
@@ -865,13 +915,14 @@ def get_negotiation_history(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
     _, record_id = _ref(_text(args, "ref", required=True, max_length=60) or "", ("opportunity",))
     try:
         found = pipeline_selectors.opportunity_detail(ctx.scope, record_id)
-        rows = _negotiation_rows(ctx, record_id)
+        deal = _deal(ctx, found)
+        rows = _negotiation_rows(ctx, record_id, withheld=not deal.known)
     except NotFoundError:
         raise ToolError("No such opportunity in this workspace.") from None
     if found.negotiated_price is not None:
         ctx.amount("Latest negotiated price", found.negotiated_price)
-    latest_cpt: str = found.agreed_cpt  # type: ignore[attr-defined]  # the newest row's
-    deal = _deal(ctx, found)
+    # The newest row's CPT: free text, withheld with the customer (L6).
+    latest_cpt: str = found.agreed_cpt if deal.known else ""  # type: ignore[attr-defined]
     return {
         "ref": deal.ref,
         "title": fmt.label(deal.title),
@@ -1230,7 +1281,10 @@ def execute(ctx: ToolContext, name: str, arguments: Any) -> ToolOutcome:
     # model never saw were shown with the answer).
     saved = _Saved.of(ctx)
     try:
-        result = tool.run(ctx, arguments)
+        # Each text searched for what to mask once in this call, however many rows or
+        # passages quote it (formatting.masking_memo; review round 1, AI-1).
+        with fmt.masking_memo():
+            result = tool.run(ctx, arguments)
     except ToolError as exc:
         saved.restore(ctx)
         return ToolOutcome(json.dumps({"error": str(exc)}), True)

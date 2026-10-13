@@ -23,7 +23,7 @@ import { opportunityHref, type Workspace, workspaceApiSegment, workspaceHref } f
 
 import type { AgreedTerms } from "./AgreedTerms";
 import { activeBoardFilterCount, type BoardFilters, CARDS_PER_STAGE, pipelineApi, pipelineKeys } from "./api";
-import { choosePipeline, isNegotiation, pipelinePermissions, useBoardState, usePipelines, useWideLayout } from "./hooks";
+import { choosePipeline, isNegotiation, pipelinePermissions, useBoardState, usePipeline, usePipelines, useWideLayout } from "./hooks";
 import { DRAG_TYPE, OpportunityCardView } from "./OpportunityCardView";
 import { OpportunityDrawer } from "./OpportunityDrawer";
 import { PipelineSettings } from "./PipelineSettings";
@@ -73,6 +73,9 @@ export function PipelineBoardView({ workspace, create = false }: { workspace: Wo
     placeholderData: (previous, query) => (query?.queryKey[2] === segment ? previous : undefined),
   });
   const move = useMoveOpportunity(workspace, boardKey);
+  // The pipeline being configured, with its whole configuration (custom fields and their
+  // choices), loaded on its own: the list carries none (review round 1, DEALS-1).
+  const configured = usePipeline(workspace, settings === "edit" ? board.data?.pipeline.id || filters.pipeline || undefined : undefined);
 
   // After a move the card re-renders in another column; keyboard users keep their place
   // on it (its "Move" button), instead of focus falling back to the page.
@@ -362,10 +365,10 @@ export function PipelineBoardView({ workspace, create = false }: { workspace: Wo
           }}
         />
       ) : null}
-      {settings ? (
+      {settings === "new" || (settings === "edit" && configured.data) ? (
         <PipelineSettings
           workspace={workspace}
-          pipeline={settings === "edit" ? (current ?? null) : null}
+          pipeline={settings === "edit" ? (configured.data ?? null) : null}
           onClose={() => setSettings(null)}
           onSaved={(saved, message) => {
             setSettings(null);

@@ -29,6 +29,7 @@ from arkray.core.middleware import client_ip
 from arkray.core.throttling import AnonRateThrottle, ScopedRateThrottle, UserRateThrottle
 
 from .. import authentication, mfa_services, selectors, services, support, throttling
+from ..emails import mask_email
 from ..models import Role, User, UserStatus
 from ..permissions import IsActiveUser, requires
 from ..policy import Capability
@@ -356,6 +357,58 @@ class PasswordResetConfirmView(ApiView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class SignInUnlockVerifyView(ApiView):
+    """Whose account an unlock link is for, masked (r***@example.com), without using it: the
+    page says it before the button is pressed, so nobody unlocks someone else's account in
+    their own browser by mistake (review round 1, IDENTITY-1). POST so the secret never enters
+    a URL on the API side."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = AUTH_THROTTLES
+    throttle_scope = "auth"
+
+    @extend_schema(
+        operation_id="auth_sign_in_unlock_verify",
+        request=s.SignInUnlockSerializer,
+        responses={200: s.SignInUnlockPreviewSerializer},
+    )
+    def post(self, request: Request) -> Response:
+        data = _validated(s.SignInUnlockSerializer, request.data)
+        user = services.inspect_sign_in_unlock(data["token"])
+        return Response({"email": mask_email(user.email)})
+
+
+class SignInUnlockView(ApiView):
+    """The link mailed to the owner when too many failed sign-ins in a day locked the account
+    from new browsers (adversarial review of 73ff1e3, L1): lifts the lock, and this browser is
+    trusted for the account from now on (its own failure budget; a new storm can't lock it
+    out), unless it is trusted for another account: that trust is never replaced (review
+    round 1, IDENTITY-1). POST so the secret never enters a URL on the API side."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = AUTH_THROTTLES
+    throttle_scope = "auth"
+
+    @extend_schema(
+        operation_id="auth_sign_in_unlock", request=s.SignInUnlockSerializer, responses={204: None}
+    )
+    def post(self, request: Request) -> Response:
+        data = _validated(s.SignInUnlockSerializer, request.data)
+        user = services.unlock_sign_in(data["token"])
+        response = Response(status=status.HTTP_204_NO_CONTENT)
+        identifiers = throttling.login_identifiers(user.email)
+        if throttling.held_for_another_account(request._request, identifiers):
+            return response  # the lock is lifted; another account's trust stays
+        throttling.remember_device(
+            response,
+            identifiers[0],
+            throttling.read_device(request._request, identifiers, user.email)
+            or secrets.token_hex(16),
+            throttling.device_trust(user.password, user.session_epoch),
+        )
+        return response
+
+
 class InvitationVerifyView(ApiView):
     """Who a still-valid invitation link is for. POST so the secret never enters a URL."""
 
@@ -418,9 +471,12 @@ class AdminUserListView(ApiView):
             page_size=params.get("page_size", ADMIN_USER_PAGE_SIZE),
             binding=CursorBinding.of("users.admin_list", params, actor_id=_actor(request).pk),
         ).paginate(users, params.get("cursor"))
+        locks = throttling.sign_in_locks(user.email for user in page.items)
         return Response(
             {
-                "results": s.AdminUserSerializer(page.items, many=True).data,
+                "results": s.AdminUserSerializer(
+                    page.items, many=True, context={"sign_in_locks": locks}
+                ).data,
                 **page_links(request, page),
             }
         )
@@ -562,6 +618,24 @@ class AdminUserMfaResetView(ApiView):
     )
     def post(self, request: Request, user_id: UUID) -> Response:
         user = mfa_services.reset_for_user(actor_id=_actor(request).pk, user_id=user_id)
+        return Response(s.AdminUserSerializer(user).data)
+
+
+class AdminUserClearSignInLockView(ApiView):
+    """Lift the lock too many failed sign-ins in a day placed on the account's sign-in from
+    new browsers (L1), when the owner can't use the emailed link. Audited."""
+
+    permission_classes = [requires(Capability.USERS_MANAGE)]
+    refused_in_support_session = True
+    requires_recent_mfa = True
+
+    @extend_schema(
+        operation_id="admin_users_clear_sign_in_lock",
+        request=None,
+        responses={200: s.AdminUserSerializer},
+    )
+    def post(self, request: Request, user_id: UUID) -> Response:
+        user = services.clear_sign_in_lock(actor_id=_actor(request).pk, user_id=user_id)
         return Response(s.AdminUserSerializer(user).data)
 
 

@@ -28,6 +28,7 @@ from arkray.core.access import AccessScope
 from tests.integration.migration_states import (
     ADR_0027,
     ADR_0028,
+    DEPLOYMENT_PREPARATION,
     ENHANCEMENTS,
     NEW_SINCE_RELEASE,
     RELEASE_CANDIDATE,
@@ -776,6 +777,10 @@ CANNOT_INSERT = {
     ENHANCEMENTS: {},
     ADR_0027: {},
     ADR_0028: {},
+    # The adversarial review's remediation (forgotten_at, fairness_key, pseudonymised_at,
+    # forgiven, the corrections and login-lock tables, the stage history's dates) adds no
+    # column 73ff1e3's code would have to name.
+    DEPLOYMENT_PREPARATION: {},
 }
 
 
@@ -856,4 +861,29 @@ def test_what_each_previous_release_can_still_insert_into_the_latest_schema():
     )  # no agreed CPT: the database default
     assert rows("SELECT price, agreed_cpt FROM pipeline_negotiation_price") == [
         (Decimal("1234567.89"), "")
+    ]
+
+    # 73ff1e3's pods beside this schema during a rolling deploy (adversarial review of 73ff1e3):
+    # their own INSERTs into the tables the remediation changed succeed, and the new columns
+    # take their database defaults.
+    previous = state_apps(DEPLOYMENT_PREPARATION)
+    event = previous.get_model("core", "OutboxEvent").objects.create(
+        topic="ai.index_lead", queue="ai_index", payload={"lead_id": str(lead.pk)}
+    )
+    assert rows("SELECT fairness_key FROM core_outbox_event WHERE id = %s", [event.pk]) == [("",)]
+    conversation = previous.get_model("ai", "Conversation").objects.create(
+        actor_id=owner.pk, workspace_kind="self", subject_id=owner.pk
+    )
+    assert rows("SELECT forgotten_at FROM ai_conversation WHERE id = %s", [conversation.pk]) == [
+        (None,)
+    ]
+    invited = previous.get_model("identity", "User").objects.create(
+        email="rolling@arkray.test",
+        first_name="Rolling",
+        status="invited",
+        password="!",
+        password_change_required=False,
+    )
+    assert rows("SELECT pseudonymised_at FROM identity_user WHERE id = %s", [invited.pk]) == [
+        (None,)
     ]

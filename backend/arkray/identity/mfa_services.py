@@ -1,7 +1,8 @@
 """Two-step verification use cases (ADR-0033; the primitives are in identity.mfa).
 
 - **State**: a user has a second factor once their device is confirmed. Administrators must
-  have one when MFA_REQUIRED_FOR_ADMINS is on (`enrollment_required`): until then they reach
+  have one when MFA_REQUIRED_FOR_ADMINS is on, and every user when MFA_REQUIRED_FOR_ALL_USERS
+  is (adversarial review of 73ff1e3, L1; `enrollment_required`): until then they reach
   only the views marked `allowed_before_mfa_enrollment` (identity.permissions).
 - **Step-up**: the session records when a code was last verified (`SESSION_VERIFIED_AT`):
   at the second step of a sign-in, at confirmation, at POST /auth/mfa/verify. Views marked
@@ -74,6 +75,7 @@ from .services import (
     SESSION_ENDED,
     _acting_manager,
     _lock_user,
+    refuse_if_pseudonymised,
     serialise_user_administration,
 )
 from .sessions import session_matches
@@ -108,6 +110,9 @@ FACTOR_RECOVERY_CODE = "recovery_code"
 
 REQUIRED_FOR_ROLE = (
     "Two-step verification is required for administrators, so it can't be turned off."
+)
+REQUIRED_FOR_EVERYONE = (
+    "Two-step verification is required for every account here, so it can't be turned off."
 )
 ADMINISTRATOR_MFA_REFUSED = (
     "Administrators manage their own two-step verification. If one is locked out, an operator"
@@ -210,10 +215,18 @@ def _forget(user: Any) -> None:
 
 
 def required_for(user: Any) -> bool:
-    """Whether the account's role must have a second factor (ADR-0033: administrators)."""
+    """Whether the account must have a second factor: every account when
+    MFA_REQUIRED_FOR_ALL_USERS is on (an organisational policy; review of 73ff1e3, L1),
+    else administrators when MFA_REQUIRED_FOR_ADMINS is (ADR-0033)."""
+    if settings.MFA_REQUIRED_FOR_ALL_USERS:
+        return True
     return bool(settings.MFA_REQUIRED_FOR_ADMINS) and (
         getattr(user, "role", None) in roles_with(Capability.USERS_MANAGE)
     )
+
+
+def required_message() -> str:
+    return REQUIRED_FOR_EVERYONE if settings.MFA_REQUIRED_FOR_ALL_USERS else REQUIRED_FOR_ROLE
 
 
 def enrollment_required(user: Any) -> bool:
@@ -482,19 +495,29 @@ def _issue_recovery_codes(user: User) -> list[str]:
 def _notify(user: User, change: str) -> None:
     """Email the account's own address about a change to its second factor (outbox, in the
     caller's transaction: no change without its notice, no notice without its change)."""
-    _notify_owner(user.pk, change)
+    _notify_owner(user.pk, change, user.email)
 
 
-def _notify_owner(user_id: UUID, change: str) -> None:
-    outbox.enqueue(TOPIC_MFA_CHANGED, {"user_id": str(user_id), "change": change})
+def _notify_owner(user_id: UUID, change: str, email: str | None = None) -> None:
+    """The address is the account's now, in the payload (review round 1, IDENTITY-3: read when
+    the job ran, a deactivation or an email change before then dropped or redirected it);
+    personal data, blanked by housekeeping."""
+    if email is None:
+        email = User.objects.filter(pk=user_id).values_list("email", flat=True).first()
+    outbox.enqueue(
+        TOPIC_MFA_CHANGED, {"user_id": str(user_id), "change": change, "email": email or ""}
+    )
 
 
-def notify_change(user_id: UUID, change: str) -> None:
-    """Outbox job (queue "email"). Skipped for an unknown change or a deactivated account."""
-    user = User.objects.filter(pk=user_id, is_active=True).only("email", "first_name").first()
-    if user is None or change not in NOTICES:
+def notify_change(user_id: UUID, change: str, email: str | None = None) -> None:
+    """Outbox job (queue "email"): to the address the account had when it happened (the
+    current one for a notice queued before it was recorded), whatever its status now (an
+    administrator's reset followed by a deactivation must still reach the owner). Skipped for
+    an unknown change or a pseudonymised account."""
+    user = User.objects.filter(pk=user_id).only("email", "first_name", "pseudonymised_at").first()
+    if user is None or user.is_pseudonymised or change not in NOTICES:
         return
-    emails.send_mfa_notice(to=user.email, first_name=user.first_name, change=change)
+    emails.send_mfa_notice(to=email or user.email, first_name=user.first_name, change=change)
 
 
 def _audit(action: str, actor_id: UUID | None, user: User, **metadata: object) -> None:
@@ -660,14 +683,14 @@ def disable(request: HttpRequest, user: User, code: str) -> None:
     """Turn the second factor off (the caller checked the current password): refused where
     the role requires it. Every other session ends."""
     if required_for(user):
-        raise BusinessRuleViolation(REQUIRED_FOR_ROLE)
+        raise BusinessRuleViolation(required_message())
     if not has_confirmed_device(user):
         raise MfaSetupRequiredError()
     _throttled_verify(request, user, **_either(code))
     with transaction.atomic():
         locked = _locked_signed_in(request, user.pk)
         if required_for(locked):  # promoted meanwhile
-            raise BusinessRuleViolation(REQUIRED_FOR_ROLE)
+            raise BusinessRuleViolation(required_message())
         _remove_factor(locked)
         _end_other_sessions(request, locked)
         _audit(AUDIT_DISABLED, locked.pk, locked)
@@ -701,6 +724,7 @@ def reset_for_user(*, actor_id: UUID, user_id: UUID) -> User:
         serialise_user_administration()
         actor = _acting_manager(actor_id)
         user = _lock_user(user_id)
+        refuse_if_pseudonymised(user)
         if user.role in roles_with(Capability.USERS_MANAGE):
             raise BusinessRuleViolation(ADMINISTRATOR_MFA_REFUSED)
         if _remove_factor(user):
@@ -723,6 +747,7 @@ def operator_reset(email: str, reason: str, *, operator_id: UUID) -> bool:
         user = User.objects.select_for_update().filter(email=normalize_email(email)).first()
         if user is None:
             raise NotFoundError("No account has this email address.")
+        refuse_if_pseudonymised(user)
         if not _remove_factor(user):
             return False
         user.session_epoch += 1

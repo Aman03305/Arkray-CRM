@@ -33,6 +33,8 @@ export function passwordState(user: AdminUser): string {
  */
 export function supportBlockedReason(user: AdminUser, isSelf: boolean): string | null {
   if (isSelf) return "This is you. Change your own password in Settings.";
+  // Never changed again (review of 73ff1e3, L4; the API refuses).
+  if (user.pseudonymised_at) return "This former user was pseudonymised: their account can't be changed.";
   if (user.role === "admin") return "Not available for administrators.";
   if (user.status === "invited") return "Not available until they accept their invitation.";
   if (user.status === "deactivated") return "Not available for deactivated users.";
@@ -78,7 +80,8 @@ export function UserDetailsDrawer({ user: listed, notice, onClose, onSetPassword
   const privacy = hasCapability(viewer, "privacy.manage") && !viewer?.supportSession;
   // Never an administrator's account (ADR-0030; the API refuses it): an operator does that on the server.
   const administrator = user.role === "admin";
-  const pseudonymisable = user.status === "deactivated" && user.id !== viewer?.id && !administrator;
+  const pseudonymisable =
+    user.status === "deactivated" && !user.pseudonymised_at && user.id !== viewer?.id && !administrator;
   const blocked = supportBlockedReason(user, user.id === viewer?.id);
   const loadError = detail.isError ? describeError(detail.error) : null;
 
@@ -136,6 +139,22 @@ export function UserDetailsDrawer({ user: listed, notice, onClose, onSetPassword
           <Row label="Two-step">
             <TwoStepBadge user={user} />
           </Row>
+          {user.sign_in_locked_at ? (
+            // Review of 73ff1e3, L1: too many failed sign-ins in a day (the row's menu clears it).
+            <Row label="Sign-in">
+              Locked for new browsers since{" "}
+              <time dateTime={user.sign_in_locked_at}>{formatDateTime(user.sign_in_locked_at)}</time>
+              <span className="mt-0.5 block text-xs text-slate-500">
+                Too many failed sign-ins. Browsers they&apos;ve used before still work; they were emailed a link to lift it.
+              </span>
+            </Row>
+          ) : null}
+          {user.pseudonymised_at ? (
+            <Row label="Privacy">
+              Pseudonymised{" "}
+              <time dateTime={user.pseudonymised_at}>{formatDate(user.pseudonymised_at)}</time>
+            </Row>
+          ) : null}
         </dl>
         {manages ? (
           <div className="border-t border-slate-200 pt-4">
@@ -170,9 +189,11 @@ export function UserDetailsDrawer({ user: listed, notice, onClose, onSetPassword
             </div>
             {pseudonymisable ? null : (
               <p className="mt-2 text-xs text-slate-500">
-                {administrator
-                  ? "An administrator's account can't be pseudonymised here."
-                  : "Only a deactivated user can be pseudonymised."}
+                {user.pseudonymised_at
+                  ? "Already pseudonymised."
+                  : administrator
+                    ? "An administrator's account can't be pseudonymised here."
+                    : "Only a deactivated user can be pseudonymised."}
               </p>
             )}
           </div>

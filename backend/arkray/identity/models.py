@@ -14,21 +14,32 @@ an impossible state.
 
 from __future__ import annotations
 
+import string
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from django.conf import settings
 from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
+from django.contrib.auth.password_validation import validate_password
 from django.contrib.postgres.indexes import GinIndex, OpClass
+from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models import F, Q, TextField
-from django.db.models.functions import Cast, Lower, Upper
+from django.db.models import F, Q, TextField, Value
+from django.db.models.functions import Cast, Concat, Left, Lower, Replace, Upper
 from django.utils import timezone
 from django.utils.crypto import salted_hmac
 
 from arkray.core.models import TimeStampedModel, UUIDPrimaryKeyModel
 
+from .emails import validate_ascii_email
+
 NAME_MAX_LENGTH = 100
+# A pseudonymised former staff member (privacy.staff; docs/privacy.md#staff): their name and
+# email become these, for good (`User.pseudonymised_at`, adversarial review of 73ff1e3, L4).
+PSEUDONYM_DOMAIN = "pseudonymised.invalid"
+PSEUDONYM_FIRST_NAME = "Former user"
+RESERVED_EMAIL = f"Addresses at {PSEUDONYM_DOMAIN} are reserved for former users."
 
 
 def _trigram_index(field: str, name: str) -> GinIndex:
@@ -49,6 +60,9 @@ class UserStatus(models.TextChoices):
     DEACTIVATED = "deactivated", "Deactivated"
 
 
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
 def normalize_email(email: str) -> str:
     """The canonical login identity: surrounding whitespace removed, lower-cased.
 
@@ -56,8 +70,36 @@ def normalize_email(email: str) -> str:
     user@example.com are one identity) and deliberately does nothing provider-specific
     (no Gmail dot or +tag stripping). Only ASCII addresses are accepted at the API
     (identity.emails), which rules out look-alike Unicode identities.
+
+    Only ASCII letters are folded: `str.lower()` also turned a Kelvin sign (U+212A) into an
+    ASCII "k", so an address spelled with one signed in to, and reset the password of, the
+    account with the plain "k" (adversarial review of 73ff1e3, AUTH-7). A non-ASCII address
+    now never equals a stored one: sign-in and reset requests treat it as unknown.
     """
-    return email.strip().lower()
+    return email.strip().translate(_ASCII_LOWER)
+
+
+def is_reserved_email(email: str) -> bool:
+    """An address in the pseudonym domain (or under it): only privacy.staff gives one, to a
+    former user (review round 1, IDENTITY-5: the API gave another account a former user's
+    pseudonym, and pseudonymising the real one then failed)."""
+    domain = normalize_email(email).rpartition("@")[2]
+    return domain == PSEUDONYM_DOMAIN or domain.endswith(f".{PSEUDONYM_DOMAIN}")
+
+
+def pseudonym_email(user_id: UUID) -> str:
+    return f"former-{user_id.hex}@{PSEUDONYM_DOMAIN}"
+
+
+def pseudonym_last_name(user_id: UUID) -> str:
+    return user_id.hex[:8]
+
+
+def _id_hex() -> Replace:
+    """`id` as the 32 hex digits `UUID.hex` gives, in SQL (for the pseudonym CHECK)."""
+    return Replace(
+        Cast("id", output_field=TextField()), Value("-"), Value(""), output_field=TextField()
+    )
 
 
 class UserManager(BaseUserManager["User"]):
@@ -79,8 +121,12 @@ class UserManager(BaseUserManager["User"]):
         """Low-level constructor (bootstrap, fixtures). Product flows use identity.services.
 
         With a password the account is active; without one it is invited (it cannot sign in
-        until the invitation is accepted).
+        until the invitation is accepted). An address that isn't ASCII is refused, as at the
+        API (identity.emails).
         """
+        validate_ascii_email(normalize_email(email))
+        if is_reserved_email(email):
+            raise ValidationError(RESERVED_EMAIL, code="reserved_email")
         user = self.model(
             email=normalize_email(email),
             first_name=first_name.strip(),
@@ -108,9 +154,25 @@ class UserManager(BaseUserManager["User"]):
         password: str | None = None,
         **extra_fields: Any,
     ) -> User:
-        """Backs `manage.py createsuperuser`, used only to bootstrap the first admin."""
+        """Backs `manage.py createsuperuser`, used only to bootstrap the first admin.
+
+        The password policy (AUTH_PASSWORD_VALIDATORS) runs here, raising ValidationError
+        (the command reports it and creates nothing): `createsuperuser --noinput`, the
+        documented bootstrap, never ran it, so the first administrator could be created with
+        the password "a", and the interactive command lets the operator bypass it (adversarial
+        review of 73ff1e3, L11)."""
         if not password:
             raise ValueError("The first administrator must be created with a password.")
+        validate_ascii_email(normalize_email(email))
+        validate_password(
+            password,
+            self.model(
+                email=normalize_email(email),
+                first_name=first_name.strip(),
+                last_name=last_name.strip(),
+                role=Role.ADMIN,
+            ),
+        )
         return self.create_user(
             email, first_name, last_name, role=Role.ADMIN, password=password, **extra_fields
         )
@@ -140,6 +202,11 @@ class User(UUIDPrimaryKeyModel, TimeStampedModel, AbstractBaseUser):
     # When the password was last set (by the user or an administrator): shown to
     # administrators instead of anything about the password itself. NULL: never set here.
     password_changed_at = models.DateTimeField(null=True, blank=True)
+    # When privacy.staff pseudonymised this former staff member. Set once, for good: the
+    # account stays deactivated, password-less and under its pseudonym (CHECK below; a
+    # trigger refuses clearing the mark), and user administration refuses every change to it
+    # (adversarial review of 73ff1e3, L4: it was an email-domain test nothing else asked).
+    pseudonymised_at = models.DateTimeField(null=True, blank=True)
 
     USERNAME_FIELD = "email"
     EMAIL_FIELD = "email"
@@ -198,6 +265,24 @@ class User(UUIDPrimaryKeyModel, TimeStampedModel, AbstractBaseUser):
                 condition=~Q(status=UserStatus.ACTIVE) | ~Q(password__startswith="!"),  # noqa: S106
                 name="identity_user_active_has_password",
             ),
+            # A pseudonymised account is a former one for good: deactivated, no usable
+            # password, and its pseudonym's name and email (adversarial review of 73ff1e3, L4).
+            models.CheckConstraint(
+                condition=Q(pseudonymised_at__isnull=True)
+                | Q(
+                    status=UserStatus.DEACTIVATED,
+                    password__startswith="!",  # noqa: S106 — Django's unusable-password mark
+                    first_name=PSEUDONYM_FIRST_NAME,
+                    last_name=Left(_id_hex(), 8),
+                    email=Concat(
+                        Value("former-"),
+                        _id_hex(),
+                        Value(f"@{PSEUDONYM_DOMAIN}"),
+                        output_field=TextField(),
+                    ),
+                ),
+                name="identity_user_pseudonym_final",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -206,6 +291,10 @@ class User(UUIDPrimaryKeyModel, TimeStampedModel, AbstractBaseUser):
     @property
     def full_name(self) -> str:
         return f"{self.first_name} {self.last_name}".strip()
+
+    @property
+    def is_pseudonymised(self) -> bool:
+        return self.pseudonymised_at is not None
 
     def save(self, *args: Any, **kwargs: Any) -> None:
         self.email = normalize_email(self.email)
@@ -228,6 +317,9 @@ class User(UUIDPrimaryKeyModel, TimeStampedModel, AbstractBaseUser):
 class TokenPurpose(models.TextChoices):
     INVITATION = "invitation", "Invitation"
     PASSWORD_RESET = "password_reset", "Password reset"
+    # Lifts the account's sign-in lock (identity.throttling; adversarial review of 73ff1e3,
+    # L1), mailed to the owner when the lock is placed.
+    SIGN_IN_UNLOCK = "sign_in_unlock", "Sign-in unlock"
 
 
 class TokenStatus(models.TextChoices):
@@ -351,6 +443,11 @@ class AuthThrottleEvent(models.Model):
     # "" = an unrecognised browser; otherwise the id from a trusted-device cookie.
     device_id = models.CharField(max_length=32, blank=True, default="")
     ip_address = models.GenericIPAddressField(null=True, blank=True)
+    # A failure the right password (and second factor) followed from the same browser: it no
+    # longer counts toward that browser's lockout, but still toward the account's daily cap,
+    # so the owner signing in from a new browser doesn't forgive an attacker's day
+    # (adversarial review of 73ff1e3, L1). db_default: the previous release still inserts.
+    forgiven = models.BooleanField(default=False, db_default=False)
 
     class Meta:
         db_table = "identity_auth_throttle_event"
@@ -376,6 +473,34 @@ class AuthThrottleEvent(models.Model):
 
     def __str__(self) -> str:
         return f"AuthThrottleEvent({self.kind}, {self.occurred_at:%Y-%m-%d %H:%M:%S})"
+
+
+class LoginLock(UUIDPrimaryKeyModel):
+    """An account whose password sign-in from unrecognised browsers is locked: it had
+    LOGIN_DAILY_FAILURE_CAP failures from unrecognised browsers in a day (identity.throttling;
+    adversarial review of 73ff1e3, L1). Browsers that signed in to it before keep working.
+
+    Keyed like the throttle, by the keyed hash of the *submitted* email, so an unknown email
+    is locked exactly like a real one (nothing tells them apart) and no email is stored.
+    Lifted by the emailed unlock link, a password reset or an accepted invitation, a password
+    set by an administrator, an administrator's "clear" (identity.services), or after
+    LOGIN_LOCK_MAX_AGE_S (identity.housekeeping), whichever comes first."""
+
+    identifier_hash = models.CharField(max_length=64, unique=True)
+    locked_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "identity_login_lock"
+        indexes = [models.Index(fields=["locked_at"], name="identity_login_lock_at_idx")]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(identifier_hash__regex=r"^[0-9a-f]{64}$"),
+                name="identity_login_lock_identifier_format",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"LoginLock({self.locked_at:%Y-%m-%d %H:%M:%S})"
 
 
 class WorkspaceAccessWindow(models.Model):

@@ -24,7 +24,8 @@ import { loginPath } from "./safe-redirect";
 
 export const VIEWER_QUERY_KEY = ["viewer"] as const;
 
-const PUBLIC_PREFIXES = ["/login", "/forgot-password", "/reset-password", "/activate"];
+// The emailed unlock link's page too (review round 1): a sign-in elsewhere mustn't reload it.
+const PUBLIC_PREFIXES = ["/login", "/forgot-password", "/reset-password", "/activate", "/unlock-sign-in"];
 
 export function isPublicPath(pathname: string): boolean {
   return PUBLIC_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));

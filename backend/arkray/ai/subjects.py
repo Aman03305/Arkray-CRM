@@ -3,8 +3,15 @@ exports (arkray.privacy) and by the legal-hold rule in conversation housekeeping
 (ai.service.housekeeping). It lives in `ai` because `privacy` sits above it in the module
 layering, and housekeeping must match a held lead's conversations exactly as an erasure
 would (deep security audit M-5). `held_conversations` is the one legal-hold rule for Ask
-Arkray history: housekeeping, deleting a conversation (ai.service.forget_conversation) and
-staff pseudonymisation (privacy.staff) all keep what it returns."""
+Arkray history: housekeeping, erasure and staff pseudonymisation (privacy.staff) all keep
+what it returns, and deleting a conversation (ai.service.forget_conversation) asks the same
+of one conversation with `hold_keeps`.
+
+These read every hold and every conversation, whoever's: what they find is never shown to a
+user (adversarial review M1: deleting a conversation answered 409 `legal_hold` when its text
+named anyone's held customer, an oracle; it now always answers the same way and keeps a held
+one as a tombstone). Tombstones (`Conversation.forgotten_at`) are found like any other
+conversation here: they are the holds' evidence, for exports and erasures as before."""
 
 from __future__ import annotations
 
@@ -201,3 +208,21 @@ def held_conversations(among: Collection[UUID] | None = None) -> set[UUID]:
             set(user_held(candidates, users).values_list("pk", flat=True))
         )
     return set(touching_conversations(set(customers.records), list(customers.terms)))
+
+
+def hold_keeps(conversation: Conversation) -> bool:
+    """Whether a legal hold keeps this conversation: `held_conversations(among=[it])`, the
+    same rule (its asker or its workspace's user held, or a held customer it touches), for
+    deleting it (ai.service.forget_conversation).
+
+    With the same work whatever the answer (adversarial review M1): both halves are always
+    evaluated, so a deletion takes no shorter path when its asker is held (held_conversations
+    skips matching what a user hold already keeps) and no longer one when they aren't. What
+    varies is only what every caller shares: how many holds there are.
+
+    Called in the deleting transaction after core.holds.barrier() (R134), like
+    held_conversations."""
+    users = holds.held_users()
+    by_user = bool(users & {conversation.actor_id, conversation.subject_id})
+    by_customer = bool(HeldCustomers.now().touching([conversation.pk]))
+    return by_user or by_customer

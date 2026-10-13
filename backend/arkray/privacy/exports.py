@@ -8,8 +8,8 @@ member** (a user). A job builds a ZIP into private storage (STORAGES["exports"])
 - `data.json`, the machine-readable whole, and `csv/*.csv`, the same as tables (each cell
   that a spreadsheet would run as a formula is prefixed with a quote);
 - `files/`: the customer's attached files that are stored and downloadable (not deleted,
-  not blocked by the scan), up to EXPORT_MAX_BYTES in total; the rest are listed, with why
-  they were left out;
+  not blocked by the scan), while the archive stays within EXPORT_MAX_BYTES; the rest are
+  listed, with why they were left out;
 - `README.txt`: what is in it and what isn't.
 
 **A customer**: the lead (every field, archived or not), its deals in full (the customer
@@ -53,10 +53,33 @@ a loop. After PURGE_ALERT_AFTER failed attempts each further one logs at ERROR; 
 explains: an object of an ended export (through its row, as above), or of no export at all
 (a database restored to before it). Only names an export is written under, older than
 ORPHAN_GRACE, and never when the exports store overlaps the attachments store.
+
+**Bounded memory** (review of 73ff1e3, M6): the build loaded every record of the customer,
+full text included, then made the whole JSON and every CSV as strings before writing the ZIP
+(a customer with 1,500 long notes peaked at 82 MB for 12 MB of text; tens of thousands, which
+nothing capped, could exhaust the worker). Now the ids are read first, then the records in
+batches (EXPORT_BATCH; SMALL_BATCH for short rows such as the stage history), written straight
+into the ZIP in the worker's temporary directory: `data.json` first, then each table's CSV from
+a second pass over the same records. Both passes read one snapshot (a REPEATABLE READ, READ
+ONLY transaction), so the JSON and the CSVs agree, and nothing else is spooled: the archive is
+the only temporary file.
+
+**The size cap** (review round 1, QUEUES-1, QUEUES-5) bounds the archive as it is stored
+(compressed): what the worker's temporary space holds while it is built (beside one file being
+copied in), what the store keeps and what the edge spools for its download, all three sized
+from EXPORT_MAX_BYTES (docs/reliability.md#export-sizing). Counting the uncompressed JSON and
+CSV instead refused customers well within the budgets: 5,000 notes of 10,000 characters came
+to 104.5 MB, Hindi ones from about 1,929 notes, and one deal moved between stages for six
+hours did it too. The structured data is written first and must fit (else the export fails,
+`too_large`); files are added while they fit; README.txt names those left out (at most
+README_OMITTED_MAX of them, then a count). A customer holds at most ACTIVITY_MAX_PER_CUSTOMER
+activities (activities.services).
 """
 
 from __future__ import annotations
 
+import codecs
+import contextlib
 import csv
 import functools
 import hashlib
@@ -65,8 +88,10 @@ import json
 import logging
 import re
 import tempfile
+import unicodedata
 import zipfile
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import IO, Any
@@ -76,8 +101,8 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.files import File
 from django.core.files.storage import storages
-from django.db import transaction
-from django.db.models import F, Q
+from django.db import connection, transaction
+from django.db.models import F, Q, QuerySet
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
@@ -92,7 +117,13 @@ from arkray.core import outbox, storage_purge
 from arkray.core.errors import BusinessRuleViolation, NotFoundError, RateLimitedError
 from arkray.identity.models import SupportSession, User
 from arkray.leads.models import Lead
-from arkray.pipeline.models import CustomField, NegotiationPrice, Opportunity, StageHistory
+from arkray.pipeline.models import (
+    CustomField,
+    NegotiationPrice,
+    Opportunity,
+    OpportunityCorrection,
+    StageHistory,
+)
 
 from . import services, staff
 from .models import DataExport, ExportStatus, SubjectType
@@ -111,7 +142,29 @@ TOO_MANY_PENDING = "You have exports still being built. Wait for them to finish.
 TOO_MANY = "Too many exports in the last hour. Try again later."
 UNAVAILABLE = "This export isn't available (still being built, failed or expired)."
 MAX_EVENTS = 20_000  # a staff member's audit events in one export
+# Records read at a time (M6): one batch of them in memory, however many the customer has.
+EXPORT_BATCH = 100  # records with long text (activities, deals, questions)
+SMALL_BATCH = 1000  # short rows (stage history, prices, corrections, timeline, files' rows)
+COPY_CHUNK = 256 * 1024  # bytes copied at a time: the files, the digest
+# Room kept at the end of the archive for README.txt and the ZIP's central directory (review
+# round 1): a tenth of the cap for a small one. Each included file also takes ENTRY_OVERHEAD
+# (its local header and central directory record) and deflate's worst case (incompressible
+# data grows by about 0.03 %).
+TAIL_RESERVE = 128 * 1024
+ENTRY_OVERHEAD = 1024
+README_OMITTED_MAX = 1000  # files named one by one in README.txt; the rest counted
+# How long a build may run (review round 1): longer than the workers' default 100 s, within
+# the outbox's 300 s running lease. A customer at the budgets builds in about 30 s (5,000
+# notes of 10,000 Hindi characters, measured at a tenth and scaled); short history rows go at
+# about 11,000 a second (docs/reliability.md#export-sizing).
+EXPORT_TIME_LIMIT_S = 240
 _FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+# Skipped before the first character a spreadsheet reads (review round 1, QUEUES-6): blanks,
+# control and format characters (zero-width space, byte order mark, word joiner, direction
+# marks, soft hyphen, ...) and combining marks; and what reads as a formula's start once
+# folded: compatibility forms (full-width and small = + - @, by NFKC) and the minus sign.
+_SKIPPED_CATEGORIES = frozenset({"Cc", "Cf", "Zs", "Zl", "Zp", "Mn", "Me"})
+_MINUS_SIGN = chr(0x2212)  # no compatibility mapping to '-'
 # Deleting an ended export's file (module docstring).
 PURGE_LEASE = timedelta(minutes=15)  # a claimed attempt; longer than the store's timeouts
 PURGE_RETRY_FIRST = timedelta(minutes=5)
@@ -504,21 +557,104 @@ def _row(obj: Any, fields: Sequence[str]) -> dict[str, Any]:
     return {field: _value(getattr(obj, field)) for field in fields}
 
 
+def _starts_a_formula(text: str) -> bool:
+    """Whether a spreadsheet could read `text` as a formula: it starts with one of
+    _FORMULA_START, or does once what a spreadsheet may skip or fold is (whitespace,
+    invisible format characters, full-width and other compatibility forms, the minus sign)."""
+    if text.startswith(_FORMULA_START):
+        return True
+    for character in text:
+        if character.isspace() or unicodedata.category(character) in _SKIPPED_CATEGORIES:
+            continue
+        folded = unicodedata.normalize("NFKC", character)
+        return folded.startswith(_FORMULA_START) or character == _MINUS_SIGN
+    return False
+
+
 def _cell(value: Any) -> str:
-    """A CSV cell a spreadsheet never runs: formulas are quoted (CSV injection)."""
+    """A CSV cell a spreadsheet never runs: formulas are quoted (CSV injection), also behind
+    whitespace a spreadsheet may skip ("  =HYPERLINK(...)", a no-break space; review of
+    73ff1e3, Low), invisible characters and look-alikes of = + - @ (review round 1)."""
     text = (
         "" if value is None else json.dumps(value) if isinstance(value, dict | list) else str(value)
     )
-    return f"'{text}" if text.startswith(_FORMULA_START) else text
+    return f"'{text}" if _starts_a_formula(text) else text
 
 
-def _csv(rows: Iterable[Mapping[str, Any]], columns: Sequence[str]) -> bytes:
-    out = io.StringIO()
-    writer = csv.writer(out)
-    writer.writerow(columns)
-    for row in rows:
-        writer.writerow([_cell(row.get(column)) for column in columns])
-    return out.getvalue().encode("utf-8-sig")
+class ExportTooLarge(Exception):
+    pass
+
+
+class _Budget:
+    """The archive as stored (compressed) against EXPORT_MAX_BYTES, read from the spool as it
+    is written (review round 1, QUEUES-1): the structured data must leave room for the
+    README and the central directory (`tail`); a file goes in only if it fits whole."""
+
+    def __init__(self, spool: IO[bytes], cap: int) -> None:
+        self.spool = spool
+        self.cap = cap
+        self.tail = min(TAIL_RESERVE, cap // 10)
+
+    def check(self) -> None:
+        """Past the cap: the build stops at once (deflate holds back at most a few hundred
+        kilobytes, so the spool may lag that much behind what was handed to it)."""
+        if self.spool.tell() > self.cap - self.tail:
+            raise ExportTooLarge()
+
+    def fits(self, size: int) -> bool:
+        """Whether a file of `size` bytes fits whole, at deflate's worst."""
+        needed = size + size // 1000 + ENTRY_OVERHEAD
+        return self.spool.tell() + needed <= self.cap - self.tail
+
+
+def _in_batches(
+    queryset: QuerySet[Any], ids: Sequence[Any], batch: int = EXPORT_BATCH
+) -> Iterator[Any]:
+    """The rows of `queryset` with these ids, in the ids' order, `batch` at a time: memory
+    holds one batch however many there are, with or without server-side cursors (a transaction
+    pooler turns them off, and psycopg then reads a whole result into memory). A row gone
+    meanwhile is left out."""
+    for start in range(0, len(ids), batch):
+        chunk = list(ids[start : start + batch])
+        found = queryset.order_by().in_bulk(chunk)
+        yield from (found[pk] for pk in chunk if pk in found)
+
+
+def _stream(queryset: QuerySet[Any], *order: str, batch: int = EXPORT_BATCH) -> Iterator[Any]:
+    """Every row of `queryset` in `order`: the ids when first asked for (small), then the rows
+    in batches (_in_batches)."""
+    ids = list(queryset.order_by(*order).values_list("pk", flat=True))
+    yield from _in_batches(queryset, ids, batch)
+
+
+def _stream_values(
+    queryset: QuerySet[Any], order: Sequence[str], fields: Sequence[str]
+) -> Iterator[dict[str, Any]]:
+    """The rows' `fields` as dicts, in `order`, SMALL_BATCH at a time: for the short rows a
+    user can multiply without a budget (stage moves, price revisions, the timeline), read
+    without building a model instance each (about twice as fast)."""
+    ids = list(queryset.order_by(*order).values_list("pk", flat=True))
+    for start in range(0, len(ids), SMALL_BATCH):
+        chunk = ids[start : start + SMALL_BATCH]
+        found = {
+            row["pk"]: row for row in queryset.order_by().filter(pk__in=chunk).values("pk", *fields)
+        }
+        yield from (found[pk] for pk in chunk if pk in found)
+
+
+Rows = Callable[[], Iterator[Mapping[str, Any]]]
+
+
+@dataclass(frozen=True, slots=True)
+class Document:
+    """What an export holds, in data.json's order. Each section is an object, or `Rows`: a
+    function returning its rows afresh, read (in batches) only as they are written, once for
+    data.json and once more for the section's CSV. `tables`: the sections that also get a
+    CSV (its name and columns), in the ZIP's order; `files`: a customer's attached files."""
+
+    sections: list[tuple[str, Any]]
+    tables: dict[str, tuple[str, Sequence[str]]]
+    files: Callable[[], Iterator[Attachment]] | None = None
 
 
 # --- a customer ----------------------------------------------------------------------------------
@@ -568,6 +704,16 @@ OPPORTUNITY_FIELDS = (
     "created_at",
     "archived_at",
 )
+# The figures each correction of a closed deal records before and after (pipeline.models.
+# OpportunityCorrection): "value_before", "value_after", ...
+CORRECTION_FIGURES = ("value", "expected_close_date", "opportunity_date")
+CORRECTION_COLUMNS = [
+    "opportunity_id",
+    "fields",
+    *(f"{field}_{when}" for field in CORRECTION_FIGURES for when in ("before", "after")),
+    "reason",
+    "occurred_at",
+]
 ACTIVITY_FIELDS = (
     "id",
     "type",
@@ -629,124 +775,221 @@ def _about(question: Question, own_refs: set[str], terms: list[str]) -> bool:
     return any(term.casefold() in text for term in terms)
 
 
+HISTORY_VALUES = (
+    "opportunity_id",
+    "from_stage_name",
+    "to_stage_name",
+    "value",
+    "expected_close_date",
+    "opportunity_date",
+    "lost_reason",
+    "occurred_at",
+)
+PRICE_VALUES = ("opportunity_id", "price", "currency", "agreed_cpt", "stage_name", "occurred_at")
+LEAD_TABLES: dict[str, tuple[str, Sequence[str]]] = {
+    "lead": ("lead", ("id", *LEAD_FIELDS, "status", "source", "owner")),
+    "opportunities": ("opportunities", (*OPPORTUNITY_FIELDS, "pipeline", "stage", "custom_fields")),
+    "stage_history": (
+        "stage_history",
+        (
+            "opportunity_id",
+            "from_stage",
+            "to_stage",
+            "value",
+            "expected_close_date",
+            "opportunity_date",
+            "lost_reason",
+            "occurred_at",
+        ),
+    ),
+    "negotiated_prices": (
+        "negotiated_prices",
+        ("opportunity_id", "price", "currency", "agreed_cpt", "stage", "occurred_at"),
+    ),
+    "deal_corrections": ("deal_corrections", CORRECTION_COLUMNS),
+    "activities": ("activities", (*ACTIVITY_FIELDS, "opportunity_id")),
+    "attachments": (
+        "attachments",
+        (
+            "id",
+            "note_id",
+            "name",
+            "content_type",
+            "size",
+            "uploaded_at",
+            "deleted_at",
+            "state",
+            "scan_status",
+        ),
+    ),
+    "ask_arkray": ("ask_arkray", ("asked_at", "question", "answer")),
+}
+
+
 def lead_document(lead_id: UUID) -> tuple[dict[str, Any], list[Attachment]]:
+    """A customer's export as one document and its files, all in memory: for a caller that
+    looks at it whole (tests). The build streams it instead (lead_sections)."""
+    document = lead_sections(lead_id)
+    whole = {name: list(value()) if _is_rows(value) else value for name, value in document.sections}
+    return whole, list(document.files()) if document.files is not None else []
+
+
+def lead_sections(lead_id: UUID) -> Document:
+    """A customer's export. Only ids (and an activity's type) are read up front: what the Ask
+    Arkray conversations about the customer are matched by. The records are read in batches
+    as they are written (build), once for data.json and once for the CSVs."""
     lead = Lead.objects.select_related("status", "source").get(pk=lead_id)
-    opportunities = list(
-        Opportunity.objects.filter(lead_id=lead_id)
-        .select_related("stage", "pipeline")
-        .order_by("created_at")
-    )
-    opportunity_ids = [o.pk for o in opportunities]
-    activities = list(
-        Activity.objects.filter(
-            Q(lead_id=lead_id) | Q(opportunity_id__in=opportunity_ids)
-        ).order_by("created_at")
-    )
-    files = list(
-        Attachment.objects.filter(note_id__in=[a.pk for a in activities]).order_by("created_at")
-    )
+    opportunities = Opportunity.objects.filter(lead_id=lead_id).select_related("stage", "pipeline")
+    opportunity_ids = list(opportunities.order_by("created_at", "pk").values_list("pk", flat=True))
+    activities = Activity.objects.filter(Q(lead_id=lead_id) | Q(opportunity_id__in=opportunity_ids))
+    activity_refs = list(activities.order_by("created_at", "pk").values_list("pk", "type"))
+    activity_ids = [pk for pk, _ in activity_refs]
+    files = Attachment.objects.filter(note_id__in=activity_ids)
     names = {
         str(f.pk): (f.name, f.is_active)
-        for f in CustomField.objects.filter(pipeline_id__in={o.pipeline_id for o in opportunities})
+        for f in CustomField.objects.filter(
+            pipeline_id__in=set(opportunities.values_list("pipeline_id", flat=True))
+        )
     }
-    history = StageHistory.objects.filter(opportunity_id__in=opportunity_ids).order_by(
-        "occurred_at"
-    )
-    prices = NegotiationPrice.objects.filter(opportunity_id__in=opportunity_ids).order_by(
-        "occurred_at"
-    )
-    records = {lead_id, *opportunity_ids, *(a.pk for a in activities)}
+    history = StageHistory.objects.filter(opportunity_id__in=opportunity_ids)
+    prices = NegotiationPrice.objects.filter(opportunity_id__in=opportunity_ids)
+    # Corrections of its closed deals' figures, with their reasons (review of 73ff1e3, M2).
+    deal_corrections = OpportunityCorrection.objects.filter(opportunity_id__in=opportunity_ids)
+    records = {lead_id, *opportunity_ids, *activity_ids}
     refs = {f"lead:{lead_id}", *(f"opportunity:{pk}" for pk in opportunity_ids)} | {
-        f"{a.type}:{a.pk}" for a in activities
+        f"{kind}:{pk}" for pk, kind in activity_refs
     }
     terms = subjects.identifying_terms(lead)
     conversation_ids = subjects.touching_conversations(records, terms)
     # Only the questions about this person, not every question of a conversation that once
     # touched them (backend review P2: a sibling question named other customers).
-    questions = [
-        q
-        for q in Question.objects.filter(
-            conversation_id__in=conversation_ids, status="answered"
-        ).order_by("created_at")
-        if _about(q, refs, terms)
+    questions = Question.objects.filter(conversation_id__in=conversation_ids, status="answered")
+    sections: list[tuple[str, Any]] = [
+        (
+            "lead",
+            {
+                "id": str(lead.pk),
+                **_row(lead, LEAD_FIELDS),
+                "status": lead.status.name,
+                "source": lead.source.name if lead.source else None,
+                "owner": STAFF,
+            },
+        ),
+        (
+            "opportunities",
+            lambda: (
+                {
+                    **_row(o, OPPORTUNITY_FIELDS),
+                    "pipeline": o.pipeline.name,
+                    "stage": o.stage.name,
+                    "custom_fields": _custom_values(o, names),
+                    "owner": STAFF,
+                }
+                for o in _in_batches(opportunities, opportunity_ids)
+            ),
+        ),
+        (
+            "stage_history",
+            lambda: (
+                {
+                    "opportunity_id": str(h["opportunity_id"]),
+                    "from_stage": h["from_stage_name"],
+                    "to_stage": h["to_stage_name"],
+                    "value": _value(h["value"]),
+                    # What the deal's dates were at that move (pipeline.0012); null before.
+                    "expected_close_date": _value(h["expected_close_date"]),
+                    "opportunity_date": _value(h["opportunity_date"]),
+                    "lost_reason": h["lost_reason"],
+                    "occurred_at": _value(h["occurred_at"]),
+                }
+                for h in _stream_values(history, ("occurred_at", "pk"), HISTORY_VALUES)
+            ),
+        ),
+        (
+            "negotiated_prices",
+            lambda: (
+                {
+                    "opportunity_id": str(p["opportunity_id"]),
+                    "price": _value(p["price"]),
+                    "currency": p["currency"],
+                    "agreed_cpt": p["agreed_cpt"],
+                    "stage": p["stage_name"],
+                    "occurred_at": _value(p["occurred_at"]),
+                }
+                for p in _stream_values(prices, ("occurred_at", "pk"), PRICE_VALUES)
+            ),
+        ),
+        (
+            "deal_corrections",
+            lambda: (
+                {
+                    "opportunity_id": str(c.opportunity_id),
+                    "fields": list(c.fields),
+                    **{
+                        f"{field}_{when}": _value(getattr(c, f"{field}_{when}"))
+                        for field in CORRECTION_FIGURES
+                        for when in ("before", "after")
+                    },
+                    "reason": c.reason,
+                    "occurred_at": _value(c.occurred_at),
+                }
+                for c in _stream(deal_corrections, "occurred_at", "id", batch=SMALL_BATCH)
+            ),
+        ),
+        (
+            "activities",
+            lambda: (
+                {
+                    **_row(a, ACTIVITY_FIELDS),
+                    "opportunity_id": _value(a.opportunity_id),
+                    "owner": STAFF,
+                }
+                for a in _in_batches(activities, activity_ids)
+            ),
+        ),
+        (
+            "attachments",
+            lambda: (
+                {
+                    "id": str(f.pk),
+                    "note_id": str(f.note_id),
+                    "name": f.original_name,
+                    "content_type": f.content_type,
+                    "size": f.size,
+                    "uploaded_at": _value(f.created_at),
+                    "deleted_at": _value(f.deleted_at),
+                    "state": f.state,
+                    "scan_status": f.scan_status,
+                }
+                for f in _stream(files, "created_at", "pk", batch=SMALL_BATCH)
+            ),
+        ),
+        (
+            "timeline",
+            lambda: (
+                {"kind": e["kind"], "occurred_at": _value(e["occurred_at"])}
+                for e in _stream_values(
+                    TimelineEntry.objects.filter(lead_id=lead_id),
+                    ("occurred_at", "pk"),
+                    ("kind", "occurred_at"),
+                )
+            ),
+        ),
+        (
+            "ask_arkray",
+            lambda: (
+                {
+                    "asked_at": _value(q.created_at),
+                    "asked_by": STAFF,
+                    "question": q.text,
+                    "answer": _answer_text(q.answer or {}, refs),
+                }
+                for q in _stream(questions, "created_at", "pk")
+                if _about(q, refs, terms)
+            ),
+        ),
     ]
-    document: dict[str, Any] = {
-        "lead": {
-            "id": str(lead.pk),
-            **_row(lead, LEAD_FIELDS),
-            "status": lead.status.name,
-            "source": lead.source.name if lead.source else None,
-            "owner": STAFF,
-        },
-        "opportunities": [
-            {
-                **_row(o, OPPORTUNITY_FIELDS),
-                "pipeline": o.pipeline.name,
-                "stage": o.stage.name,
-                "custom_fields": _custom_values(o, names),
-                "owner": STAFF,
-            }
-            for o in opportunities
-        ],
-        "stage_history": [
-            {
-                "opportunity_id": str(h.opportunity_id),
-                "from_stage": h.from_stage_name,
-                "to_stage": h.to_stage_name,
-                "value": _value(h.value),
-                "lost_reason": h.lost_reason,
-                "occurred_at": _value(h.occurred_at),
-            }
-            for h in history
-        ],
-        "negotiated_prices": [
-            {
-                "opportunity_id": str(p.opportunity_id),
-                "price": _value(p.price),
-                "currency": p.currency,
-                "agreed_cpt": p.agreed_cpt,
-                "stage": p.stage_name,
-                "occurred_at": _value(p.occurred_at),
-            }
-            for p in prices
-        ],
-        "activities": [
-            {
-                **_row(a, ACTIVITY_FIELDS),
-                "opportunity_id": _value(a.opportunity_id),
-                "owner": STAFF,
-            }
-            for a in activities
-        ],
-        "attachments": [
-            {
-                "id": str(f.pk),
-                "note_id": str(f.note_id),
-                "name": f.original_name,
-                "content_type": f.content_type,
-                "size": f.size,
-                "uploaded_at": _value(f.created_at),
-                "deleted_at": _value(f.deleted_at),
-                "state": f.state,
-                "scan_status": f.scan_status,
-            }
-            for f in files
-        ],
-        "timeline": [
-            {"kind": e.kind, "occurred_at": _value(e.occurred_at)}
-            for e in TimelineEntry.objects.filter(lead_id=lead_id).order_by("occurred_at")
-        ],
-        "ask_arkray": [
-            {
-                "asked_at": _value(q.created_at),
-                "asked_by": STAFF,
-                "question": q.text,
-                "answer": _answer_text(q.answer or {}, refs),
-            }
-            for q in questions
-        ],
-    }
-    return document, files
+    return Document(sections, LEAD_TABLES, files=lambda: _stream(files, "created_at", "pk"))
 
 
 # --- a staff member ---------------------------------------------------------------------------
@@ -824,6 +1067,17 @@ def user_document(user_id: UUID) -> dict[str, Any]:
     }
 
 
+USER_TABLES: dict[str, tuple[str, Sequence[str]]] = {
+    "user": ("account", ("id", *USER_FIELDS)),
+    "audit_events": (
+        "audit_events",
+        ("action", "occurred_at", "by_them", "about_them", "target_type", "client_address"),
+    ),
+    "support_sessions_for_them": ("support_sessions", ("started_at", "ended_at", "reason")),
+    "ask_arkray": ("ask_arkray", ("asked_at", "question", "answer")),
+}
+
+
 # --- building ---------------------------------------------------------------------------------
 README = """Arkray CRM: data export {export_id}
 Generated: {generated_at}
@@ -832,98 +1086,132 @@ Request reference: {reference}
 
 data.json      everything, machine-readable
 csv/           the same as tables (UTF-8; values starting with = + - @ are prefixed with ')
-files/         attached files (customers only), up to the export's size limit
+files/         attached files (customers only), while the archive is within its size limit
 {omitted}
 Staff are shown by role only. Free text written by staff may mention other people: review
 before releasing this export (docs/privacy.md#access-requests).
 """
 
 
-def _flatten(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    return [dict(row) for row in rows]
+def _indented(value: Any, level: int) -> str:
+    """`value` as json.dumps(indent=2) writes it `level` levels deep (a JSON string never
+    holds a raw line break, so every line break is the layout's)."""
+    text = json.dumps(value, indent=2, ensure_ascii=False, default=_value)
+    return text.replace("\n", "\n" + "  " * level)
+
+
+def _is_rows(value: Any) -> bool:
+    return callable(value)
+
+
+def _write_document(target: IO[bytes], sections: list[tuple[str, Any]], budget: _Budget) -> None:
+    """data.json, section by section, byte for byte what json.dumps(indent=2) made of the
+    whole document."""
+
+    def write(text: str) -> None:
+        target.write(text.encode())
+        budget.check()
+
+    write("{")
+    for index, (name, value) in enumerate(sections):
+        write(("," if index else "") + "\n  " + json.dumps(name) + ": ")
+        if not _is_rows(value):
+            write(_indented(value, 1))
+            continue
+        count = 0
+        for row in value():
+            write(("," if count else "[") + "\n    " + _indented(row, 2))
+            count += 1
+        write("\n  ]" if count else "[]")
+    write("\n}")
+
+
+def _write_table(
+    target: IO[bytes], columns: Sequence[str], rows: Iterable[Mapping[str, Any]], budget: _Budget
+) -> None:
+    """One table's CSV, UTF-8 with a byte order mark (spreadsheets need it), row by row."""
+    line = io.StringIO()
+    writer = csv.writer(line)
+
+    def emit(cells: Sequence[str]) -> None:
+        line.seek(0)
+        line.truncate()
+        writer.writerow(cells)
+        target.write(line.getvalue().encode())
+        budget.check()
+
+    target.write(codecs.BOM_UTF8)
+    emit(columns)
+    for row in rows:
+        emit([_cell(row.get(column)) for column in columns])
+
+
+@contextlib.contextmanager
+def _snapshot() -> Iterator[None]:
+    """One view of the subject for both passes (data.json, then the CSVs), so they agree
+    however the records change meanwhile: a REPEATABLE READ, READ ONLY transaction of its own.
+    Inside a transaction already (a test's), that one's view."""
+    if connection.in_atomic_block:
+        yield
+        return
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        yield
+
+
+def _document(export: DataExport) -> Document:
+    if export.subject_type == SubjectType.LEAD:
+        return lead_sections(export.subject_id)
+    sections: list[tuple[str, Any]] = [
+        (name, (lambda rows=value: iter(rows)) if isinstance(value, list) else value)
+        for name, value in user_document(export.subject_id).items()
+    ]
+    return Document(sections, USER_TABLES)
+
+
+def _readme(export: DataExport, generated_at: datetime, omitted: list[str]) -> str:
+    listed = omitted[:README_OMITTED_MAX]
+    if len(omitted) > len(listed):
+        listed.append(f"  ... and {len(omitted) - len(listed)} more")
+    return README.format(
+        export_id=export.pk,
+        generated_at=generated_at.isoformat(),
+        subject_type=export.subject_type,
+        subject_id=export.subject_id,
+        reference=export.reference,
+        omitted=("Files left out:\n" + "\n".join(listed) + "\n") if listed else "",
+    )
 
 
 def build(export: DataExport) -> tuple[str, int, str, int, int]:
     """Write the export's ZIP to private storage. Returns (key, size, sha256, files
-    included, files omitted)."""
+    included, files omitted). In bounded memory and within EXPORT_MAX_BYTES as stored (module
+    docstring): the records are read in batches as they are written, into the archive only."""
     generated_at = timezone.now()
-    files: list[Attachment] = []
-    if export.subject_type == SubjectType.LEAD:
-        document, files = lead_document(export.subject_id)
-        tables = {
-            "lead": ([document["lead"]], list(document["lead"])),
-            "opportunities": (
-                document["opportunities"],
-                [*OPPORTUNITY_FIELDS, "pipeline", "stage", "custom_fields"],
-            ),
-            "stage_history": (
-                document["stage_history"],
-                ["opportunity_id", "from_stage", "to_stage", "value", "lost_reason", "occurred_at"],
-            ),
-            "negotiated_prices": (
-                document["negotiated_prices"],
-                ["opportunity_id", "price", "currency", "agreed_cpt", "stage", "occurred_at"],
-            ),
-            "activities": (document["activities"], [*ACTIVITY_FIELDS, "opportunity_id"]),
-            "attachments": (
-                document["attachments"],
-                [
-                    "id",
-                    "note_id",
-                    "name",
-                    "content_type",
-                    "size",
-                    "uploaded_at",
-                    "deleted_at",
-                    "state",
-                    "scan_status",
-                ],
-            ),
-            "ask_arkray": (document["ask_arkray"], ["asked_at", "question", "answer"]),
-        }
-    else:
-        document = user_document(export.subject_id)
-        tables = {
-            "account": ([document["user"]], list(document["user"])),
-            "audit_events": (
-                document["audit_events"],
-                ["action", "occurred_at", "by_them", "about_them", "target_type", "client_address"],
-            ),
-            "support_sessions": (
-                document["support_sessions_for_them"],
-                ["started_at", "ended_at", "reason"],
-            ),
-            "ask_arkray": (document["ask_arkray"], ["asked_at", "question", "answer"]),
-        }
-    payload = json.dumps(
-        {
-            "export": {
-                "id": str(export.pk),
-                "generated_at": generated_at.isoformat(),
-                "subject_type": export.subject_type,
-                "subject_id": str(export.subject_id),
-                "reference": export.reference,
-            },
-            **document,
-        },
-        indent=2,
-        ensure_ascii=False,
-        default=_value,
-    ).encode()
-    csvs = {name: _csv(_flatten(rows), columns) for name, (rows, columns) in tables.items()}
-    limit = settings.EXPORT_MAX_BYTES
-    # Everything counts towards the cap: the JSON, its CSV copy and the files.
-    budget = limit - len(payload) - sum(len(body) for body in csvs.values()) - len(README)
-    if budget < 0:
-        raise ExportTooLarge()
-    included = omitted = 0
-    omitted_reasons: list[str] = []
+    head = {
+        "id": str(export.pk),
+        "generated_at": generated_at.isoformat(),
+        "subject_type": export.subject_type,
+        "subject_id": str(export.subject_id),
+        "reference": export.reference,
+    }
+    included = 0
+    omitted: list[str] = []
     with tempfile.TemporaryFile() as spool:
+        budget = _Budget(spool, settings.EXPORT_MAX_BYTES)
         with zipfile.ZipFile(spool, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("data.json", payload)
-            for name, body in csvs.items():
-                archive.writestr(f"csv/{name}.csv", body)
-            for file in files:
+            with _snapshot():
+                document = _document(export)
+                with archive.open("data.json", "w") as target:
+                    _write_document(target, [("export", head), *document.sections], budget)
+                sections = dict(document.sections)
+                for section, (name, columns) in document.tables.items():
+                    value = sections[section]
+                    rows = value() if _is_rows(value) else [value]
+                    with archive.open(f"csv/{name}.csv", "w") as target:
+                        _write_table(target, columns, rows, budget)
+            for file in document.files() if document.files is not None else ():
                 usable = (
                     file.deleted_at is None
                     and file.state == "stored"
@@ -931,50 +1219,31 @@ def build(export: DataExport) -> tuple[str, int, str, int, int]:
                 )
                 if not usable:
                     continue
-                if file.size > budget:
-                    omitted += 1
-                    omitted_reasons.append(f"  {file.pk}: over the export's size limit")
+                if not budget.fits(file.size):
+                    omitted.append(f"  {file.pk}: over the export's size limit")
                     continue
                 try:
                     stored = storage.open_file(file.storage_key)
                 except storage.StorageUnavailable:
-                    omitted += 1
-                    omitted_reasons.append(f"  {file.pk}: storage unavailable or object missing")
+                    omitted.append(f"  {file.pk}: storage unavailable or object missing")
                     continue
                 with stored:
                     safe = storage.ascii_fallback(file.original_name)
                     with archive.open(f"files/{file.pk}-{safe}", "w") as target:
-                        while chunk := stored.read(1024 * 1024):
+                        while chunk := stored.read(COPY_CHUNK):
                             target.write(chunk)
-                budget -= file.size
                 included += 1
-            archive.writestr(
-                "README.txt",
-                README.format(
-                    export_id=export.pk,
-                    generated_at=generated_at.isoformat(),
-                    subject_type=export.subject_type,
-                    subject_id=export.subject_id,
-                    reference=export.reference,
-                    omitted=("Files left out:\n" + "\n".join(omitted_reasons) + "\n")
-                    if omitted_reasons
-                    else "",
-                ),
-            )
+            archive.writestr("README.txt", _readme(export, generated_at, omitted))
         size = spool.tell()
         spool.seek(0)
         digest = hashlib.sha256()
-        while chunk := spool.read(1024 * 1024):
+        while chunk := spool.read(COPY_CHUNK):
             digest.update(chunk)
         spool.seek(0)
         key = storage_key(export)
         storages["exports"].delete(key)  # an earlier attempt's, if a job died after saving
         stored_as = storages["exports"].save(key, File(spool))
-    return stored_as, size, digest.hexdigest(), included, omitted
-
-
-class ExportTooLarge(Exception):
-    pass
+    return stored_as, size, digest.hexdigest(), included, len(omitted)
 
 
 def run(export_id: UUID) -> None:
@@ -1020,6 +1289,6 @@ def run(export_id: UUID) -> None:
     logger.info("export_ready", extra={"export_id": str(export.pk), "count": included})
 
 
-@outbox.handler(TOPIC_BUILD, queue="default", max_attempts=3)
+@outbox.handler(TOPIC_BUILD, queue="default", max_attempts=3, time_limit=EXPORT_TIME_LIMIT_S)
 def build_export(payload: dict[str, Any]) -> None:
     run(UUID(str(payload["export_id"])))

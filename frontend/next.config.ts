@@ -1,6 +1,6 @@
 import type { NextConfig } from "next";
 
-// Where /api/* is proxied. Rewrites are resolved at build time, so container builds pass
+// Where /api/v1/* is proxied. Rewrites are resolved at build time, so container builds pass
 // this as a build argument. In production a reverse proxy normally routes /api to Django
 // directly and this rewrite is never hit; either way the browser only ever talks to one
 // origin, so session cookies stay first-party and no CORS is needed.
@@ -33,8 +33,13 @@ const nextConfig: NextConfig = {
     // round trip. The default (0 s) re-requested every page on every click.
     staleTimes: { dynamic: 300 },
   },
+  // Next.js's image optimizer off: nothing uses next/image, and `/_next/image` would fetch and
+  // resize on request; it answers 404 (the edge refuses the path too; review of 73ff1e3).
+  images: { unoptimized: true },
+  // The API's one prefix, `/api/v1` (the review's hardening): nothing else under /api is
+  // proxied to Django from here.
   async rewrites() {
-    return [{ source: "/api/:path*", destination: `${apiOrigin}/api/:path*` }];
+    return [{ source: "/api/v1/:path*", destination: `${apiOrigin}/api/v1/:path*` }];
   },
   // There is no Leads module (ADR-0027): old links to the Leads list, the lead form and lead
   // edit pages open the same workspace's Pipeline. A lead's own page (/leads/{id}) exists
@@ -54,6 +59,8 @@ const nextConfig: NextConfig = {
       { source: "/((?!_next/static|_next/image|icon.svg).*)", headers: [{ key: "Cache-Control", value: "no-store" }] },
       { source: "/activate/:token*", headers: secretLinkHeaders },
       { source: "/reset-password/:token*", headers: secretLinkHeaders },
+      // The emailed link that lifts a sign-in lock (review of 73ff1e3, L1).
+      { source: "/unlock-sign-in/:token*", headers: secretLinkHeaders },
     ];
   },
 };

@@ -352,7 +352,9 @@ class TestWrites:
         response = signed_in(attacker).patch(
             f"{ME}/opportunities/{won.pk}", {"version": 1, "probability": "20"}, format="json"
         )
-        assert response.status_code == 400
+        # 400 before the review of 73ff1e3 (M2); a closed deal's figures are frozen now.
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "deal_closed"
         won.refresh_from_db()
         assert won.probability == Decimal("100")
 

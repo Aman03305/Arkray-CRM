@@ -401,7 +401,10 @@ export function AskView({ workspace }: { workspace: Workspace }) {
         onConfirm={forgetCurrent}
         onCancel={() => setConfirmForget(false)}
       >
-        Its questions and answers are deleted for good. Your CRM records are not affected.
+        {/* The same words for every conversation, and the deletion always succeeds the same
+            way (adversarial review M1): where records must be kept for a legal matter, the
+            conversation is still gone for you at once and deleted when the matter ends. */}
+        It disappears from your conversations for good, and its questions and answers are deleted (if records must be kept for a legal matter, once that ends). Your CRM records are not affected.
       </ConfirmDialog>
     </div>
   );

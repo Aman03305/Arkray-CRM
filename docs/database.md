@@ -163,6 +163,7 @@ Not drawn: `audit_event`, `core_outbox_event`, `core_idempotency_record` and `id
 | `session_epoch` | int | part of the session auth hash; incremented to end every session (deactivation, email change, reset) |
 | `password_change_required` | bool | product enhancement phase: set when an administrator chose the password (create with a password, *Set new password*); every API call but sign-out, `/auth/me` and the password change answers 403 until the user changes it |
 | `password_changed_at` | timestamptz NULL | when the password was last set (by the user or an administrator): what administrators see, never anything about the password |
+| `pseudonymised_at` | timestamptz NULL | `identity.0008` (adversarial review of 73ff1e3, L4): set by a staff pseudonymisation, for good. CHECK `identity_user_pseudonym_final`: a marked account is deactivated, has no usable password, and is named "Former user" with the first 8 hex digits of its id and `former-<hex id>@pseudonymised.invalid`; trigger `identity_user_pseudonym_kept` refuses an UPDATE that clears or changes the mark. The migration's backfill (`backfill_pseudonyms`, review round 1) marks only accounts a `user.pseudonymised` audit event names, or still under their own pseudonym with no usable password and not active; it moves a live account holding a former user's pseudonym to `reserved-<hex id>@pseudonymised.invalid` and lists the others in the pseudonym domain in the migrate job's log; the domain is reserved for new addresses ([privacy.md](privacy.md#staff)) |
 | `version` | int | optimistic concurrency for admin edits (409 on a stale value) |
 | `last_login`, `created_at`, `updated_at` | timestamptz | |
 
@@ -190,7 +191,7 @@ One-time secrets emailed to users ([ADR-0013](adr/0013-account-lifecycle-and-one
 | Column | Notes |
 |---|---|
 | `id` uuid PK, `user_id` FK PROTECT, `created_by_id` FK NULL | `created_by` = the inviting admin (NULL for self-service resets) |
-| `purpose` | CHECK `IN ('invitation','password_reset')` |
+| `purpose` | CHECK `IN ('invitation','password_reset','sign_in_unlock')` (the last since `identity.0008`: the emailed link that lifts a daily sign-in lock, 24 h) |
 | `status` | CHECK `IN ('pending','used','revoked')` ("expired" = pending past `expires_at`) |
 | `token_hash` char(64) NULL UNIQUE | SHA-256 of the secret; NULL until the email job mints it; CHECK `^[0-9a-f]{64}$` |
 | `created_at`, `expires_at` | CHECK `expires_at > created_at` (invitations 72 h, resets 1 h) |
@@ -218,7 +219,17 @@ bucket). There are no email addresses and no foreign keys.
 | `(kind, ip_address, occurred_at DESC)` | the per-source limits for sign-in (LIMIT 50) and reset requests (LIMIT 20) |
 
 Rows older than 24 h are purged hourly. Refused attempts are not recorded, so growth is
-bounded by attacker sources × limits.
+bounded by attacker sources × limits. `forgiven` (bool, database default false; `identity.0008`):
+a failure a later successful sign-in from that browser forgave; it no longer counts toward
+the browser's lockout but still counts toward the account's day (adversarial review of
+73ff1e3, L1). Unrecognised browsers' failures are matched per network with PostgreSQL's
+containment (`ip_address <<= cidr`), so no column was needed for it.
+
+`identity_login_lock` (`identity.0008`): `id uuid`, `identifier_hash` (UNIQUE, CHECK 64 hex:
+the same keyed hash, so an unknown email is locked exactly alike), `locked_at` (index
+`identity_login_lock_at_idx`: the hourly housekeeping lifts locks older than 30 days). A row
+means the account's daily cap of failures from unrecognised browsers was reached
+([authorization.md](authorization.md#sign-in-throttling)).
 
 ### `audit_event` (built, append-only)
 
@@ -275,6 +286,12 @@ Background work written in the business transaction ([reliability.md](reliabilit
 - Partial indexes: `(queue, available_at) WHERE pending` (relay claim),
   `(queue, locked_until) WHERE in_flight` (in-flight cap, lease recovery), `(queue) WHERE
   dead` (Phase 10: the metrics endpoint counts each status from its own partial index).
+- `fairness_key` (varchar 64, database default `''`; `core.0007`): whose work the event is,
+  the user whose request queued it (`''` for system work and the previous release's rows).
+  `outbox_pending_fair_idx (queue, fairness_key, available_at, id) WHERE pending` (`core.0008`,
+  built concurrently): the relay's turns between users (a loose index scan for the keys, then
+  each key's oldest due events) and the metrics' per-key counts (adversarial review of
+  73ff1e3, M6; [reliability.md](reliability.md#fairness-between-users)).
 - Housekeeping (Phase 10 review; until then nothing deleted finished events, so the table
   and every metrics scrape grew forever): the hourly `core.housekeeping` deletes `done`
   rows finished more than `OUTBOX_DONE_RETENTION_DAYS` (7) ago, 5,000 at a time, at most
@@ -477,7 +494,10 @@ totals are sequential scans (37-46 ms). Per-owner variants are 2-10 ms.
 `id bigint`, `opportunity_id` FK PROTECT, `from_stage_id` FK NULL (NULL on creation),
 `to_stage_id` FK, `from_stage_name`/`to_stage_name` and `from_status`/`to_status` (copies:
 the history stays readable after renames and retirements), `value` and `probability` as
-the opportunity entered the stage, `lost_reason`, `actor_id` FK, `occurred_at`.
+the opportunity entered the stage, `expected_close_date` and `opportunity_date` likewise
+(nullable, no default, `pipeline.0012`: NULL on rows from before it; the previous release's
+inserts leave them NULL; adversarial review of 73ff1e3, its review round 1, DEALS-2: a reopen,
+an edit and a new close had lost the old dates), `lost_reason`, `actor_id` FK, `occurred_at`.
 
 - CHECKs: valid `to_status`; a creation row has no "from" at all, any other row a complete
   one; lost reason only on lost rows.
@@ -505,6 +525,20 @@ the `pipeline_negotiation_price_append_only` trigger. Index `pipeline_negotiatio
 `pipeline_negotiation_stage_idx (stage_id)` (audit DOMAIN-3, `pipeline.0010`): the same
 stage-reference check and foreign-key lookups as the history's (0.01 ms; 6-13 ms of
 sequential scan at 100,000 rows without it).
+
+### `pipeline_opportunity_correction` (adversarial review of 73ff1e3, append-only)
+
+An administrator's correction of a closed deal's figures ([pipeline.md](pipeline.md#closed-deals),
+`pipeline.0011`): `id uuid`, `opportunity_id` FK PROTECT, `fields` (array; CHECK at least one,
+each of `value`, `expected_close_date`, `opportunity_date`), `value_before`/`value_after`
+NUMERIC(14,2) (CHECK ≥ 0), `expected_close_date_before`/`_after`,
+`opportunity_date_before`/`_after` (every row keeps all three figures before and after),
+`status` (CHECK `won` or `lost`), `reason` (≤ 300, plain text; redacted by an erasure),
+`opportunity_version`, `actor_id` FK, `subject_user_id` NULL (the owner when the actor is
+someone else), `occurred_at`. Append-only: `AppendOnlyModel` plus the
+`append_only_trigger`, so the application's role gets SELECT and INSERT only. Index
+`pipeline_correction_opp_idx (opportunity_id, occurred_at DESC, id DESC)`: the corrections
+list, newest first.
 
 ### `pipeline_custom_field` (product enhancement phase)
 
@@ -589,6 +623,7 @@ table. Times are the heaviest owner's or the organisation's, at 403k / 2M:
 | `activities_created_idx (created_sort, id)` | organisation-wide newest/oldest (no owner, lead or opportunity filter), archived view; ascending (rows arrive newest last), read backwards for newest first | 0.26–1.5 ms |
 | `activities_lead_idx (lead_id, schedule_sort, id)` | a lead's activities and open work; the reassignment lock query; the ownership key's lookups when a lead's owner changes | 0.02–0.48 ms |
 | `activities_opportunity_idx (opportunity_id, created_at DESC, id DESC) WHERE opportunity_id IS NOT NULL` | an opportunity's activities | 0.07–0.13 ms |
+| `activities_created_by_idx (created_by_id, created_at)` (`activities.0012`, built concurrently; adversarial review of 73ff1e3, its review round 1, QUEUES-3) | the per-person daily write budget: one statement reads at most the budget's worth of a person's newest creations, whatever else they did ([reliability.md](reliability.md#write-budgets)) | constant at any history size |
 | `activities_task_search_trgm GIN (owner_id, upper(title) gin_trgm_ops) WHERE type='task' AND archived_at IS NULL` (Phase 7, `activities.0008`; `btree_gin` for the owner) | global search's older pass for tasks, with the owner in one user's workspace (no activity list or dashboard query chooses it: 86 + 7 compared at 2M) | 47 MB at 900,000 tasks |
 | `activities_meeting_search_trgm GIN (owner_id, upper(title \|\| ' ' \|\| location) gin_trgm_ops) WHERE type='meeting' AND archived_at IS NULL` (Phase 7) | the same for meetings (title and location) | 36 MB at 600,000 meetings |
 | `activities_note_search_trgm GIN (owner_id, upper(description) gin_trgm_ops) WHERE type='note' AND archived_at IS NULL` (Phase 7) | the same for note bodies | 119 MB at 500,000 notes |
@@ -690,7 +725,10 @@ hash-checked before any text is used ([rag-architecture.md](rag-architecture.md)
 `user`, `organization`), `subject_id` (FK user, CASCADE, NULL for the organisation),
 timestamps. CHECK: organisation ⇒ no subject; self ⇒ subject = actor; user ⇒ subject ≠ actor.
 Index `(actor_id, workspace_kind, subject_id, updated_at DESC)` for "my conversations here";
-`(updated_at)` for retention.
+`(updated_at)` for retention. `forgotten_at` (timestamptz NULL, `ai.0004`): set when the asker
+deleted a conversation a legal hold keeps; every read excludes such a tombstone and the
+housekeeping deletes it once no hold keeps it (adversarial review of 73ff1e3, M1;
+[privacy.md](privacy.md#legal-holds)).
 
 `ai_question`: `id uuid`, `conversation_id` (CASCADE), `actor_id`, `text` (≤ 1,000),
 `status` (`pending`, `answered`, `failed`), `answer jsonb` (the typed answer), `error_code`,

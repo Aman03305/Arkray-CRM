@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 from django.core import mail
 from django.db import connections, transaction
+from django.test import override_settings
 from rest_framework.test import APIClient
 
 from arkray.audit.models import AuditEvent
@@ -451,7 +452,10 @@ class TestRaces:
         c.refresh_from_db()
         assert (c.role, c.email) == (Role.ADMIN, "c@example.test")
 
+    @override_settings(ADMIN_PROMOTION_COOLING_OFF_S=0)
     def test_a_promotion_waiting_on_an_email_change_happens_after_it(self):
+        """The lock order (without the cooling-off after an administrator's email change, review
+        of 73ff1e3 L3, which tests/security/test_admin_promotion_shield.py covers)."""
         first, second = AdminFactory(), AdminFactory()
         c = UserFactory()
         results = _hold_then(

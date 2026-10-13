@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PipelineView } from "@/features/workspace/views";
 import { businessToday } from "@/lib/format";
 import { salesViewer } from "@/test/fixtures";
-import { makeBoard, makeOpportunity, PIPELINE, STAGES } from "@/test/pipeline-fixtures";
+import { makeBoard, makeOpportunity, PIPELINE, pipelineRoutes, STAGES } from "@/test/pipeline-fixtures";
 import { apiError, mockApi, renderWithProviders } from "@/test/render";
 
 import { forgetBoardState } from "./hooks";
@@ -37,7 +37,7 @@ const CREATED = makeOpportunity({
 
 function routes(extra: Record<string, Parameters<typeof mockApi>[0][string]> = {}) {
   return mockApi({
-    "GET /api/v1/workspaces/me/pipelines": { status: 200, body: { results: [PIPELINE] } },
+    ...pipelineRoutes("/api/v1/workspaces/me/pipelines", { results: [PIPELINE] }),
     "GET /api/v1/workspaces/me/pipeline-board": { status: 200, body: makeBoard([]) },
     "GET /api/v1/config/opportunity-options": { status: 200, body: { instruments: INSTRUMENTS.map((name) => ({ name })) } },
     "GET /api/v1/workspaces/me/leads/duplicates": { status: 200, body: { results: [] } },

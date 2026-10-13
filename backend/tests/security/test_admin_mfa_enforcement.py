@@ -47,6 +47,8 @@ PUBLIC = {
     "api/v1/auth/password-reset/confirm",
     "api/v1/auth/invitations/verify",
     "api/v1/auth/invitations/accept",
+    "api/v1/auth/sign-in-unlock",  # review of 73ff1e3, L1: the emailed unlock link
+    "api/v1/auth/sign-in-unlock/verify",  # whose account it is, masked (review round 1)
 }
 # Everything outside /api/: the probes and the metrics (a bearer token, never a session).
 NOT_API = {"health/metrics", "health/live", "health/ready"}

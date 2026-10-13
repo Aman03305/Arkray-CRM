@@ -851,3 +851,64 @@ describe("UsersPage: two-step verification (ADR-0033)", () => {
     expect(dialog).not.toHaveTextContent("existing password");
   });
 });
+
+describe("UsersPage: sign-in locks and pseudonymised accounts (review of 73ff1e3, L1 and L4)", () => {
+  const locked = makeAdminUser({ sign_in_locked_at: "2026-10-12T09:30:00Z" });
+  const former = makeAdminUser({
+    id: "4c3b2a19-3333-4444-8555-666677778888",
+    email: "former-4c3b2a1933334444855566667777888@pseudonymised.invalid",
+    first_name: "Former user",
+    last_name: "4c3b2a19",
+    full_name: "Former user 4c3b2a19",
+    status: "deactivated",
+    status_label: "Deactivated",
+    deactivated_at: "2026-10-01T09:00:00Z",
+    pseudonymised_at: "2026-10-02T09:00:00Z",
+  });
+
+  it("clears a sign-in lock after an explicit confirmation", async () => {
+    const path = `/api/v1/admin/users/${locked.id}/clear-sign-in-lock`;
+    const api = mockApi({
+      [LIST]: page([locked]),
+      [`POST ${path}`]: { status: 200, body: { ...locked, sign_in_locked_at: null } },
+    });
+    renderPage();
+    const user = await openActions("Rahul Sharma");
+    await user.click(screen.getByRole("menuitem", { name: "Clear sign-in lock" }));
+    const dialog = screen.getByRole("alertdialog", { name: "Clear the sign-in lock for Rahul Sharma?" });
+    expect(dialog).toHaveTextContent("Browsers it has used still work");
+    expect(api.callsTo("POST", path)).toHaveLength(0);
+    await user.click(within(dialog).getByRole("button", { name: "Clear sign-in lock" }));
+    expect(await screen.findByText("Rahul Sharma can sign in from a new browser again.")).toBeInTheDocument();
+    expect(api.callsTo("POST", path)).toHaveLength(1);
+  });
+
+  it("offers it only for a locked account, and shows the lock in the details", async () => {
+    mockApi({
+      [LIST]: page([locked, invited]),
+      [`GET /api/v1/admin/users/${locked.id}`]: { status: 200, body: locked },
+    });
+    renderPage();
+    const user = await openActions("Neha Verma");
+    expect(screen.queryByRole("menuitem", { name: "Clear sign-in lock" })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Rahul Sharma" }));
+    const drawer = await screen.findByRole("dialog", { name: "Rahul Sharma" });
+    expect(within(drawer).getByText("Sign-in").nextElementSibling).toHaveTextContent("Locked for new browsers since");
+  });
+
+  it("offers nothing to change on a pseudonymised former user", async () => {
+    mockApi({
+      [LIST]: page([former]),
+      [`GET /api/v1/admin/users/${former.id}`]: { status: 200, body: former },
+    });
+    renderPage();
+    const name = await screen.findByRole("button", { name: "Former user 4c3b2a19" });
+    expect(screen.queryByRole("button", { name: "Actions for Former user 4c3b2a19" })).not.toBeInTheDocument();
+    await userEvent.setup().click(name);
+    const drawer = await screen.findByRole("dialog", { name: "Former user 4c3b2a19" });
+    expect(drawer).toHaveTextContent("This former user was pseudonymised");
+    expect(within(drawer).queryByRole("button", { name: "Set new password" })).not.toBeInTheDocument();
+    expect(within(drawer).queryByRole("button", { name: /Pseudonymise/ })).not.toBeInTheDocument();
+  });
+});

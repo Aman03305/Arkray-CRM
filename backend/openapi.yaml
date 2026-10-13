@@ -354,6 +354,30 @@ paths:
               schema:
                 $ref: '#/components/schemas/AdminUser'
           description: ''
+  /api/v1/admin/users/{user_id}/clear-sign-in-lock:
+    post:
+      operationId: admin_users_clear_sign_in_lock
+      description: |-
+        Lift the lock too many failed sign-ins in a day placed on the account's sign-in from
+        new browsers (L1), when the owner can't use the emailed link. Audited.
+      parameters:
+      - in: path
+        name: user_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - admin
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+          description: ''
   /api/v1/admin/users/{user_id}/deactivate:
     post:
       operationId: admin_users_deactivate_create
@@ -801,6 +825,55 @@ paths:
       responses:
         '204':
           description: No response body
+  /api/v1/auth/sign-in-unlock:
+    post:
+      operationId: auth_sign_in_unlock
+      description: |-
+        The link mailed to the owner when too many failed sign-ins in a day locked the account
+        from new browsers (adversarial review of 73ff1e3, L1): lifts the lock, and this browser is
+        trusted for the account from now on (its own failure budget; a new storm can't lock it
+        out), unless it is trusted for another account: that trust is never replaced (review
+        round 1, IDENTITY-1). POST so the secret never enters a URL on the API side.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignInUnlockRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      - {}
+      responses:
+        '204':
+          description: No response body
+  /api/v1/auth/sign-in-unlock/verify:
+    post:
+      operationId: auth_sign_in_unlock_verify
+      description: |-
+        Whose account an unlock link is for, masked (r***@example.com), without using it: the
+        page says it before the button is pressed, so nobody unlocks someone else's account in
+        their own browser by mistake (review round 1, IDENTITY-1). POST so the secret never enters
+        a URL on the API side.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignInUnlockRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignInUnlockPreview'
+          description: ''
   /api/v1/config/lead-options:
     get:
       operationId: lead_options
@@ -1495,8 +1568,6 @@ paths:
           description: No response body
         '404':
           description: Not found, or outside this workspace.
-        '409':
-          description: A legal hold keeps it (`legal_hold`).
   /api/v1/workspaces/{workspace}/ask/questions/{question_id}:
     get:
       operationId: ask_question
@@ -2460,6 +2531,90 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Opportunity'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/correct:
+    post:
+      operationId: opportunities_correct
+      description: |-
+        An administrator corrects a won or lost deal's value or dates, which no edit changes
+        while it is closed (adversarial review of 73ff1e3, M2): with a reason, at the version
+        last seen, appended to the deal's corrections. crm.manage_any, a recent second factor
+        (ADR-0033), and never in a support session (the administrator's own context, as for user
+        administration).
+      parameters:
+      - in: path
+        name: opportunity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpportunityCorrectionInputRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Opportunity'
+          description: ''
+        '404':
+          description: Not found, or outside this workspace.
+  /api/v1/workspaces/{workspace}/opportunities/{opportunity_id}/corrections:
+    get:
+      operationId: opportunities_corrections
+      description: |-
+        How a closed deal's figures were corrected (append-only, newest first): whoever sees
+        the deal sees them, each with its reason as pipeline.customer allows.
+      parameters:
+      - in: query
+        name: cursor
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 1000
+      - in: path
+        name: opportunity_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: query
+        name: page_size
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 50
+      - in: path
+        name: workspace
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpportunityCorrectionPage'
           description: ''
         '404':
           description: Not found, or outside this workspace.
@@ -3766,6 +3921,22 @@ components:
           oneOf:
           - $ref: '#/components/schemas/MfaLockEnum'
           - $ref: '#/components/schemas/NullEnum'
+        sign_in_locked_at:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+          description: Null, or when too many failed sign-ins in a day locked this
+            account's sign-in from browsers it hasn't been used in (those it has keep
+            working). The owner was emailed an unlock link; a password reset or POST
+            .../clear-sign-in-lock lifts it.
+        pseudonymised_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+          description: 'Null, or when this former user was pseudonymised: then nothing
+            about the account can be changed any more (422 `account_pseudonymised`).'
         version:
           type: integer
           readOnly: true
@@ -3784,8 +3955,10 @@ components:
       - mfa_lock
       - password_change_required
       - password_changed_at
+      - pseudonymised_at
       - role
       - role_label
+      - sign_in_locked_at
       - status
       - status_label
       - version
@@ -4240,6 +4413,33 @@ components:
       required:
       - lead
       - opportunity
+    CorrectedFieldEnum:
+      enum:
+      - value
+      - expected_close_date
+      - opportunity_date
+      type: string
+      description: |-
+        * `value` - Value
+        * `expected_close_date` - Expected close date
+        * `opportunity_date` - Opportunity date
+    CorrectionChange:
+      type: object
+      properties:
+        field:
+          $ref: '#/components/schemas/CorrectedFieldEnum'
+        before:
+          type: string
+          nullable: true
+          description: 'As the deal had it: an amount ("100000.00") or a date.'
+        after:
+          type: string
+          nullable: true
+          description: 'As corrected (null: no date).'
+      required:
+      - after
+      - before
+      - field
     CustomField:
       type: object
       properties:
@@ -4338,8 +4538,9 @@ components:
           description: The lead fields that changed.
         opportunities:
           type: integer
-          description: How many of the customer's deals had their copy of these details
-            corrected.
+          description: How many of the customer's deals that you can see had their
+            copy of these details corrected (copies on deals outside this workspace
+            follow too, uncounted).
       required:
       - corrected
       - lead
@@ -5753,8 +5954,9 @@ components:
           description: 'True when the viewer can''t see the deal''s customer (its
             lead was reassigned and this is a closed deal they worked): the customer''s
             name, phone, email and address are blank, the title and account show only
-            the organisation and instrument, and free-text custom values are left
-            out (docs/authorization.md#historical-deals).'
+            the organisation and instrument, the deal''s free text (description, lost
+            reason, work load, Expected CPT, agreed CPT) is blank, and free-text custom
+            values are left out (docs/authorization.md#historical-deals).'
         pipeline:
           allOf:
           - $ref: '#/components/schemas/PipelineRef'
@@ -5945,8 +6147,9 @@ components:
           description: 'True when the viewer can''t see the deal''s customer (its
             lead was reassigned and this is a closed deal they worked): the customer''s
             name, phone, email and address are blank, the title and account show only
-            the organisation and instrument, and free-text custom values are left
-            out (docs/authorization.md#historical-deals).'
+            the organisation and instrument, the deal''s free text (description, lost
+            reason, work load, Expected CPT, agreed CPT) is blank, and free-text custom
+            values are left out (docs/authorization.md#historical-deals).'
       required:
       - account_name
       - agreed_cpt
@@ -5968,6 +6171,102 @@ components:
       - value
       - version
       - weighted_value
+    OpportunityCorrection:
+      type: object
+      description: |-
+        One administrator's correction of a closed deal's figures (append-only; newest first
+        in its list). Its reason is blank for a viewer who may not see the deal's customer
+        (pipeline.customer) and once an erasure has redacted it.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/CorrectedFieldEnum'
+          readOnly: true
+          description: The figures this correction changed.
+        changes:
+          type: array
+          items:
+            $ref: '#/components/schemas/CorrectionChange'
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/StageCategoryEnum'
+          readOnly: true
+        reason:
+          type: string
+          readOnly: true
+          description: Why it was corrected (one line).
+        actor:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+        occurred_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - actor
+      - changes
+      - fields
+      - id
+      - occurred_at
+      - reason
+      - status
+    OpportunityCorrectionInputRequest:
+      type: object
+      description: |-
+        An administrator's correction of a won or lost deal: the figures to correct (at least
+        one, and at least one must change), why, and the deal's version as last seen. A closed
+        deal's probability is fixed (won 100 %, lost 0 %), so it isn't one of them.
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        reason:
+          type: string
+          description: 'Why the deal is corrected: required, one line (kept in its
+            history).'
+          maxLength: 300
+        value:
+          oneOf:
+          - type: string
+            pattern: ^[0-9]+(\.[0-9]{1,2})?$
+            example: '1250000.00'
+          - type: integer
+            minimum: 0
+          description: Amount in the organisation currency (INR), e.g. "1250000.00".
+        expected_close_date:
+          type: string
+          format: date
+          nullable: true
+        opportunity_date:
+          type: string
+          format: date
+      required:
+      - reason
+      - version
+    OpportunityCorrectionPage:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/OpportunityCorrection'
+        next:
+          type: string
+          nullable: true
+        previous:
+          type: string
+          nullable: true
+      required:
+      - next
+      - previous
+      - results
     OpportunityCreateRequest:
       type: object
       description: |-
@@ -6431,10 +6730,8 @@ components:
     Pipeline:
       type: object
       description: |-
-        A pipeline with its stages in order (retired ones flagged) and its active custom
-        fields: the board columns, stage choices and form fields come from here, never from
-        hard-coded lists. `owner` is null for a shared (organisation) pipeline; `can_manage`
-        says whether the caller may configure it in this workspace.
+        One pipeline with its whole configuration: its active stages and its active custom
+        fields (with their choices), what its forms and settings need.
       properties:
         id:
           type: string
@@ -6510,9 +6807,64 @@ components:
         results:
           type: array
           items:
-            $ref: '#/components/schemas/Pipeline'
+            $ref: '#/components/schemas/PipelineListItem'
       required:
       - results
+    PipelineListItem:
+      type: object
+      description: |-
+        A pipeline as a list shows it: its flags and its active stages in order (the board's
+        and the forms' stage choices come from here, never from hard-coded lists), never its
+        custom fields: one pipeline's own representation has them (`GET …/pipelines/{id}`). A
+        list then grows by a few kilobytes per pipeline whatever its configuration (30 choice
+        fields of 50 long options made one pipeline 200 KB and an archived list of 150 of them
+        30 MB: review round 1 of the 73ff1e3 remediation, DEALS-1). Retired stages are left out
+        too: the board's columns and a deal's own stage carry one where it matters (L10).
+        `owner` is null for a shared (organisation) pipeline; `can_manage` says whether the
+        caller may configure it in this workspace.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        key:
+          type: string
+          readOnly: true
+        name:
+          type: string
+          readOnly: true
+        owner:
+          allOf:
+          - $ref: '#/components/schemas/UserRef'
+          readOnly: true
+          nullable: true
+        is_default:
+          type: boolean
+          readOnly: true
+        is_active:
+          type: boolean
+          readOnly: true
+        version:
+          type: integer
+          readOnly: true
+        can_manage:
+          type: boolean
+          readOnly: true
+        stages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Stage'
+          readOnly: true
+      required:
+      - can_manage
+      - id
+      - is_active
+      - is_default
+      - key
+      - name
+      - owner
+      - stages
+      - version
     PipelineRef:
       type: object
       properties:
@@ -7123,6 +7475,23 @@ components:
       required:
       - new_password
       - version
+    SignInUnlockPreview:
+      type: object
+      properties:
+        email:
+          type: string
+          description: 'The account''s address, masked: r***@example.com.'
+      required:
+      - email
+    SignInUnlockRequest:
+      type: object
+      properties:
+        token:
+          type: string
+          minLength: 1
+          maxLength: 128
+      required:
+      - token
     SourceRef:
       type: object
       properties:
@@ -7235,6 +7604,20 @@ components:
           format: decimal
           pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
           readOnly: true
+        expected_close_date:
+          type: string
+          format: date
+          readOnly: true
+          nullable: true
+          description: 'The deal''s expected close date as it entered the stage (null:
+            none, or a row recorded before the dates were kept).'
+        opportunity_date:
+          type: string
+          format: date
+          readOnly: true
+          nullable: true
+          description: The deal's opportunity date as it entered the stage (null on
+            rows recorded before the dates were kept).
         lost_reason:
           type: string
           readOnly: true
@@ -7248,12 +7631,14 @@ components:
           readOnly: true
       required:
       - actor
+      - expected_close_date
       - from_stage_id
       - from_stage_name
       - from_status
       - id
       - lost_reason
       - occurred_at
+      - opportunity_date
       - probability
       - to_stage_id
       - to_stage_name

@@ -28,7 +28,7 @@ from tests.architecture.test_compose_production import BASE, PRODUCTION, ROOT, l
 DIGEST = re.compile(r"^[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$")
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 DOCKERFILES = [ROOT / "backend" / "Dockerfile", ROOT / "frontend" / "Dockerfile"]
-ONE_SHOT = {"backend-tls", "db-roles", "migrate", "certs"}
+ONE_SHOT = {"credential-guard", "backend-tls", "db-roles", "migrate", "certs"}
 # Capabilities a service may add back, and why (everything else drops ALL).
 ALLOWED_CAPABILITIES = {
     # nginx's master switches to its worker user and owns its temporary directories.

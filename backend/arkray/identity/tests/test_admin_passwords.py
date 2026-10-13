@@ -14,6 +14,7 @@ from datetime import timedelta
 
 import pytest
 from django.core import mail
+from django.test import override_settings
 from django.utils import timezone
 
 from arkray.audit.models import AuditEvent
@@ -295,7 +296,9 @@ class TestNoAdministratorTakeover:
         assert "choose their own password" in promoted.json()["error"]["message"]
         other.refresh_from_db()
         assert other.role == "sales_user"
-        # Once the user has chosen their own password, promotion works as before.
+        # Once the user has chosen their own password, promotion still waits for the
+        # cooling-off period after the administrator's change (review of 73ff1e3, L3: whoever
+        # set the password could have chosen this one too); after it, it works as before.
         assert sign_in(api_client, other.email, TEMPORARY).status_code == 200
         changed = api_client.post(
             "/api/v1/auth/password/change",
@@ -307,6 +310,11 @@ class TestNoAdministratorTakeover:
         promoted = admin_client.patch(
             f"{USERS}/{other.pk}", {"version": other.version, "role": "admin"}, format="json"
         )
+        assert promoted.status_code == 422, promoted.content
+        with override_settings(ADMIN_PROMOTION_COOLING_OFF_S=0):
+            promoted = admin_client.patch(
+                f"{USERS}/{other.pk}", {"version": other.version, "role": "admin"}, format="json"
+            )
         assert promoted.status_code == 200, promoted.content
 
     def test_an_administrator_is_invited_never_given_a_password(self, admin_client):

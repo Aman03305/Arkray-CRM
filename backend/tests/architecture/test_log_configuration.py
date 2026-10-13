@@ -38,10 +38,25 @@ def test_the_edge_access_log_holds_no_query_secret_referer_cookie_or_browser():
     assert "$arkray_log_path" in fields
 
 
+def one_time_link_pages() -> list[str]:
+    """Every page whose path carries an emailed token (`/<page>/[token]`): activation, password
+    reset and, since the review of 73ff1e3 (L1), the sign-in unlock link."""
+    app = ROOT / "frontend" / "src" / "app"
+    pages = sorted({path.parent.name for path in app.rglob("[[]token[]]") if path.is_dir()})
+    assert {"activate", "reset-password", "unlock-sign-in"} <= set(pages)
+    return pages
+
+
 def test_one_time_link_paths_are_redacted_whatever_their_case():
+    """Each token page is redacted in the edge's access log, and Next serves it with
+    `no-referrer` and `no-store` (next.config.ts): a new emailed link can't be missed (the
+    unlock link of L1 was, until this test derived the list from the pages)."""
     text = NGINX.read_text(encoding="utf-8")
-    assert re.search(r"~\*\^/activate/\s+/activate/\[redacted\];", text)
-    assert re.search(r"~\*\^/reset-password/\s+/reset-password/\[redacted\];", text)
+    config = (ROOT / "frontend" / "next.config.ts").read_text(encoding="utf-8")
+    for page in one_time_link_pages():
+        name = re.escape(page)
+        assert re.search(rf"~\*\^/{name}/\s+/{name}/\[redacted\];", text), page
+        assert re.search(rf'source: "/{name}/:token\*", headers: secretLinkHeaders', config), page
     assert "error_log /var/log/nginx/error.log crit;" in text
 
 

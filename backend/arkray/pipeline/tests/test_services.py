@@ -328,10 +328,12 @@ class TestEdit:
 
     def test_closed_opportunities_keep_their_fixed_probability(self, user_a, stages):
         won = OpportunityFactory(lead=LeadFactory(owner=user_a), stage=stages["won"])
-        with pytest.raises(InvalidInputError):
+        with pytest.raises(services.DealClosed):
             self.edit(user_a, OWN(user_a.pk), won, probability=D("90"))
-        # but a won deal's final amount can be corrected
-        assert self.edit(user_a, OWN(user_a.pk), won, value=D("190000")).value == D("190000")
+        # and its final amount too, since the review of 73ff1e3 (M2): a won deal's figures are
+        # corrected by an administrator, with a reason (services.correct_closed_deal)
+        with pytest.raises(services.DealClosed):
+            self.edit(user_a, OWN(user_a.pk), won, value=D("190000"))
 
     def test_lost_reason_only_while_lost(self, user_a, stages):
         lead = LeadFactory(owner=user_a)

@@ -37,7 +37,15 @@ from arkray.identity.policy import Capability
 from arkray.identity.workspaces import authorize_write, resolve_workspace, workspace_segment
 from arkray.leads.api.views import IDEMPOTENCY_PARAMETER, NOT_FOUND, OWNER_FILTER_ORG_ONLY
 
-from .. import configuration, corrections, field_values, instruments, selectors, services
+from .. import (
+    configuration,
+    corrections,
+    customer,
+    field_values,
+    instruments,
+    selectors,
+    services,
+)
 from ..selectors import OpportunityFilters
 from . import serializers as s
 
@@ -88,6 +96,15 @@ def _filters(params: dict[str, Any], scope: AccessScope, **extra: Any) -> Opport
 
 def _opportunity(opportunity: Any, scope: AccessScope) -> dict[str, Any]:
     return dict(s.OpportunitySerializer(opportunity, context={"scope": scope}).data)
+
+
+def _histories(rows: Any, customer_hidden: bool) -> Any:
+    """A deal's history rows (stage history, agreed prices, corrections) as this viewer may
+    read them: their free text blank if the deal's customer is hidden from them
+    (pipeline.customer; adversarial review of 73ff1e3, L6)."""
+    if customer_hidden:
+        customer.restrict_history(rows)
+    return rows
 
 
 def _location(scope: AccessScope, opportunity_id: UUID) -> str:
@@ -562,12 +579,13 @@ class OpportunityNegotiatedPricesView(ApiView):
                 scope=scope,
             ),
         )
-        page = paginator.paginate(
-            selectors.negotiation_history(scope, opportunity_id), params.get("cursor")
-        )
+        rows, hidden = selectors.shown_negotiation_history(scope, opportunity_id)
+        page = paginator.paginate(rows, params.get("cursor"))
         return Response(
             {
-                "results": s.NegotiationPriceSerializer(page.items, many=True).data,
+                "results": _histories(
+                    s.NegotiationPriceSerializer(page.items, many=True).data, hidden
+                ),
                 **page_links(request, page),
             }
         )
@@ -675,15 +693,83 @@ class OpportunityHistoryView(ApiView):
                 scope=scope,
             ),
         )
-        page = paginator.paginate(
-            selectors.stage_history(scope, opportunity_id), params.get("cursor")
-        )
+        rows, hidden = selectors.shown_stage_history(scope, opportunity_id)
+        page = paginator.paginate(rows, params.get("cursor"))
         return Response(
             {
-                "results": s.StageHistorySerializer(page.items, many=True).data,
+                "results": _histories(s.StageHistorySerializer(page.items, many=True).data, hidden),
                 **page_links(request, page),
             }
         )
+
+
+class OpportunityCorrectionsView(ApiView):
+    """How a closed deal's figures were corrected (append-only, newest first): whoever sees
+    the deal sees them, each with its reason as pipeline.customer allows."""
+
+    permission_classes = [IsActiveUser]
+    query_param_methods = frozenset({"GET"})
+
+    @extend_schema(
+        operation_id="opportunities_corrections",
+        parameters=[s.HistoryQuerySerializer],
+        responses={200: s.OpportunityCorrectionPageSerializer, 404: NOT_FOUND},
+    )
+    def get(self, request: Request, workspace: str, opportunity_id: UUID) -> Response:
+        _, scope = _scope(request, workspace)
+        params = validated(s.HistoryQuerySerializer, request.query_params)
+        paginator = KeysetPaginator(
+            selectors.CORRECTION_ORDERING,
+            page_size=params["page_size"],
+            binding=CursorBinding.of(
+                f"opportunities.corrections:{opportunity_id}",
+                params,
+                actor_id=scope.actor_id,
+                scope=scope,
+            ),
+        )
+        rows, hidden = selectors.deal_corrections(scope, opportunity_id)
+        page = paginator.paginate(rows, params.get("cursor"))
+        return Response(
+            {
+                "results": _histories(
+                    s.OpportunityCorrectionSerializer(page.items, many=True).data, hidden
+                ),
+                **page_links(request, page),
+            }
+        )
+
+
+class OpportunityCorrectView(ApiView):
+    """An administrator corrects a won or lost deal's value or dates, which no edit changes
+    while it is closed (adversarial review of 73ff1e3, M2): with a reason, at the version
+    last seen, appended to the deal's corrections. crm.manage_any, a recent second factor
+    (ADR-0033), and never in a support session (the administrator's own context, as for user
+    administration)."""
+
+    permission_classes = [requires(Capability.CRM_MANAGE_ANY)]
+    refused_in_support_session = True
+    requires_recent_mfa = True
+
+    @extend_schema(
+        operation_id="opportunities_correct",
+        request=s.OpportunityCorrectionInputSerializer,
+        responses={200: s.OpportunitySerializer, 404: NOT_FOUND},
+    )
+    def post(self, request: Request, workspace: str, opportunity_id: UUID) -> Response:
+        actor, scope = _scope(request, workspace)
+        data = validated(s.OpportunityCorrectionInputSerializer, request.data)
+        version = data.pop("version")
+        reason = data.pop("reason")
+        opportunity = services.correct_closed_deal(
+            actor=actor,
+            scope=scope,
+            opportunity_id=opportunity_id,
+            version=version,
+            reason=reason,
+            changes=data,
+        )
+        return Response(_opportunity(opportunity, scope))
 
 
 class LeadConvertView(ApiView):

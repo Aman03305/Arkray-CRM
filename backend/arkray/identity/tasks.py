@@ -15,7 +15,14 @@ from arkray.core import outbox
 from . import mfa_services, services, support, throttling, workspaces
 
 # Outbox topics whose payload holds personal data (submitted or previous email addresses).
-PERSONAL_DATA_TOPICS = (services.TOPIC_PASSWORD_RESET_REQUESTED, services.TOPIC_EMAIL_CHANGED)
+PERSONAL_DATA_TOPICS = (
+    services.TOPIC_PASSWORD_RESET_REQUESTED,
+    services.TOPIC_EMAIL_CHANGED,
+    throttling.TOPIC_SIGN_IN_LOCKED,
+    # The owner's address, taken when the notice is queued (review round 1, IDENTITY-3).
+    services.TOPIC_ACCOUNT_CHANGED,
+    mfa_services.TOPIC_MFA_CHANGED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +31,7 @@ logger = logging.getLogger(__name__)
 def housekeeping() -> dict[str, int]:
     now = timezone.now()
     purged_events = throttling.purge_expired(now)
+    lifted_locks = throttling.purge_expired_locks(now)
     purged_sessions, _ = Session.objects.filter(expire_date__lt=now).delete()
     retention = now - timedelta(seconds=settings.AUTH_THROTTLE_RETENTION_S)
     redacted = sum(
@@ -36,6 +44,7 @@ def housekeeping() -> dict[str, int]:
     expired_setups = mfa_services.purge_expired_setups(now)
     result = {
         "throttle_events": purged_events,
+        "sign_in_locks": lifted_locks,
         "sessions": purged_sessions,
         "redacted": redacted,
         "access_windows": windows,

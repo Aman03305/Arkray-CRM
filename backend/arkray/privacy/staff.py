@@ -29,6 +29,14 @@ Idempotent: an account already pseudonymised is reported, never changed again. A
 (`user.pseudonymised`, no values) and recorded in the erasure ledger (core.ledger), so a
 restored backup is pseudonymised again before it is served.
 
+Final (adversarial review of 73ff1e3, L4): it was an email-domain test that user
+administration never asked, so an administrator could rename the account back, or reactivate
+it (an invitation), point it at their own mailbox and accept: the former employee's id was a
+live login again. `User.pseudonymised_at` now marks it; the database holds a marked account
+to its pseudonym (deactivated, no usable password, this name and email: CHECK
+`identity_user_pseudonym_final`; a trigger keeps the mark), and identity.services refuses it
+every change with 422 `account_pseudonymised`.
+
 An administrator's account (its *role* is administrator, whatever its status: a deactivated
 former administrator too) is changed only by that administrator (ADR-0030), and nobody
 pseudonymises themselves, so no administrator pseudonymises another through the API: 403,
@@ -61,8 +69,10 @@ from arkray.core.errors import BusinessRuleViolation, NotFoundError, PermissionD
 from arkray.core.models import HoldSubject, OutboxEvent, OutboxStatus
 from arkray.identity import throttling
 from arkray.identity.models import (
+    PSEUDONYM_FIRST_NAME,
     AccountToken,
     AuthThrottleEvent,
+    LoginLock,
     MfaDevice,
     MfaRecoveryCode,
     SupportEnd,
@@ -71,13 +81,14 @@ from arkray.identity.models import (
     User,
     UserStatus,
     WorkspaceAccessWindow,
+    pseudonym_email,
+    pseudonym_last_name,
 )
 from arkray.identity.policy import Capability, has_capability
 from arkray.identity.services import is_administrator, serialise_user_administration
 from arkray.leads.models import Lead
 from arkray.pipeline.models import Opportunity, StageCategory
 
-PSEUDONYM_DOMAIN = "pseudonymised.invalid"
 # Matching their name reads every stored answer: more than a web request's 10 s, but within
 # the request's own budget (gunicorn ends it at 30 s, nginx at 35 s) while this holds its
 # locks (review P3-3; the API calls this too, not only the command).
@@ -114,7 +125,8 @@ class StaffErasure:
 
 
 def pseudonymised(user: User) -> bool:
-    return user.email.endswith(f"@{PSEUDONYM_DOMAIN}")
+    """Marked by pseudonymise() (L4: the email domain alone was the test before)."""
+    return user.is_pseudonymised
 
 
 def _owned_work(user: User) -> tuple[int, int, int]:
@@ -275,9 +287,10 @@ def pseudonymise(
     tokens = AccountToken.objects.filter(user=user, status=TokenStatus.PENDING).update(
         status=TokenStatus.REVOKED, revoked_at=now
     )
-    throttle, _ = AuthThrottleEvent.objects.filter(
-        identifier_hash__in=throttling.login_identifiers(original_email)
-    ).delete()
+    identifiers = throttling.login_identifiers(original_email)
+    throttle, _ = AuthThrottleEvent.objects.filter(identifier_hash__in=identifiers).delete()
+    # A sign-in lock under their email (review of 73ff1e3, L1) is evidence about them too.
+    LoginLock.objects.filter(identifier_hash__in=identifiers).delete()
     queued = OutboxEvent.objects.filter(_queued_payloads(user))
     # Unfinished work about them (an email to their address) has nothing left to do: done,
     # emptied, rather than failing into dead events (backend review P3); finished events
@@ -296,9 +309,10 @@ def pseudonymise(
     MfaRecoveryCode.objects.filter(user=user).delete()
     MfaDevice.objects.filter(user=user).delete()
 
-    user.first_name = "Former user"
-    user.last_name = user.pk.hex[:8]
-    user.email = f"former-{user.pk.hex}@{PSEUDONYM_DOMAIN}"
+    user.first_name = PSEUDONYM_FIRST_NAME
+    user.last_name = pseudonym_last_name(user.pk)
+    user.email = pseudonym_email(user.pk)
+    user.pseudonymised_at = now  # for good (CHECK and trigger; L4)
     user.set_unusable_password()
     user.last_login = None
     user.password_change_required = False

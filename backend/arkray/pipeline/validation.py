@@ -209,6 +209,23 @@ CLEANERS: Mapping[str, Callable[[Any], Any]] = {
 # operations; the title follows the customer and instrument (naming.py).
 EDITABLE_FIELDS = frozenset(CLEANERS)
 
+# --- corrections of closed deals ----------------------------------------------------------------
+CORRECTION_REASON_REQUIRED = "Say why this deal is corrected."
+
+
+def clean_correction_reason(value: Any) -> str:
+    """Why an administrator corrects a closed deal's figures (services.correct_closed_deal):
+    required, one line of plain text as every other line is cleaned (core.text: NFC, invisible
+    and display-changing characters refused, whitespace runs and pasted newlines collapsed),
+    at most CORRECTION_REASON_MAX_LENGTH characters. Stored in the append-only correction
+    history and always rendered as text."""
+    if value is None:
+        raise ValueError(CORRECTION_REASON_REQUIRED)
+    text = _line(m.CORRECTION_REASON_MAX_LENGTH)(value)
+    if not text:
+        raise ValueError(CORRECTION_REASON_REQUIRED)
+    return text
+
 
 def clean_fields(data: Mapping[str, Any]) -> dict[str, Any]:
     """Every given field cleaned, or InvalidInputError listing every problem at once."""
@@ -434,8 +451,13 @@ def _empty(value: Any) -> bool:
 def _text_value(value: Any, *, multiline: bool) -> str:
     if not isinstance(value, str):
         raise ValueError("Enter text.")
-    text = clean_multiline(value) if multiline else clean_line(value)
     limit = LONG_TEXT_VALUE_MAX_LENGTH if multiline else TEXT_VALUE_MAX_LENGTH
+    # A value far past the limit is refused before it is cleaned: a custom value is a JSON
+    # field with no length limit of its own (up to the edge's 1 MiB body), and cleaning is
+    # linear but not free (adversarial review of 73ff1e3, upload review round 4, PARSERS4-2).
+    if len(value) > 4 * limit:
+        raise ValueError(f"Use at most {limit:,} characters.")
+    text = clean_multiline(value) if multiline else clean_line(value)
     if len(text) > limit:
         raise ValueError(f"Use at most {limit:,} characters.")
     if _MARKUP.search(text):

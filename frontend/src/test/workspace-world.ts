@@ -14,7 +14,7 @@ import type { Activity, Dashboard, Lead, Opportunity } from "@/lib/api/types";
 import { asListItem, makeActivity, makeMeeting, makeNote, page, SUMMARY } from "./activity-fixtures";
 import { asRow, makeDashboard, makeDashboardLead } from "./dashboard-fixtures";
 import { OPPORTUNITY_OPTIONS, PRIYA_ID, RAHUL_ID } from "./fixtures";
-import { makeBoard, makeCard, makeOpportunity, PIPELINES, STAGES } from "./pipeline-fixtures";
+import { makeBoard, makeCard, makeOpportunity, PIPELINE, PIPELINES, STAGES } from "./pipeline-fixtures";
 import { json, type RecordedCall } from "./render";
 
 export interface Person {
@@ -164,6 +164,8 @@ export function workspaceWorld(people: Person[] = [RAHUL, PRIYA]) {
     if (rest === "/leads/duplicates" && method === "GET") return ok({ results: [] });
     if ((m = /^\/leads\/([^/]+)$/.exec(rest)) && method === "GET") return m[1] === p.leadId ? ok(leadOf(p)) : missing;
     if (rest === "/pipelines") return ok(PIPELINES); // this workspace's pipelines
+    // One pipeline with its custom fields (a list carries none: review round 1, DEALS-1).
+    if ((m = /^\/pipelines\/([^/]+)$/.exec(rest)) && method === "GET") return m[1] === PIPELINE.id ? ok(PIPELINE) : missing;
     if (rest === "/pipeline-board") {
       const board = makeBoard([cardOf(p)]);
       return ok({ ...board, totals: { pipeline_value: p.amount, weighted_pipeline: p.amount, open_count: 1 } });

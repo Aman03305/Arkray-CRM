@@ -24,6 +24,7 @@ def test_purges_old_throttle_evidence_and_expired_sessions():
 
     assert housekeeping() == {
         "throttle_events": 1,
+        "sign_in_locks": 0,  # review of 73ff1e3, L1: daily locks lift after LOGIN_LOCK_MAX_AGE_S
         "sessions": 1,
         "redacted": 0,
         "access_windows": 0,

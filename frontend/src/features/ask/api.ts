@@ -112,6 +112,9 @@ export function useAsk(workspace: Workspace) {
   });
 }
 
+/** Forget a conversation. The server answers 204 for any of yours, whether or not a legal hold
+ * means its records are kept until the matter ends (adversarial review M1: a `legal_hold`
+ * refusal told the asker about the hold), so success is the only outcome to show. */
 export function useForgetConversation(workspace: Workspace) {
   const client = useQueryClient();
   return useMutation({

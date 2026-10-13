@@ -38,6 +38,7 @@ TABLE_WIDE = [
     "activities.0007_current_work_indexes",
     "pipeline.0006_ownership_negotiation_fields",  # product enhancement phase
     "leads.0007_lead_erased_at",  # deep security audit M-1
+    "identity.0008_account_takeover_limits",  # review of 73ff1e3, L4: the pseudonym backfill
 ]
 CONCURRENT = [
     "leads.0005_owner_index_covers_archive",  # Phase 5
@@ -49,6 +50,8 @@ CONCURRENT = [
     "pipeline.0007_search_customer_names",  # ADR-0027: Leads left the UI
     "pipeline.0010_stage_reference_indexes",  # final audit DOMAIN-3
     "activities.0011_attachment_quota_index",  # deep security audit L-7
+    "activities.0012_created_by_index",  # review of 73ff1e3, M6 round 1: write budget
+    "core.0008_outbox_fair_claim_index",  # review of 73ff1e3, M6: fair claiming
 ]
 
 LIFT = "SET statement_timeout = 0; SET lock_timeout = 0;"
@@ -60,30 +63,37 @@ RESTORE = "RESET statement_timeout; RESET lock_timeout;"
 REFUSE_REVERSE = {
     "activities.0010_note_edits_and_attachments",
     "activities.0011_attachment_quota_index",  # deep security audit L-7
+    "activities.0012_created_by_index",  # review of 73ff1e3, M6 round 1: write budget
+    "activities.0013_attachment_purge_backoff",  # review of 73ff1e3, M3 round 3: purge backoff
+    "ai.0004_conversation_forgotten_at",  # adversarial review M1: tombstones
     "audit.0003_support_sessions",
     "audit.0004_support_session_index",
     "audit.0005_audit_details",  # privacy remediation
     "core.0006_privacy_remediation",  # privacy remediation
+    "core.0007_outbox_fairness_key",  # review of 73ff1e3, M6: fair claiming
+    "core.0008_outbox_fair_claim_index",  # review of 73ff1e3, M6
     "identity.0004_support_sessions",
     "identity.0005_mfa",  # ADR-0033: two-step verification
     "identity.0006_mfa_consecutive_failures",  # deep security audit M-4
     "identity.0007_mfa_cumulative_failures",  # R133: the cap a new password doesn't clear
+    "identity.0008_account_takeover_limits",  # review of 73ff1e3, L1 and L4
     "leads.0007_lead_erased_at",  # deep security audit M-1
     "pipeline.0006_ownership_negotiation_fields",
     "pipeline.0007_search_customer_names",
     "pipeline.0008_opportunity_expected_cpt",
     "pipeline.0009_agreed_cpt",
     "pipeline.0010_stage_reference_indexes",  # final audit DOMAIN-3
+    "pipeline.0011_opportunity_corrections",  # review of 73ff1e3, M2: closed-deal corrections
+    "pipeline.0012_stage_history_dates",  # review round 1, DEALS-2: dates in the stage history
     "privacy.0001_data_exports",  # privacy remediation
     "privacy.0002_export_file_purge",  # final audit PRIV-3/ARCH-4
 }
 # Released migrations whose reverse deletes data and that a backwards plan reaches without a
-# refusal first: the data is derived or short-lived. ai.0001 (`migrate ai zero`): the notes'
-# search index, rebuilt by `ai_reindex`, and Ask Arkray conversations, deleted after 30 days
-# anyway. (core.0003/0004 were reachable until core.0006, which refuses first.)
-REACHABLE_WITHOUT_REFUSAL = {
-    "ai.0001_initial",
-}
+# refusal first: the data is derived or short-lived. None any more: core.0003/0004 were
+# reachable until core.0006, and ai.0001 (`migrate ai zero`: the notes' search index, rebuilt
+# by `ai_reindex`, and Ask Arkray conversations, deleted after 30 days anyway) until ai.0004,
+# both of which refuse first.
+REACHABLE_WITHOUT_REFUSAL: set[str] = set()
 DELETES = re.compile(r"\b(DROP\s+(TABLE|COLUMN)|DELETE|TRUNCATE)\b", re.IGNORECASE)
 
 

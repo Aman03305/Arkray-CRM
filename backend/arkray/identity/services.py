@@ -16,6 +16,16 @@ the one-time secret, stores its digest and emails the link, all inside the email
 administrator-chosen password (a new user's initial one, or a reset), which exists only in
 the request that sets it: it is hashed at once, never logged, audited, queued or returned,
 and the user must replace it at their first sign-in (docs/authorization.md#admin-set-passwords).
+
+Adversarial review of 73ff1e3:
+- L3 (promote-then-shield): the account's own address is emailed when an administrator sets
+  its password or changes its role (an email change already told the old address), and an
+  account whose credentials an administrator changed can't be made an administrator for
+  ADMIN_PROMOTION_COOLING_OFF_S, whoever chose the password since.
+- L4: a pseudonymised former staff member (`User.pseudonymised_at`, privacy.staff) is
+  refused every change here, first (422 `account_pseudonymised`).
+- L1: the sign-in lock the daily failure cap places (identity.throttling) is lifted by the
+  emailed unlock link or an administrator, here.
 """
 
 from __future__ import annotations
@@ -25,12 +35,15 @@ import secrets
 from collections.abc import Callable, Collection, Mapping
 from datetime import datetime, timedelta
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import IntegrityError, connection, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from arkray.audit import services as audit
+from arkray.audit.models import AuditEvent
 from arkray.core import outbox
 from arkray.core.errors import (
     BusinessRuleViolation,
@@ -45,6 +58,7 @@ from arkray.core.text import TextRejected, clean_line
 
 from . import emails, selectors, throttling, tokens
 from .models import (
+    RESERVED_EMAIL,
     AccountToken,
     MfaDevice,
     Role,
@@ -52,6 +66,7 @@ from .models import (
     TokenStatus,
     User,
     UserStatus,
+    is_reserved_email,
     normalize_email,
 )
 from .passwords import check_new_password
@@ -62,6 +77,8 @@ logger = logging.getLogger(__name__)
 TOPIC_DELIVER_ACCOUNT_TOKEN = "identity.deliver_account_token"  # noqa: S105 — topic
 TOPIC_PASSWORD_RESET_REQUESTED = "identity.password_reset_requested"  # noqa: S105
 TOPIC_EMAIL_CHANGED = "identity.notify_email_changed"
+# The account's own address is told about a change an administrator made (L3).
+TOPIC_ACCOUNT_CHANGED = "identity.notify_account_changed"
 
 AUDIT_USER_CREATED = "user.created"
 AUDIT_INVITATION_CREATED = "user.invitation_created"
@@ -78,6 +95,25 @@ AUDIT_PASSWORD_SET_BY_ADMIN = "auth.password_set_by_admin"  # noqa: S105
 AUDIT_PASSWORD_RESET_SUPPRESSED = "auth.password_reset_suppressed"  # noqa: S105
 # A locked second factor unlocked by a new password (deep security audit M-4).
 AUDIT_MFA_UNLOCKED = "mfa.unlocked"
+# The daily failure cap locked an account's sign-in from new browsers, and what lifted it
+# (L1; `by`: email_link or administrator).
+AUDIT_SIGN_IN_LOCKED = "auth.sign_in_locked"
+AUDIT_SIGN_IN_UNLOCKED = "auth.sign_in_unlocked"
+# What an administrator did to an account's credentials that keeps it from being promoted
+# for ADMIN_PROMOTION_COOLING_OFF_S (L3): its password set, its email changed, its second
+# factor reset (mfa_services.AUDIT_RESET, by an administrator or an operator's command), or
+# created with a password (`user.created` with activation `set_by_admin`).
+_CREDENTIALS_CHANGED_BY_AN_ADMINISTRATOR = (
+    "auth.password_set_by_admin",
+    "user.email_changed",
+    "mfa.reset",
+)
+# What the owner is told (identity.emails.send_account_notice).
+ACCOUNT_NOTICES = ("password_set_by_admin", "role_changed")
+# Links whose use depends on the account's current credentials: a new password or email voids
+# both (review round 1, IDENTITY-2: an unlock link outlived them and trusted a browser for the
+# NEW credentials).
+CREDENTIAL_LINKS = (TokenPurpose.PASSWORD_RESET, TokenPurpose.SIGN_IN_UNLOCK)
 
 EDITABLE_FIELDS = frozenset({"first_name", "last_name", "role"})
 EMAIL_TAKEN = "A user with this email address already exists."
@@ -91,6 +127,17 @@ class InvalidTokenError(DomainError):
     code = "invalid_token"
     http_status = 400
     default_message = "This link is invalid or has expired. Ask for a new one."
+
+
+class AccountPseudonymisedError(BusinessRuleViolation):
+    """A pseudonymised former staff member's account is never changed again (L4): not its
+    name, email, role or password, not reactivated, invited, unlocked or supported."""
+
+    code = "account_pseudonymised"
+    default_message = (
+        "This former user's account was pseudonymised: it can't be changed or reactivated."
+        " Invite the person as a new user if they return."
+    )
 
 
 # --- helpers ---------------------------------------------------------------------------------
@@ -127,6 +174,12 @@ def is_administrator(user: User) -> bool:
     return user.role in roles_with(Capability.USERS_MANAGE)
 
 
+def refuse_if_pseudonymised(user: User) -> None:
+    """Every user-administration change asks this first, on the locked row (L4)."""
+    if user.is_pseudonymised:
+        raise AccountPseudonymisedError()
+
+
 def _refuse_for_another_administrator(actor: User, user: User, message: str) -> None:
     """An administrator's credentials and standing are changed only by that administrator
     (risk R100: email change, then Forgot password at the new address, was a takeover).
@@ -147,6 +200,12 @@ def _another_manager_remains(excluding: UUID) -> bool:
 def _require_version(user: User, version: int) -> None:
     if user.version != version:
         raise ConflictError()
+
+
+def _refuse_reserved(email: str) -> None:
+    """The pseudonym domain is privacy.staff's alone (review round 1, IDENTITY-5)."""
+    if is_reserved_email(email):
+        raise InvalidInputError(RESERVED_EMAIL, details={"email": [RESERVED_EMAIL]})
 
 
 def _email_conflict(email: str, *, excluding: UUID | None = None) -> ConflictError | None:
@@ -178,11 +237,10 @@ def _issue_token(
 ) -> AccountToken:
     """Supersede the user's live token of this purpose and queue a new one for email."""
     _revoke_pending(user, now, [purpose])
-    ttl = (
-        settings.ACCOUNT_INVITATION_TTL_S
-        if purpose == TokenPurpose.INVITATION
-        else settings.PASSWORD_RESET_TTL_S
-    )
+    ttl = {
+        TokenPurpose.INVITATION: settings.ACCOUNT_INVITATION_TTL_S,
+        TokenPurpose.SIGN_IN_UNLOCK: settings.SIGN_IN_UNLOCK_TTL_S,
+    }.get(purpose, settings.PASSWORD_RESET_TTL_S)
     token = AccountToken.objects.create(
         user=user,
         purpose=purpose,
@@ -198,6 +256,39 @@ def _audit_user(action: str, actor_id: UUID | None, user: User, **metadata: obje
     audit.record(
         action, actor_id=actor_id, target_type="user", target_id=user.pk, metadata=metadata
     )
+
+
+def _notify_account(user: User, change: str, **details: str) -> None:
+    """Email the account's own address about a change an administrator made (outbox, in the
+    caller's transaction: no change without its notice). Never the password. The address is
+    the one the account has now (review round 1, IDENTITY-3: read when the job ran, an email
+    change right after took the notice with it); personal data, blanked by housekeeping."""
+    outbox.enqueue(
+        TOPIC_ACCOUNT_CHANGED,
+        {"user_id": str(user.pk), "change": change, "email": user.email, **details},
+    )
+
+
+def _promotion_cooling_off_until(user: User, now: datetime) -> datetime | None:
+    """When `user` may next be made an administrator, if an administrator changed their
+    credentials within ADMIN_PROMOTION_COOLING_OFF_S (L3), else None. Read from the audit
+    trail (append-only): the change and who made it, whatever happened since; the user's own
+    changes don't count."""
+    cooling_off = timedelta(seconds=settings.ADMIN_PROMOTION_COOLING_OFF_S)
+    latest = (
+        AuditEvent.objects.filter(
+            Q(action__in=_CREDENTIALS_CHANGED_BY_AN_ADMINISTRATOR)
+            | Q(action=AUDIT_USER_CREATED, metadata__activation="set_by_admin"),
+            target_type="user",
+            target_id=str(user.pk),
+            occurred_at__gte=now - cooling_off,
+        )
+        .exclude(actor_id=user.pk)
+        .order_by("-occurred_at")
+        .values_list("occurred_at", flat=True)
+        .first()
+    )
+    return None if latest is None else latest + cooling_off
 
 
 def _audit_user_sensitive(
@@ -280,6 +371,7 @@ def create_user(
     last_name = _clean_name(last_name, "last_name")
     if role not in Role.values:
         raise InvalidInputError(details={"role": ["Choose a valid role."]})
+    _refuse_reserved(email)
     if not first_name:
         raise InvalidInputError(details={"first_name": ["This field may not be blank."]})
     if password is not None and role in roles_with(Capability.USERS_MANAGE):
@@ -342,6 +434,7 @@ def update_user(*, actor_id: UUID, user_id: UUID, version: int, changes: Mapping
         serialise_user_administration()
         actor = _acting_manager(actor_id)
         user = _lock_user(user_id)
+        refuse_if_pseudonymised(user)
         if changes.get("role", user.role) != user.role:
             # Before the version check: a stale page gets the reason, not a conflict.
             _refuse_for_another_administrator(actor, user, ADMINISTRATOR_ROLE_REFUSED)
@@ -369,6 +462,13 @@ def update_user(*, actor_id: UUID, user_id: UUID, version: int, changes: Mapping
                 # account now would hand them an administrator's (demote, set, promote: the
                 # enhancement security review's takeover).
                 raise BusinessRuleViolation(PROMOTION_REFUSED_UNTIL_OWN_CHOICE)
+            if new_role in roles_with(Capability.USERS_MANAGE) and (
+                until := _promotion_cooling_off_until(user, timezone.now())
+            ):
+                # Promote-then-shield (L3): whoever changed the credentials may have signed in
+                # as the user and chosen the password since; as an administrator the account
+                # would be out of every other administrator's reach (R100).
+                raise BusinessRuleViolation(_promotion_refused(until))
             if (
                 _manages_users(user)
                 and new_role not in roles_with(Capability.USERS_MANAGE)
@@ -406,6 +506,8 @@ def update_user(*, actor_id: UUID, user_id: UUID, version: int, changes: Mapping
                 **{"from": previous_role, "to": new_role},
                 revoked_invitations=revoked_invitations,
             )
+            if user.status == UserStatus.ACTIVE:
+                _notify_account(user, "role_changed", role=new_role)
     return selectors.admin_user_detail(user.pk)
 
 
@@ -428,11 +530,13 @@ def change_user_email(
     `still_signed_in`: for a change to one's own email, checked against the locked user, so
     a password reset that ended the requesting session meanwhile can't be undone by it."""
     new_email = normalize_email(email)
+    _refuse_reserved(new_email)
     try:
         with transaction.atomic():
             serialise_user_administration()
             actor = _acting_manager(actor_id)
             user = _lock_user(user_id)
+            refuse_if_pseudonymised(user)
             if still_signed_in is not None and not still_signed_in(user):
                 raise PermissionDeniedError(SESSION_ENDED)
             # No exception for an invited administrator: the new address would receive the
@@ -449,7 +553,7 @@ def change_user_email(
             user.session_epoch += 1  # signed out everywhere: the login identity changed
             user.version += 1
             user.save(update_fields=["email", "session_epoch", "version", "updated_at"])
-            revoked_links = _revoke_pending(user, now, [TokenPurpose.PASSWORD_RESET])
+            revoked_links = _revoke_pending(user, now, CREDENTIAL_LINKS)
             invitation = None
             if user.status == UserStatus.INVITED:
                 # The old link was addressed to the old mailbox: replace it.
@@ -504,6 +608,15 @@ PROMOTION_REFUSED_UNTIL_OWN_CHOICE = (
 )
 
 
+def _promotion_refused(until: datetime) -> str:
+    days = max(1, settings.ADMIN_PROMOTION_COOLING_OFF_S // (24 * 60 * 60))
+    when = until.astimezone(ZoneInfo(settings.CRM_TIME_ZONE)).strftime("%d %b %Y, %H:%M %Z")
+    return (
+        f"An administrator changed this user's password, email or two-step verification in the"
+        f" last {days} days, so they can't be made an administrator until {when}."
+    )
+
+
 def set_user_password(*, actor_id: UUID, user_id: UUID, version: int, new_password: str) -> User:
     """An administrator sets a new (temporary) password for an active user: the user's
     sessions end, outstanding reset links are voided, and the user must choose their own
@@ -517,6 +630,7 @@ def set_user_password(*, actor_id: UUID, user_id: UUID, version: int, new_passwo
         if user_id == actor.pk:
             raise BusinessRuleViolation(OWN_ACCOUNT_REFUSED)
         user = _lock_user(user_id)
+        refuse_if_pseudonymised(user)
         # By role, before the status: a deactivated or invited administrator is refused too.
         _refuse_for_another_administrator(actor, user, ADMINISTRATOR_ACCOUNT_REFUSED)
         _require_version(user, version)
@@ -539,7 +653,7 @@ def set_user_password(*, actor_id: UUID, user_id: UUID, version: int, new_passwo
                 "updated_at",
             ]
         )
-        revoked = _revoke_pending(user, now, purposes=[TokenPurpose.PASSWORD_RESET])
+        revoked = _revoke_pending(user, now, purposes=CREDENTIAL_LINKS)
         throttling.forget_account_failures(user.email)
         _forget_second_factor_failures(user, actor_id=actor.pk, by="administrator")
         audit.record(
@@ -550,6 +664,8 @@ def set_user_password(*, actor_id: UUID, user_id: UUID, version: int, new_passwo
             subject_user_id=user.pk,
             metadata={"revoked_links": revoked},
         )
+        # The owner learns of it at their own address (L3: it was silent).
+        _notify_account(user, "password_set_by_admin")
     return selectors.admin_user_detail(user.pk)
 
 
@@ -612,6 +728,7 @@ def reactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
         serialise_user_administration()
         actor = _acting_manager(actor_id)
         user = _lock_user(user_id)
+        refuse_if_pseudonymised(user)
         if user.status == UserStatus.ACTIVE:
             return selectors.admin_user_detail(user.pk)  # idempotent
         if user.status == UserStatus.INVITED:
@@ -641,7 +758,7 @@ def reactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
             **({"reset_link": True} if reset_link else {}),
         )
         if reset_link:
-            _revoke_pending(user, now, [TokenPurpose.PASSWORD_RESET])
+            _revoke_pending(user, now, CREDENTIAL_LINKS)
             _issue_token(user, TokenPurpose.PASSWORD_RESET, created_by=actor, now=now)
             _audit_user(AUDIT_PASSWORD_RESET_ISSUED, actor.pk, user, reason="reactivated")
         if user.status == UserStatus.INVITED:
@@ -662,6 +779,7 @@ def resend_invitation(*, actor_id: UUID, user_id: UUID) -> User:
         serialise_user_administration()
         actor = _acting_manager(actor_id)
         user = _lock_user(user_id)
+        refuse_if_pseudonymised(user)
         if user.status != UserStatus.INVITED:
             raise BusinessRuleViolation(
                 "Only users who haven't accepted their invitation can be sent one."
@@ -683,6 +801,27 @@ def resend_invitation(*, actor_id: UUID, user_id: UUID) -> User:
         _audit_user(
             AUDIT_INVITATION_RESENT, actor.pk, user, expires_at=invitation.expires_at.isoformat()
         )
+    return selectors.admin_user_detail(user.pk)
+
+
+def clear_sign_in_lock(*, actor_id: UUID, user_id: UUID) -> User:
+    """An administrator lifts the sign-in lock the daily failure cap placed (L1), with the
+    failures counted toward it: the user can sign in from a new browser again. Audited when
+    there was one (`auth.sign_in_unlocked`, by administrator)."""
+    with transaction.atomic():
+        serialise_user_administration()
+        actor = _acting_manager(actor_id)
+        user = _lock_user(user_id)
+        refuse_if_pseudonymised(user)
+        if throttling.forget_account_failures(user.email):
+            audit.record(
+                AUDIT_SIGN_IN_UNLOCKED,
+                actor_id=actor.pk,
+                target_type="user",
+                target_id=user.pk,
+                subject_user_id=user.pk,
+                metadata={"by": "administrator"},
+            )
     return selectors.admin_user_detail(user.pk)
 
 
@@ -762,6 +901,61 @@ def accept_invitation(secret: str, password: str) -> User:
     return user
 
 
+def inspect_sign_in_unlock(secret: str) -> User:
+    """Whose account a still-valid unlock link is for (the page shows it masked)."""
+    found = _find_token(secret, TokenPurpose.SIGN_IN_UNLOCK)
+    token = AccountToken.objects.select_related("user").get(pk=found.pk)
+    if (
+        token.status != TokenStatus.PENDING
+        or token.is_expired()
+        or token.user.status != UserStatus.ACTIVE
+    ):
+        raise InvalidTokenError()
+    return token.user
+
+
+def unlock_sign_in(secret: str) -> User:
+    """The emailed unlock link (L1): lifts the account's sign-in lock and forgets the failures
+    counted toward it (the mailbox is proof enough: it could reset the password). The view
+    trusts the browser that opened it, so the next storm can't lock that one out."""
+    with transaction.atomic():
+        user, token = _lock_live_token(secret, TokenPurpose.SIGN_IN_UNLOCK, UserStatus.ACTIVE)
+        _consume(token, timezone.now())
+        throttling.forget_account_failures(user.email)
+        audit.record(
+            AUDIT_SIGN_IN_UNLOCKED,
+            actor_id=user.pk,
+            target_type="user",
+            target_id=user.pk,
+            subject_user_id=user.pk,
+            metadata={"by": "email_link"},
+        )
+    return user
+
+
+def notify_sign_in_locked(email: str) -> None:
+    """Outbox job (identity.throttling queued it when the daily cap was reached): an active
+    account with this email gets an unlock link, and administrators a security event. An
+    unknown email, or one whose lock was lifted meanwhile, gets nothing (the request did the
+    same work either way)."""
+    candidate = User.objects.filter(email=normalize_email(email)).only("id").first()
+    if candidate is None:
+        return
+    with transaction.atomic():
+        user = User.objects.select_for_update().get(pk=candidate.pk)
+        if user.status != UserStatus.ACTIVE or throttling.sign_in_locked_at(user.email) is None:
+            return
+        _issue_token(user, TokenPurpose.SIGN_IN_UNLOCK, created_by=None, now=timezone.now())
+        audit.record(
+            AUDIT_SIGN_IN_LOCKED,
+            actor_id=None,
+            target_type="user",
+            target_id=user.pk,
+            subject_user_id=user.pk,
+            metadata={"failures": settings.LOGIN_DAILY_FAILURE_CAP},
+        )
+
+
 def request_password_reset(email: str, *, ip: str | None) -> None:
     """Constant work whether or not the account exists: record, enqueue, return. The
     email job decides whether anyone is eligible (no enumeration, not even by timing)."""
@@ -833,6 +1027,7 @@ def confirm_password_reset(secret: str, new_password: str) -> None:
             ]
         )
         _consume(token, now)
+        _revoke_pending(user, now, [TokenPurpose.SIGN_IN_UNLOCK])  # IDENTITY-2
         throttling.forget_account_failures(user.email)
         _forget_second_factor_failures(user, actor_id=user.pk, by="password_reset")
         _audit_user(AUDIT_PASSWORD_RESET_COMPLETED, user.pk, user)
@@ -881,6 +1076,13 @@ def deliver_account_token(token_id: UUID) -> None:
             link=emails.account_link("activate", secret),
             expires_at=expires_at,
         )
+    elif purpose == TokenPurpose.SIGN_IN_UNLOCK:
+        emails.send_sign_in_locked(
+            to=recipient,
+            first_name=first_name,
+            link=emails.account_link("unlock-sign-in", secret),
+            expires_at=expires_at,
+        )
     else:
         emails.send_password_reset(
             to=recipient,
@@ -892,6 +1094,23 @@ def deliver_account_token(token_id: UUID) -> None:
         sent_at=timezone.now()
     )
     logger.info("account_link_sent", extra={"account_token_id": str(token_id), "purpose": purpose})
+
+
+def notify_account_changed(
+    user_id: UUID, change: str, role: str | None = None, email: str | None = None
+) -> None:
+    """Outbox job (queue "email"): tell the account's own address that an administrator set
+    its password or changed its role (L3), at the address it had then (`email`; the current
+    one for a notice queued before it was recorded), whatever the account's status now
+    (review round 1, IDENTITY-3: deactivating it before this ran, then reactivating it, left
+    the owner never told). Skipped only for an unknown change or a pseudonymised account."""
+    user = User.objects.filter(pk=user_id).only("first_name", "email", "pseudonymised_at").first()
+    if user is None or user.is_pseudonymised or change not in ACCOUNT_NOTICES:
+        return
+    role_label = Role(role).label if role in Role.values else None
+    emails.send_account_notice(
+        to=email or user.email, first_name=user.first_name, change=change, role_label=role_label
+    )
 
 
 def notify_email_changed(user_id: UUID, previous_email: str) -> None:

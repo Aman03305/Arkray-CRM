@@ -39,9 +39,15 @@ def index_source(payload: dict[str, Any]) -> None:
 
 @outbox.handler(indexing.TOPIC_INDEX_LEAD, queue="ai_index")
 def index_lead(payload: dict[str, Any]) -> None:
+    """One batch of a lead's re-sync, then its continuation (indexing.continue_lead). A job
+    without a cursor (the first, or one the previous release queued) starts from the lead."""
     if not settings.AI_INDEXING_ENABLED:
         return
-    indexing.index_lead(_uuid(payload.get("lead_id")))
+    start: indexing.LeadCursor | None = None
+    if payload.get("source"):
+        after = payload.get("after")
+        start = (_module(payload), _uuid(after) if after else None)
+    indexing.continue_lead(_uuid(payload.get("lead_id")), start)
 
 
 @outbox.handler(indexing.TOPIC_RECONCILE, queue="ai_index", max_attempts=4)

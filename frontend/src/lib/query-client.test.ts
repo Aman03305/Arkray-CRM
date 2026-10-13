@@ -127,5 +127,8 @@ describe("a 403 about the viewer's own state", () => {
 
 it("knows the public authentication pages", () => {
   expect(["/login", "/forgot-password", "/reset-password/abc", "/activate/abc"].every(isPublicPath)).toBe(true);
+  // Review round 1: the emailed unlock link's page (a sign-in elsewhere mustn't reload it).
+  expect(isPublicPath("/unlock-sign-in/abc")).toBe(true);
+  expect(isPublicPath("/unlock-sign-inx")).toBe(false);
   expect(["/dashboard", "/admin/users", "/loginx"].some(isPublicPath)).toBe(false);
 });

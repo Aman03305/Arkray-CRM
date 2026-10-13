@@ -94,6 +94,20 @@ describe("LoginForm", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Too many sign-in attempts. Try again in 1 minute.");
   });
 
+  it("says how to get back in when too many failed sign-ins locked the account (review of 73ff1e3, L1)", async () => {
+    const message =
+      "Too many failed sign-ins for this account, so it can't be signed in to from a new browser for now. Sign in from a browser you've used here before, use the link we emailed to the account's address, or reset your password.";
+    mockApi({
+      "GET /api/v1/auth/me": NOT_SIGNED_IN,
+      "POST /api/v1/auth/login": { ...apiError(429, "sign_in_locked", message), headers: { "Retry-After": "2591000" } },
+    });
+    renderWithProviders(<LoginForm />);
+    await fillAndSubmit();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(message);
+    expect(alert).not.toHaveTextContent("Try again");
+  });
+
   it("validates required fields without calling the API", async () => {
     const api = mockApi({ "GET /api/v1/auth/me": NOT_SIGNED_IN });
     renderWithProviders(<LoginForm />);

@@ -60,6 +60,47 @@ jobs:
           docker run --rm -v "$PWD:/repo:ro" -w /repo \
             rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
 
+  # The production-shaped stack can't take a secret from a development file (adversarial
+  # review of 73ff1e3, M4: `.env.example`'s superuser password once filled its
+  # `${POSTGRES_PASSWORD:?}`). With `.env.example` copied to `.env`, as in a developer's
+  # checkout, and every secret the overlay requires given but one, Compose must refuse,
+  # naming the one left out, for each; with all of them it is a valid configuration (so
+  # each refusal is that name's, not a broken file). Configuration only: nothing is built
+  # or started. scripts/ci-local.sh runs the same check (tests/architecture/test_ci_workflow.py).
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Refuse development credentials in the production stack
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          files=(-p arkray-ci-production -f docker-compose.yml -f infrastructure/compose.production.yml --profile app)
+          mapfile -t required < <(grep -v '^ *#' infrastructure/compose.production.yml |
+            grep -oE '\$\{[A-Z][A-Z0-9_]*:\?' | sed -E 's/^\$\{//; s/:\?$//' | sort -u)
+          [[ ${#required[@]} -ge 7 ]] || { echo "::error::the overlay requires only ${#required[@]} secrets"; exit 1; }
+          # Every required secret exported (a random throwaway value) but $1, which is unset.
+          configure() {
+            local name value
+            for name in "${required[@]}"; do
+              value="$(openssl rand -hex 32)"
+              if [[ $name == "$1" ]]; then unset "$name"; else export "$name=$value"; fi
+            done
+            docker compose "${files[@]}" config --quiet
+          }
+          for missing in "${required[@]}"; do
+            if (configure "$missing") 2> "$RUNNER_TEMP/compose.err"; then
+              echo "::error::the production stack took $missing from the development .env"
+              exit 1
+            fi
+            grep -q "$missing" "$RUNNER_TEMP/compose.err" || { cat "$RUNNER_TEMP/compose.err"; exit 1; }
+          done
+          (configure "")
+          echo "refused for each of ${#required[@]} production secrets: ${required[*]}"
+
   backend:
     runs-on: ubuntu-latest
     # The full suite takes about 8 minutes on a fast workstation; hosted runners are slower.
@@ -230,3 +271,23 @@ jobs:
           DATABASE_URL="postgres://arkray_app:${APP_PASSWORD}@127.0.0.1:5432/arkray" \
             docker run --rm "${prod_env[@]}" -e DATABASE_URL "${hardened[@]}" "${on_db[@]}" arkray-backend:ci \
             python manage.py check --deploy --database default
+      # The production stack's credential guard (infrastructure/compose.production.yml,
+      # config/credentials.py; M4), in the image as Compose runs it: the published development
+      # password refused, freshly generated secrets accepted. Values through the environment.
+      - name: Check the credential guard in the image
+        run: |
+          set -euo pipefail
+          names=(ARKRAY_PROD_DB_SUPERUSER_PASSWORD ARKRAY_PROD_DB_OWNER_PASSWORD ARKRAY_PROD_DB_APP_PASSWORD
+            ARKRAY_PROD_REDIS_PASSWORD ARKRAY_PROD_DJANGO_SECRET_KEY ARKRAY_PROD_METRICS_TOKEN ARKRAY_PROD_ERASURE_LEDGER_KEY)
+          guard=(docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true)
+          for name in "${names[@]}"; do
+            value="$(openssl rand -hex 32)"
+            export "$name=$value"
+            guard+=(-e "$name")
+          done
+          "${guard[@]}" arkray-backend:ci python -m config.credentials
+          export ARKRAY_PROD_DB_SUPERUSER_PASSWORD=arkray_dev_only_password
+          if "${guard[@]}" arkray-backend:ci python -m config.credentials; then
+            echo "::error::the guard accepted the published development password" >&2
+            exit 1
+          fi

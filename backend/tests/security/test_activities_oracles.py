@@ -12,9 +12,12 @@ import json
 import uuid
 
 import pytest
+from django.db import transaction
 
 from arkray.activities import services
+from arkray.core import holds
 from arkray.core.access import AccessScope
+from arkray.core.models import HoldSubject
 from arkray.leads import services as lead_services
 from tests.factories import LeadFactory, OpportunityFactory, TaskFactory
 from tests.helpers import signed_in, without_request_id
@@ -131,3 +134,47 @@ class TestRepeatableOracle:
         task.refresh_from_db()
         assert task.version == 2  # nothing recorded on A's side
         assert len(set(answers)) == 1, answers
+
+    def test_kept_work_answers_the_same_whether_or_not_its_customer_is_held(
+        self, admin, user_a, user_b
+    ):
+        """Follow-up to the adversarial review of 73ff1e3, M1 (a legal-hold oracle): an edit
+        or a file deletion that touches a held customer's text answers 409 `legal_hold`, so
+        the previous owner of a reassigned lead must never reach that check. Notes and open
+        work move with the lead; the completed work A keeps is refused before any hold is
+        read (an edit: "reopen it first"; a reopen: "belongs to someone else"), with the same
+        answer whether or not B's customer is under a hold."""
+
+        def kept_task():
+            lead = LeadFactory(owner=user_a)
+            task = TaskFactory(lead=lead, title="A's finished work")
+            services.complete_activity(
+                actor=user_a, scope=OWN(user_a.pk), activity_id=task.pk, version=1
+            )
+            reassign(admin, lead, user_b)
+            return lead, task
+
+        held_lead, held_task = kept_task()
+        _, free_task = kept_task()
+        with transaction.atomic():
+            holds.place(HoldSubject.LEAD, held_lead.pk, reference="CASE-9", placed_by=admin.pk)
+        client = signed_in(user_a)
+
+        def answers(task):
+            edited = client.patch(
+                f"{ME}/activities/{task.pk}", {"version": 2, "title": "Renamed"}, format="json"
+            )
+            reopened = client.post(
+                f"{ME}/activities/{task.pk}/reopen", {"version": 2}, format="json"
+            )
+            return [
+                (r.status_code, json.dumps(without_request_id(r), sort_keys=True))
+                for r in (edited, reopened)
+            ]
+
+        held, free = answers(held_task), answers(free_task)
+        assert held == free, (held, free)
+        assert [status for status, _ in held] == [422, 422]
+        assert "legal_hold" not in str(held)
+        held_task.refresh_from_db()
+        assert (held_task.version, held_task.title) == (2, "A's finished work")

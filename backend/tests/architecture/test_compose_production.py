@@ -21,7 +21,9 @@ PRODUCTION = ROOT / "infrastructure" / "compose.production.yml"
 WITH_FALLBACK = re.compile(r"\$\{[A-Z_]+:-[^}]*\}")
 # Settings the production stack may take from the environment, and why.
 ALLOWED = {
-    # A secret: only the operator's shell has it; empty means "no model" (none mode).
+    # A secret, optional: the production overlay takes it from its production-only name
+    # (ARKRAY_PROD_ANTHROPIC_API_KEY, never the developer's .env; adversarial review of
+    # 73ff1e3, M4); empty means "no model" (none mode).
     ("worker-ai", "ANTHROPIC_API_KEY"),
 }
 
@@ -73,7 +75,8 @@ def test_the_scan_sees_the_settings_that_were_inherited():
     assert WITH_FALLBACK.search(backend["AI_ENABLED"])
     production = environment(load(PRODUCTION)["services"]["backend"])
     assert production["AI_ENABLED"] == "true"
-    assert production["METRICS_TOKEN"].startswith("${METRICS_TOKEN:?")
+    # Required, under its production-only name (M4: test_compose_credentials.py).
+    assert production["METRICS_TOKEN"].startswith("${ARKRAY_PROD_METRICS_TOKEN:?")
 
 
 TMPFS_SIZE = re.compile(r"(?:^|,)size=(\d+)([kmg])(?:,|$)")

@@ -15,23 +15,23 @@ claim of compliance with any law. Security controls are in [security.md](securit
 | Data | Personal data in it | Where |
 |---|---|---|
 | Leads (the canonical customer record) | names, organisation, job title, email, three phone numbers, address, free-text description | `leads_lead` (with its generated search text and phone keys) |
-| Opportunities | the deal's copy of its customer (customer and account names, contact phone and email, address), its name (derived from the customer and instrument), description, lost reason, work load, Expected CPT; amounts and prices (commercial, not personal) | `pipeline_opportunity`; lost reasons also in the append-only `pipeline_stage_history`, agreed prices and CPTs in the append-only `pipeline_negotiation_price` |
+| Opportunities | the deal's copy of its customer (customer and account names, contact phone and email, address), its name (derived from the customer and instrument), description, lost reason, work load, Expected CPT; amounts and prices (commercial, not personal) | `pipeline_opportunity`; lost reasons also in the append-only `pipeline_stage_history`, agreed prices and CPTs in the append-only `pipeline_negotiation_price`, a closed deal's corrected figures and the administrator's reason in the append-only `pipeline_opportunity_correction` ([pipeline.md](pipeline.md#closed-deals)) |
 | Custom field values | whatever a pipeline's fields collect (free text included); values of **removed** fields stay, hidden, until deleted on purpose ([below](#custom-fields)) | `pipeline_opportunity.custom_fields` |
 | Activities | notes (up to 10,000 characters), task and meeting titles and descriptions, meeting places and links | `activities_activity` |
 | Attachments | the file itself (any content), its name and content hash, type, size, who uploaded and deleted it | bytes in private object storage (an S3 bucket or a private volume); details in `activities_attachment` |
 | Timeline | user ids, kinds, dates, statuses, stage names; text is read live from the activity | `activities_timeline_entry` |
-| Ask Arkray | questions as typed, stored answers (which quote CRM text), conversations (asker, workspace) | `ai_question`, `ai_conversation`; index chunks hold vectors, hashes and offsets, no text, but vectors are **derived** from personal text (`ai_knowledge_chunk`) |
+| Ask Arkray | questions as typed, stored answers (which quote CRM text), conversations (asker, workspace), including those their asker deleted while a legal hold keeps them (hidden, [below](#legal-holds)) | `ai_question`, `ai_conversation` (`forgotten_at`); index chunks hold vectors, hashes and offsets, no text, but vectors are **derived** from personal text (`ai_knowledge_chunk`) |
 | Staff | name, email, role, status, sign-in and password-change times, an Argon2id password hash | `identity_user`; sessions in `django_session` |
 | Support sessions | which administrator helped which user, when, and the reason typed (blanked after the audit-detail retention) | `identity_support_session` |
 | Audit trail | who did what to which record, when: ids, field **names**, statuses, counts; never a customer's field values | `audit_event` (append-only) |
 | Audit details | for a while only: the client address of security events, old and new sign-in emails, a reset requester's address, a support reason | `audit_event_detail` ([below](#audit-trail)) |
-| Security evidence | client addresses and keyed hashes of submitted emails (never the email), device ids | `identity_auth_throttle_event` |
+| Security evidence | client addresses and keyed hashes of submitted emails (never the email), device ids; an account's daily sign-in lock, under the same keyed hash | `identity_auth_throttle_event`, `identity_login_lock` |
 | Account links | a hash of each invitation or reset secret, never the secret | `identity_account_token` |
 | Background work | ids; the account-email events' payloads hold an email address and, for a reset request, the requester's address (blanked 24 h after they finish); error text with email addresses replaced | `core_outbox_event` |
 | Idempotency records | a SHA-256 of a create request (24 h) | `core_idempotency_record` |
 | Data exports | who exported whose data and when (the export file itself lives 24 h) | `privacy_data_export`; files in private storage (`STORAGES["exports"]`) |
 | Legal holds | the held subject's id and a case reference | `core_legal_hold` |
-| Erasure ledger | ids of erased leads, pseudonymised users, deleted custom fields and files; no personal data | outside the database ([below](#restore-safe-erasure)) |
+| Erasure ledger | ids of erased leads, pseudonymised users, deleted custom fields and files, and signed checkpoints of the verified chain (numbers, MACs, digests, key ids); no personal data | outside the database ([below](#restore-safe-erasure)) |
 | Redis | the cache's rate-limit keys contain a client address (about a minute); the broker's messages carry ids only | the cache instance (never persisted in the production stack) and the broker |
 | Application logs | per request: the client address, the user id, the method and path (never the query string), status and timing; elsewhere ids, codes and counts only ([observability.md](observability.md#what-a-log-line-may-hold)) | stdout, then the log platform |
 | Edge logs | the client address, the path (no query string, one-time links redacted), status, timings; no user agent, referrer or cookie | nginx stdout, then the log platform |
@@ -45,7 +45,7 @@ Verified against the code; contracts and regions are the operator's to put in pl
 
 | Recipient | When | What it receives | Transport | Retention there |
 |---|---|---|---|---|
-| **Anthropic** (the language model) | only with `AI_LLM_PROVIDER=anthropic` (the default is `none`; production runs `none` until the conditions in [rag-architecture.md](rag-architecture.md#privacy-and-data-minimisation) are met) | the question and up to four earlier turns, with links, email addresses, phone numbers and PANs replaced by markers; tool results: lead name, organisation, job title, status and dates; deal names, account, customer, lost reason and description (only where the asker may see the customer), amounts, prices, CPTs, work load; activity titles and note passages (masked the same way). Never: contact fields, addresses, meeting links or places, custom values, audit data | HTTPS only (`AI_LLM_BASE_URL` must be https; SDK variables refused) | the provider's, under the organisation's agreement (not verified here) |
+| **Anthropic** (the language model) | only with `AI_LLM_PROVIDER=anthropic` (the default is `none`; production runs `none` until the conditions in [rag-architecture.md](rag-architecture.md#privacy-and-data-minimisation) are met) | the question and up to four earlier turns, with links, email addresses, phone numbers, passcodes and other credentials, and PAN, Aadhaar and card numbers replaced by markers (whatever their digits' script or encoding; previews are masked before they are cut: adversarial review of 73ff1e3, M5); tool results: lead name, organisation, job title, status and dates; deal names, account, customer, lost reason, description, work load and CPTs (only where the asker may see the customer: L6), amounts and prices; pipeline and stage names, activity titles and note passages (masked the same way). Never: contact fields, addresses, meeting links or places, custom values, audit data | HTTPS only (`AI_LLM_BASE_URL` must be https; SDK variables refused) | the provider's, under the organisation's agreement (not verified here) |
 | **SMTP provider** | always (account emails) | recipient address, first name, the inviter's name, a one-time link (invitation or reset), the old address and a masked new one (email change) | STARTTLS or TLS with certificate verification, enforced in production | the provider's |
 | **Object storage (S3-compatible)** | with `ATTACHMENT_STORAGE=s3` | attachment bytes under a random key (never the file name); export ZIPs (24 h) | HTTPS with certificate verification, enforced; objects private, SSE-AES256 | until purged; a versioned bucket keeps earlier versions until its lifecycle rule or `ATTACHMENT_S3_PURGE_VERSIONS` removes them |
 | **ClamAV** (clamd) | with `ATTACHMENT_SCANNER` | attachment bytes, to scan | plain TCP: must be loopback or a listed private container name (enforced) | none (scans in memory) |
@@ -69,10 +69,11 @@ Verified against the code; contracts and regions are the operator's to put in pl
 | Support-session reasons on the session row | the same 90 days after the session started | `identity.housekeeping` blanks them; the session (who, when) stays |
 | Sessions | at most 12 hours (2 hours idle); the cookie ends with the browser | expired rows deleted hourly; never in backups |
 | Login and reset throttle evidence | 24 hours | hourly housekeeping |
+| Daily sign-in locks | until the owner's unlock link, a reset, an administrator, or 30 days (`LOGIN_LOCK_MAX_AGE_S`) | hourly housekeeping (`identity.housekeeping`) |
 | Account-email payloads (an email address, a requester's address) | 24 hours after the email is sent | hourly housekeeping blanks them |
 | Finished background work | 7 days (`OUTBOX_DONE_RETENTION_DAYS`) | hourly housekeeping; dead events until an operator resolves them |
 | Idempotency records, workspace access windows | 24 hours / 30 minutes | hourly housekeeping |
-| Ask Arkray questions and answers | 30 days after each answer (`AI_CONVERSATION_RETENTION_DAYS`), whatever happens in the conversation since | hourly housekeeping; a user can delete a conversation at any time; both suspended by a legal hold ([below](#legal-holds)) |
+| Ask Arkray questions and answers | 30 days after each answer (`AI_CONVERSATION_RETENTION_DAYS`), whatever happens in the conversation since | hourly housekeeping; a user can delete a conversation at any time (gone for them at once; under a legal hold it is kept, hidden, and deleted by the first housekeeping after the release); retention suspended by a legal hold ([below](#legal-holds)) |
 | Ask Arkray index chunks | as long as the text they were computed from | deleted with it and by an erasure |
 | Attachment files of deleted notes' files | removed by a job after deletion (with their name and content hash) | [attachments](#attachments) |
 | Data exports | 24 hours after being built (`EXPORT_TTL_HOURS`); the record of the export stays | `privacy.housekeeping`, hourly |
@@ -100,6 +101,10 @@ anyone, through any path (the services check it, not the forms):
 | its deals' customer, account, contact phone and email, address, instrument, work load, Expected CPT, description, lost reason and custom values (and so their derived name) | new deals; value, probability, dates; stage moves and agreed prices (the history is append-only), except a move that sets or clears the lost reason (a move to a lost stage with a reason, or reopening a lost deal that has one), which is an edit of it (deep security audit L-9 and its review: a move that leaves the reason as it is goes on) |
 | its activities' subject and text, meeting place and link | new notes, tasks, meetings and files; times and priority; completing, cancelling, reopening, archiving |
 | deleting a file of its notes | uploading one |
+
+A won or lost deal's value and dates change only through an administrator's correction
+([pipeline.md](pipeline.md#closed-deals)), which goes on under a hold: it adds a row to an
+append-only history and overwrites none of the held text (adversarial review of 73ff1e3, M2).
 
 "Frozen" means no change at all, filling an empty field included: the record stays as it
 was when the hold was placed. A request changing a frozen field and an allowed one is
@@ -150,12 +155,21 @@ in it), until it is released:
   an [erasure](#erasure) of that customer matches them.
 
 While a hold keeps it, the 30-day housekeeping skips the conversation (questions older than
-the retention in it too) and **deleting it is refused** (409 `legal_hold`, nothing deleted),
-for the person the hold targets as for anyone; staff pseudonymisation leaves it in place, and
-so does the erasure of another customer it touches ([erasure](#erasure)). Deleting a
-conversation is audited (`ai.conversation_deleted`: the conversation's id and a count of its
-questions, never text). Once the hold is released, the next hourly housekeeping deletes what
-is older than the retention. Hourly housekeeping excludes a held user's conversations
+the retention in it too), staff pseudonymisation leaves it in place, and so does the erasure
+of another customer it touches ([erasure](#erasure)). **Deleting it is never refused**
+(adversarial review of 73ff1e3, M1, R148): a refusal (409 `legal_hold`, as before) told the
+asker whether any name in their question belonged to a held customer, anyone's, and a held
+user that they were held. Deleting one's own conversation always answers 204 and the
+conversation is gone for them at once, everywhere (the list, the detail, its questions,
+continuing it and a second deletion answer 404); a conversation no hold keeps is deleted then
+and there, one a hold keeps is kept as a tombstone (`ai_conversation.forgotten_at`; its
+unanswered questions are failed `forgotten` and never answered). Tombstones stay the hold's
+evidence: a subject-access export of the held customer still contains them, and an erasure
+still matches them. Both paths do the same work and are audited the same way
+(`ai.conversation_deleted`: the conversation's id, a count of its questions and `retained`,
+whether a hold kept it; never text, never which hold). Once the hold is released, the next
+hourly housekeeping deletes what is older than the retention, and every tombstone no hold
+keeps any more, whatever its age (the user's deletion completes then). Hourly housekeeping excludes a held user's conversations
 without reading them, matches the rest against the held customers in batches that each
 commit, and remembers a conversation found held while the same holds are active, so long
 holds don't slow the deletion of everyone else's history. Which customers a conversation
@@ -199,10 +213,11 @@ under Admin lists the administrator's own exports and their downloads): the requ
 confirms the identity check, and is audited (`privacy.export_requested`). A job builds a ZIP:
 
 - `data.json` (machine-readable) and `csv/*.csv` (the same as tables; a value a spreadsheet
-  would run as a formula is prefixed with a quote);
+  would run as a formula, also behind leading blanks, is prefixed with a quote);
 - for a **customer**: the lead (every field, archived or not), its deals in full (the customer
   copy, amounts, prices, CPTs, custom values by field name, removed fields' values too, stage
-  and price history), every task, meeting and note in full text (not the screens'
+  and price history, and the corrections of its closed deals: the figures before and after,
+  the reason and the time, table `deal_corrections`), every task, meeting and note in full text (not the screens'
   240-character previews), attachment details and the stored, downloadable files up to
   `EXPORT_MAX_BYTES` (100 MB; the rest are listed with the reason), the timeline, and the
   Ask Arkray questions and answers that cite the customer's records or name them, question by
@@ -214,7 +229,24 @@ confirms the identity check, and is audited (`privacy.export_requested`). A job 
   shown as "[another record]", and email addresses, phone numbers and links in the text
   masked: the customers their answers named are not their personal data; deep security audit
   L-6), and counts of the records they own. An answer's narrative written by the model can
-  still mention a person in words: review before releasing, as for free text.
+  still mention a person in words: review before releasing, as for free text. Their own
+  questions include conversations they deleted that a legal hold keeps (tombstones,
+  [legal holds](#legal-holds)): the data is still held, but the export then tells the person,
+  through the administrator handing it over, that a hold kept them (a decision for the
+  organisation: [below](#decisions-that-arent-the-systems)).
+
+The customer's export is built in bounded memory (adversarial review of 73ff1e3, M6): the
+records are read 100 at a time and written straight into the ZIP on disk, so its memory stays
+flat however much the customer holds (about 4-5 MB up to 5,000 long notes, where it peaked at
+82 MB for 1,500 before). Since its review round 1 (QUEUES-1, QUEUES-5) the CSVs are a second
+pass over the same database snapshot instead of temporary files, `EXPORT_MAX_BYTES` (100 MB)
+bounds the archive as stored (compressed), so every customer within the activity budgets
+fits (natural text in any script: about 39-76 MB measured at the budget), and the build has
+240 s; text deliberately made incompressible (random CJK or emoji) at the full budget can
+still exceed the cap and fail as too large ([reliability.md](reliability.md#export-sizing)).
+The `stage_history` rows also carry each transition's expected close date and opportunity
+date. A staff member's export is still built in memory (its audit events are capped at
+20,000).
 
 Only the administrator who asked can download it (`privacy.export_downloaded`), for 24 hours;
 then the file is deleted (`privacy.export_expired`) and the record kept. At most 3 exports may
@@ -249,8 +281,11 @@ workspace that sees the lead: one transaction, the lead's version checked (409 i
 changed it), audited by field names (`lead.corrected`). Every deal whose copy of the customer
 still holds the **old** value follows (`opportunity.customer_corrected`; its derived name
 too); a copy someone deliberately made different, the deal's amounts, prices and history are
-left as they are. Search, the dashboard and Ask Arkray (re-indexed) show the corrected
-details. An erased lead can't be corrected. A staff member's name and email are corrected by
+left as they are. The answer counts only the deals the caller can see; copies on other deals
+(a previous owner's closed deals) follow too and are audited as the system's (`cause:
+lead.corrected`), so a correction reveals nothing about deals out of the caller's sight
+(adversarial review of 73ff1e3, L5, R158). Search, the dashboard and Ask Arkray (re-indexed)
+show the corrected details. An erased lead can't be corrected. A staff member's name and email are corrected by
 an administrator on the Users page (another administrator's email only by that
 administrator, R100); the change is audited, an email change with its old and new address in
 the expiring audit detail.
@@ -298,7 +333,8 @@ says which). Refused while a legal hold covers the lead. In one transaction it:
   deal's value, probability, dates, stage moves without a lost reason, task priority and due
   time, completing work, archiving. Sending a field with the value it already holds (an edit
   form) is not a change. Customer corrections of an erased lead are refused the same way
-  (`lead_erased`);
+  (`lead_erased`), and so is an administrator's correction of its closed deals' figures (its
+  reason would be new free text about the person; adversarial review of 73ff1e3, M2);
 - blanks the opportunities' account, customer, contact and address fields, custom values,
   work load and Expected CPT and their derived names; a free-text instrument typed before the
   list existed is blanked too (one of the fixed list stays);
@@ -307,13 +343,18 @@ says which). Refused while a legal hold covers the lead. In one transaction it:
 - deletes the Ask Arkray index chunks of those records and queues their re-indexing from the
   redacted text;
 - records `lead.erased` (the administrator, the lead's id and counts, never a value);
-- redacts the free text in the append-only tables, if there is any (lost reasons, agreed
-  CPTs);
+- redacts the free text in the append-only tables, if there is any (the stage history's lost
+  reasons, the agreed prices' CPTs and the reasons of its closed deals' corrections; their
+  figures stay);
 - last, appends `lead_erased` to the [erasure ledger](#restore-safe-erasure): a ledger that
   can't be written stops the erasure, with nothing changed.
 
 Ids, dates, statuses, stage names and amounts stay, so the pipeline's figures and history keep
-their shape without identifying anyone. **What it can't find:** the person named in other
+their shape without identifying anyone. A customer holds at most 5,000 activities
+(`ACTIVITY_MAX_PER_CUSTOMER`, archived ones included; adversarial review of 73ff1e3, M6), and
+the erasure redacts and deletes them in statements of at most 1,000 rows, still in one
+transaction (about 2 s at that size); the automatic replay's worker job runs each statement
+under 60 s, an operator's command under 120 s. **What it can't find:** the person named in other
 leads' notes, tasks or meetings (search for the name across the organisation and edit those by
 hand), and a conversation naming only the company of a person lead.
 
@@ -349,6 +390,26 @@ matching reads every stored answer once, so the operation lifts the statement ti
 20 s (it runs inside a web request from the user's page: gunicorn allows 30 s, nginx 35 s;
 an erasure, which has no API path, allows 120 s).
 
+**Pseudonymisation is final** (adversarial review of 73ff1e3, L4, R157). It used to be
+inferred from the email's domain, which no user-administration action asked, so an
+administrator could type the old name back, or reactivate the account, point it at their own
+mailbox and accept the invitation: the former employee's id was a live login again. Now
+`pseudonymised_at` marks the account; the database holds a marked account to its pseudonym
+(deactivated, no usable password, that name and email: CHECK `identity_user_pseudonym_final`)
+and keeps the mark (trigger `identity_user_pseudonym_kept`, which the application's role
+can't disable); user administration refuses every change to it (422 `account_pseudonymised`:
+name, role, email, password, reactivation, invitation, two-step reset, clearing a sign-in lock,
+a support session). Accounts pseudonymised before this release were marked by migration
+`identity.0008` (renamed or revived ones put back under their pseudonym, their pending links
+revoked and their sessions ended), and only those a `user.pseudonymised` audit event names, or
+that are still under their own pseudonym with no usable password and not active: a live
+account an administrator merely gave an address at `pseudonymised.invalid` is never
+pseudonymised by it, it is listed in the migrate job's log
+(`pseudonym_domain_accounts_not_pseudonymised`, ids only) to be given a real address, and one
+holding a former user's pseudonym is moved aside to `reserved-<its own hex>@pseudonymised.invalid`
+(review round 1, IDENTITY-4 and IDENTITY-5). That domain is reserved: no invitation, email
+change or new account may use it. Someone who returns is invited as a new user.
+
 **Never another administrator's account through the API** (audit SEC-2,
 [ADR-0030](adr/0030-administrator-accounts-change-only-by-their-owner.md)): pseudonymising
 replaces the account's email and password, which only the administrator themselves may
@@ -370,9 +431,20 @@ Removing a pipeline's custom field keeps its values, hidden (removal is reversib
 them, whoever may configure the pipeline either ticks **Also delete these fields' stored
 values** when removing them, or deletes an already removed field's values by confirming its
 name. The request is audited (`pipeline.field_values_deletion_requested`); a job, once the
-request has committed, records it in the erasure ledger and removes the field's key from every deal of the pipeline in batches, row by row atomically (a
+request has committed, removes the field's key from every deal of the pipeline in batches, row by row atomically (a
 concurrent edit of the deal's other values is kept), leaving deals under a legal hold
-(counted), and audits the result (`pipeline.field_values_deleted`). Irreversible.
+(counted), records the deletion in the erasure ledger in the same transaction as its first
+removal, and audits the result (`pipeline.field_values_deleted`). Irreversible. Asking again
+is harmless (adversarial review of 73ff1e3, M3, R150): a request that finds no deal of its
+workspace still holding a value queues nothing, requests made before the job runs share it,
+and the job records the deletion in the ledger only in a transaction that removes values,
+once, so repeating the request can't grow the ledger. The answer is the same (202) either way.
+One request is one job and one ledger entry, however many fields it names (removing 30 fields
+with their values had written 30 entries; review round 1, LEDGER-2), and a person may ask for
+the deletion of at most 100 fields' values in any 24 hours
+(`MAX_VALUE_DELETIONS_PER_USER_PER_DAY`; 429 `rate_limited` with `Retry-After`, nothing
+changed; a field removal asking for deletion is refused as a whole): each one is written to the
+ledger for good.
 Configuring a pipeline is not authority over every deal in it (final production audit
 SEC-1): a deal reassigned with its lead stays in its old owner's personal pipeline, out of
 their sight. So outside the organization-wide workspace the deletion is refused as a whole
@@ -418,10 +490,17 @@ what the user sees. Writes follow reads: what they can't see they can't write or
 either (403 `customer_restricted` whatever the value sent; deep security audit M-2). The new
 owner and an administrator organisation-wide see everything
 ([authorization.md](authorization.md#historical-deals)). Conservative by default: whether a
-previous owner should keep a customer's contact details is a product decision, and so is the
-deal's own description and lost reason, which stay visible to them (R122) but are
-read-only for them (a change is 403 `customer_restricted`, so it can't reveal an erasure or
-a hold of that customer; deep security audit review).
+previous owner should keep a customer's contact details is a product decision (R118), and so
+is the deal's own free text. **One rule since the adversarial review of 73ff1e3 (L6):** the
+API showed the description, lost reason, work load and CPTs verbatim while Ask Arkray withheld
+some of them; now every surface (the deal's page, lists, board, its stage history, agreed
+prices and corrections, and Ask Arkray's tools) withholds the description, lost reason, work
+load, Expected CPT and agreed CPTs, the histories' lost reasons, agreed CPTs and correction
+reasons, and free-text custom values, from the one definition in `pipeline/customer.py`. The
+organisation, the instrument and every figure stay. The deal is read-only to them: its text
+because it may describe the customer (403 `customer_restricted`, so a change can't reveal an
+erasure or a hold of that customer), its figures because the deal is closed (422
+`deal_closed`, [pipeline.md](pipeline.md#closed-deals)).
 
 ## Restore-safe erasure
 
@@ -438,7 +517,13 @@ has applied it (`core_erasure_ledger_state`):
   changed, removed or reordered breaks the chain, and a full disk leaves no partial entry;
 - an erasure appends its entry last, just before its transaction commits; a deletion carried
   out by a job (a removed field's values, a deleted file's object) is appended by the job,
-  after the request committed, so a request that fails leaves no entry behind. A commit
+  after the request committed, in the transaction that removes the data and only when it
+  removes some, so a request that fails leaves no entry behind and a repeated one adds none
+  (adversarial review of 73ff1e3, M3). Files purged together (deleted within moments of each
+  other, an erasure's files, an hourly clean-up) share one `attachment_deleted` entry naming
+  up to 100 of them; a replay purges each again. An erasure queues one paged job for all its
+  files (a minute of purging a run, then a continuation), so it costs the same statements
+  however many files the customer had (review round 1, QUEUES-2). A commit
   that fails after the entry was written leaves the ledger ahead and the API closed; the
   **automatic reconciliation** (`privacy.reconcile_ledger`, every minute, the one task that
   runs while the gate is closed) then carries out the erasure that was asked for and the
@@ -452,6 +537,34 @@ has applied it (`core_erasure_ledger_state`):
   entry signed with the new key names it by an id (never the key) and anchors a SHA-256
   digest of every entry before it, so the old key can then be removed and can never add
   entries again ([runbooks.md](runbooks.md#rotate-the-erasure-ledger-key), ARCH-5);
+- the ledger costs the same at any size (adversarial review of 73ff1e3, M3, R150): the last
+  entry is found from the one a process last verified (one small LIST and one GET on S3, a
+  name check on a volume), entries are read only after the last verified one, which must
+  still be there unchanged (an entry naming another number than its own, or the last verified
+  entry changed or removed, is tampering), and a check never holds a request, a task or the
+  readiness probe more than 2 s: past that the gate answers from its last verified state
+  while the read finishes. A database position below the chain a process verified closes the
+  gate at once, without reading the ledger, and a ledger read decides "ahead" on its own, so a
+  slow store can't keep a restored database's gate open (review round 1, LEDGER-1). Every
+  verification leaves **signed checkpoints** in the ledger's own store, beside the entries
+  (`<prefix>.checkpoints/` in a bucket, a `checkpoints/` directory on a volume; one per 1,000
+  entries, an HMAC with the ledger key, no personal data); a process starts from the newest one
+  that verifies and whose entry is still there, reading only the entries after it (1,000 in
+  memory at a time; LEDGER-2, LEDGER-3; a store that refuses checkpoints only makes starts read
+  the whole chain), and each worker container's health check (`manage.py ledger_status`) still
+  re-verifies the whole chain from scratch at least hourly, a slice per probe, as do
+  `replay_erasures`, the key rotation and preflight. A verdict that the chain was tampered with
+  holds, in the health check and in the process that found it, until a verification of the
+  whole chain from scratch succeeds, and is logged as a security event at every probe (review
+  round 2, LEDGER2-1); `manage.py ledger_status --from-scratch` runs that verification at once.
+  A decided closed verdict (behind, ahead, tampered) stands until another read decides, and an
+  erasure appends only while the database's last applied entry is in the ledger unchanged
+  (otherwise 503, nothing written), so it never regrows a rolled-back ledger onto the
+  database's position (review round 3, LEDGER3-1). An entry verified before that is replaced by
+  anything that isn't an entry is tampering too; only a body beyond everything verified that
+  isn't JSON (a torn write, a proxy's error page) is a passing fault (review round 4,
+  LEDGER4-1). A restore is detected exactly as before (the database's position
+  against the ledger's head);
 - every process compares the database with the ledger at most once a minute, reading only
   the entries added since its last check (the whole chain at its first). A check that
   falls between an erasure's entry and its commit sees the eraser holding the append lock
@@ -499,7 +612,8 @@ and the ledger re-applies it if that backup is ever restored.
 | How long audit details are kept | 90 days (`AUDIT_DETAIL_RETENTION_DAYS`) | the organisation, with security |
 | How long logs are kept at the log platform | 30 days recommended | operations, with privacy |
 | Backup retention | 30 days | operations |
-| Whether a previous owner keeps a closed deal's customer contact details | hidden (conservative) | product owner |
+| Whether a previous owner keeps a closed deal's customer contact details, and the deal's own free text | both hidden (conservative; R118, extended to the free text by the adversarial review of 73ff1e3, L6) | product owner |
+| Whether a staff member's subject-access export includes the Ask Arkray conversations they deleted that a legal hold keeps | included (the data is still held; the export then tells them a hold kept them) | legal / privacy |
 | Whether a commercial document must be kept for a minimum period despite a deletion request | not enforced (a legal hold is the mechanism) | legal |
 | Whether to enable the Anthropic model (data-processing agreement, region, retention, a real-model evaluation) | off (`AI_LLM_PROVIDER=none`) | the organisation (R68) |
 | Contracts and regions for SMTP, object storage, database, log platform, backup store | not verifiable in code | the organisation |

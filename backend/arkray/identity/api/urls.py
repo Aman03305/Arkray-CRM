@@ -26,6 +26,12 @@ auth_urlpatterns = [
         views.PasswordResetConfirmView.as_view(),
         name="auth-password-reset-confirm",
     ),
+    path("sign-in-unlock", views.SignInUnlockView.as_view(), name="auth-sign-in-unlock"),
+    path(
+        "sign-in-unlock/verify",
+        views.SignInUnlockVerifyView.as_view(),
+        name="auth-sign-in-unlock-verify",
+    ),
     path("invitations/verify", views.InvitationVerifyView.as_view(), name="auth-invitation-verify"),
     path("invitations/accept", views.InvitationAcceptView.as_view(), name="auth-invitation-accept"),
 ]
@@ -62,6 +68,11 @@ admin_urlpatterns = [
         "users/<uuid:user_id>/mfa/reset",
         views.AdminUserMfaResetView.as_view(),
         name="admin-user-mfa-reset",
+    ),
+    path(
+        "users/<uuid:user_id>/clear-sign-in-lock",
+        views.AdminUserClearSignInLockView.as_view(),
+        name="admin-user-clear-sign-in-lock",
     ),
     path("security-events", views.SecurityEventListView.as_view(), name="admin-security-events"),
     path("support-sessions", views.SupportSessionStartView.as_view(), name="support-sessions"),

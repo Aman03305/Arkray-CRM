@@ -55,7 +55,7 @@ flowchart LR
 | ClamAV | clamd on a network shared with the scanning worker alone; strict client (only `stream: OK` is clean); signatures older than 3 days fail its health check | scanning only: uploads continue, new files can't be downloaded until scanned | 1.2 GB; up to 3 GB while new signatures load beside the old | one daemon for the measured upload rate; **amd64-only image** (below) |
 | Backup and restore | encrypted and signed dumps; restore into an empty database only; the ledger replayed after any restore; point-in-time recovery drilled (`backend/tests/drills/pitr_drill.py`) | the backup job and the key holders | dump 124 s, restore 392 s at 5.6 GB | — |
 | TLS | the edge terminates TLS (TLS 1.2/1.3, HSTS one year); every backend hop verified (`verify-full`, `rediss://`, `smtp+tls://`, https S3) | an expired certificate is an outage | — | renewal must be automated and alerted on |
-| Secrets | environment variables from a secret manager or a root-only file; production refuses dev, short or reused values ([runbooks.md](runbooks.md#rotate-a-secret)) | the secret store | — | — |
+| Secrets | environment variables from a secret manager or a root-only file; production refuses dev, short or reused values ([runbooks.md](runbooks.md#rotate-a-secret)). On the single-VM stack: production-only names (`ARKRAY_PROD_*`) from a file `docker compose --env-file` names (`scripts/init-prod-env.sh` generates it, `scripts/prod-compose.sh` runs every Compose command with it and nothing from the shell), never the repository's `.env`; a guard refuses development, weak and reused values before anything starts; PostgreSQL admits the superuser on its local socket only and the owner from the migrate job's network only (adversarial review of 73ff1e3, M4) | the secret store | — | — |
 | Monitoring | `/health/live`, `/health/ready`, `/health/metrics` (bearer token), Prometheus rules in `infrastructure/alerts/arkray.rules.yml`, JSON logs | needs a scraper, a log platform and someone paged **(org)** | — | — |
 
 **Architecture of the hosts.** Every image has only ever been built and verified on
@@ -121,12 +121,21 @@ region and no managed PostgreSQL.
 
 For a controlled pilot: about 10-20 active users, a few GB of data, a named group of testers,
 an announced support window. One x86 VM runs `compose.production.yml`'s services; S3 holds
-the files, the ledger and the backups.
+the files, the ledger and the backups. Its secrets: `scripts/init-prod-env.sh` writes them to
+an owner-only file outside the checkout, and every Compose command runs through
+`scripts/prod-compose.sh <file>` (docs/operations.md#production-shaped-stack): never the
+file loaded into a shell (an exported variable wins over the file) and never the
+repository's `.env`, whose published development values the stack refuses. **An office
+behind one shared address** (NAT, guest Wi-Fi) also needs a front proxy that bounds the
+whole time to receive a request and the connections per address (HAProxy `timeout
+http-request` with `option http-buffer-request`, or a CDN or load balancer that does the
+same): without it, one person there can hold the address's sign-in and save slots, or
+every connection with slow headers (docs/operations.md#edge-rate-limits; review round 1
+of the adversarial review of 73ff1e3, INFRA-3).
 
 | Variant | What runs where | USD / month | With GST |
 |---|---|---|---|
-| **1a. One VM, self-hosted PostgreSQL** (cheapest) | EC2 **t3a.large** (2 vCPU / 8 GiB, AMD, burstable) running everything, PostgreSQL 16 included with WAL archiving to S3 (WAL-G or pgBackRest in a small image derived from the pinned
-PostgreSQL one: point-in-time recovery); 40 GB gp3, snapshots, public IPv4; S3 (attachments, exports, backups, the ledger bucket with Object Lock); SES; Secrets Manager | **49.04** (39.11 with a 1-year Savings Plan) | 57.87 (46.15) |
+| **1a. One VM, self-hosted PostgreSQL** (cheapest) | EC2 **t3a.large** (2 vCPU / 8 GiB, AMD, burstable) running everything, PostgreSQL 16 included with WAL archiving to S3 (WAL-G or pgBackRest in a small image derived from the pinned PostgreSQL one: point-in-time recovery); 40 GB gp3, snapshots, public IPv4; S3 (attachments, exports, backups, the ledger bucket with Object Lock); SES; Secrets Manager | **49.04** (39.11 with a 1-year Savings Plan) | 57.87 (46.15) |
 | **1b. One VM + managed PostgreSQL** (recommended once real customer data is in it) | the same VM without PostgreSQL (30 GB gp3, snapshots, IPv4, S3, SES, Secrets Manager as in 1a); RDS for PostgreSQL 16 **db.t4g.small** (2 vCPU / 2 GiB, 20 GB gp3, point-in-time recovery up to 35 days, pgvector 0.8.2 / pg_trgm / btree_gin supported) | **81.41** (db.t4g.medium: 112.07) | 96.06 (132.24) |
 | 1c. DigitalOcean BLR1, one Droplet | s-4vcpu-8gb (4 vCPU / 8 GB) with weekly backups, self-hosted PostgreSQL, Spaces; the ledger bucket on AWS S3 (Spaces has no Object Lock) | **62.92** | 74.25 |
 | 1d. Lightsail 8 GB bundle | 2 vCPU / 8 GB / 160 GB, 2.5 TB transfer included in Mumbai; Lightsail object storage + an S3 ledger bucket. *Unverified:* x86 (confirm with `uname -m`), and Lightsail's managed PostgreSQL extensions (don't use it for the database) | **48.90** | 57.70 |
@@ -243,6 +252,9 @@ decision.
    `production` with required reviewers for the release workflow.
 4. Provide the production secrets through a secret manager (never the repository), the backup
    encryption key pair (made offline, private key with two named people) and the ledger key.
+   Every password and key generated for the environment (`openssl rand -hex 32`; on the
+   single VM, `scripts/init-prod-env.sh`), none shared between environments or secrets;
+   `manage.py preflight` fails a weak database or Redis password.
 5. Accept or reject each residual risk listed in the risk register (the deployment-readiness
    report lists the open ones): this document accepts none on the owner's behalf.
 6. Decide Ask Arkray: keep `AI_LLM_PROVIDER=none`, or authorise the real-model evaluation

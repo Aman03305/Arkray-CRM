@@ -48,6 +48,11 @@ export const authApi = {
     }),
   verifyInvitation: (token: string) =>
     apiFetch<InvitationPreview>(`${AUTH}/invitations/verify`, { method: "POST", body: { token } }),
+  /** Whose account an unlock link is for, masked, without using it (review round 1). */
+  verifySignInUnlock: (token: string) =>
+    apiFetch<{ email: string }>(`${AUTH}/sign-in-unlock/verify`, { method: "POST", body: { token } }),
+  /** The emailed link that lifts a sign-in lock (review of 73ff1e3, L1); trusts this browser. */
+  unlockSignIn: (token: string) => apiFetch<void>(`${AUTH}/sign-in-unlock`, { method: "POST", body: { token } }),
   acceptInvitation: (token: string, password: string) =>
     apiFetch<InvitationPreview>(`${AUTH}/invitations/accept`, {
       method: "POST",

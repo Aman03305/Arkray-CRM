@@ -324,3 +324,38 @@ class TestCeleryWiring:
 
         route = app.amqp.router.route({}, "core.outbox.relay")
         assert route["queue"].name == "outbox"
+
+
+class TestTimeLimits:
+    """Review round 1 (QUEUES-1): a handler may run longer than the workers' default (a
+    data-subject export), within the running lease, so it is never claimed again while it
+    still runs."""
+
+    def test_a_handlers_own_limit_travels_with_its_message(self, monkeypatch):
+        from arkray.core import tasks
+
+        sent: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            tasks.process_outbox_event, "apply_async", lambda **kwargs: sent.append(kwargs)
+        )
+        outbox.handler("test.slow", queue="default", time_limit=200)(lambda payload: None)
+        slow = outbox.enqueue("test.slow", {"id": 1})
+        quick = outbox.enqueue("test.ok", {"id": 2})
+        assert outbox.relay() == 2
+        by_event = {kwargs["args"][0]: kwargs for kwargs in sent}
+        assert (
+            by_event[slow.pk]["soft_time_limit"],
+            by_event[slow.pk]["time_limit"],
+        ) == (200, 200 + outbox.TIME_LIMIT_GRACE)
+        assert "soft_time_limit" not in by_event[quick.pk]  # the workers' default
+        assert "time_limit" not in by_event[quick.pk]
+
+    def test_a_limit_that_outlasts_the_running_lease_is_refused(self):
+        lease = outbox.settings.OUTBOX_LEASE_SECONDS
+        with pytest.raises(ImproperlyConfigured, match="running lease"):
+            outbox.handler("test.too_slow", time_limit=lease - outbox.TIME_LIMIT_GRACE)(
+                lambda payload: None
+            )
+        outbox.handler("test.slow_enough", time_limit=lease - outbox.TIME_LIMIT_GRACE - 1)(
+            lambda payload: None
+        )

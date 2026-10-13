@@ -32,7 +32,8 @@ administrator runs `manage.py erase_lead`, which in one transaction:
 - records `lead.erased` in the audit trail: the operator, the lead's id and counts, never
   any of the erased values;
 - redacts the free text kept in the append-only tables, when there is any: the lost
-  reasons of the stage history and the agreed CPT of every negotiated price. The trigger is
+  reasons of the stage history, the agreed CPT of every negotiated price and the reason of
+  every correction of its closed deals (their figures stay). The trigger is
   disabled for each single statement, inside the transaction, which needs the schema owner's
   credentials; the lock this takes holds stage moves and price entries for the moment
   between it and the commit;
@@ -52,6 +53,15 @@ Running it again: refused (AlreadyErased) only when the lead is erased and nothi
 person is left anywhere it reaches (`_left_to_erase`). Text typed back in before the rule
 above existed (or by a previous release during a rolling deploy) is removed by erasing again,
 and a ledger replay (privacy.replay) re-applies an erasure the same way.
+
+Bounded (review of 73ff1e3, M6): a customer holds at most ACTIVITY_MAX_PER_CUSTOMER
+activities (activities.services), and the activities are redacted and the index chunks deleted
+ERASE_BATCH at a time, so no statement grows with the customer (at the budget: 5,000
+activities and 8,000 chunks erased in about 2 s). Still one transaction: a failure part-way
+leaves nothing half-done (the ledger entry last, as above), and running it again redoes the
+whole erasure. The automatic reconciliation runs it in a worker (privacy.reconcile), where
+each statement gets WORKER_STATEMENT_TIMEOUT, inside Celery's 100 s soft limit; an operator's
+command gets STATEMENT_TIMEOUT.
 """
 
 from __future__ import annotations
@@ -106,9 +116,21 @@ LEAD_TEXT_FIELDS = (
 HISTORY_COLUMNS = (
     ("pipeline_stage_history", "lost_reason"),
     ("pipeline_negotiation_price", "agreed_cpt"),
+    # Why an administrator corrected a closed deal's figures (review of 73ff1e3, M2).
+    ("pipeline_opportunity_correction", "reason"),
 )
 # An operator's command over every stored answer: not a web request's 10 s.
 STATEMENT_TIMEOUT = "120s"
+# The automatic reconciliation's replay runs in a worker job (privacy.reconcile): a statement
+# that runs long fails there (rolled back, tried again next minute) before Celery's 100 s soft
+# limit stops the job.
+WORKER_STATEMENT_TIMEOUT = "60s"
+# Rows an erasure changes per statement (M6): none grows with the customer.
+ERASE_BATCH = 1000
+
+
+def _batches(ids: list[UUID]) -> list[list[UUID]]:
+    return [ids[start : start + ERASE_BATCH] for start in range(0, len(ids), ERASE_BATCH)]
 
 
 class OwnerRequired(Exception):
@@ -319,9 +341,11 @@ def erase(
     and nothing new is appended to the ledger. `unless_held` (with `replay`): the automatic
     reconciliation (privacy.reconcile, no operator), which leaves a held lead to an
     operator: a hold on it stops the replay as it stops an erasure, under the same lock, so
-    one placed since the reconciliation checked is seen."""
+    one placed since the reconciliation checked is seen (and that runs in a worker job:
+    WORKER_STATEMENT_TIMEOUT)."""
+    timeout = WORKER_STATEMENT_TIMEOUT if replay and unless_held else STATEMENT_TIMEOUT
     with connection.cursor() as cursor:
-        cursor.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
+        cursor.execute(f"SET LOCAL statement_timeout = '{timeout}'")
     # The first lock: serialised with placing any hold (core.holds.barrier). The holds read
     # below (this lead's, and the others' that keep conversations it touches) are then
     # final until this commits: one being placed has committed, or waits (R134).
@@ -366,12 +390,13 @@ def erase(
     conversations = deleted.get(Conversation._meta.label, 0)
 
     bump = {"version": F("version") + 1, "updated_at": now}
-    Activity.objects.filter(pk__in=activity_ids, type=ActivityType.NOTE).update(
-        title="", description=ERASED, **bump
-    )
-    Activity.objects.filter(pk__in=activity_ids).exclude(type=ActivityType.NOTE).update(
-        title=ERASED, description="", location="", meeting_url="", **bump
-    )
+    for batch in _batches(activity_ids):  # already locked above, all of them
+        Activity.objects.filter(pk__in=batch, type=ActivityType.NOTE).update(
+            title="", description=ERASED, **bump
+        )
+        Activity.objects.filter(pk__in=batch).exclude(type=ActivityType.NOTE).update(
+            title=ERASED, description="", location="", meeting_url="", **bump
+        )
     Opportunity.objects.filter(pk__in=opportunity_ids).update(
         title=ERASED,
         description="",
@@ -412,9 +437,10 @@ def erase(
             )
         )
 
-    chunks, _ = KnowledgeChunk.objects.filter(
-        Q(lead_id=lead_id) | Q(source_id__in=records)
-    ).delete()
+    chunks, _ = KnowledgeChunk.objects.filter(lead_id=lead_id).delete()
+    for batch in _batches(sorted(records)):  # also those filed under another lead
+        removed, _ = KnowledgeChunk.objects.filter(source_id__in=batch).delete()
+        chunks += removed
     indexing.enqueue_lead(lead_id)  # after commit, from the redacted text
 
     result = Erasure(

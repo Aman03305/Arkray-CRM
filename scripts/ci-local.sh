@@ -14,13 +14,16 @@
 #   secrets    gitleaks over every commit (CI's scan), then over what CI will scan once it
 #              is committed: changes staged and not, and untracked files that aren't ignored
 #   workflows  actionlint, with shellcheck on every `run:` script
+#   compose    the production-shaped stack refuses the development environment file for each
+#              secret it requires (CI copies .env.example to .env; here it is given with
+#              --env-file, so your own .env is never touched or read)
 #   backend    uv.lock against pyproject.toml, the embedding model, then
 #              `scripts/check.sh backend` (needs the local PostgreSQL; DATABASE_URL is passed
 #              through: give your own database name when others run tests too)
 #   frontend   `scripts/check.sh frontend` (Node >= 22.12 on PATH)
-#   images     both builds, Trivy's three gates per image, the hardened smoke test, and a
+#   images     both builds, Trivy's three gates per image, the hardened smoke test, a
 #              release on a new database (roles.sql, migrate as the owner, migrate --check,
-#              the release check as the application role)
+#              the release check as the application role), and the credential guard
 # Run in full, images is skipped when backend or frontend failed (CI's `needs`).
 #
 # The images are built from the working tree unless --ref names a commit (exported with
@@ -54,7 +57,7 @@ API_PORT="${CI_LOCAL_API_PORT:-18000}"
 WEB_PORT="${CI_LOCAL_WEB_PORT:-13000}"
 WORKDIR="${CI_LOCAL_WORKDIR:-${TMPDIR:-/tmp}/arkray-ci-local}"
 
-JOBS=(secrets workflows backend frontend images)
+JOBS=(secrets workflows compose backend frontend images)
 
 usage() {
   sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//'
@@ -142,6 +145,40 @@ job_workflows() {
     docker run --rm -v "$(host_path "$repo"):/repo:ro" -w /repo "$ACTIONLINT_IMAGE"
 }
 
+# --- compose ----------------------------------------------------------------------------
+# CI's check (.github/workflows/ci.yml, job compose): every secret the production overlay
+# requires given but one, with the development environment file; Compose must refuse,
+# naming it. .env.example is given with --env-file (CI copies it to .env): the same values,
+# and this checkout's own .env stays untouched.
+compose_configure() {
+  local name value
+  for name in "${compose_required[@]}"; do
+    value="$(openssl rand -hex 32)"
+    if [[ $name == "$1" ]]; then unset "$name"; else export "$name=$value"; fi
+  done
+  local files=(-p arkray-ci-local-production -f docker-compose.yml -f infrastructure/compose.production.yml --profile app)
+  docker compose --env-file .env.example "${files[@]}" config --quiet
+}
+compose_refuses_development_credentials() {
+  local missing errors="$WORKDIR/compose.err"
+  mkdir -p "$WORKDIR" || return 1
+  mapfile -t compose_required < <(grep -v '^ *#' infrastructure/compose.production.yml |
+    grep -oE '\$\{[A-Z][A-Z0-9_]*:\?' | sed -E 's/^\$\{//; s/:\?$//' | sort -u)
+  ((${#compose_required[@]} >= 7)) || { echo "the overlay requires only ${#compose_required[@]} secrets" >&2; return 1; }
+  for missing in "${compose_required[@]}"; do
+    if (compose_configure "$missing") 2> "$errors"; then
+      echo "the production stack took $missing from the development environment file" >&2
+      return 1
+    fi
+    grep -q "$missing" "$errors" || { cat "$errors" >&2; return 1; }
+  done
+  (compose_configure "") || return 1
+  echo "refused for each of ${#compose_required[@]} production secrets: ${compose_required[*]}"
+}
+job_compose() {
+  gate "compose: the production stack refuses development credentials" compose_refuses_development_credentials
+}
+
 # --- backend and frontend ---------------------------------------------------------------
 # CI's backend job runs `uv sync --locked` and `ai_fetch_model` before the gates that
 # scripts/check.sh runs; the lock check here changes nothing in the shared environment.
@@ -223,6 +260,26 @@ fresh_database() {
     python manage.py check --deploy --database default
 }
 
+# CI's guard check (images job): the published development password refused, generated
+# secrets accepted, in the image.
+credential_guard() {
+  local names=(ARKRAY_PROD_DB_SUPERUSER_PASSWORD ARKRAY_PROD_DB_OWNER_PASSWORD ARKRAY_PROD_DB_APP_PASSWORD
+    ARKRAY_PROD_REDIS_PASSWORD ARKRAY_PROD_DJANGO_SECRET_KEY ARKRAY_PROD_METRICS_TOKEN ARKRAY_PROD_ERASURE_LEDGER_KEY)
+  local guard=(docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true)
+  local name value
+  for name in "${names[@]}"; do
+    value="$(openssl rand -hex 32)"
+    local -x "$name=$value"
+    guard+=(-e "$name")
+  done
+  "${guard[@]}" "$BACKEND_IMAGE" python -m config.credentials || return 1
+  local -x ARKRAY_PROD_DB_SUPERUSER_PASSWORD=arkray_dev_only_password
+  if "${guard[@]}" "$BACKEND_IMAGE" python -m config.credentials; then
+    echo "the guard accepted the published development password" >&2
+    return 1
+  fi
+}
+
 job_images() {
   local failed=0 src built=1 image
   src="$(source_tree)" || return 1
@@ -267,6 +324,7 @@ job_images() {
   gate "images: hardened smoke test" smoke || failed=1
   gate "images: release on a new database (roles.sql, migrate, release check)" fresh_database "$src" ||
     failed=1
+  gate "images: the credential guard refuses development values" credential_guard || failed=1
   cleanup
   [[ -z $ref ]] || rm -rf "$src"
   return "$failed"

@@ -44,8 +44,12 @@ COPY --from=build /opt/venv /opt/venv
 # code execution through a recycled worker importing modified code (Phase 9 review).
 COPY --from=build /app /app
 COPY --from=model /opt/models /opt/models
+# ARKRAY_RUNTIME: this image runs production settings only; a process started without
+# DJANGO_SETTINGS_MODULE gets them too, never the development fallback, and another module is
+# refused (config/settings_module.py; adversarial review of 73ff1e3, L14).
 ENV PATH="/opt/venv/bin:${PATH}" \
     DJANGO_SETTINGS_MODULE=config.settings.production \
+    ARKRAY_RUNTIME=production \
     AI_EMBEDDING_MODEL_DIR=/opt/models/bge-small-en-v1.5
 WORKDIR /app
 USER arkray
