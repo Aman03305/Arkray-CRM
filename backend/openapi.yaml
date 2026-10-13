@@ -192,6 +192,14 @@ paths:
           minLength: 1
           maxLength: 500
       - in: query
+        name: manager
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 36
+        description: 'A team: an Admin''s id, or `none` for the users in no team (ADR-0035).
+          Intersected with what the caller administers.'
+      - in: query
         name: page_size
         schema:
           type: integer
@@ -211,11 +219,13 @@ paths:
         schema:
           enum:
           - admin
+          - team_admin
           - sales_user
           type: string
           minLength: 1
         description: |-
-          * `admin` - Admin
+          * `admin` - Super admin
+          * `team_admin` - Admin
           * `sales_user` - User
       - in: query
         name: status
@@ -405,7 +415,8 @@ paths:
       description: |-
         Remove an ordinary user's second factor (they lost the device and the recovery codes):
         their sessions end; they sign in with their password and may set up a new one. 422 for
-        an administrator, whoever asks (ADR-0033: an operator runs `manage.py reset_mfa`).
+        an administrator of either kind, whoever asks (ADR-0033/0035: an operator runs
+        `manage.py reset_mfa`); 404 outside the caller's reach (a team administrator: their team).
       parameters:
       - in: path
         name: user_id
@@ -479,8 +490,9 @@ paths:
   /api/v1/assignees:
     get:
       operationId: assignees_list
-      description: Who CRM records can be assigned to (owner pickers). Active users
-        only, by name.
+      description: |-
+        Who CRM records can be assigned to (owner pickers). Active users only, by name; a team
+        administrator's: themselves and their team's active members (ADR-0035).
       parameters:
       - in: query
         name: cursor
@@ -1025,7 +1037,8 @@ paths:
         schema:
           type: string
           format: uuid
-        description: Organisation-wide workspace only.
+        description: Organisation-wide or a team's workspace only; narrows it, never
+          widens.
       - in: query
         name: page_size
         schema:
@@ -1772,7 +1785,8 @@ paths:
         schema:
           type: string
           format: uuid
-        description: Organisation-wide workspace only.
+        description: Organisation-wide or a team's workspace only; narrows it, never
+          widens.
       - in: query
         name: page_size
         schema:
@@ -1964,8 +1978,9 @@ paths:
     post:
       operationId: leads_assign
       description: |-
-        Reassign a lead (crm.assign_any). The response shows the lead as reassigned, even if
-        it has thereby left the workspace it was reassigned from.
+        Reassign a lead (crm.assign_any; or crm.assign_team, within the team: the service
+        applies the reach, ADR-0035). The response shows the lead as reassigned, even if it has
+        thereby left the workspace it was reassigned from.
       parameters:
       - in: path
         name: lead_id
@@ -2296,7 +2311,8 @@ paths:
         schema:
           type: string
           format: uuid
-        description: Organisation-wide workspace only.
+        description: Organisation-wide or a team's workspace only; narrows it, never
+          widens.
       - in: query
         name: page_size
         schema:
@@ -2499,10 +2515,11 @@ paths:
     post:
       operationId: opportunities_assign
       description: |-
-        Change an open opportunity's owner (crm.assign_any). Ownership follows the customer
-        record, so its other open opportunities and current work move too (ADR-0027). The
-        response shows the opportunity as reassigned, even if it has thereby left the workspace
-        it was reassigned from (as leads' assign).
+        Change an open opportunity's owner (crm.assign_any; or crm.assign_team, within the
+        team: the service applies the reach, ADR-0035). Ownership follows the customer record, so
+        its other open opportunities and current work move too (ADR-0027). The response shows the
+        opportunity as reassigned, even if it has thereby left the workspace it was reassigned
+        from (as leads' assign).
       parameters:
       - in: path
         name: opportunity_id
@@ -2540,7 +2557,8 @@ paths:
       description: |-
         An administrator corrects a won or lost deal's value or dates, which no edit changes
         while it is closed (adversarial review of 73ff1e3, M2): with a reason, at the version
-        last seen, appended to the deal's corrections. crm.manage_any, a recent second factor
+        last seen, appended to the deal's corrections. crm.manage_any, or crm.manage_team for a
+        deal of the team (ADR-0035; the service applies the reach), a recent second factor
         (ADR-0033), and never in a support session (the administrator's own context, as for user
         administration).
       parameters:
@@ -2935,7 +2953,8 @@ paths:
         schema:
           type: string
           format: uuid
-        description: Organisation-wide workspace only.
+        description: Organisation-wide or a team's workspace only; narrows it, never
+          widens.
       - in: query
         name: pipeline
         schema:
@@ -3007,7 +3026,8 @@ paths:
         schema:
           type: string
           format: uuid
-        description: Organisation-wide workspace only.
+        description: Organisation-wide or a team's workspace only; narrows it, never
+          widens.
       - in: query
         name: pipeline
         schema:
@@ -3897,6 +3917,14 @@ components:
           - $ref: '#/components/schemas/InvitationState'
           nullable: true
           readOnly: true
+        manager:
+          allOf:
+          - $ref: '#/components/schemas/Person'
+          nullable: true
+          readOnly: true
+          description: 'The Admin (role team_admin) whose team this user is in, or
+            null: a user in no team (managed by super admins) or an administrator
+            (ADR-0035).'
         password_change_required:
           type: boolean
           readOnly: true
@@ -3951,6 +3979,7 @@ components:
       - invitation
       - last_login
       - last_name
+      - manager
       - mfa_enabled
       - mfa_lock
       - password_change_required
@@ -5305,7 +5334,8 @@ components:
         owner:
           type: string
           format: uuid
-          description: Organisation-wide workspace only (required there, needs crm.assign_any).
+          description: Organisation-wide (crm.assign_any) or a team's workspace (a
+            member of the team, crm.assign_team) only, and required there.
     LeadDuplicate:
       type: object
       properties:
@@ -6362,7 +6392,8 @@ components:
           type: string
           format: uuid
           description: 'Without a lead: who owns the new opportunity. Required organisation-wide
-            (crm.assign_any); elsewhere the workspace''s user, so it may be omitted.'
+            (crm.assign_any) and in a team''s workspace (a member of the team, crm.assign_team);
+            elsewhere the workspace''s user, so it may be omitted.'
         pipeline:
           type: string
           format: uuid
@@ -6712,7 +6743,21 @@ components:
           type: string
           maxLength: 100
         role:
-          $ref: '#/components/schemas/RoleEnum'
+          allOf:
+          - $ref: '#/components/schemas/RoleEnum'
+          description: |-
+            Super admins only (ADR-0035).
+
+            * `admin` - Super admin
+            * `team_admin` - Admin
+            * `sales_user` - User
+        manager:
+          type: string
+          format: uuid
+          nullable: true
+          description: Move a user into an Admin's team (an active or invited team_admin),
+            or out of any (null). Super admins only; the user must be, or become in
+            the same request, a sales_user (ADR-0035).
         version:
           type: integer
           minimum: 1
@@ -7064,10 +7109,12 @@ components:
     RoleEnum:
       enum:
       - admin
+      - team_admin
       - sales_user
       type: string
       description: |-
-        * `admin` - Admin
+        * `admin` - Super admin
+        * `team_admin` - Admin
         * `sales_user` - User
     ScanStatusEnum:
       enum:
@@ -7971,6 +8018,13 @@ components:
             sign in). Omit it to email an invitation instead. Stored only as a hash;
             never returned.
           maxLength: 1024
+        manager:
+          type: string
+          format: uuid
+          nullable: true
+          description: 'A new user''s Admin (an active or invited team_admin), for
+            role sales_user only (ADR-0035). Super admins only: an Admin''s new users
+            are always in their own team (null or their own id; anything else is 403).'
       required:
       - email
       - first_name
@@ -8089,11 +8143,13 @@ components:
       enum:
       - self
       - user
+      - team
       - organization
       type: string
       description: |-
         * `self` - self
         * `user` - user
+        * `team` - team
         * `organization` - organization
     WorkspaceSubject:
       type: object

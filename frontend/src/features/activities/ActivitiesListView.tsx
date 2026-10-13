@@ -19,7 +19,7 @@ import type { ActivityListItem, ActivityOrdering } from "@/lib/api/types";
 import { useFlash } from "@/lib/flash";
 import { businessToday } from "@/lib/format";
 import { useViewer } from "@/lib/viewer-context";
-import { type Workspace, workspaceApiSegment } from "@/lib/workspace";
+import { isOverview, type Workspace, workspaceApiSegment } from "@/lib/workspace";
 
 import {
   activeFilterCount,
@@ -63,7 +63,8 @@ function done(action: LifecycleAction, activity: ActivityListItem): string {
 
 /**
  * The Activities page, rendered unchanged in every workspace: a salesperson's own
- * (/activities), the organisation for administrators (/activities), and one user's
+ * (/activities), the overview for administrators (/activities: the organisation, or a team
+ * administrator's team), and one user's
  * workspace opened by an administrator (/admin/users/{id}/activities). Only the API path
  * differs. The same tabs switch between the list and the calendar.
  */
@@ -254,7 +255,7 @@ export function ActivitiesListView({ workspace }: { workspace: Workspace }) {
             activities={rows}
             loading={activities.isPending}
             workspace={workspace}
-            showOwner={workspace.kind === "organization"}
+            showOwner={isOverview(workspace)}
             canWrite={permissions.canWrite}
             busyId={action.isPending ? (action.variables?.activity.id ?? null) : null}
             onAction={onRowAction}
@@ -314,7 +315,7 @@ function Labelled({ id, label, children }: { id: string; label: string; children
 }
 
 /** The tabs (the calendar, or the list of all / tasks / meetings / notes); for the list, the
- * status and sort up front, and dates, opportunity, owner (organisation-wide) and the archived view
+ * status and sort up front, and dates, opportunity, owner (in the overview) and the archived view
  * under "More filters". Only filters the API accepts exist here. */
 function FiltersBar({ workspace, list }: { workspace: Workspace; list: ReturnType<typeof useActivityListState> }) {
   const ids = { status: useId(), sort: useId(), from: useId(), to: useId(), panel: useId(), range: useId() };
@@ -427,11 +428,11 @@ function FiltersBar({ workspace, list }: { workspace: Workspace; list: ReturnTyp
                   name="filter-opportunity"
                 />
               </div>
-              {workspace.kind === "organization" ? (
+              {isOverview(workspace) ? (
                 <div className="sm:col-span-2">
                   <OwnerSelect
                     label="Owner"
-                    placeholder="Anyone"
+                    placeholder={workspace.kind === "team" ? "Anyone in my team" : "Anyone"}
                     value={filters.owner}
                     valueLabel={filters.ownerLabel}
                     onChange={(owner, ownerLabel) => list.setFilters({ owner, ownerLabel })}

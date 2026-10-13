@@ -47,7 +47,7 @@ A session without valid timestamps is treated as expired: deny by default.
 | `POST /api/v1/auth/mfa/disable` | signed in | `{current_password, code}` → 204; `422` where the role requires it |
 | `POST /api/v1/auth/mfa/verify` | signed in | `{code}` or `{recovery_code}` → 204 (step-up) |
 | `POST /api/v1/auth/logout` | public (idempotent) | deletes the session; audited when a user was signed in |
-| `GET /api/v1/auth/me` | signed in | `{id, email, first_name, last_name, full_name, role, role_label, capabilities[], features, password_change_required, support_session, mfa_enabled, mfa_enrollment_required}` |
+| `GET /api/v1/auth/me` | signed in | `{id, email, first_name, last_name, full_name, role, role_label, capabilities[], features, password_change_required, support_session, mfa_enabled, mfa_enrollment_required}`. `role` is `admin` ("Super admin"), `team_admin` ("Admin") or `sales_user` ("User") ([ADR-0035](adr/0035-super-administrators-and-teams.md)); `capabilities` lists what the role holds ([Roles → capabilities](#roles--capabilities-built)), and the web app decides what to show from them, never from the role |
 | `POST /api/v1/auth/password/change` | signed in | `{current_password, new_password}`; throttled like sign-in; keeps this session (new key), ends all others, and voids any outstanding password-reset link |
 | `POST /api/v1/auth/password-reset` | public | `{email}` → always `202` "If an eligible account exists, password reset instructions have been sent." |
 | `POST /api/v1/auth/password-reset/confirm` | public | `{token, new_password}` → 204; every session ends; the user then signs in |
@@ -94,7 +94,9 @@ stateDiagram-v2
 
 Every rule is a CHECK constraint on `identity_user` ([database.md](database.md#identity_user-built-lifecycle-added-in-phase-1)).
 Users are **never deleted**: foreign keys are `PROTECT`, and history and ownership
-references stay intact.
+references stay intact. "admin" in the diagram is either kind of administrator acting within
+their reach: a super admin on any account, an Admin on their own team's users only
+([User administration rules](#user-administration-rules)).
 
 ### Admin-set passwords
 
@@ -103,6 +105,11 @@ password** (`POST /admin/users {…, password}`) instead of an invitation, and m
 password** for a user (`POST /admin/users/{id}/set-password {version, new_password}`). In
 both cases ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.md)):
 
+- **who**: a super admin for any user; an Admin (team administrator,
+  [ADR-0035](adr/0035-super-administrators-and-teams.md)) for the users of their own team
+  only, whom they create with an initial password or set one for like a super admin does.
+  Anyone outside the caller's reach is a 404, identical to an account that doesn't exist
+  ([User administration rules](#user-administration-rules));
 - the plaintext exists only in that request: the password policy runs, the hash is stored,
   and the password is never stored, logged, audited, queued, emailed or returned by any API
   (tested on logs, audit, outbox, mail and every response);
@@ -112,41 +119,61 @@ both cases ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.md))
   shows only the change-password screen. An unchanged temporary password expires after
   `TEMPORARY_PASSWORD_TTL_S` (72 h; sign-in answers `temporary_password_expired`);
 - setting a password ends the user's sessions and voids outstanding reset links; it is
-  refused for oneself (Settings), for another administrator **whatever the account's status**
-  (that would let one administrator sign in as another; see
-  [Administrator account protection](#administrator-account-protection)), and for invited or
-  deactivated users; audited as `auth.password_set_by_admin` (actor, user; never the
+  refused for oneself (Settings), for another administrator of either kind **whatever the
+  account's status** (that would let one administrator sign in as another; see
+  [Administrator account protection](#administrator-account-protection)), for an account
+  another administrator took out of an administrator role in the last 7 days
+  ("demote-then-unshield", same section), and for invited or deactivated users; audited as `auth.password_set_by_admin` (actor, user; never the
   password), and the account's own address is emailed that an administrator set a new
   password (no password in it; adversarial review of 73ff1e3, L3); the notice carries the
   address it was queued for and is sent whatever the account's status by then, so neither a
   quick deactivation and reactivation nor an email change right after suppresses or redirects
   it (review round 1, IDENTITY-3; the role-change and second-factor notices alike);
-- **administrators are always invited** (a password on create is refused for a role that
-  manages users), and a user whose administrator-set password is still unchanged **can't be
-  made an administrator** until they choose their own (422): otherwise set, promote would
+- **administrators of both kinds are always invited** (a password on create is refused for
+  a role that manages users, Super admin or Admin; `identity.policy.administrator_roles`), and
+  a user whose administrator-set password is still unchanged **can't be made an
+  administrator** of either kind until they choose their own (422): otherwise set, promote would
   hand one administrator another administrator's account (adversarial review); and once
   they have chosen it, not for `ADMIN_PROMOTION_COOLING_OFF_S` (7 days) after an
   administrator set their password, changed their email, reset their second factor or created
-  the account with a password (422 naming the date; adversarial review of 73ff1e3, L3:
-  "promote-then-shield", [Administrator account protection](#administrator-account-protection));
+  the account with a password, or an Admin created the account at all (they chose the address
+  its invitation or reset goes to; ADR-0035) (422 naming the date; adversarial review of
+  73ff1e3, L3: "promote-then-shield",
+  [Administrator account protection](#administrator-account-protection)). An **invited**
+  account (its invitation not yet accepted) can't be made an administrator either (422 "This
+  user hasn't accepted their invitation yet, so they can't be made an administrator: promote
+  them once they have signed in, or invite the administrator with their role."): whoever
+  invited it chose the address the pending invitation goes to;
+- **a temporary password goes with the reach of the administrator who chose it**
+  (ADR-0035): when they lose their reach over the account (the user moved out of their team,
+  `team_moved`; the administrator made a non-administrator, `setter_demoted`; or deactivated,
+  either kind, `setter_deactivated`), every account still on a temporary password they set
+  gets, as a reactivated administrator does (R126), a random password nobody knows, its
+  sessions and trusted browsers retired, its pending reset and unlock links revoked and, if
+  active, a reset link at its own address. Audited as `auth.temporary_password_voided` with
+  the reason (shown in the security events). A password someone else set since, or the user
+  chose, is left alone. Otherwise an Admin could set a user's password, have the user moved
+  out of their team (or be demoted or deactivated themselves) and still sign in as them;
 - a sign-in with a password an administrator set (before the user changed it) is recorded as
   `auth.login_with_temporary_password` and shown in the security events: an administrator
   using it is visible there, before the user's own change;
 - the user detail shows *when* a password was set (`password_changed_at`) and whether it must
   be changed, never anything about the password itself. **Administrators cannot retrieve or
   receive user plaintext passwords.** Residual risk (R92): until the user changes it, the
-  administrator knows the temporary password; the forced change, its expiry and the audit
-  trail bound that.
+  administrator knows the temporary password; the forced change, its expiry, its voiding when
+  the administrator loses their reach and the audit trail bound that.
 
 ### Password change notification
 
 The request "if a user updates their password, the admin gets the updated password" is **not
 implemented literally**: no administrator ever receives a plaintext password. Instead every
-password change is a security event administrators see (`GET /admin/security-events`,
-`audit.view`; the organisation dashboard's *Security activity*): **who** changed their
+password change is a security event super admins see (`GET /admin/security-events`,
+`audit.view`; the organisation dashboard's *Security activity*; Admins don't hold
+`audit.view`, so the feed stays organisation-wide, ADR-0035): **who** changed their
 password and **when** (`auth.password_changed`, `auth.password_reset_completed`,
-`auth.password_set_by_admin`), plus users created, deactivated, reactivated, given a new role
-or email, and support sessions started and ended. The feed is an allowlist of actions and of
+`auth.password_set_by_admin`, `auth.temporary_password_voided`), plus users created,
+deactivated, reactivated, given a new role or email, or moved into, out of or between teams
+(`user.manager_changed`, without the teams' ids), and support sessions started and ended. The feed is an allowlist of actions and of
 metadata keys; never a password, a hash, a token or a link.
 
 ### Invitation flow (admins never choose or see passwords)
@@ -222,7 +249,9 @@ with the reasons returned per field. Passwords are never trimmed, logged or audi
 Existing sessions fail on their next request (401) and **stay dead after a
 reactivation**. Records, history and audit are untouched. The action is idempotent.
 Admins can't deactivate themselves, and the system always keeps at least one active
-administrator.
+**super** administrator (an Admin can't administer the organisation, so doesn't count;
+ADR-0035). A deactivated administrator of either kind takes their pending invitations and
+the temporary passwords they set with them ([Admin-set passwords](#admin-set-passwords)).
 
 ### User administration rules
 
@@ -230,20 +259,69 @@ administrator.
   An admin who was deactivated or demoted a moment ago can't complete an action, and two
   admins deactivating each other can't leave zero administrators (tested with real
   concurrency).
-- Editable via `PATCH` (with the current `version`, or 409): first name, last name, role.
-  Anything else, including `email`, `status`, `is_active`, `password`, `is_superuser` and
-  `capabilities`, is rejected with 400 (unknown field). Role changes are audited with
-  before and after values, admins can't change their own role, **nor another
-  administrator's** (422, below), and a role change signs the user out everywhere
+- **Reach** ([ADR-0035](adr/0035-super-administrators-and-teams.md),
+  [Teams](#teams-adr-0035)): a super admin (`users.manage`) administers every account; an
+  Admin (`users.manage_team`) administers themselves and their team's users, whatever their
+  status (a deactivated member stays listed and can be reactivated). Every `/admin/users…`
+  route is open to both (`requires_any`), and the services apply the reach: the list and the
+  detail return only accounts within it, and every operation on one account (edit, email
+  change, password, deactivation, reactivation, invitation, clearing a sign-in lock, second
+  factor reset) locks the target's row and answers **404 outside the reach, identical to an
+  account that doesn't exist**, before its version, status, role or pseudonymisation can show
+  (`identity.services._lock_reachable_user`). So an Admin learns nothing about accounts
+  outside their team and never reaches another administrator of either kind: only super
+  admins edit or off-board an Admin.
+- **The users list** (`GET /admin/users`) filters by `role` (`admin`, `team_admin`,
+  `sales_user`) and by `manager` (an Admin's id, or `none` for the users in no team), each
+  intersected with the reach, never widening it. Every account shows its team as
+  `manager: {id, full_name}` or null (`role_label` "Super admin", "Admin" or "User").
+- **Creating** (`POST /admin/users`): an Admin creates **users only, into their own team**
+  (`manager` omitted, null or their own id); another role or another team is 403 "Admins add
+  users to their own team only.". A super admin creates users, Admins and Super admins, and
+  may name a new user's Admin (`manager`, for `sales_user` only: an Admin whose account is
+  active or invited and not pseudonymised, else 400 `details.manager` "Choose an Admin whose
+  account is active or invited."). Administrators of either kind are always invited
+  ([Admin-set passwords](#admin-set-passwords)). `user.created` records the team
+  (`manager`) and, for an Admin's creation, `creator_scope: team`, which the promotion
+  cooling-off counts.
+- Editable via `PATCH` (with the current `version`, or 409): first name, last name, role and
+  `manager`. Anything else, including `email`, `status`, `is_active`, `password`,
+  `is_superuser` and `capabilities`, is rejected with 400 (unknown field). **Roles and teams
+  are the super admins' alone**: an Admin who sends `role` or `manager` gets 403 "Only a super
+  admin changes roles and teams.", decided before the target is read, so the answer depends
+  on who asks, never on whom. Role changes are audited with before and after values, nobody
+  changes their own role, **another super admin's role is never changed** (422, below), and a
+  super admin may make an Admin a User or a Super admin and promote a User to either kind
+  (with the promotion guards below). A role change signs the user out everywhere
   (`session_epoch`; deep security audit L-2), so it applies to a fresh sign-in, with the
   second factor the new role may require.
+- **Moving a user between teams** (super admins): `PATCH {manager, version}` with an Admin
+  whose account is active or invited (400 `details.manager` otherwise), or null (no team:
+  managed by the super admins only). Only a user belongs to a team, so the target must be,
+  or become in the same request, a `sales_user` (400 "Only users belong to an Admin's team:
+  administrators don't."); making a user an administrator of either kind takes them out of
+  their team. Audited as `user.manager_changed` with `from` and `to` (also when a promotion
+  clears it). The account's `version` moves on but its `session_epoch` doesn't: nobody is
+  signed out, because a team change takes effect at the next request anyway
+  ([Teams](#teams-adr-0035)); but a temporary password the previous Admin set for the user,
+  still unchanged, is voided ([Admin-set passwords](#admin-set-passwords)).
+- **An Admin who stops being one** (made a User or a Super admin) leaves their team
+  unassigned in the same transaction: every member's `manager` becomes null (each member's
+  `version` moves on; the count is `unassigned_members` in `user.role_changed`), so no user is
+  ever managed by an account that is no longer an Admin, and their pending invitations are
+  revoked. Made a User, they also lose the temporary passwords they set (voided, a reset link
+  mailed); made a Super admin, they keep them (their reach only grows). A **deactivated**
+  Admin keeps their team: the super admins manage it meanwhile, or move it (R174); their
+  invitations are revoked and their temporary passwords voided, as for any administrator's
+  deactivation.
 - **Email change** is its own action (`POST /admin/users/{id}/change-email`, with the
   version): uniqueness is checked (409), `session_epoch` is incremented (the user is signed
   out everywhere), pending reset links are revoked, invited users get a fresh invitation at
   the new address, and active users' previous address is notified. It is audited with old
   and new values. Changing **your own** email also requires your current password
   (throttled like sign-in), so a hijacked session can't become a permanent takeover.
-  **Another administrator's** email can't be changed at all (422, below).
+  **Another administrator's** email (either kind) can't be changed at all, nor, for 7 days,
+  that of an account another administrator took out of an administrator role (422, below).
 
 ### Administrator account protection
 
@@ -251,41 +329,57 @@ Risk R100: an administrator could change another administrator's email to a mail
 read, use *Forgot password* there and sign in as them; or demote them, set a temporary
 password (allowed for sales users), sign in with it and choose a new one at the forced change.
 Each step was audited, but nothing stopped it. Since then **an administrator's credentials
-and standing are changed only by that administrator**. For another account whose *role* is
-administrator, whatever its status (active, invited or deactivated: the protection must not
-depend on a status another administrator can change):
+are changed only by that administrator**. Since
+[ADR-0035](adr/0035-super-administrators-and-teams.md) this holds for **both kinds**, a
+Super admin (`admin`) and an Admin (`team_admin`): `identity.services.is_administrator`
+(`identity.policy.administrator_roles`) is the one definition, used here, in
+`identity.support`, `identity.mfa_services` and `privacy.staff`. A super admin controls an
+Admin's role and team, never their password, email or second factor, so nobody can sign in
+as an Admin either. The protection applies to every other account whose *role* is
+administrator, whatever its status (active, invited or deactivated: it must not depend on a
+status another administrator can change). An Admin never reaches another administrator at all (404, as for
+an account that doesn't exist: [User administration rules](#user-administration-rules)),
+so the table describes what a super admin gets:
 
 | Action on another administrator | Result |
 |---|---|
 | Change email | 422 `business_rule_violation`: "Administrators change their own email address in Settings." No exception for an invitation sent to a mistyped address: deactivate it and invite the right one. |
 | Set password | 422: "Administrators set their own passwords: …" (they use *Forgot password*, which mails only their own address). |
-| Change role (demote) | 422: "An administrator's role can't be changed by another administrator. To remove their access, deactivate the account." |
+| Change role: another **super** admin | Never: 422 "A super admin's role can't be changed by another administrator. To remove their access, deactivate the account." Demote, then set a password, was a takeover (R100). |
+| Change role: an **Admin** | A super admin may make them a User or a Super admin (ADR-0035, amending [ADR-0030](adr/0030-administrator-accounts-change-only-by-their-owner.md)). It changes no credential: their sessions end, their team is left unassigned and their pending invitations are revoked, and a demoted account stays shielded for 7 days (next row). Only super admins change roles at all (an Admin gets 403). |
+| Change email, set password or reset the second factor of an account another administrator took out of an administrator role in the last 7 days | 422: "This account stopped being an administrator in the last 7 days, so another administrator can't change its password, email or two-step verification until …" (naming the date). **Demote-then-unshield**, the mirror of promote-then-shield: without it a super admin could make an Admin a User, then set their password and sign in as them. Read from the audit trail: the latest `user.role_changed` from an administrator role to a non-administrator one made by someone other than the account (an operator's, with no actor, counts too) within `ADMIN_PROMOTION_COOLING_OFF_S`. |
 | Edit first or last name | allowed |
-| Deactivate, reactivate, resend invitation | allowed and audited (off-boarding; gives no credentials: reactivation restores the account's own password, invitations go to the account's own address). The last active administrator still can't be deactivated. |
+| Deactivate, reactivate, resend invitation | allowed and audited (off-boarding; gives no credentials: an administrator reactivated by another comes back with no known password and a reset link at their own address, R126; invitations go to the account's own address). The last active **super** administrator still can't be deactivated; Admins don't count toward it. |
 | Support session | refused (support sessions are for CRM users only) |
 | Pseudonymise (privacy) | 403 `permission_denied`, nothing changed (audit SEC-2): it replaces the account's email and password. Checked in `privacy.staff` under the same lock, on the locked row. Only an operator, on the server: `manage.py pseudonymise_user --allow-administrator` ([privacy.md](privacy.md#staff)). |
 | Anything on a pseudonymised former user (any role) | 422 `account_pseudonymised`: name, role, email, password, reactivation, invitation, MFA reset, clearing a sign-in lock, a support session; deactivating stays a no-op. The database holds the account to its pseudonym (adversarial review of 73ff1e3, L4) |
 
-The checks are in `identity.services` (`_refuse_for_another_administrator`), under the
+The checks are in `identity.services` (`_refuse_for_another_administrator`,
+`_refuse_role_change_of_another_super_administrator`, `_refuse_if_recently_demoted`), under the
 user-administration advisory lock, against the target's **locked** row, and before the
 version check (a stale page gets the reason, not a conflict). So a promotion racing an
 email change either commits first, and the email change is refused, or commits after it
 (tested with real concurrency in `tests/security/test_admin_takeover.py`). Promoting a
-user to administrator stays allowed (with the guard above), except within 7 days of an
-administrator's change of that account's credentials (**promote-then-shield**, adversarial
-review of 73ff1e3, L3: an administrator could set an ordinary user's password, sign in as
-them, change it and promote the account, which this table then put out of every other
-administrator's reach). The owner is emailed about an administrator-set password and every
-role change, and each promotion raises `ArkrayAdministratorPromoted`
-(`tests/security/test_admin_promotion_shield.py`). How an operator removes or
-changes an administrator when the policy is in the way: [security.md](security.md#administrator-account-protection).
-- A manager who is deactivated takes their **pending invitations** with them: they're revoked
-  in the same transaction (counted in the audit event), so nobody can leave a pre-approved
-  account behind. The invited user shows "No active invitation" until another admin resends.
-  (A role change through `update_user` does the same, but since R100 no administrator can
-  change another administrator's role; an operator demoting one in the database revokes
-  their invitations by hand, see [security.md](security.md#administrator-account-protection).)
-- The rules check capabilities (`users.manage`) through `roles_with()`, never role names.
+user to administrator of either kind stays allowed (with the guard above), except while the
+account is still invited, and within 7 days of an administrator's change of that account's
+credentials or an Admin's creation of it (**promote-then-shield**,
+adversarial review of 73ff1e3, L3: an administrator could set an ordinary user's password,
+sign in as them, change it and promote the account, which this table then put out of every
+other administrator's reach). The owner is emailed about an administrator-set password and
+every role change, and each promotion to either administrator role raises
+`ArkrayAdministratorPromoted`, as each administrator's deactivation raises
+`ArkrayAdministratorDeactivated` (`tests/security/test_admin_promotion_shield.py`,
+`test_teams_identity.py`). How an operator removes or changes an administrator when the
+policy is in the way: [security.md](security.md#administrator-account-protection).
+- An administrator of either kind who is deactivated takes their **pending invitations**
+  with them: they're revoked in the same transaction (counted in the audit event), so nobody
+  can leave a pre-approved account behind. The invited user shows "No active invitation"
+  until another admin resends. A role change out of an administrator role (an Admin made a
+  User or a Super admin) does the same; another super admin's role is never changed through
+  the API, so an operator demoting one in the database revokes their invitations by hand
+  ([security.md](security.md#administrator-account-protection)).
+- The rules check capabilities (`users.manage`, `users.manage_team`) through `roles_with()`
+  and `administrator_roles()`, never role names.
 
 ### Two-step verification
 
@@ -293,7 +387,8 @@ changes an administrator when the policy is in the way: [security.md](security.m
 30-second steps, one step of drift either way) with any authenticator app; `identity.mfa`
 (primitives) and `identity.mfa_services` (use cases).
 
-- **Who**: available to everyone; **required for administrators** when
+- **Who**: available to everyone; **required for administrators** of both kinds (Super admins
+  and Admins, `identity.policy.administrator_roles`; ADR-0035) when
   `MFA_REQUIRED_FOR_ADMINS` is on (production default; refused off without the local opt-in)
   and **for every user** when `MFA_REQUIRED_FOR_ALL_USERS` is on (production default `true`;
   `false` is accepted in production as the organisation's decision; adversarial review of
@@ -363,9 +458,14 @@ changes an administrator when the policy is in the way: [security.md](security.m
 - **Recovery**: a recovery code signs in, steps up, or stands in for the device to replace
   codes or disable. A user may disable their own (password and a code) unless their role
   requires it. An administrator may reset an **ordinary user's** device (`POST
-  /admin/users/{id}/mfa/reset`, audited, their sessions end); never another administrator's
-  or their own (422): an operator runs `manage.py reset_mfa --email … --by … --reason …`
-  ([runbooks](runbooks.md#lost-second-factor)).
+  /admin/users/{id}/mfa/reset`, audited, their sessions end): a super admin any user's, an
+  Admin their own team's users' only (404 for anyone else, as for an account that doesn't
+  exist). Never another administrator's of either kind or their own (422), nor, for 7 days,
+  that of an account another administrator took out of an administrator role
+  ([demote-then-unshield](#administrator-account-protection)): an operator runs `manage.py
+  reset_mfa --email … --by … --reason …`, where `--by` must name an active **super** admin
+  ("--by must name an active super admin": an Admin administers only their team's users,
+  never an administrator's second factor) ([runbooks](runbooks.md#lost-second-factor)).
 - **Audit**: `mfa.enabled`, `mfa.disabled`, `mfa.reset` (by `administrator` or `operator`,
   the operator's reason as an expiring detail), `mfa.recovery_codes_replaced`,
   `mfa.recovery_code_used`, `mfa.locked` (with the count; `until: mfa_reset` for the lock only an MFA reset lifts) and `mfa.unlocked` (by
@@ -393,26 +493,48 @@ Four layers, each deny-by-default:
 Code checks **capabilities**, never role names
 ([`identity/policy.py`](../backend/arkray/identity/policy.py)).
 
-| Capability | Meaning | admin | sales_user |
-|---|---|:-:|:-:|
-| `crm.access_own` | work in one's own workspace | ✓ | ✓ |
-| `crm.view_all` | organisation-wide CRM reads (workspace `all`) | ✓ | |
-| `workspace.view_any` | open any user's workspace (audited) | ✓ | |
-| `crm.assign_any` | assign or reassign records to any user | ✓ | |
-| `crm.manage_any` | create, edit and archive records in another user's workspace or organisation-wide (Phase 2) | ✓ | |
-| `users.manage` | create, edit, (de)activate, invite users | ✓ | |
-| `config.manage` | pipelines, stages, lead statuses and sources | ✓ | |
-| `audit.view` | read the audit log | ✓ | |
-| `ai.query` | use Ask Arkray within one's own scope | ✓ | ✓ |
-| `support.access` | start a support session in one user's CRM ([admin-user-workspace.md](admin-user-workspace.md#support-sessions)) | ✓ | |
-| `privacy.manage` | data-subject exports, staff pseudonymisation ([privacy.md](privacy.md#requests)); never inside a support session | ✓ | |
+Three roles ([ADR-0035](adr/0035-super-administrators-and-teams.md)): **Super admin**
+(stored value `admin`, unchanged, so every administrator from before teams is one), **Admin**
+(`team_admin`, an administrator of their own team) and **User** (`sales_user`).
 
-- Inactive users, anonymous users and **unknown roles get nothing**.
-- Adding a role (for example a *sales manager* who sees a team) means adding one mapping
-  entry, plus, if the new role sees other people's data, a new `AccessScope` kind that
-  resolves to the team's owner IDs. Endpoints, selectors and Ask Arkray tools don't change
-  because they only consume the scope. This is the "additional access explicitly granted"
-  extension point.
+| Capability | Meaning | Super admin (`admin`) | Admin (`team_admin`) | User (`sales_user`) |
+|---|---|:-:|:-:|:-:|
+| `crm.access_own` | work in one's own workspace | ✓ | ✓ | ✓ |
+| `crm.view_all` | organisation-wide CRM reads (workspace `all`) | ✓ | | |
+| `crm.view_team` | the team's CRM reads: workspace `all` is the Admin's own and their team's records (scope `TEAM`, audited) | | ✓ | |
+| `workspace.view_any` | open any user's workspace (audited) | ✓ | | |
+| `workspace.view_team` | open a team member's workspace (audited) | | ✓ | |
+| `crm.assign_any` | assign or reassign records to any user | ✓ | | |
+| `crm.assign_team` | assign or reassign records within the team (themselves or an active member) | | ✓ | |
+| `crm.manage_any` | create, edit and archive records in another user's workspace or organisation-wide (Phase 2) | ✓ | | |
+| `crm.manage_team` | the same in a team member's workspace or the team's, while every owner is in the team | | ✓ | |
+| `users.manage` | create, edit, (de)activate, invite users; roles and teams | ✓ | | |
+| `users.manage_team` | the same for the team's users only; creates users into the team; no roles or teams | | ✓ | |
+| `config.manage` | pipelines, stages, lead statuses and sources | ✓ | | |
+| `audit.view` | read the audit log | ✓ | | |
+| `ai.query` | use Ask Arkray within one's own scope | ✓ | ✓ | ✓ |
+| `support.access` | start a support session in one user's CRM ([admin-user-workspace.md](admin-user-workspace.md#support-sessions)) | ✓ | | |
+| `support.access_team` | the same with a team member only | | ✓ | |
+| `privacy.manage` | data-subject exports, staff pseudonymisation ([privacy.md](privacy.md#requests)); never inside a support session | ✓ | | |
+
+- Inactive users, anonymous users and **unknown roles get nothing**. So during a rolling
+  deploy the previous release, which doesn't know `team_admin`, grants an Admin nothing
+  rather than reading them as an organisation-wide administrator. It doesn't protect them
+  as an administrator either, so Admins are created only once every pod runs the new
+  release ([deployment.md](deployment.md#which-previous-release-can-run-beside-the-new-schema)).
+- **The team capabilities are distinct strings, never the organisation-wide ones with a
+  narrower scope.** Any check not written for teams asks for `crm.manage_any`,
+  `users.manage` and so on, which an Admin doesn't hold, so it denies them (fail closed);
+  reusing the organisation-wide strings would have handed an Admin the organisation wherever
+  a check forgot the reach (ADR-0035, alternatives). Configuration, the audit log and privacy
+  requests have no team counterpart: they stay with the super admins.
+- A route open to both kinds names both (`identity.permissions.requires_any`; in the
+  authorization matrix `capability:a|b`). Passing it says only that the caller may ask: the
+  service then applies the caller's reach ([Teams](#teams-adr-0035)).
+- Adding a role still means one mapping entry plus, if the role sees other people's data, a
+  scope kind for it, as `TEAM` was added for the Admin. Endpoints, selectors and Ask Arkray
+  tools that only consume the scope don't change. This is the "additional access explicitly
+  granted" extension point.
 
 ### `AccessScope` (built)
 
@@ -422,17 +544,81 @@ touch:
 | Kind | Owners | Constructed when |
 |---|---|---|
 | `SELF` | `{actor}` | workspace `me` (or the actor's own id) |
-| `USER` | `{subject}` | an actor with `workspace.view_any` opens `{uuid}` |
+| `USER` | `{subject}` | an actor with `workspace.view_any` opens `{uuid}`, or one with `workspace.view_team` opens a team member's |
+| `TEAM` | `{actor} ∪ the actor's team's users` | an actor with `crm.view_team` (and not `crm.view_all`) opens `all` (ADR-0035) |
 | `ORGANIZATION` | all (no filter) | an actor with `crm.view_all` opens `all` |
 
 Invariants are enforced in the constructor. In particular, an empty owner set can never
 mean "everyone": organisation-wide access is a separate kind, so a bug that loses the owner
-list denies access instead of granting it. `scope.apply(qs, owner_field="owner_id")` is the
-one filtering primitive used by selectors, search, dashboard aggregates and Ask Arkray.
+list denies access instead of granting it. A `TEAM` scope always contains its Admin and has
+no single subject: `subject_user_id` raises for it, so code written for one workspace owner
+(an idempotency digest, a job limited to "the workspace owner's" records, an audit subject)
+can't quietly read "no subject" as "everyone"; such code asks `is_team` first.
+`scope.apply(qs, owner_field="owner_id")` is the one filtering primitive used by selectors,
+search, dashboard aggregates and Ask Arkray.
 
 Background jobs are the only unscoped readers. They act as the *system*, load records by
 id, and never serve responses to users. An Ask Arkray tool is **not** a background job: it
 always receives the requesting user's scope.
+
+### Teams (ADR-0035)
+
+[ADR-0035](adr/0035-super-administrators-and-teams.md); code:
+[`identity/teams.py`](../backend/arkray/identity/teams.py),
+[`identity/workspaces.py`](../backend/arkray/identity/workspaces.py),
+[`core/access.py`](../backend/arkray/core/access.py).
+
+#### Who is in a team
+
+- **The manager.** `identity_user.manager` names the Admin who manages a **user**
+  (`sales_user`), or is null: the user is in no team and only the super admins manage them.
+  The database allows a manager only on a sales user and never oneself (CHECKs,
+  [database.md](database.md#identity_user-built-lifecycle-added-in-phase-1)). That it names an
+  Admin (active or invited, not pseudonymised) is kept by `identity.services` under the
+  user-administration lock; and every reader also asks for the member's role and the actor's
+  team capability, so a reference left behind (by an operator's demotion, say) grants
+  nothing. An administrator of either kind is in no team. Only super admins move users
+  between teams ([User administration rules](#user-administration-rules)).
+- **Reach**, the one rule every team check applies: a super admin reaches everyone; an Admin
+  reaches themselves and their team's users, **whatever the member's status** (a deactivated
+  member's history stays viewable, like everyone's); anyone else reaches only themselves.
+  Outside the reach is always the answer for something that doesn't exist (404), never a
+  403 that would confirm it does.
+- **Users in no team** (every existing user after the upgrade) are visible only to super
+  admins; giving a deal to someone outside the team is a super admin's job.
+
+#### The team scope
+
+Workspace `all` resolves to `TEAM` for an Admin: the owners are the Admin and their team's
+users, read from the team as it is at that request. It filters like one user's scope
+(`owner_id IN …`), it is never organisation-wide, and it is audited when opened
+([below](#admin--user-workspace-built-resolution-and-banner-endpoint-in-phase-0-module-views-in-phases-25-completed-in-phase-6)).
+`{uuid}` opens only a team member's workspace (`USER`); anyone else's id is the same 404 as
+a user who doesn't exist.
+
+- **Writing** in a team member's workspace or the team's needs `crm.manage_team` **and every
+  owner of the scope still in the team**: `authorize_write` re-reads the team at the write,
+  so a scope built elsewhere can't widen it and a member who has left is out of reach at
+  once ([Object-level rules](#object-level-and-mutation-rules-built-for-leads-in-phase-2-opportunities-in-phase-3-and-activities-in-phase-4)).
+- **Creating** a record in the team's `all` names an owner in the team; `owner` filters are
+  allowed there, intersected with the scope.
+- **What stays organisation-wide** (super admins only): configuring shared pipelines,
+  stages and custom fields (an Admin configures nothing from the team's workspace, and a
+  member's personal pipeline only from that member's workspace:
+  [pipeline.md](pipeline.md#configuration)); the security events and the audit log; privacy
+  requests; and every operator command that names an administrator.
+
+#### When a team change takes effect
+
+At the next request, like every permission change: the scope, the users list, support
+sessions (which end there, `not_allowed`, once the member has left the team) and Ask Arkray
+are resolved from the team as it is then. Nobody is signed out (a team change moves the
+account's `version`, not its `session_epoch`). A write already authorised in flight
+completes: assignments, creations for a member and closed-deal corrections hold a share lock
+on the member's row (`identity.teams.lock_team_member`), so a team change committing
+meanwhile waits for them, or they see it and are refused (R173). A page link (keyset cursor)
+is bound to the owners it was made for, so after a team change an open "next page" link
+answers 400 and the list starts again.
 
 ## Admin → User Workspace (built: resolution and banner endpoint in Phase 0; module views in Phases 2–5; completed in Phase 6)
 
@@ -446,10 +632,12 @@ navigates that user's Dashboard, Pipeline, Leads and Activities, with a persiste
   ([`identity/workspaces.py`](../backend/arkray/identity/workspaces.py)) turns the segment
   into an `AccessScope`:
   - `me` → SELF;
-  - `all` → ORGANIZATION if the actor has `crm.view_all`, otherwise 404;
+  - `all` → ORGANIZATION if the actor has `crm.view_all`; TEAM (their own and their team's
+    records) if they have `crm.view_team` ([Teams](#teams-adr-0035)); otherwise 404;
   - `{uuid}` → USER if the actor has `workspace.view_any` and the user exists (active or
-    deactivated), otherwise **404, identical for "exists" and "doesn't exist"**, so it
-    can't be used to enumerate users. Only the canonical hyphenated UUID form is accepted
+    deactivated), or has `workspace.view_team` and the user is in their team (any status);
+    otherwise **404, identical for "exists" and "doesn't exist"** (and for "exists outside
+    the team"), so it can't be used to enumerate users. Only the canonical hyphenated UUID form is accepted
     (`urn:uuid:`, braces, bare hex and similar spellings → 404), so workspace URLs are
     canonical.
 - **No impersonation.** The admin stays signed in as themselves. No session, cookie or
@@ -464,20 +652,25 @@ navigates that user's Dashboard, Pipeline, Leads and Activities, with a persiste
   at once write exactly one row (R58), and nothing outside the database can suppress auditing
   (the window used to be a cache key: a write to Redis hid an admin's access indefinitely, and
   a Redis outage audited every request). Every access-log line for the request also carries
-  `subject_user_id`.
+  `subject_user_id`. An Admin's `all` (their team) is audited as target `all` with metadata
+  `scope: team` and no subject, in a window of its own (marker `team`), so an Admin promoted
+  to Super admin within one window is audited again when they first open the organisation.
 - **Known limit: reading through `all`.** An administrator reading one user's records
   organisation-wide (`/workspaces/all/leads?owner=…`, a record opened there) is audited as
   access to `all`, not to that user: the trail shows when an administrator had the whole
-  organisation open, not which owner's records they looked at (Phase 9 review; R73).
+  organisation (or, for an Admin, their team) open, not which owner's records they looked at
+  (Phase 9 review; R73).
 - **Opening a workspace.** `GET /api/v1/workspaces/{workspace}` resolves the segment (and
   audits delegated access) and returns `{kind, subject: {id, full_name, status}}`, which the
-  frontend uses for the "Viewing CRM for" banner. Anything the caller may not open is 404.
+  frontend uses for the "Viewing CRM for" banner (`kind` is `self`, `user`, `team` or
+  `organization`; a team has no subject). Anything the caller may not open is 404.
 - **Frontend reuse.** The same page components render at `/pipeline` and
   `/admin/users/{id}/pipeline` (and every other module); the workspace comes from the URL
   ([ADR-0010](adr/0010-frontend-workspace-routing.md)). The URL is parsed once, the way
   Next.js decodes the route param, and fails closed. The frame renders a page only when the
   URL's user and the layout's user are the same user. User names link to a workspace only for
-  viewers with `workspace.view_any`.
+  viewers with `workspace.view_any` or `workspace.view_team` (an Admin's Users page, "My
+  team", lists only their team anyway).
 - **Deactivated and invited users** stay viewable; new current work can't be given to them
   (lead create: *"This user's account isn't active, so new leads can't be added to their
   workspace."*; opportunities and activities: the deactivated-owner rule). Nothing is
@@ -489,7 +682,9 @@ navigates that user's Dashboard, Pipeline, Leads and Activities, with a persiste
 
 - **Writing** anywhere is authorised by one function, `identity.workspaces.authorize_write(actor, scope)`,
   which every CRM service calls before any change: the own workspace (`me`) needs
-  `crm.access_own`; another user's workspace or `all` needs **`crm.manage_any`**.
+  `crm.access_own`; another user's workspace or `all` needs **`crm.manage_any`**, or, for a
+  team member's workspace or the team's `all`, **`crm.manage_team`** with every owner of the
+  scope still in the actor's team (re-read at the write; never the organisation's `all`).
   Being able to *view* a workspace (`workspace.view_any`, `crm.view_all`) never implies
   being able to change it, so a future read-only role (an auditor, a manager who only
   watches) needs no endpoint changes. Refusal is 403: the caller can already see the
@@ -506,29 +701,45 @@ navigates that user's Dashboard, Pipeline, Leads and Activities, with a persiste
   in the caller's scope (directly or through one of its opportunities) and is created for
   that lead's owner; `created_by` is the actor. Linking to a lead or opportunity outside the
   scope is a 404 identical to a missing one (non-enumerating, tested). A note's text may be
-  edited only by its author (403 otherwise); lifecycle changes are explicit actions
+  edited by its author, or by an administrator working in someone else's workspace
+  (`crm.manage_any`; an Admin in a team member's workspace or the team's, `crm.manage_team`),
+  whose edit is then shown as theirs ([activities.md](activities.md#notes)); 403 for anyone
+  else. Lifecycle changes are explicit actions
   (`/complete`, `/cancel`, `/reopen`, `/archive`, `/restore`).
 - **Opportunities have no chosen owner at all** (Phase 3): an opportunity is always
   created for, and owned by, its lead's owner; the lead must be in the caller's scope
-  (404 otherwise), and creating one in someone else's workspace needs `crm.manage_any`
-  but not `crm.assign_any`, because nothing is being assigned. An `owner` in the payload
+  (404 otherwise), and creating one in someone else's workspace needs `crm.manage_any` (an
+  Admin: `crm.manage_team`, in a team member's workspace or the team's) but not
+  `crm.assign_any`, because nothing is being assigned. An `owner` in the payload
   is a 400.
 - **Creation:** in `me` the new record is always the actor's (any other `owner` in the
   payload is a 400, identical whether or not that user exists). In `{uuid}` it is always
   that user's; in `all` the actor must choose one. Both need `crm.assign_any` (creating a
   record for someone else *is* an assignment) and an active user whose role works in a
   CRM workspace (`identity.selectors.lock_assignable_user`, which share-locks the user row
-  so a concurrent deactivation can't slip in).
+  so a concurrent deactivation can't slip in). An Admin needs `crm.assign_team` instead: in
+  the team's `all` the owner is required and must be the Admin or an active member of their
+  team, checked under a share lock on that user's row (`leads.services.lock_assignee`:
+  `identity.teams.lock_team_member` plus `lock_assignable_user`); someone outside the team, a
+  deactivated member and an id that exists nowhere all get the same 400 "Choose an active
+  user.". In a member's workspace the record is the member's; if the member has left the team
+  meanwhile, the creation is a 403 (the workspace is no longer theirs to write in).
 - **Assignment / reassignment** requires `crm.assign_any` (sales users can't give records
-  away, not even their own), locks the row, requires the current `version`, writes the
+  away, not even their own), or, for an Admin, `crm.assign_team`: to themselves or an active
+  member of their team, under the same share lock and with the same 400 for anyone else. It
+  locks the row, requires the current `version`, writes the
   audit entry and publishes the domain event that later phases use to move related records
-  and re-index ([leads.md](leads.md#reassignment)).
+  and re-index ([leads.md](leads.md#reassignment)). The owner pickers (`GET /assignees`)
+  list every active CRM user for `crm.assign_any`, and the Admin and their team's active
+  members for `crm.assign_team`.
 - **Mass assignment:** serializers declare explicit writable fields. `owner`,
   `created_by`, `status` (state machine), `closed_at`, `version` and timestamps are never
   directly writable; transitions go through action endpoints (`/assign`, `/move`,
   `/complete`).
-- **Filters** are allowlisted. An `owner` filter exists only in the `all` workspace and is
-  intersected with the scope, never used to widen it.
+- **Filters** are allowlisted. An `owner` filter exists only in the `all` workspace (the
+  organisation's, or an Admin's team) and is intersected with the scope, never used to widen
+  it: in a team, an owner outside the team lists nothing (200, empty), exactly like an id
+  that exists nowhere. In `me` and `{uuid}` it is still a 400.
 
 ### Ownership coherence (v1)
 
@@ -551,8 +762,11 @@ Because visibility is owner-based, related open records share an owner:
 
 For open records this guarantees a user never sees a record whose parent they can't
 open. Closed records a user keeps after the parent moved on (a won opportunity whose lead
-was reassigned) render the parent as restricted (below). When teams or record sharing are
-introduced, this rule is relaxed together with the new scope kind, not before.
+was reassigned) render the parent as restricted (below). Teams (ADR-0035) kept this rule
+unchanged: a team's scope is a set of owners, so a team sees a record and its parent exactly
+when both owners are in the team, and a closed deal whose lead moved out of the team is
+restricted there like anywhere else. If record sharing is introduced, this rule is relaxed
+together with its new scope kind, not before.
 
 ### Related records and timelines
 
@@ -577,9 +791,11 @@ introduced, this rule is relaxed together with the new scope kind, not before.
 - **The dashboard** (Phase 5) adds no authorization of its own: `GET …/{workspace}/dashboard`
   resolves the workspace like every CRM route and calls the owning modules' selectors with
   that scope, so every figure and list is computed from `scope.apply()` first. A sales user
-  sees their own figures; `all` (with `crm.view_all`) is the Admin Home; `{uuid}` (with
-  `workspace.view_any`) is exactly that user's figures, audited once per window like any
-  delegated access ([dashboard.md](dashboard.md#workspaces)).
+  sees their own figures; `all` (with `crm.view_all`) is the Admin Home; an Admin's `all`
+  (with `crm.view_team`) counts their team only, their own records included; `{uuid}` (with
+  `workspace.view_any`, or `workspace.view_team` for a team member) is exactly that user's
+  figures, audited once per window like any delegated access
+  ([dashboard.md](dashboard.md#workspaces)).
 
 ### Historical deals
 
@@ -652,7 +868,7 @@ workspace): 422 `deal_closed`. Reopening it (a move to an open stage) makes them
 
 | Route | Access |
 |---|---|
-| `POST /api/v1/workspaces/{workspace}/opportunities/{id}/correct` | `crm.manage_any` (administrators; checked in the service too, before anything is looked up, so a sales user gets 403 even for their own deal), `authorize_write` for the workspace, a recent second factor (`requires_recent_mfa`), refused in a support session; a closed, non-archived deal whose customer isn't erased |
+| `POST /api/v1/workspaces/{workspace}/opportunities/{id}/correct` | `crm.manage_any` (super admins), or `crm.manage_team` (Admins, ADR-0035) for a deal whose owner is the Admin or a member of their team, re-checked under a share lock on that owner's row (404 otherwise, as outside the scope); checked in the service too, before anything is looked up, so a sales user gets 403 even for their own deal; `authorize_write` for the workspace, a recent second factor (`requires_recent_mfa`), refused in a support session; a closed, non-archived deal whose customer isn't erased |
 | `GET /api/v1/workspaces/{workspace}/opportunities/{id}/corrections` | whoever sees the deal (its reasons blank for a viewer who may not see the customer) |
 
 ### Global search (Phase 7)
@@ -667,7 +883,9 @@ workspace): 422 `deal_closed`. Reopening it (a move to an open stage) makes them
   ranked or read; results, `has_more`, sizes and ordering are identical whether or not other
   users' records match.
 - **The selected workspace decides**: an administrator in Rahul's workspace finds only
-  Rahul's records. Opening the workspace is audited as before; searches aren't, and the
+  Rahul's records. An Admin's `all` finds their own and their team's records (`TEAM`
+  scope), never the organisation's; a workspace outside their team is a 404 before the query
+  is looked at. Opening the workspace is audited as before; searches aren't, and the
   query never reaches the audit trail or logs.
 - **Related records** follow the rules above: an opportunity's or activity's lead is shown
   only if visible in the same workspace, and nothing is matched by a related record's text
@@ -677,8 +895,8 @@ workspace): 422 `deal_closed`. Reopening it (a move to an open stage) makes them
 
 ## Ask Arkray (Phase 8)
 
-`/api/v1/workspaces/{workspace}/ask…` requires the `ai.query` capability (sales users and
-admins hold it), then resolves the workspace exactly like every CRM route (404 for a
+`/api/v1/workspaces/{workspace}/ask…` requires the `ai.query` capability (every role holds
+it), then resolves the workspace exactly like every CRM route (404 for a
 workspace the caller may not open). Questions and conversations are then looked up among
 **the caller's own conversations in that workspace**: another person's question id, or the
 caller's own id from another workspace, is a 404 identical to a missing one. A conversation
@@ -690,13 +908,25 @@ whoever's customer it was (adversarial review of 73ff1e3, M1; [privacy.md](priva
 
 Ask Arkray gets the same `AccessScope` as the page it is asked from, and its tools call the
 same scoped selectors. The model never receives a scope parameter it could alter (no tool
-has one); the organisation-only tool is absent from other scopes' tool lists; retrieved
+has one); the tool comparing people (`team_breakdown`) is offered only where the scope has
+several people, the organisation or an Admin's team, and is absent from one person's tool
+list; retrieved
 vector hits are re-read through the owning module's scoped `knowledge_documents` and
 hash-checked before their text is used. The ai worker re-resolves the workspace for the
 actor when it answers (a deactivated user or a demoted admin gets `not_permitted`). An Ask
 Arkray tool is a scoped reader, not a background job: it never uses the unscoped
 `*_for_indexing` selectors, which only the indexer calls.
 See [rag-architecture.md](rag-architecture.md#security-invariant).
+
+**In a team** (ADR-0035): an Admin's `all` is their team, and Ask Arkray reads exactly what
+the `TEAM` scope holds, through every tool and retrieval. Its conversations have a kind of
+their own, `team` (no subject), so they are never listed, continued or answered from the
+Admin's own workspace, a member's or the organisation's; a question queued before a role
+change that makes "all" mean something else (an Admin made a Super admin, or the reverse) is
+failed `not_permitted`, never answered from the other workspace. A team's answer records
+the people it covered: once any of them has left the team it is hidden and never replayed
+to the model (a member joining hides nothing). The `ai.question` audit event records the
+workspace kind it was asked in (`workspace_kind`).
 
 ## How this is verified
 
@@ -709,6 +939,12 @@ See [rag-architecture.md](rag-architecture.md#security-invariant).
 | `AccessScope` invariants and filtering against a real table | `core/tests/test_access.py`, `tests/integration/test_scope_filtering.py` |
 | Each view declares exactly the permission and methods its matrix rule states, and derives from the CSRF-enforcing `ApiView` | `tests/architecture/test_authorization_baseline.py` |
 | Every route × {anonymous, sales user, admin, a view-only role (in another user's workspace and in `all`: reads pass, writes 403, or 404 for a missing record), a deactivated user's open session (401 everywhere)}; 403 without enumeration; CSRF on every unsafe route; self-escalation and mass assignment | `tests/security/test_authz_matrix.py` |
+| The matrix's team-admin pass (ADR-0035): every route as an Admin, in `me`, `all` (the team) and a member's workspace: the routes their capabilities name answer, the organisation-wide ones (security events, privacy requests) are 403, pipeline configuration in the team's `all` never succeeds; on every `/admin/users/{id}…` route a user in no team and another team's user answer byte for byte like an account that doesn't exist; a deactivated Admin's open session gets 401 everywhere | `tests/security/test_authz_matrix.py` |
+| Teams in user administration: an Admin's reach on every route (404 of nobody for anyone outside the team, whatever their status), list and filters within the reach, creating users into the team only, roles and teams refused to Admins, moves between teams, unassigning a demoted Admin's team, another super admin's role, promotion guards for both roles (an invited account never promoted; an Admin's creations counted by the cooling-off), both kinds' credentials, demote-then-unshield (an operator's demotion included), temporary passwords voided when their setter loses the reach (a team move, a demotion, a deactivation), the last-administrator guard, support sessions and assignees within the team, and real-concurrency races between demotions, moves, creations and password sets | `tests/security/test_teams_identity.py` |
+| Teams in workspace resolution and writes: `all` is the team, a member's id their workspace, anyone else's 404; the audit marker; `authorize_write` re-reads the team, so a member who left is out of reach at once and a scope built elsewhere can't widen it | `tests/security/test_teams_workspaces.py` |
+| Teams in the CRM: marked records and amounts per owner across leads, opportunities, activities, pipelines and the dashboard; outsiders' records answer like missing ones; assignment and creation within the team under the member's share lock (a team move racing an assignment); owners required in the team's `all`; pipeline configuration refused there; closed-deal corrections within the team; owner filters narrowing within it | `tests/security/test_teams_crm.py` |
+| Teams in Ask Arkray and search: the team's records only, through every tool, retrieval and an adversarial model; `team_breakdown` names only the team; `team` conversations never cross workspaces; a member leaving hides old answers; a question queued before a role change is never answered elsewhere; search from the team's `all`, a member's workspace and the organisation's, with no trace of anyone outside | `tests/security/test_teams_ai.py`, `test_search_teams.py` |
+| Teams in the web app: the team's overview named as the team's, never the organisation's (Dashboard, calendar, Activities, Pipeline, search, Ask Arkray); what an Admin may do in a workspace mirrors `authorize_write` (each team capability gates its own action; never the organisation's workspace); the shell's gates and "My team" | `frontend/src/features/team-admin.test.tsx`, `src/lib/viewer.test.ts` |
 | List page links (Phase 9): a cursor continues only its own list, for the same user, workspace and filters, before it expires; sealed (unreadable); every list including the board's columns and the user table | `tests/security/test_cursor_binding.py`, `tests/architecture/test_cursor_binding.py` |
 | Sign-in: identical failures (incl. timing), fixation, CSRF, throttling (trusted browsers, per IP, expiry, bounded cost) | `identity/tests/test_login.py`, `test_throttling.py` |
 | Adversarial review of 73ff1e3: per-network budgets, the daily cap and its unlocking (the verify step, another account's trust never replaced, the link revoked by credential changes), equal work for unknown emails (statements and paired timings), non-ASCII emails (L1); throttles before permissions (L2); promote-then-shield and the owner's notices (L3); final pseudonymisation, the backfill and the reserved domain (L4); two-step verification for every user (every gated route for every role in both modes); the password policy on every path, `createsuperuser` included (L11); closed deals' figures and their corrections (M2); the customer correction's count (L5); the deal's free text for a previous owner (L6) | `tests/security/test_sign_in_guessing.py`, `test_api_throttle_order.py`, `test_admin_promotion_shield.py`, `test_staff_pseudonymisation_is_final.py`, `test_mfa_for_all_users.py`, `identity/tests/test_password_policy_everywhere.py`, `tests/security/test_closed_deal_integrity.py`, `test_customer_correction.py`, `test_historical_deal_privacy.py` |

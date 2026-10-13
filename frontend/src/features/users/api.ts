@@ -1,3 +1,5 @@
+import { useQuery } from "@tanstack/react-query";
+
 import { apiFetch } from "@/lib/api/client";
 import type {
   AdminUser,
@@ -25,9 +27,14 @@ export interface UserFilters {
   q: string;
   status: UserStatus | "";
   role: Role | "";
+  /** Whose team (ADR-0035): an Admin's id, NO_MANAGER for users without one, or "" for any. */
+  manager: string;
 }
 
-export const NO_FILTERS: UserFilters = { q: "", status: "", role: "" };
+/** The `manager` filter's value for sales users without an Admin (the API's literal). */
+export const NO_MANAGER = "none";
+
+export const NO_FILTERS: UserFilters = { q: "", status: "", role: "", manager: "" };
 
 /** The cursor inside a `next`/`previous` link. Only the cursor is used: the link's host
  * is whatever the API saw, and the client only ever calls its own origin. */
@@ -46,6 +53,7 @@ export function listPath(filters: UserFilters, cursor: string | null, pageSize =
   if (q.length >= SEARCH_MIN_LENGTH) params.set("q", q);
   if (filters.status) params.set("status", filters.status);
   if (filters.role) params.set("role", filters.role);
+  if (filters.manager) params.set("manager", filters.manager);
   if (cursor) params.set("cursor", cursor);
   params.set("page_size", String(pageSize));
   return `${USERS}?${params.toString()}`;
@@ -103,10 +111,69 @@ export const securityApi = {
   },
 };
 
+// The labels are the API's role_label (ADR-0035): `admin` is shown as "Super admin".
 export const ROLE_OPTIONS: readonly { value: Role; label: string; description: string }[] = [
   { value: "sales_user", label: "User", description: "Works in their own CRM workspace." },
-  { value: "admin", label: "Admin", description: "Manages users and can open every user's workspace." },
+  {
+    value: "team_admin",
+    label: "Admin",
+    description: "Manages the users in their team and can open their workspaces.",
+  },
+  {
+    value: "admin",
+    label: "Super admin",
+    description: "Manages every user and Admin, the shared settings, and can open every user's workspace.",
+  },
 ];
+
+/**
+ * Super admins and Admins: always invited (never given a password), and only they change
+ * their own email, password and two-step verification (ADR-0030, ADR-0035). The account's
+ * role, not the viewer's: the API refuses the same cases.
+ */
+export function isAdministratorRole(role: Role): boolean {
+  return role === "admin" || role === "team_admin";
+}
+
+/**
+ * Why a Super admin can't change this account's role (null when they can). The API refuses
+ * the same cases: one's own role, and another Super admin's (ADR-0030, kept by ADR-0035:
+ * deactivate instead).
+ */
+export function roleChangeBlockedReason(user: AdminUser, isSelf: boolean): string | null {
+  if (isSelf) return "You can't change your own role.";
+  if (user.role === "admin") return "A Super admin's role can't be changed. To remove their access, deactivate the account.";
+  return null;
+}
+
+/**
+ * The team administrators (Admins) a user can be given to, or listed by (ADR-0035): one page
+ * of the API's list (newest first; `q` narrows it server-side), in the order to show them,
+ * by name. `truncated`: there are more than this page holds, so the pickers offer a search.
+ */
+export const teamAdminsKey = (q: string) => [...USERS_QUERY_KEY, "team-admins", q] as const;
+export const TEAM_ADMINS_PAGE_SIZE = 100;
+
+const NAME_ORDER = new Intl.Collator("en", { sensitivity: "base" });
+
+/** By name, then email (two Admins may share a name): the order every Admin picker shows. */
+export function byName<T extends Pick<AdminUser, "full_name" | "email">>(users: readonly T[]): T[] {
+  return [...users].sort((a, b) => NAME_ORDER.compare(a.full_name, b.full_name) || NAME_ORDER.compare(a.email, b.email));
+}
+
+export function useTeamAdmins(q: string, enabled: boolean) {
+  const query = useQuery({
+    queryKey: teamAdminsKey(q),
+    queryFn: () => usersApi.list({ ...NO_FILTERS, q, role: "team_admin" }, null, TEAM_ADMINS_PAGE_SIZE),
+    enabled,
+    staleTime: 30_000,
+  });
+  return {
+    query,
+    admins: byName(query.data?.results ?? []),
+    truncated: Boolean(query.data?.next) || q !== "",
+  };
+}
 
 export const STATUS_OPTIONS: readonly { value: UserStatus; label: string }[] = [
   { value: "active", label: "Active" },

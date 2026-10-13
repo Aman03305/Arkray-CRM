@@ -13,7 +13,7 @@ export default async function UserWorkspaceLayout({ children, params }: LayoutPr
   const { userId } = await params;
   if (!isUuid(userId)) notFound();
   return (
-    <RequireCapability capability="workspace.view_any">
+    <RequireCapability capability={["workspace.view_any", "workspace.view_team"]}>
       <UserWorkspaceFrame userId={userId.toLowerCase()}>{children}</UserWorkspaceFrame>
     </RequireCapability>
   );

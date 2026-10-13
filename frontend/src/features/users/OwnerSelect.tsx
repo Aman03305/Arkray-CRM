@@ -26,7 +26,8 @@ interface OwnerSelectProps {
 }
 
 /**
- * Pick an active user who can own CRM records (GET /api/v1/assignees, crm.assign_any).
+ * Pick an active user who can own CRM records (GET /api/v1/assignees, crm.assign_any; for a
+ * team administrator, crm.assign_team: themselves and their team's active users, ADR-0035).
  * A native select, so it is keyboard- and screen-reader-friendly everywhere. The first 100
  * users by name are listed; with more than that a search box narrows the list server-side.
  *

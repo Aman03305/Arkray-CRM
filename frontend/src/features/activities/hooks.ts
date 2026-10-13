@@ -4,8 +4,8 @@ import { type QueryClient, useMutation, useQueryClient } from "@tanstack/react-q
 import { useCallback } from "react";
 
 import type { Activity, ActivityListItem, ActivityPage } from "@/lib/api/types";
-import { hasCapability, type Viewer } from "@/lib/viewer";
-import type { Workspace } from "@/lib/workspace";
+import type { Viewer } from "@/lib/viewer";
+import { canWriteIn, type Workspace } from "@/lib/workspace";
 
 import { activitiesApi, activityKeys, type LifecycleAction, timelineKeys } from "./api";
 
@@ -20,7 +20,7 @@ export interface ActivityPermissions {
  * customer), so creating needs no assigning rights. Presentation only: the API decides.
  */
 export function activityPermissions(viewer: Viewer | null, workspace: Workspace): ActivityPermissions {
-  return { canWrite: hasCapability(viewer, workspace.kind === "self" ? "crm.access_own" : "crm.manage_any") };
+  return { canWrite: canWriteIn(viewer, workspace) };
 }
 
 /** A note's text is its author's words: only the author edits it (others may archive it). */

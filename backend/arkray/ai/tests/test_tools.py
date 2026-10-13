@@ -135,19 +135,30 @@ class TestUntrustedArguments:
 
 
 class TestScopeBinding:
-    def test_no_tool_offers_an_owner_or_workspace_parameter(self, admin):
-        for scope in (own(admin), AccessScope.organization(admin.pk)):
+    def test_no_tool_offers_an_owner_or_workspace_parameter(self, admin, user_a):
+        team = AccessScope.team(admin.pk, [user_a.pk])  # ADR-0035
+        for scope in (own(admin), team, AccessScope.organization(admin.pk)):
             for definition in tools.definitions(scope):
                 names = set(definition["input_schema"]["properties"])
                 assert not names & {"owner", "owner_id", "user", "user_id", "workspace", "scope"}
                 assert definition["strict"] is True
                 assert definition["input_schema"]["additionalProperties"] is False
 
-    def test_organisation_tools_exist_only_in_organisation_scope(self, admin, user_a):
+    def test_the_people_comparing_tool_exists_only_where_there_are_several_people(
+        self, admin, user_a
+    ):
+        """Organisation-wide, and in a team administrator's team (ADR-0035); never in one
+        person's workspace, whoever opens it."""
         names = lambda scope: [d["name"] for d in tools.definitions(scope)]  # noqa: E731
         assert "team_breakdown" not in names(own(user_a))
         assert "team_breakdown" not in names(AccessScope.for_user(admin.pk, user_a.pk))
         assert "team_breakdown" in names(AccessScope.organization(admin.pk))
+        assert "team_breakdown" in names(AccessScope.team(admin.pk, [user_a.pk]))
+
+    def test_team_breakdown_in_a_team_names_only_its_people(self, admin, user_a, user_b, golden):
+        LeadFactory(owner=user_b)  # Priya: outside the team
+        body = ok(AccessScope.team(admin.pk, [user_a.pk]), "team_breakdown", {"metric": "leads"})
+        assert [(row["user"], row["leads"]) for row in body["users"]] == [(user_a.full_name, 10)]
 
     def test_strict_schema_limits_hold(self, admin):
         definitions = tools.definitions(AccessScope.organization(admin.pk))

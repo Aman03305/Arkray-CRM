@@ -9,7 +9,7 @@ from arkray.identity.models import Role
 from arkray.identity.policy import ROLE_CAPABILITIES, Capability
 from arkray.identity.selectors import assignable_users, lock_assignable_user
 from arkray.identity.workspaces import authorize_write
-from tests.factories import AdminFactory, InvitedUserFactory, UserFactory
+from tests.factories import AdminFactory, InvitedUserFactory, TeamAdminFactory, UserFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -58,7 +58,7 @@ class TestAssignableUsers:
     def test_only_active_users_whose_role_works_in_the_crm(self, monkeypatch):
         rahul, anita = UserFactory(first_name="Rahul"), AdminFactory(first_name="Anita")
         gone, invited = UserFactory(is_active=False), InvitedUserFactory()
-        assert set(assignable_users()) == {rahul, anita}
+        assert set(assignable_users(actor=anita)) == {rahul, anita}
         assert lock_assignable_user(rahul.pk)
         assert lock_assignable_user(anita.pk)
         assert not lock_assignable_user(gone.pk)
@@ -67,11 +67,30 @@ class TestAssignableUsers:
         # A role without a CRM workspace (e.g. a future auditor) can't own records.
         monkeypatch.setitem(ROLE_CAPABILITIES, Role.SALES_USER, frozenset())
         assert not lock_assignable_user(rahul.pk)
-        assert set(assignable_users()) == {anita}
+        assert set(assignable_users(actor=anita)) == {anita}
 
-    def test_search_matches_name_or_email(self):
+    def test_search_matches_name_or_email(self, admin):
         rahul = UserFactory(first_name="Rahul", last_name="Sharma", email="rahul@arkray.example")
         UserFactory(first_name="Priya", last_name="Patel", email="priya@arkray.example")
-        assert list(assignable_users(q="sharma")) == [rahul]
-        assert list(assignable_users(q="rahul@arkray")) == [rahul]
-        assert list(assignable_users(q="rahul patel")) == []
+        assert list(assignable_users(actor=admin, q="sharma")) == [rahul]
+        assert list(assignable_users(actor=admin, q="rahul@arkray")) == [rahul]
+        assert list(assignable_users(actor=admin, q="rahul patel")) == []
+
+    def test_a_team_administrator_assigns_within_their_team(
+        self, admin, team_admin, team_member, team_member_2, user_b, other_team_member
+    ):
+        """ADR-0035: themselves and their team's active members; never a deactivated or
+        invited member, another team's, a user in no team, or an administrator."""
+        gone = UserFactory(is_active=False, manager=team_admin)
+        invited = InvitedUserFactory(manager=team_admin)
+        found = set(assignable_users(actor=team_admin))
+        assert found == {team_admin, team_member, team_member_2}
+        assert not found & {gone, invited, user_b, other_team_member, admin}
+        assert list(assignable_users(actor=team_admin, q="mohan")) == [team_member_2]
+        assert list(assignable_users(actor=team_admin, q="priya")) == []
+        # The super administrator's list includes team administrators (they own records).
+        assert team_admin in set(assignable_users(actor=admin))
+
+    def test_nobody_else_gets_anyone(self, user_a, user_b):
+        assert list(assignable_users(actor=user_a)) == []
+        assert list(assignable_users(actor=TeamAdminFactory(is_active=False))) == []

@@ -24,7 +24,7 @@ import type {
   StageInput,
 } from "@/lib/api/types";
 import type { IdempotencyKey } from "@/lib/random";
-import { type Workspace, workspaceApiPath, workspaceApiSegment } from "@/lib/workspace";
+import { isOverview, type Workspace, workspaceApiPath, workspaceApiSegment } from "@/lib/workspace";
 
 import type { AgreedTerms } from "./AgreedTerms";
 
@@ -43,7 +43,7 @@ export const PAGE_SIZE = 25;
 /** How many recent open opportunities a picker lists before anything is typed. */
 export const RECENT_OPEN_PAGE_SIZE = 20;
 
-/** The board's filters (allowlisted server-side; owner only organisation-wide). */
+/** The board's filters (allowlisted server-side; owner only in the overview). */
 export interface BoardFilters {
   pipeline: string;
   /** Inclusive business dates "YYYY-MM-DD". */
@@ -64,7 +64,7 @@ function filterParams(workspace: Workspace, filters: BoardFilters): URLSearchPar
   if (filters.pipeline) params.set("pipeline", filters.pipeline);
   if (filters.closeFrom) params.set("expected_close_from", filters.closeFrom);
   if (filters.closeTo) params.set("expected_close_to", filters.closeTo);
-  if (filters.owner && workspace.kind === "organization") params.set("owner", filters.owner);
+  if (filters.owner && isOverview(workspace)) params.set("owner", filters.owner);
   return params;
 }
 
@@ -205,7 +205,7 @@ export const pipelineApi = {
   restore: (workspace: Workspace, id: string, version: number) =>
     apiFetch<Opportunity>(opportunity(workspace, id, "restore"), { method: "POST", body: { version } }),
   /** Change an open opportunity's owner: its customer, with its other open deals and
-   * current work, moves to them (crm.assign_any). */
+   * current work, moves to them (crm.assign_any, or crm.assign_team within the team). */
   assign: (workspace: Workspace, id: string, owner: string, version: number) =>
     apiFetch<Opportunity>(opportunity(workspace, id, "assign"), { method: "POST", body: { owner, version } }),
 };

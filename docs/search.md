@@ -23,10 +23,10 @@ window), each module's `selectors.search`, and
 
 | Kind | A word matches when it occurs in | Never searched | Result shows |
 |---|---|---|---|
-| Leads | first and last name, organisation, email, phone digits (the Leads list's own rule, `leads.selectors.match_condition`) | description, address, city, amounts | name, organisation, status, owner (organisation workspace) |
-| Opportunities | title, account name, customer name (the opportunity's own snapshot; ADR-0027) | the lead's name, description, amounts, history | title, account and customer names (the lead's name when both are empty), stage, Open/Won/Lost, owner (organisation workspace) |
-| Tasks | title (subject) | description, the lead's name | title, status, due date, overdue, lead, owner (organisation workspace) |
-| Meetings | title and location | agenda, meeting link, the lead's name | title, start, location, status, lead, owner (organisation workspace) |
+| Leads | first and last name, organisation, email, phone digits (the Leads list's own rule, `leads.selectors.match_condition`) | description, address, city, amounts | name, organisation, status, owner (organisation or team workspace) |
+| Opportunities | title, account name, customer name (the opportunity's own snapshot; ADR-0027) | the lead's name, description, amounts, history | title, account and customer names (the lead's name when both are empty), stage, Open/Won/Lost, owner (organisation or team workspace) |
+| Tasks | title (subject) | description, the lead's name | title, status, due date, overdue, lead, owner (organisation or team workspace) |
+| Meetings | title and location | agenda, meeting link, the lead's name | title, start, location, status, lead, owner (organisation or team workspace) |
 | Notes | body | the lead's name, the author | a 240-character preview around the first search word, the lead, when it was added |
 
 - **Every searched word must match**, case-insensitively, anywhere in the record's search
@@ -80,8 +80,9 @@ nothing (the Leads list showed every lead); and a repeated word used up the cap,
 | Workspace | Searches | Needs |
 |---|---|---|
 | `me` | the caller's own records | `crm.access_own` |
-| `{userId}` | that user's records only (deactivated and invited users included: their history stays readable) | `workspace.view_any` (404 otherwise, like a missing user) |
-| `all` | every user's records | `crm.view_all` (404 otherwise) |
+| `{userId}` | that user's records only (deactivated and invited users included: their history stays readable) | `workspace.view_any`, or `workspace.view_team` for a member of the caller's team (404 otherwise, like a missing user) |
+| `all` | every user's records | `crm.view_all` |
+| `all`, for an Admin ([ADR-0035](adr/0035-super-administrators-and-teams.md)) | the Admin's own and their team's records (scope `TEAM`, audited when opened), never the organisation's | `crm.view_team` (404 for anyone with neither) |
 
 - **Authorization comes first.** The workspace resolves to an `AccessScope` before the query
   is looked at (an unopenable workspace is 404 even for an invalid query). Each module then
@@ -89,7 +90,10 @@ nothing (the Leads list showed every lead); and a repeated word used up the cap,
   window carry the scope, so a record outside it is never matched, counted, ranked or read.
 - **The selected workspace decides**, not the actor's rights: an administrator searching
   Rahul's workspace for "Priya" finds only Rahul's records, although the same administrator
-  could find Priya's organisation-wide.
+  could find Priya's organisation-wide. An Admin's `all` is filtered by its owners like one
+  person's workspace (`owner_id IN` the team), so a team search never reads anyone outside
+  the team; a closed deal whose lead left the team is shown there as in one person's
+  workspace, without its customer. The dialog says "Searching your team's records.".
 - **Actor and subject** are Phase 6's: the administrator stays signed in as themselves; no
   impersonation. Opening a user's workspace is audited (`workspace.accessed`, once per 15
   minutes) by `resolve_workspace`; individual searches are not audited and the query never
@@ -225,7 +229,8 @@ marks trusted, created by `activities.0008` and kept on rollback like `pg_trgm`)
   with the owner, so it rechecks only that user's records. With the trigrams alone it
   rechecked every owner's candidates and filtered by owner afterwards: 260-460 ms for a word
   made of common trigrams in an ordinary owner's workspace (review, P2-2; 14-55 ms now).
-  Organisation-wide searches use the same indexes without the owner.
+  Organisation-wide searches use the same indexes without the owner; an Admin's team
+  (ADR-0035) looks them up with the team's owner list.
 - **Leads and opportunities stay trigram-only**: their search text is short, so rechecking
   every owner's candidates costs little (2-21 ms per group in every shape and workspace).
   An owner-first opportunity index was tried and dropped: PostgreSQL also chose it for 17
@@ -366,6 +371,13 @@ records (never fewer), which only closes the gate earlier.
   three Hindi sentences can't show how often (review, unconfirmed).
 - A **disk-cold** first search after a restart reads index pages from disk and is slower;
   production memory sizing is Phase 10/11 (as R53).
+- **An Admin's team** (ADR-0035) has several owners and no index ordered by "newest of
+  these owners", so the recent pass either reads all the team's records of a kind (through
+  the owner index, then sorts them) or walks the organisation's newest-first index and skips
+  everyone else's, whichever PostgreSQL estimates cheaper. Either way its cost grows with the
+  team's records (or, for a small team, with everyone's newer records). It is bounded by the
+  2 s statement timeout (503 `search_busy`) and was not benchmarked at production size
+  (R172).
 
 ## Resource protection
 
@@ -491,8 +503,8 @@ the `SET TRANSACTION` isn't sent (7 / 8 / 7).
   node and link that reaches the DOM while a delayed Rahul search finishes after the switch
   to Priya: nothing of Rahul's appears.
 - **Links stay in the workspace**: every result opens through the Phase 6 route builders
-  (`opportunityHref`, `activityHref`): `/pipeline/{id}` in one's own or the organisation's
-  workspace, `/admin/users/{id}/pipeline/{id}` in a user's.
+  (`opportunityHref`, `activityHref`): `/pipeline/{id}` in one's own, the organisation's or
+  an Admin's team workspace, `/admin/users/{id}/pipeline/{id}` in a user's.
 - **Cache**: TanStack Query in memory only (15 s fresh, gone a minute after its last use);
   nothing in browser storage; sign-out reloads the page, dropping all of it.
 - **XSS**: everything is rendered as React text. Highlighting wraps the searched words in
@@ -523,6 +535,7 @@ search still answers. [Resource protection](#resource-protection) has every boun
 | What | Where |
 |---|---|
 | Marked records (`RAHUL-OMEGA-LEAD` … `PRIYA-ZETA-NOTE-SECRET`) searched from Rahul's, Priya's, the organisation's and each selected workspace: exact results, no trace of the other user in the bytes | `tests/security/test_search_cross_user.py` |
+| An Admin's team (ADR-0035): marked records of every kind for six people searched from the Admin's `all` (exactly their own and their team's, no trace of anyone else), a member's workspace and a super admin's `all`; anyone outside the team 404 before the query is looked at; a closed deal whose lead left the team shown without its customer | `tests/security/test_search_teams.py` |
 | Another workspace's exact secret looks like nothing at all (same body, size and flags as a secret that doesn't exist); another user's records never move a workspace's ranking, window or flags; scope widening attempts; 404 identical for missing and forbidden users | same |
 | Restricted leads aren't revealed or matched; results re-authorise when opened; deactivated users' workspaces | `arkray/search/tests/test_api.py` |
 | Input bounds, malformed encodings, lone surrogates, bidi and control characters, every script, SQL and regex syntax, wildcards | `arkray/search/tests/test_input.py` |

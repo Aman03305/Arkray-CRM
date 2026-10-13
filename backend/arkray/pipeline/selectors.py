@@ -138,7 +138,7 @@ class OpportunityFilters:
     stage_id: UUID | None = None
     status: str | None = None
     lead_id: UUID | None = None
-    owner_id: UUID | None = None  # organisation-wide workspace only; narrows, never widens
+    owner_id: UUID | None = None  # organisation-wide or a team's only; narrows, never widens
     expected_close_from: date | None = None
     expected_close_to: date | None = None
     probability_min: Decimal | None = None

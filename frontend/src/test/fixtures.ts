@@ -37,6 +37,18 @@ export function makeViewer(overrides: Partial<Viewer> = {}): Viewer {
   };
 }
 
+// A team administrator (ADR-0035): the team counterparts, never an organisation-wide capability.
+export const TEAM_ADMIN_CAPABILITIES: Capability[] = [
+  "ai.query",
+  "crm.access_own",
+  "crm.assign_team",
+  "crm.manage_team",
+  "crm.view_team",
+  "support.access_team",
+  "users.manage_team",
+  "workspace.view_team",
+];
+
 export const salesViewer = makeViewer();
 export const adminViewer = makeViewer({
   id: "a1",
@@ -44,8 +56,19 @@ export const adminViewer = makeViewer({
   firstName: "Anita",
   lastName: "Admin",
   fullName: "Anita Admin",
-  roleLabel: "Admin",
+  // The stored role "admin" is labelled "Super admin" since ADR-0035.
+  roleLabel: "Super admin",
   capabilities: ADMIN_CAPABILITIES,
+});
+/** Tara, a team administrator ("Admin"; the super administrator above is adminViewer). */
+export const teamAdminViewer = makeViewer({
+  id: "7a1d2c3b-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+  email: "tara@example.test",
+  firstName: "Tara",
+  lastName: "Singh",
+  fullName: "Tara Singh",
+  roleLabel: "Admin",
+  capabilities: TEAM_ADMIN_CAPABILITIES,
 });
 
 export function makeAdminUser(overrides: Partial<AdminUser> = {}): AdminUser {
@@ -70,6 +93,7 @@ export function makeAdminUser(overrides: Partial<AdminUser> = {}): AdminUser {
     mfa_lock: null,
     sign_in_locked_at: null,
     pseudonymised_at: null,
+    manager: null,
     version: 1,
   };
   return { ...base, ...overrides };

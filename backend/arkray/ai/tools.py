@@ -4,8 +4,9 @@
   name is an error result; there is no SQL, ORM, shell, file or HTTP tool.
 - **Scope-bound.** Every tool runs with the request's AccessScope as a Python argument and
   reads through the owning module's scoped selectors. No tool has an owner, user or
-  workspace parameter. Organisation-wide tools (`team_breakdown`) are *absent* from every
-  other scope's list, not merely refused.
+  workspace parameter. The tool comparing people (`team_breakdown`) is offered only where
+  the scope has several people, the organisation or a team (ADR-0035), and is *absent*
+  from one person's list, not merely refused.
 - **Untrusted arguments.** Strict schemas constrain the model, and every argument is
   validated again here (types, enums, bounds, unknown keys). A record reference outside the
   scope is "not found", exactly like an id that doesn't exist.
@@ -199,9 +200,18 @@ def _ref(value: str, kinds: tuple[str, ...] = REF_KINDS) -> tuple[str, UUID]:
 
 
 # --- shared row shapes -------------------------------------------------------------------------
+def _several_people(scope: AccessScope) -> bool:
+    """A scope over several people's records: the organisation, or a team administrator's
+    team (ADR-0035: the administrator and the users they manage). One person's workspace
+    (their own, or theirs opened by an administrator) is not."""
+    return scope.is_organization_wide or scope.is_team
+
+
 def _person(ctx: ToolContext, user: Any) -> str | None:
-    """Owner names only where they tell the user something: organisation-wide answers."""
-    return user.full_name if ctx.scope.is_organization_wide and user is not None else None
+    """Owner names only where they tell the user something: answers over several people's
+    records. In a team every record's owner is the administrator or one of their team (the
+    scope filters by owner), people the administrator manages and sees listed anyway."""
+    return user.full_name if _several_people(ctx.scope) and user is not None else None
 
 
 def _lead_link(ctx: ToolContext, lead: Lead | None) -> dict[str, str] | None:
@@ -1028,7 +1038,13 @@ _TEAM_METRICS = ("pipeline", "leads", "overdue_tasks")
 
 
 def team_breakdown(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    if not ctx.scope.is_organization_wide:  # never offered then; refused if called anyway
+    """Figures per person of the scope. Offered in a team too (ADR-0035): comparing the
+    team's people is what a team administrator's view is for, and every figure is read
+    through the scope (the three selectors filter by its owners before grouping), so only
+    the administrator and their team's members are ever named. In one person's workspace it
+    would compare nobody: never offered there, refused if called anyway. A team's answer
+    naming a member is hidden once they leave the team (answers.owner_basis)."""
+    if not _several_people(ctx.scope):
         raise ToolError("Unknown tool.")
     _check_keys(args, {"metric", "limit"})
     metric = _choice(args, "metric", _TEAM_METRICS, None)
@@ -1095,7 +1111,11 @@ class Tool:
     description: str
     schema: dict[str, Any]
     run: Callable[[ToolContext, dict[str, Any]], dict[str, Any]]
-    organisation_only: bool = False
+    # Compares the scope's people: offered only where it has several (the organisation, a
+    # team). Every other tool reads one scope the same way whoever's records it holds, so it
+    # is offered everywhere; in a team each of them reads through the team scope (owner_id IN
+    # the team) exactly as in one person's workspace, never organisation-wide.
+    compares_people: bool = False
 
 
 TOOLS: tuple[Tool, ...] = (
@@ -1227,21 +1247,23 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         "team_breakdown",
-        "Organisation-wide figures per salesperson: open pipeline, leads, or open and overdue "
-        "tasks, largest first.",
+        # Worded for the organisation and a team alike: one description, so the tool list
+        # stays byte-identical per scope kind (cacheable) and is true in both.
+        "Figures per salesperson in this workspace (the organisation, or a team): open "
+        "pipeline, leads, or open and overdue tasks, largest first.",
         _schema(
             {"metric": {"type": "string", "enum": list(_TEAM_METRICS)}, "limit": _LIMIT_PROPERTY},
             ("metric",),
         ),
         team_breakdown,
-        organisation_only=True,
+        compares_people=True,
     ),
 )
 _BY_NAME = {tool.name: tool for tool in TOOLS}
 
 
 def available(scope: AccessScope) -> list[Tool]:
-    return [t for t in TOOLS if scope.is_organization_wide or not t.organisation_only]
+    return [t for t in TOOLS if _several_people(scope) or not t.compares_people]
 
 
 def definitions(scope: AccessScope) -> list[dict[str, Any]]:

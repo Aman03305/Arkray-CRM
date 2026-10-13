@@ -208,7 +208,8 @@ class LeadCreateSerializer(LeadFieldsSerializer):
     )
     owner = serializers.UUIDField(
         required=False,
-        help_text="Organisation-wide workspace only (required there, needs crm.assign_any).",
+        help_text="Organisation-wide (crm.assign_any) or a team's workspace (a member of the "
+        "team, crm.assign_team) only, and required there.",
     )
 
 
@@ -237,7 +238,10 @@ class LeadListQuerySerializer(StrictInputSerializer):
     status = serializers.CharField(max_length=32, required=False)
     source = serializers.CharField(max_length=32, required=False)  # type: ignore[assignment]
     rating = serializers.ChoiceField(choices=m.Rating.choices, required=False)
-    owner = serializers.UUIDField(required=False, help_text="Organisation-wide workspace only.")
+    owner = serializers.UUIDField(
+        required=False,
+        help_text="Organisation-wide or a team's workspace only; narrows it, never widens.",
+    )
     created_from = serializers.DateField(required=False, help_text="Inclusive, business time zone.")
     created_to = serializers.DateField(required=False, help_text="Inclusive, business time zone.")
     archived = serializers.BooleanField(required=False, default=False)

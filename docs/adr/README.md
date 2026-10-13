@@ -40,6 +40,7 @@ and update the old one's status line.
 | [0032](0032-privacy-remediation.md) | Privacy remediation: verified backend TLS, logs by allowlist, AI payload masking, expiring audit details, legal holds, export, correction (amends 0028), staff pseudonymisation, restore-safe erasure ledger, attachment and custom-value purges, historical-deal masking, browser-session cookies |
 | [0033](0033-administrator-mfa-and-reactivation.md) | Two-step verification (TOTP) for every user, required for administrators in production, with step-up for sensitive administration; an administrator reactivated by another must reset their password (amended by 0034) |
 | [0034](0034-staging-security-remediation.md) | Security remediation before staging (adversarial review of 73ff1e3): Ask conversation deletion never refused (tombstones under legal holds), closed deals frozen with administrator corrections in an append-only history, fair outbox claiming and write budgets, production-only credential names with a credential guard and `pg_hba.conf`, sign-in limits per network and per day with an emailed unlock, two-step verification for every user, a promotion cooling-off, final pseudonymisation |
+| [0035](0035-super-administrators-and-teams.md) | Super administrators and team administrators: the existing `admin` role is the Super admin; a new `team_admin` (Admin) manages the sales users assigned to them (`manager`), with team capabilities and a `TEAM` scope; organisation-wide areas stay with super administrators (amends 0030, 0033) |
 
 Template:
 

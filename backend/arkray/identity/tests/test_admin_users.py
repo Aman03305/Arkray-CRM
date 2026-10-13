@@ -474,6 +474,9 @@ class TestServiceLevelGuards:
         from arkray.core.errors import BusinessRuleViolation
 
         monkeypatch.setattr(services, "_acting_manager", lambda actor_id: user_a)
+        # ...acting with a super administrator's reach (ADR-0035: the stand-in is no
+        # administrator at all, so it reaches nobody otherwise).
+        monkeypatch.setattr(services, "_is_super_administrator", lambda actor: True)
         with pytest.raises(BusinessRuleViolation):
             services.deactivate_user(actor_id=user_a.pk, user_id=admin.pk)
         with pytest.raises(BusinessRuleViolation):

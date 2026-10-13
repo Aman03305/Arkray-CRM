@@ -156,12 +156,18 @@ workspace in the URL decides whose leads exist
 | Workspace | Who | Reads | New lead's owner | Writes need |
 |---|---|---|---|---|
 | `me` | everyone | own leads | always the actor (any other `owner` is a 400) | `crm.access_own` |
-| `{user_id}` | admins (`workspace.view_any`) | that user's leads | always that user (must be active) | `crm.manage_any` + `crm.assign_any` to create |
-| `all` | admins (`crm.view_all`) | every lead | required `owner`: an active user who works in a CRM workspace | `crm.manage_any` + `crm.assign_any` to create |
+| `{user_id}` | super admins (`workspace.view_any`); an Admin for a member of their team (`workspace.view_team`) | that user's leads | always that user (must be active; for an Admin, still in the team: 403 otherwise) | `crm.manage_any` + `crm.assign_any` to create; an Admin `crm.manage_team` + `crm.assign_team` |
+| `all` | super admins (`crm.view_all`) | every lead | required `owner`: an active user who works in a CRM workspace | `crm.manage_any` + `crm.assign_any` to create |
+| `all` | an Admin (`crm.view_team`, [ADR-0035](adr/0035-super-administrators-and-teams.md)) | their own and their team's leads | required `owner`: the Admin or an active member of their team | `crm.manage_team` + `crm.assign_team` to create |
 
 - Viewing a workspace never implies changing it: delegated writes need the separate
-  `crm.manage_any` capability (`identity.workspaces.authorize_write`).
-- A sales user can't give a lead away, even their own: reassignment needs `crm.assign_any`.
+  `crm.manage_any` capability (`identity.workspaces.authorize_write`), or for an Admin
+  `crm.manage_team` with every owner of the workspace still in their team.
+- A sales user can't give a lead away, even their own: reassignment needs `crm.assign_any`,
+  or an Admin's `crm.assign_team` (to themselves or an active member of their team).
+- One answer for every owner who can't be chosen: someone outside the Admin's team, a
+  deactivated member and an id that exists nowhere all get the same 400 "Choose an active
+  user." (`services.lock_assignee`), so an Admin learns nobody's existence from it.
 - Records an admin creates in Rahul's workspace are **owned by Rahul**, `created_by` is
   the admin, and the audit actor is the admin with Rahul as the subject. No impersonation.
 
@@ -171,8 +177,10 @@ workspace in the URL decides whose leads exist
 through PATCH, never as a side effect.
 
 ```
-Reassign lead (crm.assign_any; lead inside the workspace; current version; not archived)
-  → lock the lead row; share-lock the new owner's user row (must be active and assignable)
+Reassign lead (crm.assign_any, or crm.assign_team within the team; lead inside the
+               workspace; current version; not archived)
+  → lock the lead row; share-lock the new owner's user row (must be active and assignable;
+    for crm.assign_team also the Admin or a member of their team: identity.teams.lock_team_member)
   → owner changes, version + 1
   → audit lead.reassigned {from_owner_id, to_owner_id}
   → publish LeadReassigned (in the same transaction)
@@ -193,6 +201,8 @@ Reassign lead (crm.assign_any; lead inside the workspace; current version; not a
   lead no longer appears.
 - The share lock on the new owner means a concurrent deactivation waits for the
   reassignment (or is seen by it): a lead is never handed to someone already deactivated.
+  The same lock orders a team change against an Admin's reassignment: a lead is never given
+  to someone who left the team before it committed.
 
 ## Archive
 
@@ -247,7 +257,7 @@ inside the caller's workspace, it can't reveal other users' leads.
 |---|---|
 | `q` | 2–100 characters, up to 5 whitespace-separated words, **every** word must occur (case-insensitive substring) in first name, last name, organisation, email or any phone number's digits. Words shorter than 2 characters are ignored ("Rahul S" searches "Rahul"; only short words is a 400), and the first 5 longer words are searched (since Phase 7 short words are skipped before counting: "a b c d e Rahul" used to search nothing). A phone-like word (`98765-43210`, `1-800`) matches phone digits **or** the text as typed ("1-800 Flowers"). LIKE wildcards are literal. Case folding is PostgreSQL's `upper()`: locale-specific letters (Turkish İ, German ß) match only as typed. Description, city and other fields are not searched. The same rule (`selectors.match_condition`) finds leads in global search, which narrows by words of 3+ characters only ([search.md](search.md)). |
 | `status`, `source`, `rating` | exact key |
-| `owner` | user id; **organisation-wide workspace only** (400 elsewhere); only narrows the scope |
+| `owner` | user id; **`all` only** (organisation-wide, or an Admin's team; 400 elsewhere); only narrows the scope (in a team, an owner outside it lists nothing) |
 | `created_from`, `created_to` | inclusive dates (2000–2999), interpreted as business days in Asia/Kolkata |
 | `archived` | `false` (default) or `true` |
 | `ordering` | `-created_at` (default, newest), `created_at`, `name` (display name, A–Z), `-updated_at`, `-last_contacted_at` (never-contacted last), `last_contacted_at` (never-contacted first) |
@@ -296,7 +306,9 @@ Every write locks the lead row and requires the `version` the client last saw.
 
 Idempotency keys are per user and per operation, kept 24 h (purged hourly by
 `core.housekeeping`), and a reused key with a different body is refused (422
-`idempotency_key_reused`). The frontend derives the key from the exact request body, so it
+`idempotency_key_reused`). In an Admin's team workspace the request's digest names the
+workspace as `team`, without its members (ADR-0035), so a retry after a team change is still
+the same request; its replay is looked up in the retry's scope, as always. The frontend derives the key from the exact request body, so it
 reuses a key only for an identical retry. The UI never navigates or shows "saved" for a
 save that finishes after the user has left the form.
 

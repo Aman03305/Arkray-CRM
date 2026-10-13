@@ -15,6 +15,7 @@ import type { Viewer } from "@/lib/viewer";
 import { userWorkspaceHref } from "@/lib/workspace";
 
 import { SECURITY_EVENTS_QUERY_KEY, supportApi, toSupportSession } from "./api";
+import { useOutOfReachOn404 } from "./reach";
 
 const REASON_MAX = 200;
 
@@ -40,6 +41,8 @@ export function AccessAsUserDialog({ user, onClose }: { user: AdminUser; onClose
       router.push(userWorkspaceHref(session.target.id));
     },
   });
+  // Out of reach now (404): the Users page closes this and says why (ADR-0035).
+  useOutOfReachOn404(start.error, user);
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();

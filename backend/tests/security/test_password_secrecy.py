@@ -384,6 +384,7 @@ USER_SERIALIZER_FIELDS = {
         "activated_at",
         "deactivated_at",
         "invitation",
+        "manager",  # ADR-0035: the team's Admin, {id, full_name} or null; nothing else of them
         "password_change_required",
         "password_changed_at",
         "mfa_enabled",

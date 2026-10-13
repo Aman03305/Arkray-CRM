@@ -69,7 +69,7 @@ export function presetActivityList(workspaceKey: string, filters: Partial<Activi
 }
 
 /**
- * The calendar's view, the day it is on and (organisation-wide) whose activities it shows,
+ * The calendar's view, the day it is on and (in the overview) whose activities it shows,
  * remembered per workspace for this page load like the list's filters. It opens on this
  * month, everyone's.
  */
@@ -77,7 +77,7 @@ interface CalendarState {
   view: CalendarView;
   /** A business date inside the period shown. */
   anchor: string;
-  /** Organisation-wide only: the viewer's own activities ("My calendar"). */
+  /** In the overview only: the viewer's own activities ("My calendar"). */
   mine: boolean;
 }
 

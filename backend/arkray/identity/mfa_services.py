@@ -70,11 +70,13 @@ from arkray.core.errors import (
 
 from . import emails, mfa, selectors, throttling
 from .models import MfaDevice, MfaLock, MfaRecoveryCode, User, normalize_email
-from .policy import Capability, roles_with
+from .policy import administrator_roles
 from .services import (
     SESSION_ENDED,
     _acting_manager,
-    _lock_user,
+    _acting_super_administrator,
+    _lock_reachable_user,
+    _refuse_if_recently_demoted,
     refuse_if_pseudonymised,
     serialise_user_administration,
 )
@@ -217,11 +219,12 @@ def _forget(user: Any) -> None:
 def required_for(user: Any) -> bool:
     """Whether the account must have a second factor: every account when
     MFA_REQUIRED_FOR_ALL_USERS is on (an organisational policy; review of 73ff1e3, L1),
-    else administrators when MFA_REQUIRED_FOR_ADMINS is (ADR-0033)."""
+    else administrators of either kind (super or team, ADR-0035) when MFA_REQUIRED_FOR_ADMINS
+    is (ADR-0033)."""
     if settings.MFA_REQUIRED_FOR_ALL_USERS:
         return True
     return bool(settings.MFA_REQUIRED_FOR_ADMINS) and (
-        getattr(user, "role", None) in roles_with(Capability.USERS_MANAGE)
+        getattr(user, "role", None) in administrator_roles()
     )
 
 
@@ -464,7 +467,7 @@ def _throttled_verify(
 
 
 def _locked_signed_in(request: HttpRequest, user_id: UUID) -> User:
-    user = User.objects.select_for_update().filter(pk=user_id).first()
+    user = User.objects.select_for_update(no_key=True).filter(pk=user_id).first()
     if user is None or not user.is_active:
         raise PermissionDeniedError()
     if not session_matches(request, user):
@@ -543,7 +546,7 @@ def begin_setup(user: User) -> Setup:
     """A new unconfirmed device (replacing an earlier unconfirmed one). The caller checked
     the current password. The secret is returned here, once, and never again."""
     with transaction.atomic():
-        locked = User.objects.select_for_update().get(pk=user.pk)
+        locked = User.objects.select_for_update(no_key=True).get(pk=user.pk)
         device = MfaDevice.objects.select_for_update().filter(user_id=locked.pk).first()
         if device is not None and device.confirmed_at is not None:
             raise MfaAlreadyEnabledError()
@@ -719,14 +722,18 @@ def _remove_factor(user: User) -> bool:
 def reset_for_user(*, actor_id: UUID, user_id: UUID) -> User:
     """An administrator removes an ordinary user's second factor (lost phone and codes): the
     user signs in with their password and may set up a new one; their sessions end. Never an
-    administrator's, their own included (ADR-0030/0033): an operator runs `reset_mfa`."""
+    administrator's of either kind, their own included (ADR-0030/0033/0035): an operator runs
+    `reset_mfa`. Within the actor's reach (404 outside it, identical to no such account; a
+    team administrator: their team's users), and not for an account another administrator
+    took out of an administrator's role within the cooling-off (ADR-0035)."""
     with transaction.atomic():
         serialise_user_administration()
         actor = _acting_manager(actor_id)
-        user = _lock_user(user_id)
+        user = _lock_reachable_user(actor, user_id)
         refuse_if_pseudonymised(user)
-        if user.role in roles_with(Capability.USERS_MANAGE):
+        if user.role in administrator_roles():
             raise BusinessRuleViolation(ADMINISTRATOR_MFA_REFUSED)
+        _refuse_if_recently_demoted(actor, user)
         if _remove_factor(user):
             user.session_epoch += 1
             user.version += 1
@@ -738,13 +745,16 @@ def reset_for_user(*, actor_id: UUID, user_id: UUID) -> User:
 
 def operator_reset(email: str, reason: str, *, operator_id: UUID) -> bool:
     """`manage.py reset_mfa`: remove anyone's second factor (administrators included), with
-    shell and database access, on behalf of `operator_id` (an active administrator, re-read
-    under the lock; the sole administrator may reset their own). Audited with them as the
-    actor and the reason as an expiring detail. False when there was nothing to remove."""
+    shell and database access, on behalf of `operator_id` (an active super administrator,
+    re-read under the lock: a team administrator administers only their team, ADR-0035; the
+    sole administrator may reset their own). Audited with them as the actor and the reason as
+    an expiring detail. False when there was nothing to remove."""
     with transaction.atomic():
         serialise_user_administration()
-        operator = _acting_manager(operator_id)
-        user = User.objects.select_for_update().filter(email=normalize_email(email)).first()
+        operator = _acting_super_administrator(operator_id)
+        user = (
+            User.objects.select_for_update(no_key=True).filter(email=normalize_email(email)).first()
+        )
         if user is None:
             raise NotFoundError("No account has this email address.")
         refuse_if_pseudonymised(user)

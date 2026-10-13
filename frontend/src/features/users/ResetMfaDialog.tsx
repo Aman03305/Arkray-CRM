@@ -7,6 +7,7 @@ import { describeError } from "@/lib/api/errors";
 import type { AdminUser } from "@/lib/api/types";
 
 import { usersApi } from "./api";
+import { useOutOfReachOn404 } from "./reach";
 
 /**
  * Removing an ordinary user's two-step verification, for someone who lost their phone and
@@ -22,6 +23,8 @@ export function ResetMfaDialog({ user, onClose, onDone }: {
     mutationFn: () => usersApi.resetMfa(user.id),
     onSuccess: (updated) => onDone(updated, `Two-step verification was reset for ${updated.full_name}.`),
   });
+  // Out of reach now (404): the Users page closes this and says why (ADR-0035).
+  useOutOfReachOn404(reset.error, user);
   return (
     <ConfirmDialog
       open

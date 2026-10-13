@@ -61,9 +61,9 @@ Rows carry only what the dashboard shows (security review): a lead's name, organ
 created time, assigned user and its opportunity's id, name and instrument; a meeting's or task's title, type, status, start or due
 time, "overdue", its lead and its owner. People are `{id, full_name, is_active}`, never an
 email; no description, agenda, author or version is sent, and no lead contact data. A new
-lead's row shows its name, its instrument, (organisation-wide) its owner and "Today 2:15 pm".
-Organisation-wide the UI writes the owner on every row; in one person's workspace the rows
-don't repeat their name.
+lead's row shows its name, its instrument, (in an overview) its owner and "Today 2:15 pm".
+In an overview (the organisation's, or an Admin's team's) the UI writes the owner on every
+row; in one person's workspace the rows don't repeat their name.
 
 ## Workspaces
 
@@ -73,13 +73,18 @@ The dashboard follows the existing workspace rules exactly; nothing is dashboard
 | URL | Viewer | API workspace | Shows |
 |---|---|---|---|
 | `/dashboard` | sales user | `me` | their own records |
-| `/dashboard` (and `/admin`, which redirects there) | administrator | `all` | **Admin Home**: the organisation's figures and lists |
-| `/admin/users/{id}/dashboard` | administrator | `{id}` | that user's records only, under the "Viewing CRM for: Rahul Sharma" banner |
+| `/dashboard` (and `/admin`, which redirects there) | super admin | `all` | **Admin Home**: the organisation's figures and lists ("Organization overview") |
+| `/dashboard` (and `/admin`) | Admin (team administrator, [ADR-0035](adr/0035-super-administrators-and-teams.md)) | `all` (scope `TEAM`) | **Admin Home** for the team ("Team overview"): the Admin's own and their team's users' figures and lists, never anyone else's; no security activity or data requests (super admins only) |
+| `/admin/users/{id}/dashboard` | super admin; an Admin for a member of their team | `{id}` | that user's records only, under the "Viewing CRM for: Rahul Sharma" banner |
 
 - A sales user asking for `all` or another user's id gets the same 404 as for a user that
   doesn't exist (enumeration-safe; 15 odd spellings tried by the security review).
 - An administrator's own records are at `/api/v1/workspaces/me/dashboard`; the UI's
-  top-level dashboard for administrators is the organisation (ADR-0010).
+  top-level dashboard for administrators is their overview (ADR-0010): the organisation for a
+  super admin, the team for an Admin. The dashboard adds nothing for teams: the team's
+  figures are the module selectors' over the `TEAM` scope, so every figure counts the team
+  only, and an Admin asking for anyone else's id outside their team gets the same 404 as
+  for a user who doesn't exist.
 - **No impersonation:** viewing Rahul's dashboard is the administrator reading Rahul's
   scope. Workspace resolution audits the delegated access (`workspace.accessed`, at most
   once per actor and workspace per 15 minutes); refreshing the dashboard writes nothing more,
@@ -296,7 +301,7 @@ of the schedule index). Those tests vacuum their data first, as autovacuum keeps
 ## Frontend
 
 - **Layout:** the page header (Dashboard; Your records / Selected user's records /
-  Organization overview), "Key figures" (six cards: Total leads, New leads today, Pipeline
+  Organization overview, or Team overview for an Admin), "Key figures" (six cards: Total leads, New leads today, Pipeline
   value, Weighted pipeline, Meetings, Tasks; one column on phones, two on tablets, three on
   desktops; amounts wrap only at their commas), then the three lists in this order: **New
   leads**, Upcoming meetings, Tasks requiring attention (stacked on phones and tablets, two
@@ -338,6 +343,7 @@ of the schedule index). Those tests vacuum their data first, as autovacuum keeps
 | Freshness through the real write APIs | `arkray/dashboard/tests/test_freshness.py` |
 | Query counts and the read-only snapshot | `arkray/dashboard/tests/test_query_counts.py` |
 | Aggregate isolation: A, B and the admin with distinctive amounts; exact figures per workspace; A's response byte-identical before and after B's records exist; reassignment moving figures exactly | `tests/security/test_dashboard_cross_user.py` |
+| An Admin's team (ADR-0035): figures count the team only (amounts unique per owner), outsiders' never; a super admin's unchanged | `tests/security/test_teams_crm.py`; frontend `src/features/team-admin.test.tsx` |
 | Review regressions (slim rows, the concurrent index swap, autovacuum settings, JIT off) | `tests/security/test_phase5_review_regressions.py`, `tests/architecture/test_migrations.py` |
 | Redis and broker outages | `tests/security/test_outages.py` |
 | Query plans | `tests/performance/test_dashboard_query_plans.py`, `test_activity_query_plans.py` |

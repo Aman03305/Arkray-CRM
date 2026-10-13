@@ -216,8 +216,10 @@ describe("a user's privacy actions, from their details", () => {
     expect(dialog).toHaveTextContent("Ask Arkray conversations deleted: 3");
     expect(dialog).toHaveTextContent("Expiring audit details deleted: 12");
     expect(dialog).not.toHaveTextContent("Support sessions ended");
-    // The list (and their details) are read again: they now show the pseudonym.
-    await waitFor(() => expect(api.callsTo("GET", "/api/v1/admin/users").length).toBeGreaterThan(1));
+    // The list (and their details) are read again: they now show the pseudonym. (Not the
+    // Admins the page loads for its Admin filter, role=team_admin: ADR-0035.)
+    const listCalls = () => api.callsTo("GET", "/api/v1/admin/users").filter((c) => c.query.get("role") !== "team_admin");
+    await waitFor(() => expect(listCalls().length).toBeGreaterThan(1));
   });
 
   it("shows the server's refusal (a user who still owns current work)", async () => {

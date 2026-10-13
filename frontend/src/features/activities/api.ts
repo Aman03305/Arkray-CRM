@@ -20,7 +20,7 @@ import type {
   NotePage,
   TimelinePage,
 } from "@/lib/api/types";
-import { type Workspace, workspaceApiPath, workspaceApiSegment } from "@/lib/workspace";
+import { isOverview, type Workspace, workspaceApiPath, workspaceApiSegment } from "@/lib/workspace";
 
 export const PAGE_SIZE = 25;
 export const TIMELINE_PAGE_SIZE = 20;
@@ -33,7 +33,7 @@ export const CALENDAR_MAX_PAGES = 5;
 export type ActivityTab = "all" | ActivityType;
 
 /**
- * The list's filters (allowlisted server-side; owner only organisation-wide). `status`
+ * The list's filters (allowlisted server-side; owner only in the overview). `status`
  * is a status key or a preset: "overdue", "current" (open tasks and scheduled meetings),
  * "upcoming" (current work from now on) and "not_cancelled" (the summary's "meetings
  * today" counts scheduled and completed ones), so each summary figure opens a list of
@@ -144,7 +144,7 @@ export function listParams(workspace: Workspace, filters: ActivityFilters, curso
   if (filters.dateFrom) params.set("date_from", filters.dateFrom);
   if (filters.dateTo) params.set("date_to", filters.dateTo);
   if (filters.opportunity) params.set("opportunity", filters.opportunity);
-  if (filters.owner && workspace.kind === "organization") params.set("owner", filters.owner);
+  if (filters.owner && isOverview(workspace)) params.set("owner", filters.owner);
   if (filters.archived) params.set("archived", "true");
   if (filters.ordering !== NO_FILTERS.ordering) params.set("ordering", filters.ordering);
   if (cursor) params.set("cursor", cursor);
@@ -164,7 +164,7 @@ function currentWorkPath(workspace: Workspace, target: CurrentWorkTarget): strin
 }
 
 /**
- * The calendar's range: inclusive business dates of the days on screen, and, organisation-wide
+ * The calendar's range: inclusive business dates of the days on screen, and, in the overview
  * only, one owner ("My calendar"; empty for everyone).
  */
 export interface CalendarRange {

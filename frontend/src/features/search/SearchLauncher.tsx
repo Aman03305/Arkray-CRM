@@ -4,7 +4,7 @@ import { Search } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { useWorkspace } from "@/lib/use-workspace";
-import { hasCapability } from "@/lib/viewer";
+import { canOpenUserWorkspaces } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
 import { type Workspace, workspaceApiSegment } from "@/lib/workspace";
 
@@ -51,7 +51,7 @@ function useSearchShortcut(enabled: boolean, isOpen: boolean, open: () => void):
  * switch from one user's workspace to another's (Back, Forward, a link) closes the dialog
  * and drops everything typed or found: nothing searched in one workspace is ever shown in
  * another. Search is disabled until the workspace is certain: while the viewer is still
- * loading (it decides between one's own and the organisation's records; never a guessed
+ * loading (it decides between one's own and the overview's records; never a guessed
  * workspace, as with the module views), for a URL that names no workspace (a malformed user
  * id), and in a user's workspace the viewer may not open.
  */
@@ -59,7 +59,7 @@ export function SearchLauncher() {
   const viewer = useViewer();
   const found = useWorkspace();
   const workspace =
-    viewer === null || (found?.kind === "user" && !hasCapability(viewer, "workspace.view_any")) ? null : found;
+    viewer === null || (found?.kind === "user" && !canOpenUserWorkspaces(viewer)) ? null : found;
   return <WorkspaceSearch key={workspace ? workspaceApiSegment(workspace) : "none"} workspace={workspace} />;
 }
 

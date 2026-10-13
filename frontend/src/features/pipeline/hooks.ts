@@ -6,8 +6,8 @@ import { useCallback, useSyncExternalStore } from "react";
 import { activityKeys, timelineKeys } from "@/features/activities/api";
 import { leadKeys } from "@/features/leads/api";
 import type { Board, Opportunity, OpportunityCard, OpportunityPage, PipelineDto, Stage } from "@/lib/api/types";
-import { hasCapability, type Viewer } from "@/lib/viewer";
-import type { Workspace } from "@/lib/workspace";
+import { canAssign, canManageOthersRecords, type Viewer } from "@/lib/viewer";
+import { canWriteIn, isOverview, type Workspace } from "@/lib/workspace";
 
 import { type BoardFilters, NO_BOARD_FILTERS, OPPORTUNITY_OPTIONS_KEY, pipelineApi, pipelineKeys, type PipelineListItem } from "./api";
 import { moveCardInBoard } from "./transitions";
@@ -71,28 +71,30 @@ export function firstOpenStage(pipeline: PipelineListItem | undefined): Stage | 
 export interface PipelinePermissions {
   /** Create, edit, move, archive and restore opportunities in this workspace. */
   canWrite: boolean;
-  /** Change an open opportunity's owner (crm.assign_any). */
+  /** Change an open opportunity's owner (crm.assign_any, or crm.assign_team within the team). */
   canAssign: boolean;
-  /** The organisation-wide workspace: a new opportunity's owner must be chosen. */
+  /** The overview (the organisation's, or a team's): a new opportunity's owner must be chosen. */
   choosesOwner: boolean;
   /** Correct a won or lost deal's value or dates, with a reason (administrators,
-   * crm.manage_any; never in a support session: the API refuses it there). */
+   * crm.manage_any, or crm.manage_team for a deal in the team; never in a support session:
+   * the API refuses it there). */
   canCorrect: boolean;
 }
 
 /**
  * What the UI offers in this workspace (mirroring identity.workspaces.authorize_write on
  * the server). An opportunity's owner follows its customer record (ADR-0027): in one's own
- * or a user's workspace a new one is that user's; organisation-wide its owner is chosen.
+ * or a user's workspace a new one is that user's; in the overview its owner is chosen (within
+ * the team, for a team administrator: ADR-0035).
  * Presentation only: the API decides.
  */
 export function pipelinePermissions(viewer: Viewer | null, workspace: Workspace): PipelinePermissions {
-  const canWrite = hasCapability(viewer, workspace.kind === "self" ? "crm.access_own" : "crm.manage_any");
+  const canWrite = canWriteIn(viewer, workspace);
   return {
     canWrite,
-    canAssign: canWrite && hasCapability(viewer, "crm.assign_any"),
-    choosesOwner: workspace.kind === "organization",
-    canCorrect: canWrite && hasCapability(viewer, "crm.manage_any") && !viewer?.supportSession,
+    canAssign: canWrite && canAssign(viewer),
+    choosesOwner: isOverview(workspace),
+    canCorrect: canWrite && canManageOthersRecords(viewer) && !viewer?.supportSession,
   };
 }
 

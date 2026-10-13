@@ -2,7 +2,7 @@
 
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Search, UsersRound } from "lucide-react";
-import { useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -14,7 +14,9 @@ import { workspaceKeys } from "@/features/workspace/api";
 import { describeError, isApiError } from "@/lib/api/errors";
 import type { AdminUser } from "@/lib/api/types";
 import { useFlash } from "@/lib/flash";
+import { usersPageLabel } from "@/lib/navigation";
 import { VIEWER_QUERY_KEY } from "@/lib/query-client";
+import { canManageAdmins } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
 
 import {
@@ -30,18 +32,21 @@ import {
   usersApi,
 } from "./api";
 import { AccessAsUserDialog } from "./AccessAsUserDialog";
+import { AdminFilter } from "./AdminFilter";
 import { ChangeEmailDialog } from "./ChangeEmailDialog";
 import { LifecycleDialog } from "./LifecycleDialog";
 import { ClearSignInLockDialog } from "./ClearSignInLockDialog";
 import { ResetMfaDialog } from "./ResetMfaDialog";
 import { SetPasswordDialog } from "./SetPasswordDialog";
+import { OutOfReachProvider } from "./reach";
 import { UserDetailsDrawer } from "./UserDetailsDrawer";
 import { UserFormDialog } from "./UserFormDialog";
 import { type UserAction, UsersTable } from "./UsersTable";
 
 type OpenDialog =
   | { kind: "create" }
-  | { kind: "edit"; user: AdminUser }
+  // From the details panel (role or Admin): saving goes back to it, with the outcome.
+  | { kind: "edit"; user: AdminUser; fromDetails?: boolean }
   | { kind: "change-email"; user: AdminUser }
   | { kind: "deactivate" | "activate" | "resend"; user: AdminUser }
   | { kind: "reset-mfa" | "clear-sign-in-lock"; user: AdminUser }
@@ -61,8 +66,15 @@ function useDebounced<T>(value: T, delayMs: number): T {
 const FILTER_CONTROL =
   "h-9 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-900 focus-visible:outline-brand-600";
 
+/**
+ * The Users page. A Super admin manages everyone: roles, each User's Admin (their team) and
+ * the administrators' accounts. An Admin (team administrator, ADR-0035) sees "My team":
+ * themselves and the users they manage, and creates Users only, into their team. The API
+ * lists only who the viewer may reach, and refuses everything else.
+ */
 export function UsersPage() {
   const viewer = useViewer();
+  const superAdmin = canManageAdmins(viewer);
   const queryClient = useQueryClient();
   const [filters, setFilters] = useState<UserFilters>(NO_FILTERS);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -76,6 +88,8 @@ export function UsersPage() {
   const searchId = useId();
   const statusId = useId();
   const roleId = useId();
+  // Someone the API no longer lets the viewer reach (404): what was open about them closed.
+  const [gone, setGone] = useState<string | null>(null);
 
   const q = useDebounced(filters.q, 300);
   const effective: UserFilters = { ...filters, q: q.trim().length >= SEARCH_MIN_LENGTH ? q.trim() : "" };
@@ -89,7 +103,7 @@ export function UsersPage() {
     setFilters((f) => ({ ...f, ...patch }));
     setCursor(null);
   };
-  const filtered = Boolean(effective.q || filters.status || filters.role);
+  const filtered = Boolean(effective.q || filters.status || filters.role || filters.manager);
 
   const refresh = (user: AdminUser) => {
     queryClient.setQueryData(userDetailKey(user.id), user);
@@ -107,20 +121,48 @@ export function UsersPage() {
     refresh(user);
   };
 
+  // Saved from the details panel: back to it, which shows the outcome (like a new password).
+  const onSavedToDetails = (user: AdminUser, message: string) => {
+    setDialog(null);
+    setDetailsNotice(message);
+    refresh(user);
+  };
+
   const onPasswordSet = (user: AdminUser, message: string) => {
     setDialog(null); // back to the details panel, which shows the outcome
     setDetailsNotice(message);
     refresh(user);
   };
 
+  // A 404 about a listed user (their details, or an action on them): they are out of the
+  // viewer's reach now, e.g. a team member moved to another team (ADR-0035; out of reach
+  // reads exactly like an account that doesn't exist). Nothing about them stays open, the
+  // page says why, and the list is read again.
+  const onOutOfReach = useCallback(
+    (user: { id: string; fullName: string }) => {
+      setDialog(null);
+      setDetails(null);
+      setDetailsNotice(null);
+      setNotice(null);
+      setGone(
+        `${user.fullName} is no longer in your reach (they may have moved to another team). Nothing was changed, and the list has been refreshed.`,
+      );
+      queryClient.removeQueries({ queryKey: userDetailKey(user.id) });
+      void queryClient.invalidateQueries({ queryKey: USERS_QUERY_KEY });
+    },
+    [queryClient, setNotice],
+  );
+
   const onAction = (action: UserAction, user: AdminUser) => {
     setNotice(null);
+    setGone(null);
     setDetails(null);
     setDialog(action === "edit" ? { kind: "edit", user } : { kind: action, user });
   };
 
   const openDetails = (user: AdminUser) => {
     setNotice(null);
+    setGone(null);
     setDetailsNotice(null);
     setDetails(user);
   };
@@ -129,11 +171,18 @@ export function UsersPage() {
   const error = users.isError ? describeError(users.error) : null;
 
   return (
-    <>
+    <OutOfReachProvider value={onOutOfReach}>
       <PageHeader
-        title="Users"
+        title={usersPageLabel(viewer)}
+        subtitle={superAdmin ? undefined : "You and the users you manage."}
         actions={
-          <Button icon={<Plus aria-hidden="true" className="size-4" />} onClick={() => setDialog({ kind: "create" })}>
+          <Button
+            icon={<Plus aria-hidden="true" className="size-4" />}
+            onClick={() => {
+              setGone(null);
+              setDialog({ kind: "create" });
+            }}
+          >
             New user
           </Button>
         }
@@ -173,24 +222,29 @@ export function UsersPage() {
             ))}
           </select>
         </div>
-        <div>
-          <label htmlFor={roleId} className="sr-only">
-            Filter by role
-          </label>
-          <select
-            id={roleId}
-            value={filters.role}
-            onChange={(e) => updateFilters({ role: e.target.value as UserFilters["role"] })}
-            className={FILTER_CONTROL}
-          >
-            <option value="">All roles</option>
-            {ROLE_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        {superAdmin ? (
+          <div>
+            <label htmlFor={roleId} className="sr-only">
+              Filter by role
+            </label>
+            <select
+              id={roleId}
+              value={filters.role}
+              onChange={(e) => updateFilters({ role: e.target.value as UserFilters["role"] })}
+              className={FILTER_CONTROL}
+            >
+              <option value="">All roles</option>
+              {ROLE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
+        {superAdmin ? (
+          <AdminFilter value={filters.manager} onChange={(manager) => updateFilters({ manager })} className={FILTER_CONTROL} />
+        ) : null}
       </div>
       {filters.q.trim().length > 0 && filters.q.trim().length < SEARCH_MIN_LENGTH ? (
         <p className="-mt-2 mb-4 text-xs text-slate-500">Type at least {SEARCH_MIN_LENGTH} characters to search.</p>
@@ -198,6 +252,7 @@ export function UsersPage() {
 
       <div aria-live="polite" className="mb-4 empty:hidden">
         {notice ? <Alert tone="success">{notice}</Alert> : null}
+        {gone ? <Alert tone="info">{gone}</Alert> : null}
       </div>
 
       {error ? (
@@ -259,7 +314,7 @@ export function UsersPage() {
         <UserFormDialog
           mode={{ kind: "edit", user: dialog.user, isSelf: dialog.user.id === viewer?.id }}
           onClose={() => setDialog(null)}
-          onSaved={onSaved}
+          onSaved={dialog.fromDetails ? onSavedToDetails : onSaved}
         />
       ) : null}
       {dialog?.kind === "change-email" ? (
@@ -295,6 +350,10 @@ export function UsersPage() {
             setDetails(null);
             setDetailsNotice(null);
           }}
+          onEdit={(user) => {
+            setDetailsNotice(null);
+            setDialog({ kind: "edit", user, fromDetails: true });
+          }}
           onSetPassword={(user) => {
             setDetailsNotice(null);
             setDialog({ kind: "set-password", user });
@@ -313,6 +372,6 @@ export function UsersPage() {
           }}
         />
       ) : null}
-    </>
+    </OutOfReachProvider>
   );
 }

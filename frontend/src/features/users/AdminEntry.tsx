@@ -5,17 +5,18 @@ import { useEffect } from "react";
 
 import { NotFoundView } from "@/components/ui/NotFoundView";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { hasCapability } from "@/lib/viewer";
+import { canManageUsers } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
 
 /**
- * /admin: administrators go to their home, the organisation dashboard (ADR-0010).
+ * /admin: administrators go to their home, the overview dashboard (ADR-0010): the
+ * organisation's for a super administrator, their team's for a team administrator (ADR-0035).
  * Everyone else gets the standard "not found" page.
  */
 export function AdminEntry() {
   const viewer = useViewer();
   const router = useRouter();
-  const allowed = hasCapability(viewer, "users.manage");
+  const allowed = canManageUsers(viewer);
 
   useEffect(() => {
     if (allowed) router.replace("/dashboard");

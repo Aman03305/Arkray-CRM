@@ -7,8 +7,8 @@ Search, filters and sorts are allowlisted and bounded (docs/leads.md#search-filt
   with global search); every word must occur in the lead's names, organisation, email or
   phone digits (case-insensitive substring, served by one trigram index; `matching`).
   Phone-like words ("98765-43210") are reduced to digits first.
-- filters: status, source, rating, owner (organisation-wide workspace only; it can only
-  narrow the scope), created date range in the business time zone, archived.
+- filters: status, source, rating, owner (organisation-wide or a team's workspace only;
+  it can only narrow the scope), created date range in the business time zone, archived.
 - sorts: see ORDERINGS. Every ordering ends in the primary key, so keyset cursors are exact.
 """
 

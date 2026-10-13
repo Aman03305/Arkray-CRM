@@ -410,6 +410,38 @@ workers can't run them), and know that the previous release's `replay_erasures` 
 ledger entries naming several fields or files (it reports them failed and the API stays
 closed): replay with this release's image.
 
+**The super administrators and teams release** ([ADR-0035](adr/0035-super-administrators-and-teams.md))
+adds `identity.0009` (the role value `team_admin`, the nullable `identity_user.manager_id`
+with no default, its partial index and two CHECKs) and `ai.0005` (the conversation kind
+`team`) ([database.md](database.md#migrations)). **No data migration**: the stored role
+`admin` keeps its meaning and its powers, so every existing administrator is a Super admin
+and every existing user starts in no team. A rolling deploy is possible: the previous
+release never names `manager_id` and still inserts users and conversations (pinned by the
+same test, whose inserts through `73ff1e3`'s own models run on the latest schema), and the
+new role value is one it doesn't know, which it **grants nothing** (unknown roles get no
+capability): an Admin's requests on a previous-release pod are refused, never read as an
+organisation-wide administrator's (the reason the stored value wasn't renamed). Its ai
+worker fails a team conversation's question (`not_permitted`) rather than answering it, and
+it lists conversations by its own kinds only. What the previous release doesn't know while
+its pods run:
+
+- it doesn't count `team_admin` as an administrator (its `is_administrator` knows only
+  `admin`), so on its pods a super admin could set an Admin's password, change their email,
+  reset their second factor or pseudonymise them; a reactivation there gives an Admin their
+  old password back (no R126 reset link); a deactivation there neither revokes the
+  invitations they sent nor voids the temporary passwords they set (nor does a team move or
+  demotion there); and a role change there leaves the Admin's team assigned (a
+  reference left behind grants nothing on the new pods, which check the manager's role);
+- it ignores `manager`: a user created there is in no team.
+
+So **create or promote Admins only once every pod (web, api and the workers) runs this
+release**: until then nobody holds the new role, and there is nothing for the previous
+release to misread. The same holds for **redeploying the previous images without a
+restore** after Admins exist: they can do nothing there, and their accounts lose the
+administrator protection while it runs, so prefer rolling forward; if you must go back,
+a super admin first makes each Admin a User (their teams are unassigned) or deactivates
+them. Both migrations **refuse to be reversed** ([Rollback](#rollback)).
+
 ### Before an upgrade
 
 1. **Back up and verify**: `scripts/backup.sh` (it checks the archive reads back and writes
@@ -438,7 +470,8 @@ closed): replay with this release's image.
 
 **Rollback and downgrade policy.** Schema down-migrations are **not supported past the v1.0
 RC** (`64bb641`). Every migration after it (`pipeline` 0006-0009, `identity.0004`,
-`activities.0010`, `audit` 0003-0004, `identity.0005`) refuses to be reversed: `migrate pipeline 0005` (or any
+`activities.0010`, `audit` 0003-0004, `identity.0005`, and later ones such as ADR-0035's
+`identity.0009` and `ai.0005`) refuses to be reversed: `migrate pipeline 0005` (or any
 target that would undo one of them) stops with `IrreversibleError: <migration> can't be
 reversed: that would delete ... restore the database backup taken before the upgrade (with
 that release), or deploy a forward fix` **before changing anything**, whether or not anything
@@ -446,7 +479,8 @@ was recorded since (tested on an empty database and on one holding negotiated pr
 history: the migration records, the schema and every row unchanged). Reversing them would
 delete the negotiated price history and agreed CPTs, user pipelines and custom fields, every
 opportunity's customer, contact, instrument details and Expected CPT, support sessions,
-attachments' records and note edit stamps ([database.md](database.md#reversibility)).
+attachments' records and note edit stamps, which Admin manages each user, and team
+administrators' Ask Arkray conversations ([database.md](database.md#reversibility)).
 
 To go back:
 

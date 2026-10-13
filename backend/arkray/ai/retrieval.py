@@ -3,8 +3,10 @@
 1. **Pre-filter in SQL.** Candidates are only ever drawn from the chunks the caller's scope
    could own: `owner_id = ANY(scope owners)` (or one lead's / opportunity's chunks) is part
    of the query, never applied afterwards to an organisation-wide top-K. For one person's
-   scope the search is exact (their chunks are read through the owner index and ranked by
-   distance in a materialised subquery); organisation-wide it uses the HNSW index.
+   scope, and for a team's (ADR-0035: the administrator and their members, several owners
+   in one array), the search is exact (their chunks are read through the owner index and
+   ranked by distance in a materialised subquery); only organisation-wide does it use the
+   HNSW index.
 2. **Live re-verification.** Every candidate's source is re-read through the owning
    module's scoped selector (`knowledge_documents(scope, ids)`): a source that is gone,
    archived, emptied or now someone else's is dropped, whatever the chunk's (possibly
@@ -90,6 +92,9 @@ def _candidates(
     where: list[str] = []
     params: list[Any] = []
     if not scope.is_organization_wide:
+        # Every other kind lists its owners: one (SELF, USER) or a team's (TEAM, never empty:
+        # it always holds its administrator). A team is filtered like a person, never read as
+        # the organisation.
         where.append("owner_id = ANY(%s::uuid[])")
         params.append([str(owner) for owner in scope.owner_ids])
     if lead_id is not None:
@@ -106,7 +111,9 @@ def _candidates(
     narrow = not scope.is_organization_wide or lead_id is not None or opportunity_id is not None
     if narrow:
         # Exact: the scope's (or the lead's) chunks are read through their btree index and
-        # ranked here; the HNSW index can't serve a selective filter reliably.
+        # ranked here; the HNSW index can't serve a selective filter reliably. A team's
+        # search reads all of its people's chunks, so its cost grows with them (about
+        # 3.5 µs a chunk: docs/rag-architecture.md#measured).
         # Only constant fragments are spliced in; every value is a parameter.
         sql = (
             f"WITH scoped AS MATERIALIZED (SELECT {columns}, embedding FROM ai_knowledge_chunk"  # noqa: S608

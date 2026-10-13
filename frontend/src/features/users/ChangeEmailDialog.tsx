@@ -12,6 +12,7 @@ import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
 import type { AdminUser } from "@/lib/api/types";
 
 import { USERS_QUERY_KEY, usersApi } from "./api";
+import { useOutOfReachOn404 } from "./reach";
 
 /** Email is the sign-in identity, so changing it is its own, clearly explained action. */
 export function ChangeEmailDialog({ user, isSelf, onClose, onSaved }: {
@@ -41,6 +42,8 @@ export function ChangeEmailDialog({ user, isSelf, onClose, onSaved }: {
       }
     },
   });
+  // Out of reach now (404): the Users page closes this and says why (ADR-0035).
+  useOutOfReachOn404(save.error, user);
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();

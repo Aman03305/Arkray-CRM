@@ -18,7 +18,7 @@ import {
   UsersRound,
 } from "lucide-react";
 
-import { canAsk, hasCapability, type SupportSession, type Viewer } from "./viewer";
+import { canAsk, canManageAdmins, canManageUsers, canOpenUserWorkspaces, type SupportSession, type Viewer } from "./viewer";
 import {
   activeSection,
   askHref,
@@ -43,7 +43,7 @@ export function navigationWorkspace(pathname: string, viewer: Viewer | null): Wo
   const session = viewer?.supportSession;
   if (session) return { kind: "user", userId: session.target.id };
   const named = workspaceFromPathname(pathname, viewer);
-  return named && !(named.kind === "user" && !hasCapability(viewer, "workspace.view_any"))
+  return named && !(named.kind === "user" && !canOpenUserWorkspaces(viewer))
     ? named
     : workspaceFromPathname("/", viewer)!;
 }
@@ -76,9 +76,17 @@ export function assistantNavigation(workspace: Workspace, viewer: Viewer | null)
   return canAsk(viewer) ? [{ key: "ask", label: "Ask Arkray", href: askHref(workspace), icon: MessageSquareText }] : [];
 }
 
+/**
+ * The Users page's name: "Users" for a super administrator (everyone), "My team" for a team
+ * administrator (themselves and the users they manage, ADR-0035).
+ */
+export function usersPageLabel(viewer: Viewer | null): string {
+  return canManageAdmins(viewer) ? "Users" : "My team";
+}
+
 export function administrationNavigation(viewer: Viewer | null): NavItem[] {
-  return hasCapability(viewer, "users.manage") && !viewer?.supportSession
-    ? [{ key: "users", label: "Users", href: "/admin/users", icon: UsersRound }]
+  return canManageUsers(viewer) && !viewer?.supportSession
+    ? [{ key: "users", label: usersPageLabel(viewer), href: "/admin/users", icon: UsersRound }]
     : [];
 }
 

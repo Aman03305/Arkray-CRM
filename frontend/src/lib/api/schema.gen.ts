@@ -245,7 +245,8 @@ export interface paths {
         /**
          * @description Remove an ordinary user's second factor (they lost the device and the recovery codes):
          *     their sessions end; they sign in with their password and may set up a new one. 422 for
-         *     an administrator, whoever asks (ADR-0033: an operator runs `manage.py reset_mfa`).
+         *     an administrator of either kind, whoever asks (ADR-0033/0035: an operator runs
+         *     `manage.py reset_mfa`); 404 outside the caller's reach (a team administrator: their team).
          */
         readonly post: operations["admin_users_mfa_reset"];
         readonly delete?: never;
@@ -298,7 +299,10 @@ export interface paths {
             readonly path?: never;
             readonly cookie?: never;
         };
-        /** @description Who CRM records can be assigned to (owner pickers). Active users only, by name. */
+        /**
+         * @description Who CRM records can be assigned to (owner pickers). Active users only, by name; a team
+         *     administrator's: themselves and their team's active members (ADR-0035).
+         */
         readonly get: operations["assignees_list"];
         readonly put?: never;
         readonly post?: never;
@@ -1075,8 +1079,9 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         /**
-         * @description Reassign a lead (crm.assign_any). The response shows the lead as reassigned, even if
-         *     it has thereby left the workspace it was reassigned from.
+         * @description Reassign a lead (crm.assign_any; or crm.assign_team, within the team: the service
+         *     applies the reach, ADR-0035). The response shows the lead as reassigned, even if it has
+         *     thereby left the workspace it was reassigned from.
          */
         readonly post: operations["leads_assign"];
         readonly delete?: never;
@@ -1257,10 +1262,11 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         /**
-         * @description Change an open opportunity's owner (crm.assign_any). Ownership follows the customer
-         *     record, so its other open opportunities and current work move too (ADR-0027). The
-         *     response shows the opportunity as reassigned, even if it has thereby left the workspace
-         *     it was reassigned from (as leads' assign).
+         * @description Change an open opportunity's owner (crm.assign_any; or crm.assign_team, within the
+         *     team: the service applies the reach, ADR-0035). Ownership follows the customer record, so
+         *     its other open opportunities and current work move too (ADR-0027). The response shows the
+         *     opportunity as reassigned, even if it has thereby left the workspace it was reassigned
+         *     from (as leads' assign).
          */
         readonly post: operations["opportunities_assign"];
         readonly delete?: never;
@@ -1281,7 +1287,8 @@ export interface paths {
         /**
          * @description An administrator corrects a won or lost deal's value or dates, which no edit changes
          *     while it is closed (adversarial review of 73ff1e3, M2): with a reason, at the version
-         *     last seen, appended to the deal's corrections. crm.manage_any, a recent second factor
+         *     last seen, appended to the deal's corrections. crm.manage_any, or crm.manage_team for a
+         *     deal of the team (ADR-0035; the service applies the reach), a recent second factor
          *     (ADR-0033), and never in a support session (the administrator's own context, as for user
          *     administration).
          */
@@ -1821,6 +1828,8 @@ export interface components {
             /** Format: date-time */
             readonly deactivated_at: string | null;
             readonly invitation: components["schemas"]["InvitationState"] | null;
+            /** @description The Admin (role team_admin) whose team this user is in, or null: a user in no team (managed by super admins) or an administrator (ADR-0035). */
+            readonly manager: components["schemas"]["Person"] | null;
             readonly password_change_required: boolean;
             /** Format: date-time */
             readonly password_changed_at: string | null;
@@ -2368,7 +2377,7 @@ export interface components {
             readonly status?: string;
             /**
              * Format: uuid
-             * @description Organisation-wide workspace only (required there, needs crm.assign_any).
+             * @description Organisation-wide (crm.assign_any) or a team's workspace (a member of the team, crm.assign_team) only, and required there.
              */
             readonly owner?: string;
         };
@@ -2755,7 +2764,7 @@ export interface components {
             readonly lead?: string;
             /**
              * Format: uuid
-             * @description Without a lead: who owns the new opportunity. Required organisation-wide (crm.assign_any); elsewhere the workspace's user, so it may be omitted.
+             * @description Without a lead: who owns the new opportunity. Required organisation-wide (crm.assign_any) and in a team's workspace (a member of the team, crm.assign_team); elsewhere the workspace's user, so it may be omitted.
              */
             readonly owner?: string;
             /**
@@ -2918,7 +2927,19 @@ export interface components {
         readonly PatchedUserUpdateRequest: {
             readonly first_name?: string;
             readonly last_name?: string;
+            /**
+             * @description Super admins only (ADR-0035).
+             *
+             *     * `admin` - Super admin
+             *     * `team_admin` - Admin
+             *     * `sales_user` - User
+             */
             readonly role?: components["schemas"]["RoleEnum"];
+            /**
+             * Format: uuid
+             * @description Move a user into an Admin's team (an active or invited team_admin), or out of any (null). Super admins only; the user must be, or become in the same request, a sales_user (ADR-0035).
+             */
+            readonly manager?: string | null;
             readonly version?: number;
         };
         readonly Person: {
@@ -3062,11 +3083,12 @@ export interface components {
             readonly recovery_codes: readonly string[];
         };
         /**
-         * @description * `admin` - Admin
+         * @description * `admin` - Super admin
+         *     * `team_admin` - Admin
          *     * `sales_user` - User
          * @enum {string}
          */
-        readonly RoleEnum: "admin" | "sales_user";
+        readonly RoleEnum: "admin" | "team_admin" | "sales_user";
         /**
          * @description * `not_scanned` - Not scanned
          *     * `pending` - Being checked
@@ -3430,6 +3452,11 @@ export interface components {
             readonly role: components["schemas"]["RoleEnum"];
             /** @description An initial password (the user must change it when they first sign in). Omit it to email an invitation instead. Stored only as a hash; never returned. */
             readonly password?: string;
+            /**
+             * Format: uuid
+             * @description A new user's Admin (an active or invited team_admin), for role sales_user only (ADR-0035). Super admins only: an Admin's new users are always in their own team (null or their own id; anything else is 403).
+             */
+            readonly manager?: string | null;
         };
         readonly UserRef: {
             /** Format: uuid */
@@ -3472,10 +3499,11 @@ export interface components {
         /**
          * @description * `self` - self
          *     * `user` - user
+         *     * `team` - team
          *     * `organization` - organization
          * @enum {string}
          */
-        readonly WorkspaceKindEnum: "self" | "user" | "organization";
+        readonly WorkspaceKindEnum: "self" | "user" | "team" | "organization";
         readonly WorkspaceSubject: {
             /** Format: uuid */
             readonly id: string;
@@ -3667,13 +3695,16 @@ export interface operations {
         readonly parameters: {
             readonly query?: {
                 readonly cursor?: string;
+                /** @description A team: an Admin's id, or `none` for the users in no team (ADR-0035). Intersected with what the caller administers. */
+                readonly manager?: string;
                 readonly page_size?: number;
                 readonly q?: string;
                 /**
-                 * @description * `admin` - Admin
+                 * @description * `admin` - Super admin
+                 *     * `team_admin` - Admin
                  *     * `sales_user` - User
                  */
-                readonly role?: "admin" | "sales_user";
+                readonly role?: "admin" | "team_admin" | "sales_user";
                 /**
                  * @description * `invited` - Invited
                  *     * `active` - Active
@@ -4451,7 +4482,7 @@ export interface operations {
                  */
                 readonly ordering?: "-created_at" | "-scheduled" | "created_at" | "scheduled";
                 readonly overdue?: boolean;
-                /** @description Organisation-wide workspace only. */
+                /** @description Organisation-wide or a team's workspace only; narrows it, never widens. */
                 readonly owner?: string;
                 readonly page_size?: number;
                 /**
@@ -5169,7 +5200,7 @@ export interface operations {
                  *     * `name` - name
                  */
                 readonly ordering?: "-created_at" | "-last_contacted_at" | "-updated_at" | "created_at" | "last_contacted_at" | "name";
-                /** @description Organisation-wide workspace only. */
+                /** @description Organisation-wide or a team's workspace only; narrows it, never widens. */
                 readonly owner?: string;
                 readonly page_size?: number;
                 readonly q?: string;
@@ -5590,7 +5621,7 @@ export interface operations {
                  *     * `value` - value
                  */
                 readonly ordering?: "-closed_at" | "-created_at" | "-updated_at" | "-value" | "created_at" | "expected_close" | "value";
-                /** @description Organisation-wide workspace only. */
+                /** @description Organisation-wide or a team's workspace only; narrows it, never widens. */
                 readonly owner?: string;
                 readonly page_size?: number;
                 readonly pipeline?: string;
@@ -6093,7 +6124,7 @@ export interface operations {
                 /** @description Inclusive. */
                 readonly expected_close_to?: string;
                 readonly lead?: string;
-                /** @description Organisation-wide workspace only. */
+                /** @description Organisation-wide or a team's workspace only; narrows it, never widens. */
                 readonly owner?: string;
                 /** @description The default pipeline if omitted. */
                 readonly pipeline?: string;
@@ -6133,7 +6164,7 @@ export interface operations {
                 /** @description Inclusive. */
                 readonly expected_close_to?: string;
                 readonly lead?: string;
-                /** @description Organisation-wide workspace only. */
+                /** @description Organisation-wide or a team's workspace only; narrows it, never widens. */
                 readonly owner?: string;
                 /** @description Every pipeline if omitted. */
                 readonly pipeline?: string;

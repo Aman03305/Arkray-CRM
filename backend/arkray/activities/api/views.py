@@ -34,7 +34,12 @@ from arkray.core.throttling import ScopedRateThrottle, UserRateThrottle
 from arkray.identity.models import User
 from arkray.identity.permissions import IsActiveUser
 from arkray.identity.workspaces import authorize_write, resolve_workspace, workspace_segment
-from arkray.leads.api.views import IDEMPOTENCY_PARAMETER, NOT_FOUND, OWNER_FILTER_ORG_ONLY
+from arkray.leads.api.views import (
+    IDEMPOTENCY_PARAMETER,
+    NOT_FOUND,
+    OWNER_FILTER_ORG_ONLY,
+    owner_filter_allowed,
+)
 
 from .. import attachments, selectors, services, storage
 from ..models import Activity, TimelineEntry
@@ -76,7 +81,7 @@ class ActivityListView(ApiView):
     def get(self, request: Request, workspace: str) -> Response:
         _, scope = _scope(request, workspace)
         params = validated(s.ActivityListQuerySerializer, request.query_params)
-        if "owner" in params and not scope.is_organization_wide:
+        if "owner" in params and not owner_filter_allowed(scope):
             raise InvalidInputError(details={"owner": [OWNER_FILTER_ORG_ONLY]})
         context = _context(scope)
         filters = ActivityFilters(

@@ -98,7 +98,9 @@ a date and a time (pre-filled with 18:00, the end of the working day, in India t
   the lead's context and follows it on reassignment, so the new owner can read it, while the
   author shown never changes.
 - **The author edits a note's text, and so may an administrator working in someone's
-  workspace** (`crm.manage_any`; others get 403). The note then records **who edited it and
+  workspace** (`crm.manage_any`; an Admin in a team member's workspace or the team's,
+  `crm.manage_team`, [ADR-0035](adr/0035-super-administrators-and-teams.md); others get 403).
+  Files on a note follow the same rule. The note then records **who edited it and
   when** (`edited_by`, `edited_at`) and shows "Edited by Anita Rao", so nobody's words are
   presented as someone else's; the audit has `note.updated` with the actor. Previous text is
   not kept (privacy-minimal, as audit never stores text). Anyone who may write in the
@@ -393,6 +395,7 @@ Files on notes ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.
 | a salesperson | own (`me`) | the lead's owner = themselves | them | `crm.access_own` |
 | an administrator | Rahul's (`{id}`) | Rahul (the lead's owner) | the admin | `crm.manage_any` |
 | an administrator | organisation (`all`) | the lead's owner | the admin | `crm.manage_any` |
+| Rahul's Admin (ADR-0035) | Rahul's (`{id}`) or the team's (`all`) | the lead's owner (in the team) | the Admin | `crm.manage_team`, every owner still in the team |
 
 Nobody chooses an owner: the API has no `owner` field (a 400), and the services have no
 parameter for one. Current work is always the lead's owner's, which PostgreSQL enforces
@@ -428,7 +431,8 @@ previous owner.
 
 Consequence of owner-based visibility: after the move B sees the lead, its notes and open
 work, and the lead's own history; A keeps seeing the meetings A completed (the lead shown as
-*in another workspace*); administrators see everything organisation-wide.
+*in another workspace*); super admins see everything organisation-wide, and an Admin's team
+workspace sees whatever belongs to the Admin or a member of their team.
 
 ## Opportunity integration
 
@@ -438,7 +442,11 @@ work, and the lead's own history; A keeps seeing the meetings A completed (the l
   opportunity is a 404 (non-enumerating, below).
 - Activities may follow up closed opportunities (a thank-you call after a win). New work on
   a closed opportunity that its closer kept after the lead moved on would belong to the
-  lead's new owner, so the closer is refused (422 "…ask an administrator").
+  lead's new owner, so the closer is refused (422 "…ask an administrator"). The message says
+  where it can be done: a super admin in a user's workspace is pointed to the
+  organisation-wide view; an Admin (in the team's workspace or a member's) to "your team's
+  view if they are in your team, or ask a super administrator" (ADR-0035). Reopening a task
+  or meeting whose lead moved on is answered the same way.
 - Open work on an open opportunity follows the lead with it: never "lead B, open
   opportunity B, open task A".
 - A deactivated owner takes no new, reopened or restored current work: restoring an
@@ -519,7 +527,7 @@ All under `/api/v1/workspaces/{me|all|user_id}/`, every route in `tests/authz_ma
 
 | Route | |
 |---|---|
-| `GET activities` | list: `type`, `status`, `lead`, `opportunity`, `owner` (organisation-wide only), `date_from`/`date_to` (inclusive business dates of the due time / start / creation), `overdue`, `current` (open tasks and scheduled meetings), `upcoming` (current work from now on; undated tasks included), `cancelled` (`false` leaves cancelled tasks and meetings out, `true` keeps only them), `archived`, `ordering`, `cursor`, `page_size`. Unknown parameters and contradictions (`type=meeting&status=open`, `upcoming` with `overdue`, `cancelled` with `status`) are a 400 |
+| `GET activities` | list: `type`, `status`, `lead`, `opportunity`, `owner` (organisation-wide or an Admin's team only; it narrows within the scope, and an owner outside it lists nothing), `date_from`/`date_to` (inclusive business dates of the due time / start / creation), `overdue`, `current` (open tasks and scheduled meetings), `upcoming` (current work from now on; undated tasks included), `cancelled` (`false` leaves cancelled tasks and meetings out, `true` keeps only them), `archived`, `ordering`, `cursor`, `page_size`. Unknown parameters and contradictions (`type=meeting&status=open`, `upcoming` with `overdue`, `cancelled` with `status`) are a 400 |
 | `POST activities` | create `{type, lead?, opportunity?, …the type's fields}` (`Idempotency-Key` supported) |
 | `GET`/`PATCH activities/{id}` | detail; edit `{version, …the type's fields}` |
 | `POST activities/{id}/complete` · `cancel` · `reopen` · `archive` · `restore` | `{version}` |
@@ -560,8 +568,11 @@ everyone; details and the reasons for the numbers:
 The same four layers as everything else ([authorization.md](authorization.md)): signed-in
 user, capability, workspace → `AccessScope`, object lookups through `scope.apply()` (404
 outside). Writes call `identity.workspaces.authorize_write` (own: `crm.access_own`; another
-user's or `all`: `crm.manage_any`). Services apply the scope themselves, so a direct call is
-as constrained as HTTP.
+user's or `all`: `crm.manage_any`; a team member's or an Admin's team: `crm.manage_team`,
+with every owner still in the team, [ADR-0035](adr/0035-super-administrators-and-teams.md)).
+Services apply the scope themselves, so a direct call is as constrained as HTTP.
+An activity's owner is never chosen, so teams add no assignment rule here: work created in
+the team's workspace belongs to its lead's owner, who is in the team.
 
 - **Relationship fields are scope-aware and non-enumerating**: linking your task to someone
   else's lead or opportunity answers exactly like a lead or opportunity that doesn't exist
@@ -658,7 +669,7 @@ figure counts (meetings today: `cancelled=false` and today's dates; upcoming mee
 
 | Route | Workspace |
 |---|---|
-| `/activities`, `/activities/{id}` | own (sales users); organisation-wide (admins) |
+| `/activities`, `/activities/{id}` | own (sales users); organisation-wide (super admins); the team's (Admins) |
 | `/admin/users/{id}/activities`, `…/activities/{activityId}` | that user's, under the "Viewing CRM for" banner |
 
 - One implementation: the route files render the shared views; the workspace comes from the
@@ -671,7 +682,8 @@ figure counts (meetings today: `cancelled=false` and today's dates; upcoming mee
   upcoming), tabs All / Tasks / Meetings / Notes (each starting from a sensible status and
   sort), status and sort, and under "More filters" the date range (an inverted range is
   explained and never sent), opportunity (the opportunity picker below), owner
-  (organisation-wide) and the archived view. Filters
+  (organisation-wide, and "Anyone in my team" or one of its people in an Admin's team) and
+  the archived view. Filters
   live in memory per workspace (never in the URL or storage). Table on tablets and desktops,
   cards on phones; type, status, "Overdue" and "Awaiting outcome" are written out. Complete
   is a button on each row (keyboard and touch, using the row's version; a 409 is explained
@@ -686,7 +698,8 @@ figure counts (meetings today: `cancelled=false` and today's dates; upcoming mee
   of its day). Cancelled and archived ones are left out; completed ones stay, struck through;
   overdue tasks and meetings awaiting an outcome are marked in words and by icon, not colour
   alone. Organisation-wide, *My calendar* narrows it to the viewer's own and *Everyone*
-  (the default) names each entry's owner. A month cell lists three entries, or two and
+  (the default) names each entry's owner; in an Admin's team the choice is *My calendar* or
+  *My team*. A month cell lists three entries, or two and
   "+N more", which opens the day; on phones a cell shows dots and opens the day. Each day's
   **+** (and, with a mouse, a click on an empty part of a day, or on a time in the week and
   day views, to the half hour) opens the task/meeting dialog prefilled for then (a whole day:
@@ -812,6 +825,13 @@ which forbids sequential scans and sorts and names the index each shape must use
   today's start on, each an index-only range of the schedule index: 0.8 ms / 12 ms at 2M,
   4.8 ms / 70 ms on the grown copy, figures identical
   ([dashboard.md](dashboard.md#what-the-benchmark-and-the-review-changed)).
+
+- **An Admin's team** ([ADR-0035](adr/0035-super-administrators-and-teams.md)): the team's
+  `all` is filtered by its owners (`owner_id IN` the team), so its lists use the narrower
+  orderings and the per-owner indexes, never the organisation's columns. The current-work
+  list reads the team's current rows by the per-owner path and sorts the top N of them: 6.7 ms
+  for 1,260 such rows (EXPLAIN on about 5,000 rows a table, a team of 21). Its cost grows with
+  the team's rows; not benchmarked at production size (R172).
 
 Risk R44 is resolved by that split. Index count: 12 on `activities_activity` besides the primary and
 timeline keys, nine of them partial (archived rows left out; the current-work ones hold open

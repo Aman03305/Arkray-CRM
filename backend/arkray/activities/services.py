@@ -7,12 +7,14 @@ Authorization, applied here for every caller (API, future imports, Ask Arkray to
   doesn't exist. A link to someone else's lead or opportunity is a 404 too, so creating an
   activity can't be used to learn that a record exists;
 - writing requires identity.workspaces.authorize_write (own workspace: crm.access_own;
-  another user's or the organisation's: crm.manage_any), else 403;
+  another user's or the organisation's: crm.manage_any; a team member's or the team's:
+  crm.manage_team, ADR-0035), else 403;
 - nobody chooses an activity's owner: current work belongs to the lead's (active) owner,
   so an admin's task in Rahul's workspace is Rahul's, with the admin as `created_by`;
 - a note's text is its author's words: the author may edit it, and so may an administrator
-  working in someone's workspace (crm.manage_any); the note then records who edited it and
-  when (`edited_by`, `edited_at`), so nobody's words are presented as someone else's.
+  working in someone's workspace (crm.manage_any; a team administrator in a member's or the
+  team's, crm.manage_team); the note then records who edited it and when (`edited_by`,
+  `edited_at`), so nobody's words are presented as someone else's.
   Anyone who may write in the workspace may archive it. Files on a note follow the same
   rule (attachments.py).
 
@@ -26,6 +28,8 @@ Lock order (docs/activities.md#lock-order), the same in every operation:
     3. activities        FOR NO KEY UPDATE OF the activity row only; several at once only in
                          ascending id order (the reassignment subscriber)
     4. user rows         FOR SHARE (identity.selectors.lock_assignable_user); leaf locks
+                         here (user administration locks them FOR NO KEY UPDATE, so a
+                         write's foreign-key KEY SHARE never waits on it: ADR-0035)
     5. inserts           timeline, audit, idempotency records
 
 The activity's lead id is read first (unlocked: it never changes), then the lead is
@@ -91,6 +95,7 @@ from arkray.core.errors import (
     RateLimitedError,
 )
 from arkray.identity.models import User
+from arkray.identity.policy import Capability, has_capability
 from arkray.identity.selectors import lock_assignable_user
 from arkray.identity.workspaces import authorize_write
 from arkray.leads import selectors as lead_selectors
@@ -128,6 +133,19 @@ LEAD_ELSEWHERE = (
 LEAD_ELSEWHERE_DELEGATED = (
     "This opportunity's customer now belongs to someone else, so activities can't be added "
     "in this user's workspace. Add them from the organisation-wide view."
+)
+# A team administrator (ADR-0035): their widest view is their team's, which can only if the
+# customer's owner is in the team; a super administrator can always.
+LEAD_ELSEWHERE_MEMBER = (
+    "This opportunity's customer now belongs to someone else, so activities can't be added "
+    "in this user's workspace. Add them from your team's view if they are in your team, or "
+    "ask a super admin."
+)
+# ...and in their team's view, which already includes everyone in the team: the customer's
+# owner is outside it (security review of ADR-0035).
+LEAD_ELSEWHERE_TEAM = (
+    "This opportunity's customer now belongs to someone outside your team, so activities "
+    "can't be added here. Ask a super admin."
 )
 OWNER_NOT_ASSIGNABLE = (
     "This customer's owner is deactivated. Change the owner to an active user first."
@@ -256,8 +274,25 @@ def lock_note(scope: AccessScope, note_id: UUID, *, adding: bool = False) -> Act
     return note
 
 
+def _elsewhere(
+    actor: User, scope: AccessScope, own: str, delegated: str, member: str, team: str
+) -> str:
+    """Which explanation fits a refusal because the lead now lives outside `scope`: one's
+    own workspace (ask an administrator), a super administrator's in a user's workspace (the
+    organisation-wide view can), a team administrator's in a member's workspace (their
+    team's view can, if the new owner is in it: ADR-0035), or a team administrator's team
+    view (the new owner is outside the team: ask a super admin)."""
+    if not scope.is_delegated:
+        return own
+    if scope.is_team:
+        return team
+    if not has_capability(actor, Capability.CRM_VIEW_ALL):
+        return member
+    return delegated
+
+
 def _lock_link(
-    scope: AccessScope, lead_id: UUID | None, opportunity_id: UUID | None
+    actor: User, scope: AccessScope, lead_id: UUID | None, opportunity_id: UUID | None
 ) -> tuple[Lead, Opportunity | None]:
     """The lead a new activity is about, locked, and its opportunity if one is given. Both
     must be visible in `scope` (404 otherwise: the same answer as for an id that doesn't
@@ -281,7 +316,14 @@ def _lock_link(
         # A closed opportunity kept by its closer after the lead moved on: new work on it
         # would belong to the lead's current owner, outside this workspace.
         raise BusinessRuleViolation(
-            LEAD_ELSEWHERE_DELEGATED if scope.is_delegated else LEAD_ELSEWHERE
+            _elsewhere(
+                actor,
+                scope,
+                LEAD_ELSEWHERE,
+                LEAD_ELSEWHERE_DELEGATED,
+                LEAD_ELSEWHERE_MEMBER,
+                LEAD_ELSEWHERE_TEAM,
+            )
         )
     return lead, opportunity
 
@@ -401,7 +443,7 @@ def create_activity(
         cleaned.setdefault("priority", Priority.NORMAL)
     digest = idempotency.request_digest(
         scope.kind.value,
-        str(scope.subject_user_id),
+        lead_services.digest_subject(scope),
         spec.type,
         str(lead_id),
         str(opportunity_id),
@@ -416,7 +458,7 @@ def create_activity(
     try:
         with transaction.atomic():
             _charge_daily_budget(actor, timezone.now())  # its lock first: the lock order
-            lead, opportunity = _lock_link(scope, lead_id, opportunity_id)
+            lead, opportunity = _lock_link(actor, scope, lead_id, opportunity_id)
             lead_services.require_not_erased(lead, lead_services.ERASED_NO_NEW)
             if lead.archived_at is not None:
                 raise BusinessRuleViolation(LEAD_ARCHIVED)
@@ -671,10 +713,14 @@ def reopen_activity(
         # Whether the lead lives elsewhere is checked first: its archive state is then the
         # other workspace's business and must not be revealed (review, an oracle).
         if lead.owner_id != previous_owner and not scope.permits_owner(lead.owner_id):
-            where = (
-                "in this user's workspace. Reopen it from the organisation-wide Activities."
-                if scope.is_delegated
-                else "here. Ask an administrator to reopen it."
+            where = _elsewhere(
+                actor,
+                scope,
+                "here. Ask an administrator to reopen it.",
+                "in this user's workspace. Reopen it from the organisation-wide Activities.",
+                "in this user's workspace. Reopen it from your team's Activities if they are in "
+                "your team, or ask a super admin.",
+                "here: they're outside your team. Ask a super admin to reopen it.",
             )
             raise BusinessRuleViolation(
                 f"This {_noun(activity)}'s lead now belongs to someone else, so it can't be "

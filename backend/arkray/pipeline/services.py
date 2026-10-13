@@ -5,15 +5,17 @@ Authorization, applied here for every caller (API, conversion, future imports an
 - the opportunity (and its lead) are looked up through the caller's AccessScope: outside
   it, NotFoundError (404), indistinguishable from a record that doesn't exist;
 - writing requires identity.workspaces.authorize_write (own workspace: crm.access_own;
-  another user's or the organisation's: crm.manage_any), else 403;
+  another user's or the organisation's: crm.manage_any; a team member's or the team's:
+  crm.manage_team), else 403;
 - an opportunity's owner is always its lead's owner (who must be an active, assignable
   user). The lead is the opportunity's canonical customer record (ADR-0027, ADR-0028): an
   opportunity created without one gets a new one, in the same transaction, owned as a lead
   created in the same workspace would be (the creator in their own workspace, the user in
-  theirs, a chosen active user organisation-wide: only that last is an assignment,
-  crm.assign_any). Changing the owner afterwards is `reassign_opportunity`, which reassigns
-  the customer record (crm.assign_any), so the customer's other open opportunities and
-  current work move too.
+  theirs, a chosen active user organisation-wide or of the team in a team's workspace:
+  creating it for someone else is an assignment, crm.assign_any, or crm.assign_team within
+  the team, ADR-0035). Changing the owner afterwards is `reassign_opportunity`, which
+  reassigns the customer record (the same capabilities), so the customer's other open
+  opportunities and current work move too.
 
 Nobody names an opportunity: its title is derived from its customer and instrument
 (naming.py) at creation and whenever those change. Its instrument is one of
@@ -39,7 +41,9 @@ can never wait for each other in a cycle:
                          exclusively and never lock a lead or an opportunity, so they can't
                          be part of a cycle; a stage being archived can't receive a move
                          that read it as active (docs/pipeline.md#configuration)
-    4. user rows         FOR SHARE (identity.selectors.lock_assignable_user); leaf locks:
+    4. user rows         FOR SHARE (identity.selectors.lock_assignable_user, and for a team
+                         administrator's assignment or correction identity.teams.
+                         lock_team_member, ADR-0035); leaf locks:
                          whoever holds one never waits for a lead or opportunity lock
                          held by a transaction that wants the user row exclusively
     5. inserts           stage history, negotiated prices, audit, idempotency records
@@ -76,9 +80,10 @@ for every role, nothing written; the same values sent back are no change), nor c
 price be recorded on it. Reopening (a move to an open stage) makes them editable again, and
 closing freezes them again, each step in the stage history with the deal's value,
 probability and dates as they were then (review round 1, DEALS-2). An administrator corrects them
-instead (`correct_closed_deal`: crm.manage_any, a reason, the version, the row lock), which
-appends the figures before and after to the append-only correction history; its text, stages,
-owner and archive state follow their usual rules.
+instead (`correct_closed_deal`: crm.manage_any, or crm.manage_team for a deal of the team; a
+reason, the version, the row lock), which appends the figures before and after to the
+append-only correction history; its text, stages, owner and archive state follow their usual
+rules.
 """
 
 from __future__ import annotations
@@ -107,8 +112,9 @@ from arkray.core.errors import (
     NotFoundError,
     PermissionDeniedError,
 )
+from arkray.identity import teams
 from arkray.identity.models import User
-from arkray.identity.policy import Capability, has_capability
+from arkray.identity.policy import Capability, has_any_capability, has_capability
 from arkray.identity.selectors import lock_assignable_user
 from arkray.identity.workspaces import authorize_write
 from arkray.leads import selectors as lead_selectors
@@ -161,6 +167,19 @@ REOPEN_ELSEWHERE = (
 REOPEN_ELSEWHERE_DELEGATED = (
     "This opportunity's customer now belongs to someone else, so it can't be reopened in this "
     "user's workspace. Reopen it from the organisation-wide Pipeline."
+)
+# A team administrator (ADR-0035): their widest view is their team's, which can reopen it
+# only if the customer's owner is in the team; a super administrator can always.
+REOPEN_ELSEWHERE_MEMBER = (
+    "This opportunity's customer now belongs to someone else, so it can't be reopened in this "
+    "user's workspace. Reopen it from your team's Pipeline if they are in your team, or ask a "
+    "super admin."
+)
+# ...and in their team's view, which already includes everyone in the team: the new owner is
+# outside it (security review of ADR-0035: it pointed them at the view they were in).
+REOPEN_ELSEWHERE_TEAM = (
+    "This opportunity's customer now belongs to someone outside your team, so it can't be "
+    "reopened here. Ask a super admin to reopen it."
 )
 CLOSED_PROBABILITY = (
     "Won opportunities are 100% and lost ones 0%; the probability can't be changed."
@@ -787,11 +806,25 @@ def _mark_converted(actor: User, scope: AccessScope, lead: Lead) -> None:
     )
 
 
+def _reopen_elsewhere(actor: User, scope: AccessScope) -> str:
+    """Why a closed deal whose customer moved out of `scope` can't be reopened here, and
+    where it can: the organisation-wide Pipeline for a super administrator, the team's (if
+    the new owner is in it) for a team administrator, an administrator for anyone else."""
+    if not scope.is_delegated:
+        return REOPEN_ELSEWHERE
+    if scope.is_team:
+        return REOPEN_ELSEWHERE_TEAM
+    if not has_capability(actor, Capability.CRM_VIEW_ALL):
+        return REOPEN_ELSEWHERE_MEMBER
+    return REOPEN_ELSEWHERE_DELEGATED
+
+
 def _check_new_owner(actor: User, scope: AccessScope, owner_id: UUID | None) -> None:
     """The owner a request may name for a new customer record, checked up front so the
     answer speaks of opportunities. leads.services.create_lead applies the same rules (and
-    the capability and active-user checks) under its locks."""
-    if scope.kind is ScopeKind.ORGANIZATION:
+    the capability, reach and active-user checks) under its locks. Organisation-wide and in
+    a team's workspace (ADR-0035: several owners, none of them "the" subject) it is named."""
+    if scope.kind in (ScopeKind.ORGANIZATION, ScopeKind.TEAM):
         if owner_id is None:
             raise InvalidInputError(details={"owner": [OWNER_REQUIRED]})
         return
@@ -839,7 +872,7 @@ def create_opportunity(
         customer = _customer_record(cleaned)
     digest = idempotency.request_digest(
         scope.kind.value,
-        str(scope.subject_user_id),
+        lead_services.digest_subject(scope),
         str(lead_id),
         str(owner_id),
         cleaned,
@@ -929,7 +962,7 @@ def convert_lead(
     price, cpt = _clean_terms(negotiated_price, agreed_cpt)
     digest = idempotency.request_digest(
         scope.kind.value,
-        str(scope.subject_user_id),
+        lead_services.digest_subject(scope),
         str(lead_id),
         lead_version,
         cleaned,
@@ -1218,9 +1251,7 @@ def move_opportunity(
             # Whether the lead lives elsewhere is checked first: its archive state is then the
             # other workspace's business and must not be revealed (Phase 6 review, an oracle).
             if lead.owner_id != previous_owner and not scope.permits_owner(lead.owner_id):
-                raise BusinessRuleViolation(
-                    REOPEN_ELSEWHERE_DELEGATED if scope.is_delegated else REOPEN_ELSEWHERE
-                )
+                raise BusinessRuleViolation(_reopen_elsewhere(actor, scope))
             if lead.archived_at is not None:
                 # Reopening adds open pipeline to the lead, like creating an opportunity would.
                 raise BusinessRuleViolation(LEAD_ARCHIVED_REOPEN)
@@ -1467,10 +1498,13 @@ def correct_closed_deal(
     73ff1e3, M2; docs/pipeline.md#closed-deals): its value, expected close date or opportunity
     date (CORRECTABLE), which no normal edit changes while it is closed.
 
-    - Who: crm.manage_any (administrators), in a workspace where they may write and see the
-      deal (organisation-wide, or a user's); never a salesperson, not even on their own deal
-      (403 before anything is looked up). The API also asks for a recent second factor and
-      refuses a support session (pipeline.api.views).
+    - Who: crm.manage_any (super administrators), in a workspace where they may write and
+      see the deal (organisation-wide, or a user's); or crm.manage_team (a team
+      administrator, ADR-0035) for a deal whose owner is in their reach: themselves or a
+      sales user of their team, re-checked under that user's row lock (a deal of someone who
+      left the team meanwhile is a 404, as outside the scope). Never a salesperson, not even
+      on their own deal (403 before anything is looked up). The API also asks for a recent
+      second factor and refuses a support session (pipeline.api.views).
     - What: a reason (one line, required), the deal's version (409 otherwise, checked under
       its row lock), at least one figure that actually changes. Refused (422) for an open deal
       (edit it), an archived one (restore it) and an erased customer's (its reason would be
@@ -1481,12 +1515,19 @@ def correct_closed_deal(
       figures before and after, the reason, who and when; the audit event names the fields
       and the row, never a figure or the reason; OpportunityUpdated, as an edit publishes. The
       stage history keeps the value each transition happened at."""
-    if not has_capability(actor, Capability.CRM_MANAGE_ANY):
+    if not has_any_capability(actor, Capability.CRM_MANAGE_ANY, Capability.CRM_MANAGE_TEAM):
         raise PermissionDeniedError()
     authorize_write(actor, scope)
     text, cleaned = _clean_correction(reason, changes)
     with transaction.atomic():
         opportunity, lead = _lock(scope, opportunity_id)
+        # The scope and authorize_write already keep a team administrator to their team; said
+        # here once more, about this deal's owner, under that owner's row lock (a leaf lock),
+        # so a team change committing meanwhile waits for the correction or is seen by it.
+        if not has_capability(actor, Capability.CRM_MANAGE_ANY) and not teams.lock_team_member(
+            actor.pk, opportunity.owner_id
+        ):
+            raise NotFoundError()
         _require_version(opportunity, version)
         _require_not_archived(opportunity)
         if opportunity.is_open:
@@ -1661,14 +1702,15 @@ def reassign_opportunity(
     """Hand an open opportunity to another salesperson: "Change owner" on the deal, where
     the Leads screen's Assign used to be (ADR-0027). An opportunity's owner is its customer
     record's (lead's) owner, so this reassigns the lead through the leads module's own
-    operation (crm.assign_any, active owner, its audit and LeadReassigned): the customer's
-    other open opportunities and current work move too, in this transaction. Won and lost
+    operation (crm.assign_any, or crm.assign_team to themselves or an active member of the
+    team; an active owner; its audit and LeadReassigned): the customer's other open
+    opportunities and current work move too, in this transaction. Won and lost
     opportunities keep the owner who closed them, so only an open one can be reassigned;
     archived ones are read-only. Choosing the current owner changes nothing.
 
     Lock order: the lead first (FOR UPDATE, as leads.services.reassign_lead takes it, so the
     lock is never upgraded), then the opportunity; the subscribers lock the rest in order."""
-    if not has_capability(actor, Capability.CRM_ASSIGN_ANY):
+    if not lead_services.may_assign(actor):
         raise PermissionDeniedError()
     authorize_write(actor, scope)
     with transaction.atomic():

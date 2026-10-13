@@ -127,12 +127,30 @@ def _kind(scope: AccessScope) -> str:
     return {
         ScopeKind.SELF: WorkspaceKind.SELF,
         ScopeKind.USER: WorkspaceKind.USER,
+        # A team administrator's "all" (ADR-0035): a kind of its own, never the
+        # organisation's, so a conversation asked in a team is never listed, continued or
+        # answered as the organisation's (or the other way round) after a role change.
+        ScopeKind.TEAM: WorkspaceKind.TEAM,
         ScopeKind.ORGANIZATION: WorkspaceKind.ORGANIZATION,
     }[scope.kind]
 
 
 def _subject(scope: AccessScope) -> UUID | None:
-    return None if scope.is_organization_wide else scope.subject_user_id
+    """The conversation's subject: the workspace's one user, or None for the organisation
+    and a team (several owners, none of them "the" subject; the team is the actor's, so the
+    actor and the kind identify it)."""
+    if scope.is_organization_wide or scope.is_team:
+        return None
+    return scope.subject_user_id
+
+
+def _audit_subject(scope: AccessScope) -> UUID | None:
+    """Whose workspace an audited Ask Arkray action concerned when it isn't the actor's own:
+    the selected user's; None for the actor's own workspace, the organisation and a team (no
+    single subject; as identity.workspaces audits opening it)."""
+    if scope.kind is ScopeKind.USER:
+        return scope.subject_user_id
+    return None
 
 
 def conversations_in(actor: User, scope: AccessScope) -> Any:
@@ -198,13 +216,16 @@ def forget_conversation(actor: User, scope: AccessScope, conversation_id: UUID) 
             actor_id=actor.pk,
             target_type="ai_conversation",
             target_id=conversation_id,
-            subject_user_id=scope.subject_user_id if scope.is_delegated else None,
+            subject_user_id=_audit_subject(scope),
             metadata={"questions": questions, "retained": retained},
         )
 
 
 def _segment(conversation: Conversation) -> str:
-    if conversation.workspace_kind == WorkspaceKind.ORGANIZATION:
+    """The workspace a conversation's questions are re-authorised in (`answer`): "all" for
+    the organisation and a team alike (it resolves to whichever the actor may open now; a
+    different kind than the conversation's is refused there)."""
+    if conversation.workspace_kind in (WorkspaceKind.ORGANIZATION, WorkspaceKind.TEAM):
         return "all"
     if conversation.workspace_kind == WorkspaceKind.SELF:
         return "me"
@@ -362,7 +383,7 @@ def submit(actor: User, scope: AccessScope, text: Any, conversation_id: UUID | N
                 actor_id=actor.pk,
                 target_type="workspace",
                 target_id=workspace_segment(scope) if scope.kind is not ScopeKind.SELF else "me",
-                subject_user_id=scope.subject_user_id if scope.is_delegated else None,
+                subject_user_id=_audit_subject(scope),
                 metadata={"question_id": str(question.pk)},
             )
     return question
@@ -523,6 +544,12 @@ def answer(question_id: UUID) -> None:
         if not has_capability(actor, Capability.AI_QUERY):
             raise PermissionDeniedError()
         scope = resolve_workspace(actor, _segment(question.conversation))
+        if _kind(scope) != question.conversation.workspace_kind:
+            # "all" now means another workspace than when it was asked (ADR-0035: a team
+            # administrator made a super administrator meanwhile, or the reverse): never
+            # answered from the organisation for a team's question, nor from a team for the
+            # organisation's.
+            raise PermissionDeniedError()
     except (PermissionDeniedError, NotFoundError):
         _finish(question, QuestionStatus.FAILED, error_code="not_permitted")
         logger.warning("ai_question_refused", extra={"question_id": str(question_id)})
@@ -595,27 +622,27 @@ def _record(
         "tools": list(dict.fromkeys(ctx.tools_used)),
         "records": len(ctx.records),
         "outcome": outcome,
+        # "all" is the organisation for a super administrator and the team for a team
+        # administrator (ADR-0035): the trail says which it was when asked.
+        "workspace_kind": scope.kind.value,
     }
     audit.record(
         AUDIT_ACTION,
         actor_id=question.actor_id,
         target_type="workspace",
         target_id=workspace_segment(scope) if scope.kind is not ScopeKind.SELF else "me",
-        subject_user_id=scope.subject_user_id if scope.is_delegated else None,
+        subject_user_id=_audit_subject(scope),
         metadata=metadata,
     )
-    logger.info(
-        "ai_question_answered",
-        extra={**metadata, "workspace_kind": scope.kind.value, "latency_ms": elapsed_ms},
-    )
+    logger.info("ai_question_answered", extra={**metadata, "latency_ms": elapsed_ms})
 
 
 # --- the router's answers ---------------------------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class WorkspaceWords:
-    subject: str  # "You" / "Rahul Sharma" / "The organisation"
+    subject: str  # "You" / "Rahul Sharma" / "Your team" / "The organisation"
     has: str  # "have" / "has"
-    possessive: str  # "Your" / "Rahul Sharma's" / "The organisation's"
+    possessive: str  # "Your" / "Rahul Sharma's" / "Your team's" / "The organisation's"
     description: str  # for the model's context
 
 
@@ -628,6 +655,19 @@ def _workspace_words(scope: AccessScope, actor: User) -> WorkspaceWords:
             "has",
             "The organisation's",
             "the whole organisation (every salesperson), viewed by administrator "
+            f"{actor.full_name}",
+        )
+    if scope.kind is ScopeKind.TEAM:
+        # The team administrator's own records and their team's (ADR-0035): said as such,
+        # never as the organisation, so neither a routed answer nor the model calls a
+        # team's figures the organisation's. The members aren't listed: the tools name each
+        # record's owner, and nothing more about the team need leave the deployment.
+        return WorkspaceWords(
+            "Your team",
+            "has",
+            "Your team's",
+            f"the team of administrator {actor.full_name}: their own records and those of the "
+            "users in their team (not the whole organisation), viewed by "
             f"{actor.full_name}",
         )
     subject_id = scope.subject_user_id
@@ -1131,6 +1171,14 @@ def visible_refs(scope: AccessScope, refs: Collection[str]) -> Visible:
             continue
     seen: set[str] = set()
     restricted: set[str] = set()
+    # The people a team's answer covered (answers.owner_basis, ADR-0035): still in the
+    # reader's scope, or the answer is hidden like one whose record left it. No query: the
+    # scope was resolved from the team as it is now.
+    seen |= {
+        f"{answers.OWNER_REF}:{owner}"
+        for owner in by_kind.pop(answers.OWNER_REF, set())
+        if scope.permits_owner(owner)
+    }
     activity_ids = (
         by_kind.pop("task", set()) | by_kind.pop("meeting", set()) | by_kind.pop("note", set())
     )

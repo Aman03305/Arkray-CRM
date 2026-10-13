@@ -166,8 +166,9 @@ class AttachmentUnavailable(DomainError):
 
 def may_change_note(actor: User, scope: AccessScope, note: Activity) -> bool:
     """A note's text and files are its author's; an administrator working in someone's
-    workspace (crm.manage_any, already required by authorize_write there) may change them
-    too, recorded as themselves (docs/activities.md#notes)."""
+    workspace (crm.manage_any, already required by authorize_write there; or a team
+    administrator in a member's or the team's, crm.manage_team with every owner in the team,
+    ADR-0035) may change them too, recorded as themselves (docs/activities.md#notes)."""
     return note.created_by_id == actor.pk or scope.is_delegated
 
 

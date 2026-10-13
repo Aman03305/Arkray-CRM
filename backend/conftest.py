@@ -9,6 +9,7 @@ from rest_framework.test import APIClient
 from tests.ai_fixtures import ai_on, golden, scripted  # noqa: F401 — shared fixtures
 from tests.factories import (
     AdminFactory,
+    TeamAdminFactory,
     UserFactory,
     ensure_lead_configuration,
     ensure_pipeline_configuration,
@@ -35,7 +36,38 @@ def user_b(db):
 
 @pytest.fixture
 def admin(db):
+    """A super administrator (ADR-0035: the role value "admin")."""
     return AdminFactory(first_name="Anita", last_name="Admin")
+
+
+# --- teams (ADR-0035): Tara manages Rahul (user_a) and Mohan; Priya (user_b) is in no team ---
+@pytest.fixture
+def team_admin(db):
+    return TeamAdminFactory(first_name="Tara", last_name="Lead")
+
+
+@pytest.fixture
+def team_member(user_a, team_admin):
+    """user_a (Rahul), in team_admin's team."""
+    user_a.manager = team_admin
+    user_a.save(update_fields=["manager"])
+    return user_a
+
+
+@pytest.fixture
+def team_member_2(team_admin):
+    return UserFactory(first_name="Mohan", last_name="Das", manager=team_admin)
+
+
+@pytest.fixture
+def other_team_admin(db):
+    """Another team's administrator, with a member of their own (`other_team_member`)."""
+    return TeamAdminFactory(first_name="Omar", last_name="Khan")
+
+
+@pytest.fixture
+def other_team_member(other_team_admin):
+    return UserFactory(first_name="Kavya", last_name="Iyer", manager=other_team_admin)
 
 
 @pytest.fixture

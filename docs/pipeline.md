@@ -51,20 +51,35 @@ from its creation day).
 **Who sees which pipelines** (`selectors.visible`): a workspace sees the shared pipelines, the
 personal pipelines of its owner, and **any pipeline holding one of its opportunities** (a deal
 follows its lead when the lead is reassigned; it must never become invisible because it sits in
-its previous owner's pipeline). Organisation-wide: every pipeline (at most 500 listed). Another
-user's personal pipeline is otherwise a 404 (and an unknown `?pipeline=` on the board a 400,
-the same as for one that doesn't exist).
+its previous owner's pipeline). Organisation-wide: every pipeline (at most 500 listed). An
+Admin's team workspace (`all` for a team administrator, scope `TEAM`,
+[ADR-0035](adr/0035-super-administrators-and-teams.md)) sees the shared pipelines, the
+personal pipelines of the Admin and their team's users, and any pipeline holding one of the
+team's deals. Another user's personal pipeline is otherwise a 404 (and an unknown
+`?pipeline=` on the board a 400, the same as for one that doesn't exist).
 
 **Who configures them** (`configuration.py`):
 
 | Pipeline | May configure | From |
 |---|---|---|
-| shared | administrators (`config.manage`) | the organisation-wide workspace only |
-| a user's own | that user (`crm.access_own`); administrators (`crm.manage_any`, recorded as actor with the owner as subject) | the owner's workspace (or organisation-wide) |
+| shared | super admins (`config.manage`) | the organisation-wide workspace only |
+| a user's own | that user (`crm.access_own`); super admins (`crm.manage_any`), and the user's Admin (`crm.manage_team`), recorded as actor with the owner as subject | the owner's workspace (or, for a super admin, organisation-wide) |
+
+**Nothing is configured from a team's workspace** (403 `permission_denied`: "Pipelines
+aren't configured from your team's workspace. Open a user's workspace to change their own
+pipelines; shared pipelines are configured by a super administrator."), on every
+configuration route: create, rename, stages, fields, deleting a field's values, archive and
+restore. The team's workspace holds several owners' pipelines and the shared ones, and none
+of them is "the team's": a new pipeline would have no owner, and a scope with no single
+owner must never be read as "every deal" (the deletion job's "no owner" means the
+organisation, so `field_values` refuses a team scope too, as a second line). An Admin
+configures a member's personal pipeline from that member's workspace, while the member is in
+their team. `can_manage` (the *Settings* flag on each pipeline) follows the same rule, so the
+team's board offers no settings.
 
 Seeing a pipeline never implies configuring it (403). A new pipeline belongs to the
 workspace it is created in: one's own; a user's (an administrator, `created_by` = the
-administrator); organisation-wide, a shared one (`config.manage`). Limits: 25 active pipelines
+administrator); organisation-wide, a shared one (`config.manage`); never a team's. Limits: 25 active pipelines
 per owner (and 25 shared), 20 active stages per pipeline, 30 custom fields, 50 choices per
 field. Names are plain text (no markup), bounded. An owner keeps at most 25 archived pipelines
 (`MAX_ARCHIVED_PIPELINES_PER_OWNER`, the shared ones counting as one owner: archiving one more
@@ -253,7 +268,7 @@ pipeline, checked at commit so a reorder can swap positions in one transaction),
 |---|---|
 | `title` | the opportunity's name, ≤ 200 characters: **derived, never sent by a client** ([The opportunity's name](#the-opportunitys-name)); read-only in the API |
 | `lead` | optional in the API: an existing lead **in the caller's workspace**; omitted (as the UI does), a new customer record is created from the customer details in the same transaction ([Ownership](#ownership)); fixed for the opportunity's lifetime |
-| `owner` | only when creating **without** a lead, organisation-wide, where it is required (`crm.assign_any`; elsewhere it is the workspace's user and may be omitted); otherwise refused: always the lead's owner (see [Ownership](#ownership)) |
+| `owner` | only when creating **without** a lead, organisation-wide (`crm.assign_any`) or in an Admin's team workspace (the Admin or an active member of the team, `crm.assign_team`), where it is required; elsewhere it is the workspace's user and may be omitted; otherwise refused: always the lead's owner (see [Ownership](#ownership)) |
 | `pipeline`, `stage` | the pipeline defaults to the default one, the stage to its first active open stage; stages change only through the move operation |
 | `status` | `open` / `won` / `lost` = the stage's category, database-enforced; read-only |
 | `value` | `NUMERIC(14,2)`, 0 to 999,999,999,999.99, in INR; shown as **Installation price** (the instrument installation price: the deal's amount) |
@@ -421,16 +436,20 @@ workspace only) and shows a non-blocking "Possible existing lead"; nothing is li
 existing lead's opportunity: convert takes none, and create refuses one alongside `lead`
 (422). An opportunity created **without** a lead (the UI, ADR-0027) gets a new customer
 record owned as a lead created in that workspace would be: by the creator in their own
-workspace, by the user in theirs (an administrator, `crm.assign_any`), and organisation-wide
-by the active user the request names in `owner` (required there). The record is created by
+workspace, by the user in theirs (an administrator, `crm.assign_any`, or the user's Admin,
+`crm.assign_team`), organisation-wide by the active user the request names in `owner`
+(required there), and in an Admin's team workspace by the Admin or the active member of
+their team that `owner` names (required there; anyone else is the same 400 as an id that
+exists nowhere, ADR-0035). The record is created by
 `leads.services.create_lead` in the opportunity's transaction (its audit and `LeadCreated`
 included), its owner share-locked before the pipeline: a documented exception to the lock
 order below that can't close a cycle (nothing locks a pipeline and then a user row in a
 conflicting mode, and the new lead row is invisible until commit).
 
 **Changing the owner** is `POST …/opportunities/{id}/assign {owner, version}`
-(`crm.assign_any`; open, unarchived opportunities only; 409 on a stale version; the current
-owner is a no-op). It reassigns the customer record through `leads.services.reassign_lead`
+(`crm.assign_any`, or an Admin's `crm.assign_team` to themselves or an active member of their
+team, checked under a share lock on that user's row; open, unarchived opportunities only; 409
+on a stale version; the current owner is a no-op). It reassigns the customer record through `leads.services.reassign_lead`
 (lead first, FOR UPDATE, then the opportunity), so everything below applies: the customer's
 other open opportunities and current work move too, won and lost ones stay. The deal page
 offers it as **Change owner** and says so.
@@ -450,12 +469,16 @@ offers it as **Change owner** and says so.
 - Consequence (owner-based visibility): after a reassignment the new owner sees the lead
   and its open opportunities; the previous owner keeps seeing the won/lost opportunities
   they closed, with the lead shown as **restricted** (`{"id": null, "restricted": true}`:
-  its name is not sent), because it now lives in someone else's workspace. Administrators
-  see everything organisation-wide.
+  its name is not sent), because it now lives in someone else's workspace. Super admins
+  see everything organisation-wide; an Admin's team workspace sees the lead while its owner
+  is in the team.
 - **Reopening** a closed opportunity makes it open again, so it must belong to the lead's
   *current* owner: if the lead changed hands meanwhile, reopening moves it to them
   (`opportunity.owner_changed`, reason `reopened`), which only someone whose workspace
-  includes the lead's owner may do (the previous owner gets a 422 asking an administrator).
+  includes the lead's owner may do. The 422 says where it can be done: the previous owner is
+  told to ask an administrator; a super admin in a user's workspace, to reopen it from the
+  organisation-wide Pipeline; an Admin (in the team's workspace or a member's), "Reopen it
+  from your team's Pipeline if they are in your team, or ask a super administrator."
 - New opportunities (and reopened ones) need an **active, assignable** owner: a lead owned
   by a deactivated user must be reassigned first (422).
 
@@ -573,8 +596,11 @@ audit named the field only (adversarial review of 73ff1e3, M2; R149). Now:
   both are open product decisions (R149).
 - **An administrator's correction**: `POST /api/v1/workspaces/{ws}/opportunities/{id}/correct
   {version, reason, value?, expected_close_date?, opportunity_date?}` → 200 with the deal
-  (`services.correct_closed_deal`). It needs `crm.manage_any` (checked in the service too,
-  before anything is looked up: a salesperson gets 403 even for their own deal), a workspace
+  (`services.correct_closed_deal`). It needs `crm.manage_any`, or an Admin's
+  `crm.manage_team` (ADR-0035), checked in the service too, before anything is looked up (a
+  salesperson gets 403 even for their own deal); for an Admin, a deal whose owner is the Admin
+  or a member of their team, re-checked under a share lock on that owner's row (a deal of
+  someone who left the team meanwhile is a 404, as outside the scope); a workspace
   where the administrator may write and see the deal, a recent second factor (step-up,
   ADR-0033), and is refused in a support session. A reason is required (one line, at most
   300 characters, the usual text rules); the version is checked under the row lock (409
@@ -658,17 +684,21 @@ opportunity** ([ADR-0019](adr/0019-lead-conversion.md)).
 
 The same model as leads ([authorization.md](authorization.md)): workspace-nested routes,
 `resolve_workspace` → `AccessScope`, 404 outside the scope, `authorize_write` for every
-write (own workspace: `crm.access_own`; a user's workspace or `all`: `crm.manage_any`).
-Creating an opportunity in someone's workspace needs no `crm.assign_any`: its owner is not
-chosen, it is the lead's owner. Every read, **every total, count and per-stage value** is
-computed from `scope.apply()` first; a sales user's `lead`, `stage` or `pipeline` filter
-can only narrow their own records, and `owner` exists only organisation-wide.
+write (own workspace: `crm.access_own`; a user's workspace or `all`: `crm.manage_any`; a
+team member's workspace or an Admin's team: `crm.manage_team`, with every owner still in the
+team). Creating an opportunity for an existing lead in someone's workspace needs no
+`crm.assign_any`: its owner is not chosen, it is the lead's owner. Every read, **every total,
+count and per-stage value** is computed from `scope.apply()` first; a sales user's `lead`,
+`stage` or `pipeline` filter can only narrow their own records, and `owner` exists only
+where a workspace has several owners (organisation-wide, and an Admin's team), where it
+narrows within the scope: an owner outside it lists nothing, like an id that exists nowhere.
 
 | Workspace | Opportunities, totals and history visible |
 |---|---|
 | `me` | the caller's own (opportunities they own) |
-| `{user_id}` (admin, `workspace.view_any`) | that user's, and that user's totals only |
-| `all` (admin, `crm.view_all`) | everyone's; `owner` filter narrows |
+| `{user_id}` (super admin, `workspace.view_any`; an Admin for a team member, `workspace.view_team`) | that user's, and that user's totals only |
+| `all` (super admin, `crm.view_all`) | everyone's; `owner` filter narrows |
+| `all` (Admin, `crm.view_team`; [ADR-0035](adr/0035-super-administrators-and-teams.md)) | the Admin's own and their team's users', and the team's totals; `owner` filter narrows within the team |
 
 Cross-user suite (User A vs User B both ways): [`tests/security/test_pipeline_cross_user.py`](../backend/tests/security/test_pipeline_cross_user.py).
 
@@ -695,7 +725,10 @@ locked an opportunity before its lead; a deliberate mutation of `_lock` produced
    reassignment: the personal pipelines holding the lead's deals, after its opportunities)
    or FOR KEY SHARE (moves, restores), then the target stage FOR KEY SHARE
    ([Configuration](#configuration));
-4. **user rows**: `FOR SHARE` (`lock_assignable_user`), leaf locks;
+4. **user rows**: `FOR SHARE` (`lock_assignable_user`; for an Admin's assignment, creation
+   for someone else or closed-deal correction also `identity.teams.lock_team_member`, which
+   share-locks the member's row so a team change committing meanwhile waits or is seen,
+   ADR-0035), leaf locks;
 5. inserts: stage history, negotiated prices, audit, idempotency records.
 
 Phase 4 extends the order with **activities** after opportunities and before user rows
@@ -754,12 +787,13 @@ bumps the versions of the opportunities it moves.
 
 | Route | Workspace |
 |---|---|
-| `/pipeline`, `/pipeline/new`, `/pipeline/{id}`, `/pipeline/{id}/edit` | own (sales users); organisation-wide (admins) |
+| `/pipeline`, `/pipeline/new`, `/pipeline/{id}`, `/pipeline/{id}/edit` | own (sales users); organisation-wide (super admins); the team's (Admins) |
 | `/admin/users/{id}/pipeline`, `…/new`, `…/{opportunityId}`, `…/edit` | that user's, under the "Viewing CRM for" banner |
 
 - **Wide screens (≥ 1024 px)**: the Kanban board (horizontal controlled scrolling), totals
   (pipeline value, weighted pipeline, open count), filters (expected close range; owner
-  organisation-wide; pipeline when there is more than one). Crowded columns end in
+  organisation-wide, and "Everyone in my team" or one of its people in an Admin's team;
+  pipeline when there is more than one). Crowded columns end in
   "View all N", which opens that stage's paginated list.
 - **Phones and narrow tablets**: stage tabs (with counts; arrow keys move between them)
   and one stage's paginated list; the board is requested with `cards_per_stage=0`.
@@ -786,7 +820,7 @@ bumps the versions of the opportunities it moves.
   are one request; a partial save (rename saved, stages refused) is retried from what was
   saved, at its version.
 - **Deal page**: a header (status, stage, account, owner; *Won*, *Lost*, *Move* or
-  *Reopen*, *Edit*, and *Change owner* (open deals, `crm.assign_any`) and *Delete (archive)* /
+  *Reopen*, *Edit*, and *Change owner* (open deals, `crm.assign_any` or `crm.assign_team`) and *Delete (archive)* /
   *Restore* in the actions menu) and three tabs:
   **Overview** (Deal: installation price, agreed price and agreed CPT with *Update price &
   CPT* while negotiating (the dialog starts from the CPT on record, which it follows until

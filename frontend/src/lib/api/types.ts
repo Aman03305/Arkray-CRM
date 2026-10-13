@@ -10,10 +10,18 @@ type Schemas = components["schemas"];
 export type ViewerDto = Schemas["Viewer"];
 export type AdminUser = Schemas["AdminUser"];
 export type AdminUserPage = Schemas["AdminUserPage"];
-export type InvitationState = Schemas["InvitationState"];
 export type WorkspaceDto = Schemas["Workspace"];
-export type InvitationPreview = Schemas["InvitationPreview"];
+/** `admin` is the Super admin, `team_admin` an Admin, `sales_user` a User (ADR-0035). */
 export type Role = Schemas["RoleEnum"];
+/** A sales user's Admin (a team administrator), or null: managed by the super administrators. */
+export type UserManager = NonNullable<AdminUser["manager"]>;
+/** `manager`: a team administrator's id or null; only super administrators send one. */
+export type UserCreateRequest = Schemas["UserCreateRequest"];
+/** `role` and `manager`: super administrators only (a team administrator gets 403). */
+export type UserUpdateRequest = Schemas["PatchedUserUpdateRequest"];
+
+export type InvitationState = Schemas["InvitationState"];
+export type InvitationPreview = Schemas["InvitationPreview"];
 export type UserStatus = Schemas["StatusEnum"];
 
 export type UserRef = Schemas["UserRef"];
@@ -29,8 +37,6 @@ export type LeadDuplicateList = Schemas["LeadDuplicateList"];
 export type Assignee = Schemas["Assignee"];
 export type AssigneePage = Schemas["AssigneePage"];
 export type LoginRequest = Schemas["LoginRequest"];
-export type UserCreateRequest = Schemas["UserCreateRequest"];
-export type UserUpdateRequest = Schemas["PatchedUserUpdateRequest"];
 export type EmailChangeRequest = Schemas["EmailChangeRequest"];
 export type SetPasswordRequest = Schemas["SetPasswordRequest"];
 export type SupportSessionDto = Schemas["SupportSession"];

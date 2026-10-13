@@ -8,8 +8,10 @@ and only the fields a given operation may change are declared at all.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from django.conf import settings
 from django.utils import timezone
@@ -31,9 +33,13 @@ from ..models import (
     UserStatus,
 )
 from ..policy import capabilities_for
+from ..selectors import NO_MANAGER
 from ..support import REASON_MAX_LENGTH
 
 EMAIL_MAX_LENGTH = 254
+_CANONICAL_UUID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
 # Generous parse limit; the password policy itself caps new passwords at 128 characters.
 PASSWORD_INPUT_MAX_LENGTH = 1024
 TOKEN_INPUT_MAX_LENGTH = 128
@@ -162,6 +168,10 @@ class AdminUserSerializer(serializers.ModelSerializer[User]):
     role_label = serializers.CharField(source="get_role_display", read_only=True)
     status_label = serializers.CharField(source="get_status_display", read_only=True)
     invitation = serializers.SerializerMethodField()
+    manager = serializers.SerializerMethodField(
+        help_text="The Admin (role team_admin) whose team this user is in, or null: a user in"
+        " no team (managed by super admins) or an administrator (ADR-0035)."
+    )
 
     class Meta:
         model = User
@@ -180,6 +190,7 @@ class AdminUserSerializer(serializers.ModelSerializer[User]):
             "activated_at",
             "deactivated_at",
             "invitation",
+            "manager",
             "password_change_required",
             "password_changed_at",
             "mfa_enabled",
@@ -236,6 +247,20 @@ class AdminUserSerializer(serializers.ModelSerializer[User]):
             lock = device.lock if device is not None else None
         return None if lock is None else lock.value
 
+    @extend_schema_field(PersonSerializer(allow_null=True))
+    def get_manager(self, user: User) -> dict[str, Any] | None:
+        if user.manager_id is None:
+            return None
+        annotated = user.__dict__
+        if "manager_first_name" in annotated:  # selectors.admin_user_*: no query per row
+            first, last = annotated["manager_first_name"], annotated["manager_last_name"]
+        else:
+            first, last = User.objects.filter(pk=user.manager_id).values_list(
+                "first_name", "last_name"
+            )[0]
+        full_name = f"{first} {last}".strip()
+        return dict(PersonSerializer({"id": user.manager_id, "full_name": full_name}).data)
+
     @extend_schema_field(InvitationStateSerializer(allow_null=True))
     def get_invitation(self, user: User) -> dict[str, Any] | None:
         expires_at = getattr(user, "invitation_expires_at", None)
@@ -268,7 +293,7 @@ class WorkspaceSubjectSerializer(serializers.ModelSerializer[User]):
 
 
 class WorkspaceSerializer(serializers.Serializer[Any]):
-    kind = serializers.ChoiceField(choices=["self", "user", "organization"])
+    kind = serializers.ChoiceField(choices=["self", "user", "team", "organization"])
     subject = WorkspaceSubjectSerializer(allow_null=True)
 
 
@@ -415,8 +440,21 @@ class UserListQuerySerializer(StrictInputSerializer):
     )
     status = serializers.ChoiceField(choices=UserStatus.choices, required=False)
     role = serializers.ChoiceField(choices=Role.choices, required=False)
+    manager = serializers.CharField(
+        max_length=36,
+        required=False,
+        help_text="A team: an Admin's id, or `none` for the users in no team (ADR-0035)."
+        " Intersected with what the caller administers.",
+    )
     cursor = serializers.CharField(max_length=500, required=False)
     page_size = serializers.IntegerField(min_value=1, max_value=100, required=False)
+
+    def validate_manager(self, value: str) -> UUID | str:
+        if value == NO_MANAGER:
+            return NO_MANAGER
+        if not _CANONICAL_UUID.fullmatch(value):
+            raise serializers.ValidationError("Enter an Admin's id, or none.")
+        return UUID(value)
 
 
 class AssigneeQuerySerializer(StrictInputSerializer):
@@ -441,6 +479,13 @@ class UserCreateSerializer(StrictInputSerializer):
         style={"input_type": "password"},
         help_text="An initial password (the user must change it when they first sign in). "
         "Omit it to email an invitation instead. Stored only as a hash; never returned.",
+    )
+    manager = serializers.UUIDField(
+        required=False,
+        allow_null=True,
+        help_text="A new user's Admin (an active or invited team_admin), for role sales_user"
+        " only (ADR-0035). Super admins only: an Admin's new users are always in their own"
+        " team (null or their own id; anything else is 403).",
     )
 
 
@@ -483,7 +528,16 @@ class SecurityEventPageSerializer(serializers.Serializer[Any]):
 class UserUpdateSerializer(StrictInputSerializer):
     first_name = serializers.CharField(max_length=NAME_MAX_LENGTH, required=False)
     last_name = serializers.CharField(max_length=NAME_MAX_LENGTH, required=False, allow_blank=True)
-    role = serializers.ChoiceField(choices=Role.choices, required=False)
+    role = serializers.ChoiceField(
+        choices=Role.choices, required=False, help_text="Super admins only (ADR-0035)."
+    )
+    manager = serializers.UUIDField(
+        required=False,
+        allow_null=True,
+        help_text="Move a user into an Admin's team (an active or invited team_admin), or out"
+        " of any (null). Super admins only; the user must be, or become in the same request,"
+        " a sales_user (ADR-0035).",
+    )
     version = serializers.IntegerField(min_value=1)
 
 

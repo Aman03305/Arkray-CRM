@@ -20,13 +20,14 @@ import { describeError, isApiError } from "@/lib/api/errors";
 import type { Dashboard, DashboardActivity, DashboardLead } from "@/lib/api/types";
 import { businessToday, formatDateOnly, formatTime } from "@/lib/format";
 import { formatInr } from "@/lib/money";
-import { activityHref, leadHref, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
+import { activityHref, isOverview, leadHref, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
 
 import { useDashboard } from "./api";
 
 /*
  * The dashboard of one workspace: a salesperson's own (/dashboard), one user's opened by an
- * administrator (/admin/users/{id}/dashboard) and, inside Admin Home, the organisation's.
+ * administrator (/admin/users/{id}/dashboard) and, inside Admin Home, the overview's (the
+ * organisation's, or a team administrator's team's: ADR-0035).
  * The lead figures count the Lead table, which every opportunity created in the pipeline
  * adds one lead to (ADR-0028): today's new leads are listed first, each opening its lead.
  * Every figure comes from the server as it is shown (counts, and money as exact decimal
@@ -227,12 +228,12 @@ const WRAP = "[overflow-wrap:anywhere]";
 // Rows open their record from anywhere on them (ROW_LINK): the name alone was 20 px tall on
 // a phone (final audit UI-8).
 
-/** Today's newest leads: who, for which instrument, (organisation-wide) whose, and when.
+/** Today's newest leads: who, for which instrument, (in the overview) whose, and when.
  * Each opens its lead, which links to its opportunity. */
 function NewLeads({ dashboard, workspace, go }: { dashboard: Dashboard; workspace: Workspace; go: Targets }) {
   const rows: readonly DashboardLead[] = dashboard.new_leads;
   const total = dashboard.leads.new_today;
-  const withOwner = workspace.kind === "organization";
+  const withOwner = isOverview(workspace);
   return (
     <Panel
       title="New leads"
@@ -287,7 +288,7 @@ function ActivityRows({
   workspace: Workspace;
   kind: "meeting" | "task";
 }) {
-  const withOwner = workspace.kind === "organization";
+  const withOwner = isOverview(workspace);
   return (
     <ul className="divide-y divide-slate-100">
       {rows.map((activity) => (

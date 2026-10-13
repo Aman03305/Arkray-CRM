@@ -17,15 +17,15 @@ import pytest
 from django.core.cache import cache
 
 from arkray.identity import mfa_services
-from arkray.identity.policy import ROLE_CAPABILITIES
 from tests.authz_matrix import AUTHZ_MATRIX
-from tests.factories import AdminFactory, UserFactory
+from tests.factories import AdminFactory, TeamAdminFactory, UserFactory
 from tests.helpers import signed_in
 from tests.mfa_helpers import Clock, code_for, enrol, sign_in_with_code
 from tests.security.test_admin_mfa_enforcement import (
     ALLOWED_BEFORE_ENROLMENT,
     GATED,
     error_code,
+    may_ask,
     send,
 )
 
@@ -134,7 +134,11 @@ COMBINATIONS = [
     ("sales_user", "administrators"),
     ("sales_user", "everyone"),
     ("admin", "everyone"),
+    # A team administrator is an administrator here (ADR-0035): asked in both modes.
+    ("team_admin", "administrators"),
+    ("team_admin", "everyone"),
 ]
+FACTORIES = {"admin": AdminFactory, "team_admin": TeamAdminFactory, "sales_user": UserFactory}
 
 
 @pytest.mark.parametrize(("role", "mode"), COMBINATIONS)
@@ -142,18 +146,15 @@ COMBINATIONS = [
 def test_every_route_follows_the_setting_for_every_role(settings, role, mode, route, method):
     settings.MFA_REQUIRED_FOR_ADMINS = mode == "administrators"
     settings.MFA_REQUIRED_FOR_ALL_USERS = mode == "everyone"
-    user = AdminFactory() if role == "admin" else UserFactory()
+    user = FACTORIES[role]()
     response = send(signed_in(user), method, route)
     rule = AUTHZ_MATRIX[route]
-    gated = mode == "everyone" or role == "admin"
+    gated = mode == "everyone" or role in ("admin", "team_admin")
     if route in ALLOWED_BEFORE_ENROLMENT or not gated:
         assert error_code(response) != "mfa_enrollment_required", (method, route)
         return
     assert response.status_code == 403, (method, route, response.content)
-    capability = rule.access.removeprefix("capability:")
-    if rule.access.startswith("capability:") and capability not in {
-        held.value for held in ROLE_CAPABILITIES[role]
-    }:
+    if not may_ask(role, rule.access):
         # Refused for the capability before any gate (and nothing was let through).
         assert error_code(response) == "permission_denied", (method, route)
     else:

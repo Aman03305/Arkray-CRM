@@ -4,8 +4,9 @@
  * The URL is the single source of truth, so the selected-user context survives navigation,
  * reloads and shared links without any client state:
  *
- *   /dashboard, /pipeline, ...              -> own workspace ("me"), or the whole
- *                                              organisation ("all") for viewers with crm.view_all
+ *   /dashboard, /pipeline, ...              -> own workspace ("me"), or the overview ("all"):
+ *                                              the whole organisation for viewers with
+ *                                              crm.view_all, their team with crm.view_team
  *   /admin/users/{userId}/dashboard, ...    -> that user's workspace (admin, audited server-side)
  *
  * The same page components render in every workspace; only the API path differs
@@ -15,7 +16,7 @@
  * id, the path names no workspace at all (null): it never falls back to the viewer's own or
  * the organisation's records, which would put other data under the selected user's banner.
  */
-import { hasCapability, type Viewer } from "./viewer";
+import { canManageOthersRecords, hasCapability, overviewKind, type Viewer } from "./viewer";
 
 // No Leads: a deal carries its customer (ADR-0027).
 export const WORKSPACE_SECTIONS = ["dashboard", "pipeline", "activities"] as const;
@@ -27,10 +28,43 @@ export const SECTION_LABELS: Record<WorkspaceSection, string> = {
   activities: "Activities",
 };
 
+/**
+ * `organization` and `team` are both the "all" workspace (the overview): every user's records
+ * for a super administrator, a team administrator's own and their team's (ADR-0035). The API
+ * decides which from the caller; the kind only tells the UI how to name it.
+ */
 export type Workspace =
   | { kind: "self" }
   | { kind: "organization" }
+  | { kind: "team" }
   | { kind: "user"; userId: string };
+
+export type OverviewWorkspace = Extract<Workspace, { kind: "organization" | "team" }>;
+
+/** The overview ("all"): records of several owners, so lists name whose each one is, an
+ * owner can be filtered on, and a new record's owner is chosen. */
+export function isOverview(workspace: Workspace | null | undefined): workspace is OverviewWorkspace {
+  return workspace?.kind === "organization" || workspace?.kind === "team";
+}
+
+/**
+ * May the viewer create or change records in `workspace`? Mirrors
+ * identity.workspaces.authorize_write: one's own needs crm.access_own, the organisation
+ * crm.manage_any, a user's workspace or the team's crm.manage_any or crm.manage_team (the API
+ * also checks that every owner is still in the team). Viewing a workspace never implies
+ * changing it. Presentation only: the API decides.
+ */
+export function canWriteIn(viewer: Viewer | null, workspace: Workspace): boolean {
+  switch (workspace.kind) {
+    case "self":
+      return hasCapability(viewer, "crm.access_own");
+    case "organization":
+      return hasCapability(viewer, "crm.manage_any");
+    case "team":
+    case "user":
+      return canManageOthersRecords(viewer);
+  }
+}
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ADMIN_USER_PATH = /^\/admin\/users\/([^/]+)(?:\/|$)/;
@@ -62,7 +96,8 @@ export function workspaceFromPathname(pathname: string, viewer: Viewer | null): 
   const userId = userIdFromPathname(pathname);
   if (userId === null) return null;
   if (userId !== undefined) return { kind: "user", userId };
-  return hasCapability(viewer, "crm.view_all") ? { kind: "organization" } : { kind: "self" };
+  const overview = overviewKind(viewer);
+  return overview ? { kind: overview } : { kind: "self" };
 }
 
 /**
@@ -97,6 +132,7 @@ export function workspaceApiSegment(workspace: Workspace): string {
     case "self":
       return "me";
     case "organization":
+    case "team":
       return "all";
     case "user":
       return workspace.userId;

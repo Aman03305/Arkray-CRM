@@ -1,9 +1,22 @@
 import { describe, expect, it } from "vitest";
 
 import type { ViewerDto } from "@/lib/api/types";
-import { makeViewer } from "@/test/fixtures";
+import { adminViewer, makeViewer, TEAM_ADMIN_CAPABILITIES, teamAdminViewer } from "@/test/fixtures";
 
-import { hasCapability, initials, toViewer, type Viewer } from "./viewer";
+import {
+  canAssign,
+  canManageAdmins,
+  canManageOthersRecords,
+  canManageUsers,
+  canOpenUserWorkspaces,
+  canStartSupport,
+  type Capability,
+  hasCapability,
+  initials,
+  overviewKind,
+  toViewer,
+  type Viewer,
+} from "./viewer";
 
 describe("initials", () => {
   it.each([
@@ -127,5 +140,60 @@ describe("toViewer", () => {
       startedAt: "2026-10-05T10:00:00Z",
       expiresAt: "2026-10-05T10:30:00Z",
     });
+  });
+});
+
+describe("super administrators and team administrators (ADR-0035)", () => {
+  const superAdmin = adminViewer;
+  const teamAdmin = teamAdminViewer;
+  const user = makeViewer();
+
+  it("names each power by what it offers, held organisation-wide or for a team", () => {
+    expect([superAdmin, teamAdmin, user, null].map(canManageUsers)).toEqual([true, true, false, false]);
+    expect([superAdmin, teamAdmin, user, null].map(canOpenUserWorkspaces)).toEqual([true, true, false, false]);
+    expect([superAdmin, teamAdmin, user, null].map(canAssign)).toEqual([true, true, false, false]);
+    expect([superAdmin, teamAdmin, user, null].map(canManageOthersRecords)).toEqual([true, true, false, false]);
+    expect([superAdmin, teamAdmin, user, null].map(canStartSupport)).toEqual([true, true, false, false]);
+  });
+
+  it("roles, teams and administrators' accounts are the super administrator's only", () => {
+    expect([superAdmin, teamAdmin, user, null].map(canManageAdmins)).toEqual([true, false, false, false]);
+  });
+
+  it("each team capability alone is enough for its helper (no hidden dependency on another)", () => {
+    const only = (capability: Capability) => makeViewer({ capabilities: [capability] });
+    expect(canManageUsers(only("users.manage_team"))).toBe(true);
+    expect(canOpenUserWorkspaces(only("workspace.view_team"))).toBe(true);
+    expect(canAssign(only("crm.assign_team"))).toBe(true);
+    expect(canManageOthersRecords(only("crm.manage_team"))).toBe(true);
+    expect(canStartSupport(only("support.access_team"))).toBe(true);
+    // ...and none of them is the super administrator's.
+    expect(canManageAdmins(only("users.manage_team"))).toBe(false);
+  });
+
+  it("the overview is the organisation (crm.view_all), the team (crm.view_team), or none", () => {
+    expect(overviewKind(superAdmin)).toBe("organization");
+    expect(overviewKind(teamAdmin)).toBe("team");
+    expect(overviewKind(user)).toBeNull();
+    expect(overviewKind(null)).toBeNull();
+    // Organisation-wide wins if a viewer somehow had both.
+    expect(overviewKind(makeViewer({ capabilities: ["crm.view_team", "crm.view_all"] }))).toBe("organization");
+  });
+
+  it("a team administrator holds no organisation-wide capability", () => {
+    for (const capability of ["crm.view_all", "workspace.view_any", "crm.assign_any", "crm.manage_any", "users.manage", "support.access", "config.manage", "audit.view", "privacy.manage"] as const) {
+      expect(hasCapability(teamAdmin, capability)).toBe(false);
+    }
+  });
+
+  it("keeps the six team capabilities from the API (they are known strings now)", () => {
+    const viewer = toViewer({
+      ...VIEWER_DTO_REQUIRED,
+      role: "team_admin",
+      role_label: "Admin",
+      capabilities: ["crm.access_own", "crm.view_team", "workspace.view_team", "crm.assign_team", "crm.manage_team", "users.manage_team", "support.access_team", "ai.query"],
+    });
+    expect(viewer.roleLabel).toBe("Admin");
+    expect([...viewer.capabilities].sort()).toEqual([...TEAM_ADMIN_CAPABILITIES].sort());
   });
 });

@@ -47,7 +47,8 @@ erDiagram
         varchar email UK "lower-case enforced"
         varchar first_name
         varchar last_name
-        varchar role "admin | sales_user"
+        varchar role "admin | team_admin | sales_user"
+        uuid manager_id FK "the team's Admin; sales users only"
         varchar status "invited | active | deactivated"
         bool is_active "= status is active"
         int session_epoch
@@ -154,7 +155,8 @@ Not drawn: `audit_event`, `core_outbox_event`, `core_idempotency_record` and `id
 | `email` | varchar(254) UNIQUE | CHECK `email = lower(email)`: case-insensitive uniqueness that holds even for writes bypassing the ORM; ASCII-only at the API ([canonicalisation](authorization.md#email-canonicalisation)) |
 | `first_name` | varchar(100) | CHECK non-empty |
 | `last_name` | varchar(100) | may be empty (mononymous names); `full_name` is computed |
-| `role` | varchar(32) | CHECK `IN ('admin','sales_user')` (UI labels: Admin, User); mapped to capabilities in code ([authorization.md](authorization.md)) |
+| `role` | varchar(32) | CHECK `identity_user_role_valid`: `IN ('admin','team_admin','sales_user')` (UI labels: Super admin, Admin, User; `team_admin` since `identity.0009`, [ADR-0035](adr/0035-super-administrators-and-teams.md): the stored `admin` kept its meaning, so no row changed); mapped to capabilities in code ([authorization.md](authorization.md#roles--capabilities-built)) |
+| `manager_id` | uuid NULL, FK → `identity_user` PROTECT | `identity.0009` (ADR-0035): the Admin (`team_admin`) who manages this sales user, or NULL (in no team: managed by the super admins only). CHECK `identity_user_manager_only_for_sales_users` (`manager_id IS NULL OR role = 'sales_user'`: administrators of either kind are in no team) and `identity_user_manager_not_self`. That it names an active or invited Admin is kept by `identity.services` under the user-administration lock, not by the database; every reader also checks the member's role and the actor's team capability, so a stale reference grants nothing ([authorization.md](authorization.md#teams-adr-0035)) |
 | `status` | varchar(16) | CHECK `IN ('invited','active','deactivated')` |
 | `is_active` | bool | kept for Django's auth backend; CHECK `is_active = (status = 'active')` |
 | `activated_at` | timestamptz NULL | CHECK: NULL when invited, set when active |
@@ -170,7 +172,9 @@ Not drawn: `audit_event`, `core_outbox_event`, `core_idempotency_record` and `id
 Indexes: `(created_at DESC, id DESC)` for the admin list order and cursor; GIN trigram indexes
 on `UPPER(first_name)`, `UPPER(last_name)` and `UPPER(email)` for the admin search
 (`icontains` compiles to `UPPER(col::text) LIKE …`; verified with `EXPLAIN`). The
-`pg_trgm` extension is created by `identity.0002`.
+`pg_trgm` extension is created by `identity.0002`. Partial index `identity_user_manager_idx`
+on `(manager_id) WHERE manager_id IS NOT NULL` (`identity.0009`): a team's members, for
+workspace resolution, the users list and the assignment checks; users in no team aren't in it.
 
 ### `identity_support_session` (product enhancement phase)
 
@@ -722,8 +726,10 @@ hash-checked before any text is used ([rag-architecture.md](rag-architecture.md)
 ### `ai_conversation`, `ai_question` (built, Phase 8)
 
 `ai_conversation`: `id uuid`, `actor_id` (FK user, CASCADE), `workspace_kind` (`self`,
-`user`, `organization`), `subject_id` (FK user, CASCADE, NULL for the organisation),
-timestamps. CHECK: organisation ⇒ no subject; self ⇒ subject = actor; user ⇒ subject ≠ actor.
+`user`, `team`, `organization`; `team` since `ai.0005`, an Admin's team, ADR-0035),
+`subject_id` (FK user, CASCADE, NULL for the organisation and a team), timestamps. CHECK
+`ai_conversation_workspace_valid`: organisation ⇒ no subject; team ⇒ no subject; self ⇒
+subject = actor; user ⇒ subject ≠ actor.
 Index `(actor_id, workspace_kind, subject_id, updated_at DESC)` for "my conversations here";
 `(updated_at)` for retention. `forgotten_at` (timestamptz NULL, `ai.0004`): set when the asker
 deleted a conversation a legal hold keeps; every read excludes such a tombstone and the
@@ -879,6 +885,22 @@ before the reverse guard: since 2026-10-06 that rollback is refused, see
   TABLE). It keeps its database default, for the same rolling-deploy reason as 0008 (tested
   with 989830b's own model; the test fails if the default is dropped). Catalogue-only, a
   brief lock at any size. Refuses to be reversed (it would drop every agreed CPT).
+- `identity.0009` and `ai.0005` ([ADR-0035](adr/0035-super-administrators-and-teams.md),
+  super administrators and teams). `identity.0009` widens the role CHECK to `team_admin`,
+  adds `identity_user.manager_id` (nullable, no default: catalogue-only, no rewrite, no
+  backfill; every existing user starts in no team), its partial index and its two CHECKs.
+  The user table is small (staff accounts), so the index and the CHECKs are built and
+  validated in the migration's own transaction. The stored role `admin` keeps its meaning,
+  so no data changes: every existing administrator is a super administrator. The previous
+  release never names the column and still inserts during a rolling deploy, and it gives the
+  unknown `team_admin` nothing
+  ([deployment.md](deployment.md#which-previous-release-can-run-beside-the-new-schema)). `ai.0005` adds
+  `team` to `ai_conversation.workspace_kind` and a branch to its CHECK: every existing row
+  already satisfies it, but the constraint is still validated against the whole table under
+  ALTER TABLE's lock, so the migration lifts the statement timeout for its transaction first
+  (conversations are deleted after 30 days, so the scan is short; pinned by
+  `tests/architecture/test_migrations.py`). Both refuse to be reversed:
+  [Reversibility](#reversibility).
 - Extensions (`vector`, `pg_trgm`, `btree_gin`) are created by the migration of the module
   that needs them. All are "trusted" extensions installable by the database owner role.
 - **Upgrade from the previous release, tested** (`tests/integration/test_upgrade_from_release.py`):
@@ -930,6 +952,8 @@ by a backwards plan from the latest schema without a refusal first.
 | `identity.0004` (support sessions, password-change state) | **refused** |
 | `activities.0010` (note edit stamps, attachments: the stored files' only record) | **refused** |
 | `audit.0003` (`support_session_id` on audit events), `audit.0004` (its index) | **refused** |
+| `identity.0009` (`team_admin`, `manager_id`: which Admin manages each user) | **refused**: dropping the column would forget every team, and the old role CHECK fails on any Admin |
+| `ai.0005` (`team` conversations) | **refused**: the previous CHECK fails on any team conversation, and deleting them first would delete what people asked |
 | `activities.0003` (timeline backfill) | no-op (the rows stay) |
 | every other migration up to the RC (`core` 0001-0005, `identity` 0001-0003, `audit` 0001-0002, `leads` 0001-0006, `pipeline` 0001-0005, `activities` 0001-0002, 0004-0009, `ai` 0001-0003) | reversible, for development history; from the latest schema a backwards plan meets a refusal first, except `ai.0001` (the notes' search index, rebuilt by `ai_reindex`, and Ask Arkray conversations, deleted after 30 days anyway) and `core.0003`/`0004` (the outbox's claim tokens, and idempotency records kept 24 hours) |
 

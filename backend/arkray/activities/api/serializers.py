@@ -429,7 +429,10 @@ class ActivityListQuerySerializer(StrictInputSerializer):
     status = serializers.ChoiceField(choices=m.ActivityStatus.choices, required=False)
     lead = serializers.UUIDField(required=False)
     opportunity = serializers.UUIDField(required=False)
-    owner = serializers.UUIDField(required=False, help_text="Organisation-wide workspace only.")
+    owner = serializers.UUIDField(
+        required=False,
+        help_text="Organisation-wide or a team's workspace only; narrows it, never widens.",
+    )
     date_from = serializers.DateField(
         required=False, help_text="Inclusive business date of the due time / start / creation."
     )

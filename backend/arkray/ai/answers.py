@@ -28,10 +28,15 @@ from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from arkray.core.access import AccessScope
 from arkray.core.text import without_refused
 
 from .formatting import user_text
 from .tools import Citation, Fact, RecordRef, ToolContext
+
+# A person a team's answer covered, in its basis ("owner:<user id>"; never a record, never
+# shown or linked).
+OWNER_REF = "owner"
 
 # Case-insensitive: "[[Lead:...]]" is a reference too (shown if visible, else dropped), never
 # literal text (Phase 9 review).
@@ -347,6 +352,20 @@ def _citation(citation: Citation) -> dict[str, str]:
     }
 
 
+def owner_basis(scope: AccessScope) -> list[str]:
+    """The people a team's answer rests on besides its records (ADR-0035): every owner of
+    the team scope it was answered in. Its figures (a team's pipeline value) and per-person
+    rows (team_breakdown names each member with their figures) cite no record, so without
+    this an answer would keep showing, and replaying to the model, what a member who has
+    since left the team had, while their records themselves are hidden (service.visible_refs
+    hides the answer once any of these is outside the reader's scope). A member joining
+    hides nothing. Not needed elsewhere: one person's workspace is 404 once its user is out
+    of reach, and the organisation reaches everyone."""
+    if not scope.is_team:
+        return []
+    return sorted(f"{OWNER_REF}:{owner}" for owner in scope.owner_ids)
+
+
 def assemble(
     ctx: ToolContext,
     *,
@@ -372,8 +391,9 @@ def assemble(
     return {
         # Every record a tool returned for this question (internal, never serialised): what
         # the narrative may be based on, re-checked against the reader's scope when the
-        # answer is read again (service.visible_answer).
-        "basis": sorted(ctx.records),
+        # answer is read again (service.visible_answer). A team's answer also names the
+        # people it covered (owner_basis).
+        "basis": sorted(ctx.records) + owner_basis(ctx.scope),
         # The deals of the basis named without their customer (internal too): a deal the
         # answer named *with* its customer is hidden from a reader who no longer sees that
         # customer, while one it never named stays (privacy audit PRIV-1).

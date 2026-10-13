@@ -40,7 +40,10 @@ describe("describeSecurityEvent", () => {
     [event("user.created", { details: { role: "sales_user", activation: "password" } }), "Anita Rao created Rahul Sharma"],
     [event("user.deactivated"), "Anita Rao deactivated Rahul Sharma"],
     [event("user.reactivated"), "Anita Rao reactivated Rahul Sharma"],
-    [event("user.role_changed", { details: { from: "sales_user", to: "admin" } }), "Anita Rao changed Rahul Sharma's role to Admin"],
+    // ADR-0035: the stored "admin" is the Super admin; "team_admin" is an Admin.
+    [event("user.role_changed", { details: { from: "sales_user", to: "admin" } }), "Anita Rao changed Rahul Sharma's role to Super admin"],
+    [event("user.role_changed", { details: { from: "sales_user", to: "team_admin" } }), "Anita Rao changed Rahul Sharma's role to Admin"],
+    [event("user.manager_changed", { details: { from: "", to: "" } }), "Anita Rao changed Rahul Sharma's Admin"],
     [event("user.email_changed"), "Anita Rao changed Rahul Sharma's email"],
     [event("support_session.started", { details: { reason: "Fixing a lead" } }), "Anita Rao started a support session for Rahul Sharma"],
     [event("support_session.ended", { details: { end: "expired" } }), "Anita Rao's support session for Rahul Sharma ended (expired)"],

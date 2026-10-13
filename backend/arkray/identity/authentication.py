@@ -312,7 +312,7 @@ def change_password(request: HttpRequest, current_password: str, new_password: s
             details={"new_password": ["Choose a password you haven't used here."]}
         )
     with transaction.atomic():
-        user = User.objects.select_for_update().get(pk=actor.pk)
+        user = User.objects.select_for_update(no_key=True).get(pk=actor.pk)
         if not user.is_active:
             raise PermissionDeniedError()
         if not session_still_current(request, user):

@@ -5,7 +5,9 @@ an AccessScope first (404 for workspaces the caller may not open, before the que
 validated; delegated access is audited by resolve_workspace, once per window, not per
 search), and every record is searched inside that scope. The same view serves a
 salesperson's own search ("me"), an administrator's search of one user's workspace
-("{user_id}") and of the organisation ("all"). Listed in tests/authz_matrix.py.
+("{user_id}"), and "all": the organisation for a super administrator, their own and their
+team's records for a team administrator (ADR-0035: a TEAM scope, filtered by its owners like
+one user's, never the organisation's). Listed in tests/authz_matrix.py.
 
 The query is never logged, audited or stored: the access log records the path without the
 query string (core.middleware), and search writes nothing (search.selectors). Each user may

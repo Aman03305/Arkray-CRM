@@ -208,7 +208,13 @@ def request(*, actor: User, subject_type: str, subject_id: UUID, reference: str)
     with transaction.atomic():
         # Serialise this administrator's requests on their own row, which exists even before
         # their first export (backend review P3: locking their exports locked nothing then).
-        list(User.objects.select_for_update().filter(pk=actor.pk).values_list("pk", flat=True))
+        # NO KEY: user rows are never locked FOR UPDATE (ADR-0035 review: a deadlock with the
+        # foreign-key checks of a team administrator's writes; identity.services).
+        list(
+            User.objects.select_for_update(no_key=True)
+            .filter(pk=actor.pk)
+            .values_list("pk", flat=True)
+        )
         mine = DataExport.objects.filter(requested_by=actor)
         if mine.filter(status=ExportStatus.QUEUED).count() >= settings.EXPORT_MAX_PENDING_PER_ADMIN:
             raise RateLimitedError(TOO_MANY_PENDING, retry_after=60)

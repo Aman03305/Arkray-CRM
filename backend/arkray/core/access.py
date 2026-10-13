@@ -8,6 +8,7 @@ search query, dashboard aggregate and Ask Arkray tool filters through `AccessSco
 Invariants (enforced at construction):
 - SELF         -> owner_ids == {actor_id}
 - USER         -> exactly one owner (another user's workspace, opened with permission)
+- TEAM         -> the actor and the sales users they manage (ADR-0035); at least the actor
 - ORGANIZATION -> no owner filter at all; requires an explicit capability upstream
 
 An empty owner set can never mean "everyone": organisation-wide access is a distinct kind,
@@ -24,6 +25,8 @@ from uuid import UUID
 from django.db.models import Q
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from django.db.models import Model, QuerySet
 
 M = TypeVar("M", bound="Model")
@@ -32,6 +35,9 @@ M = TypeVar("M", bound="Model")
 class ScopeKind(StrEnum):
     SELF = "self"
     USER = "user"
+    # A team administrator's own records and their team's (ADR-0035): the "all" workspace
+    # of an administrator whose reach is a team. Several owners, none of them "the" subject.
+    TEAM = "team"
     ORGANIZATION = "organization"
 
 
@@ -58,6 +64,9 @@ class AccessScope:
         elif self.kind is ScopeKind.SELF:
             if self.owner_ids != frozenset({self.actor_id}):
                 raise ValueError("A SELF scope must contain exactly the actor.")
+        elif self.kind is ScopeKind.TEAM:
+            if self.actor_id not in self.owner_ids:
+                raise ValueError("A TEAM scope always contains its administrator.")
         elif len(self.owner_ids) != 1:
             raise ValueError("A USER scope must contain exactly one owner.")
         elif self.actor_id in self.owner_ids:
@@ -75,6 +84,13 @@ class AccessScope:
         return cls(actor_id=actor_id, kind=ScopeKind.USER, owner_ids=frozenset({subject_user_id}))
 
     @classmethod
+    def team(cls, actor_id: UUID, member_ids: Iterable[UUID]) -> AccessScope:
+        """A team administrator's team: their own records and their members'."""
+        return cls(
+            actor_id=actor_id, kind=ScopeKind.TEAM, owner_ids=frozenset({actor_id, *member_ids})
+        )
+
+    @classmethod
     def organization(cls, actor_id: UUID) -> AccessScope:
         return cls(actor_id=actor_id, kind=ScopeKind.ORGANIZATION, owner_ids=frozenset())
 
@@ -84,10 +100,21 @@ class AccessScope:
         return self.kind is ScopeKind.ORGANIZATION
 
     @property
+    def is_team(self) -> bool:
+        return self.kind is ScopeKind.TEAM
+
+    @property
     def subject_user_id(self) -> UUID | None:
-        """The single workspace owner, or None for organisation-wide scopes."""
+        """The single workspace owner, or None for organisation-wide scopes.
+
+        A TEAM scope has several owners and no single subject: asking raises, so code written
+        for one workspace owner (an idempotency digest, a job limited to "the workspace
+        owner's" records, an audit subject) can't quietly read None as "everyone"
+        (ADR-0035). Such code asks `is_team` first."""
         if self.kind is ScopeKind.ORGANIZATION:
             return None
+        if self.kind is ScopeKind.TEAM:
+            raise ValueError("A team scope has no single subject user.")
         (owner,) = self.owner_ids
         return owner
 

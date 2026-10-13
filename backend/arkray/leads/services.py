@@ -6,9 +6,11 @@ Authorization, applied here for every caller (API, future imports, Ask Arkray to
 - the lead is looked up through the caller's AccessScope: outside it, NotFoundError (404),
   indistinguishable from a lead that doesn't exist;
 - writing requires identity.workspaces.authorize_write (own workspace: crm.access_own;
-  another user's workspace or the organisation: crm.manage_any), else 403;
-- changing ownership additionally requires crm.assign_any, and the new owner must be an
-  active user who works in a CRM workspace.
+  another user's workspace or the organisation: crm.manage_any; a team member's workspace
+  or the team's: crm.manage_team), else 403;
+- changing ownership additionally requires crm.assign_any (any active CRM user) or
+  crm.assign_team (the actor or an active member of their team, ADR-0035), and the new
+  owner must be an active user who works in a CRM workspace (`lock_assignee`).
 
 Concurrency (docs/leads.md#concurrency): every change locks the lead row, requires the
 `version` the client last saw (409 if someone else changed it meanwhile) and increments it.
@@ -50,8 +52,9 @@ from arkray.core.errors import (
     NotFoundError,
     PermissionDeniedError,
 )
+from arkray.identity import teams
 from arkray.identity.models import User
-from arkray.identity.policy import Capability, has_capability
+from arkray.identity.policy import Capability, has_any_capability, has_capability
 from arkray.identity.selectors import lock_assignable_user
 from arkray.identity.workspaces import authorize_write
 
@@ -200,10 +203,50 @@ def _require_active_source(key: str | None) -> None:
         raise InvalidInputError(details={"source": [INVALID_SOURCE]})
 
 
+def digest_subject(scope: AccessScope) -> str:
+    """The workspace's part of an idempotency digest (with `scope.kind`): its subject user
+    ("None" organisation-wide, as earlier releases wrote it, so a retry across a deploy still
+    replays). A team administrator's team has no single subject (ADR-0035): "team", the
+    members left out, so a retry after a team change is still the same request (its replay
+    is then looked up in the scope of the retry, as always)."""
+    return "team" if scope.is_team else str(scope.subject_user_id)
+
+
+def may_assign(actor: User) -> bool:
+    """Whether `actor` may give records to someone at all: crm.assign_any, or crm.assign_team
+    (within their team, `lock_assignee`)."""
+    return has_any_capability(actor, Capability.CRM_ASSIGN_ANY, Capability.CRM_ASSIGN_TEAM)
+
+
+def _lock_within_reach(actor: User, owner_id: UUID) -> bool:
+    """Whether `owner_id` is someone `actor`'s assignment capability reaches: anyone with
+    crm.assign_any; with crm.assign_team, themselves or a sales user of their team (ADR-0035),
+    share-locking that user's row until the transaction ends (identity.teams.
+    lock_team_member), so a team change committing meanwhile waits for this write, or this
+    sees it: a record is never given to someone who left the team before it committed."""
+    if has_capability(actor, Capability.CRM_ASSIGN_ANY):
+        return True
+    return has_capability(actor, Capability.CRM_ASSIGN_TEAM) and teams.lock_team_member(
+        actor.pk, owner_id
+    )
+
+
+def lock_assignee(actor: User, owner_id: UUID) -> bool:
+    """Whether `actor` may make `owner_id` the owner of a record (assigning, or creating it
+    for them): within the actor's reach (`_lock_within_reach`) and an active user whose role
+    works in a CRM workspace (identity.selectors.lock_assignable_user), both under a share lock
+    on the user's row (a leaf lock: docs/pipeline.md#lock-order). One answer for everyone
+    refused: someone outside the team, a deactivated member and an id that exists nowhere
+    are told apart by nothing."""
+    return _lock_within_reach(actor, owner_id) and lock_assignable_user(owner_id)
+
+
 def _owner_for_new_lead(actor: User, scope: AccessScope, requested: UUID | None) -> UUID:
     """Who owns a lead created in `scope`. A payload can never pick an owner the actor may
     not assign: in their own workspace everyone creates leads for themselves; creating a
-    lead for someone else is an assignment (crm.assign_any) to an active user."""
+    lead for someone else is an assignment (crm.assign_any; a team administrator's
+    crm.assign_team, within their team) to an active user. Organisation-wide and in a team's
+    workspace the owner is named, and must be in that workspace (`scope.permits_owner`)."""
     if scope.kind is ScopeKind.SELF:
         if requested is not None and requested != actor.pk:
             raise InvalidInputError(details={"owner": [OWNER_IS_SELF_ONLY]})
@@ -212,19 +255,26 @@ def _owner_for_new_lead(actor: User, scope: AccessScope, requested: UUID | None)
         if not lock_assignable_user(actor.pk):
             raise PermissionDeniedError()
         return actor.pk
-    if not has_capability(actor, Capability.CRM_ASSIGN_ANY):
+    if not may_assign(actor):
         raise PermissionDeniedError()
     if scope.kind is ScopeKind.USER:
         subject = scope.subject_user_id
         assert subject is not None  # noqa: S101 — AccessScope invariant for USER scopes
         if requested is not None and requested != subject:
             raise InvalidInputError(details={"owner": [OWNER_IS_SUBJECT_ONLY]})
+        # The workspace is one the actor may write in (authorize_write): if its owner left
+        # the actor's team since, the workspace is no longer theirs to write in (403).
+        if not _lock_within_reach(actor, subject):
+            raise PermissionDeniedError()
         if not lock_assignable_user(subject):
             raise InvalidInputError(details={"owner": [SUBJECT_NOT_ASSIGNABLE]})
         return subject
+    # Organisation-wide or a team's workspace (ADR-0035): the owner is chosen. A team's
+    # workspace takes only an owner of the team: outside it, the same answer as for an
+    # inactive user or an id that exists nowhere.
     if requested is None:
         raise InvalidInputError(details={"owner": [OWNER_REQUIRED]})
-    if not lock_assignable_user(requested):
+    if not scope.permits_owner(requested) or not lock_assignee(actor, requested):
         raise InvalidInputError(details={"owner": [OWNER_NOT_ASSIGNABLE]})
     return requested
 
@@ -247,7 +297,7 @@ def create_lead(
         cleaned.get("organization_name", ""),
     )
     digest = idempotency.request_digest(
-        scope.kind.value, str(scope.subject_user_id), cleaned, status, str(owner_id)
+        scope.kind.value, digest_subject(scope), cleaned, status, str(owner_id)
     )
     if idempotency_key is not None:
         earlier = idempotency.replayed_resource(
@@ -397,8 +447,13 @@ def reassign_lead(
     Ownership never changes through a generic edit. Subscribers to LeadReassigned (Phase 3/4)
     move open opportunities and current activities in this same transaction; who did what
     in the past (created_by, audit actors) is never rewritten.
+
+    crm.assign_any: to any active CRM user. crm.assign_team (a team administrator, ADR-0035):
+    a lead of their workspace (the scope, as every write), to themselves or an active member
+    of their team, checked under the member's row lock (`lock_assignee`); anyone else is the
+    same 400 as an inactive user, so it reveals nobody's existence.
     """
-    if not has_capability(actor, Capability.CRM_ASSIGN_ANY):
+    if not may_assign(actor):
         raise PermissionDeniedError()
     authorize_write(actor, scope)
     with transaction.atomic():
@@ -407,7 +462,7 @@ def reassign_lead(
             return selectors.lead_by_id(lead.pk)
         _require_version(lead, version)
         _require_not_archived(lead)
-        if not lock_assignable_user(owner_id):
+        if not lock_assignee(actor, owner_id):
             raise InvalidInputError(details={"owner": [OWNER_NOT_ASSIGNABLE]})
         previous = lead.owner_id
         lead.owner_id = owner_id

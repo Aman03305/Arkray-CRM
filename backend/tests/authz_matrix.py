@@ -11,6 +11,9 @@ Access rules:
     "workspace"      — the {workspace} segment is resolved via resolve_workspace (404 when
                        the caller may not open it); any active signed-in user may ask
     "capability:<x>" — requires identity.policy.Capability <x>
+    "capability:<x>|<y>" — requires any of them: an organisation-wide capability and its
+                       team counterpart (ADR-0035); the service then applies the caller's
+                       reach (a team administrator's team, 404 outside it)
 """
 
 from __future__ import annotations
@@ -28,8 +31,12 @@ def _rule(access: str, *methods: str) -> RouteRule:
     return RouteRule(methods=frozenset(methods), access=access)
 
 
-USERS_MANAGE = "capability:users.manage"
-ASSIGN_ANY = "capability:crm.assign_any"
+# ADR-0035: an organisation-wide capability or its team counterpart; the services apply the
+# caller's reach (a team administrator's team: 404 outside it).
+USERS_MANAGE = "capability:users.manage|users.manage_team"
+ASSIGN_ANY = "capability:crm.assign_any|crm.assign_team"
+SUPPORT = "capability:support.access|support.access_team"
+MANAGE_ANY = "capability:crm.manage_any|crm.manage_team"
 OPPORTUNITY = "api/v1/workspaces/<str:workspace>/opportunities/<uuid:opportunity_id>"
 ACTIVITY = "api/v1/workspaces/<str:workspace>/activities/<uuid:activity_id>"
 PIPELINE = "api/v1/workspaces/<str:workspace>/pipelines/<uuid:pipeline_id>"
@@ -78,8 +85,8 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     # Lifting the daily sign-in lock (review of 73ff1e3, L1).
     "api/v1/admin/users/<uuid:user_id>/clear-sign-in-lock": _rule(USERS_MANAGE, "POST"),
     "api/v1/admin/security-events": _rule("capability:audit.view", "GET"),
-    "api/v1/admin/support-sessions": _rule("capability:support.access", "POST"),
-    "api/v1/admin/support-sessions/current": _rule("capability:support.access", "DELETE"),
+    "api/v1/admin/support-sessions": _rule(SUPPORT, "POST"),
+    "api/v1/admin/support-sessions/current": _rule(SUPPORT, "DELETE"),
     # --- privacy remediation: data-subject exports and staff pseudonymisation (refused in a
     # support session; only the requesting administrator downloads, privacy.exports) --------
     "api/v1/admin/privacy/exports": _rule(PRIVACY, "GET", "POST"),
@@ -119,7 +126,7 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     # Correcting a won or lost deal's figures (review of 73ff1e3, M2): administrators only
     # (crm.manage_any, a recent second factor, never in a support session); whoever sees the
     # deal reads its corrections.
-    f"{OPPORTUNITY}/correct": _rule("capability:crm.manage_any", "POST"),
+    f"{OPPORTUNITY}/correct": _rule(MANAGE_ANY, "POST"),
     f"{OPPORTUNITY}/corrections": _rule("workspace", "GET"),
     f"{OPPORTUNITY}/notes": _rule("workspace", "GET"),
     f"{ACTIVITY}/attachments": _rule("workspace", "POST"),

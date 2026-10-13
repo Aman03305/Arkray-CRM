@@ -208,7 +208,7 @@ the system can't verify them.
       everyone else invited.
 - [ ] Every administrator has set up two-step verification (the Users page shows "On") and
       stored their recovery codes; the identity check for an operator's
-      `manage.py reset_mfa --by <administrator>` is agreed ([runbooks.md](runbooks.md#lost-second-factor)).
+      `manage.py reset_mfa --by <super admin>` is agreed ([runbooks.md](runbooks.md#lost-second-factor)).
 - [ ] Mail delivery checked end to end before administrators enrol: owners are emailed about
       every change to their two-step verification, the rollout's check against someone with
       a phished password enrolling first.
@@ -307,6 +307,35 @@ the system can't verify them.
 - [ ] The restore and point-in-time recovery drills and the 100-user capacity run repeated on
       the merged release, with the write budgets, two-step verification for every user and the
       edge's new rates in place ([testing.md](testing.md#adversarial-review-of-73ff1e3-2026-10-12)).
+
+**Upgrading to the super administrators and teams release** ([ADR-0035](adr/0035-super-administrators-and-teams.md);
+`identity.0009`, `ai.0005`; [deployment.md](deployment.md#which-previous-release-can-run-beside-the-new-schema)):
+
+- [ ] No Admin created and nobody promoted to Admin until every pod (web, api and the
+      workers) runs the new release: the previous release grants the new role nothing, but
+      doesn't count it as an administrator either, so on its pods a super admin could change
+      an Admin's email, password or second factor or pseudonymise them, a reactivation would
+      skip R126's reset link and a deactivation wouldn't revoke their invitations.
+- [ ] A rollback to the previous images without a restore, once Admins exist: each Admin
+      made a User (their team is unassigned) or deactivated first; both migrations refuse to
+      be reversed.
+- [ ] **(org, owner)** If the organisation uses teams: after the upgrade every existing
+      administrator is a Super admin (all their powers kept) and every existing user is in no
+      team, managed by the super admins only. Create or promote the Admins, then assign each
+      user to their Admin on the Users page (*Change role or Admin*; *Filter by Admin* →
+      *No admin* lists who is left) ([runbooks.md](runbooks.md#admins-and-teams)). Until a user
+      is assigned, no Admin sees their records.
+- [ ] **(org, owner)** Each existing administrator who should be an Admin rather than a Super
+      admin: a super admin's role can't be changed through the API (ADR-0030), so an operator
+      changes it ([security.md](security.md#administrator-account-protection), with
+      `team_admin` as the new role), or the account is deactivated and the person invited
+      anew as an Admin. At least one active Super admin always remains.
+- [ ] Each new Admin has set up two-step verification at their first sign-in (required for
+      both administrator roles where it is required for administrators) and knows that a lost
+      factor is the operator's `reset_mfa`, whose `--by` names a super admin
+      ([runbooks.md](runbooks.md#lost-second-factor)).
+- [ ] Team-scope performance watched once real teams exist (R172: search, the activities
+      list and Ask Arkray in a team weren't benchmarked at production size).
 
 ## After go-live
 

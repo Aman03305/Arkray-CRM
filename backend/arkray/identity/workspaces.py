@@ -4,8 +4,11 @@ Every CRM API route is nested under `/api/v1/workspaces/{workspace}/...` where
 `{workspace}` is:
 
     "me"      -> the actor's own records                       (AccessScope SELF)
-    "<uuid>"  -> that user's records; needs WORKSPACE_VIEW_ANY  (AccessScope USER, audited)
+    "<uuid>"  -> that user's records; needs WORKSPACE_VIEW_ANY, or WORKSPACE_VIEW_TEAM and
+                 the user is in the actor's team                (AccessScope USER, audited)
     "all"     -> every user's records; needs CRM_VIEW_ALL       (AccessScope ORGANIZATION, audited)
+                 or, with CRM_VIEW_TEAM, the actor's and their team's records
+                                                                (AccessScope TEAM, audited)
 
 This is *authorised data access*, not impersonation: the admin stays signed in as
 themselves, every write records the admin as the actor, and no session or credential of the
@@ -30,6 +33,7 @@ from arkray.core.access import AccessScope, ScopeKind
 from arkray.core.context import current_support_target_id, update_context
 from arkray.core.errors import NotFoundError, PermissionDeniedError, SupportSessionActive
 
+from . import teams
 from .models import User, WorkspaceAccessWindow
 from .policy import Capability, has_capability
 
@@ -77,9 +81,12 @@ def resolve_workspace(actor: _Actor, workspace: str) -> AccessScope:
         return AccessScope.own(actor.pk)
 
     if workspace == WORKSPACE_ORGANIZATION:
-        if not has_capability(actor, Capability.CRM_VIEW_ALL):
+        if has_capability(actor, Capability.CRM_VIEW_ALL):
+            scope = AccessScope.organization(actor.pk)
+        elif has_capability(actor, Capability.CRM_VIEW_TEAM):
+            scope = teams.team_scope(actor)  # ADR-0035
+        else:
             raise NotFoundError()
-        scope = AccessScope.organization(actor.pk)
         _record_delegated_access(scope)
         return scope
 
@@ -88,10 +95,15 @@ def resolve_workspace(actor: _Actor, workspace: str) -> AccessScope:
     subject_id = UUID(workspace)
     if subject_id == actor.pk:
         return resolve_workspace(actor, WORKSPACE_SELF)
-    if not has_capability(actor, Capability.WORKSPACE_VIEW_ANY):
-        raise NotFoundError()
-    # Deactivated users stay viewable: their history is preserved, not hidden.
-    if not User.objects.filter(pk=subject_id).exists():
+    # Deactivated users stay viewable: their history is preserved, not hidden. Outside the
+    # actor's reach is the same 404 as a user who doesn't exist.
+    if has_capability(actor, Capability.WORKSPACE_VIEW_ANY):
+        if not User.objects.filter(pk=subject_id).exists():
+            raise NotFoundError()
+    elif has_capability(actor, Capability.WORKSPACE_VIEW_TEAM):
+        if not teams.is_team_member(actor.pk, subject_id):
+            raise NotFoundError()
+    else:
         raise NotFoundError()
     scope = AccessScope.for_user(actor.pk, subject_id)
     _record_delegated_access(scope)
@@ -102,7 +114,7 @@ def workspace_segment(scope: AccessScope) -> str:
     """The `{workspace}` URL segment that addresses `scope` ("me", "all" or a user id)."""
     if scope.kind is ScopeKind.SELF:
         return WORKSPACE_SELF
-    if scope.kind is ScopeKind.ORGANIZATION:
+    if scope.kind in (ScopeKind.ORGANIZATION, ScopeKind.TEAM):
         return WORKSPACE_ORGANIZATION
     return str(scope.subject_user_id)
 
@@ -113,15 +125,26 @@ def authorize_write(actor: _Actor, scope: AccessScope) -> None:
 
     - own workspace (SELF): CRM_ACCESS_OWN;
     - another user's workspace or the organisation (USER, ORGANIZATION): CRM_MANAGE_ANY.
-      Being allowed to *view* someone's workspace never implies being allowed to change it.
+      Being allowed to *view* someone's workspace never implies being allowed to change it;
+    - a team member's workspace or the team's (USER, TEAM): CRM_MANAGE_ANY, or
+      CRM_MANAGE_TEAM with every owner of the scope still in the actor's team (ADR-0035;
+      re-read here, so a scope built elsewhere can't widen it). Never ORGANIZATION.
     """
     if not actor.is_authenticated or not actor.is_active or scope.actor_id != actor.pk:
         raise PermissionDeniedError()
-    required = (
-        Capability.CRM_ACCESS_OWN if scope.kind is ScopeKind.SELF else Capability.CRM_MANAGE_ANY
-    )
-    if not has_capability(actor, required):
-        raise PermissionDeniedError()
+    if scope.kind is ScopeKind.SELF:
+        if not has_capability(actor, Capability.CRM_ACCESS_OWN):
+            raise PermissionDeniedError()
+        return
+    if has_capability(actor, Capability.CRM_MANAGE_ANY):
+        return
+    if (
+        has_capability(actor, Capability.CRM_MANAGE_TEAM)
+        and scope.kind in (ScopeKind.USER, ScopeKind.TEAM)
+        and teams.all_in_team(actor.pk, scope.owner_ids)
+    ):
+        return
+    raise PermissionDeniedError()
 
 
 def _record_delegated_access(scope: AccessScope) -> None:
@@ -132,20 +155,26 @@ def _record_delegated_access(scope: AccessScope) -> None:
     transaction as the audit row (identity.models.WorkspaceAccessWindow): a rolled-back
     request leaves neither, so it never suppresses auditing, and of several requests
     opening a window at once exactly one writes the row.
+
+    A team's "all" (ADR-0035) is audited as "all" with the scope `team`, under a window of its
+    own: an administrator promoted from their team to the organisation (or the reverse)
+    within one window is audited for each.
     """
-    subject = str(scope.subject_user_id) if scope.subject_user_id else WORKSPACE_ORGANIZATION
+    subject_user_id = None if scope.is_team else scope.subject_user_id
+    subject = str(subject_user_id) if subject_user_id else WORKSPACE_ORGANIZATION
     update_context(subject_user_id=subject)
     window = settings.WORKSPACE_ACCESS_AUDIT_WINDOW_S
     epoch = int(timezone.now().timestamp())
     window_start = datetime.fromtimestamp(epoch - epoch % window, tz=UTC)
-    marker = {"actor_id": scope.actor_id, "workspace": subject, "window_start": window_start}
+    workspace = ScopeKind.TEAM.value if scope.is_team else subject
+    marker = {"actor_id": scope.actor_id, "workspace": workspace, "window_start": window_start}
     if WorkspaceAccessWindow.objects.filter(**marker).exists():
         return  # already audited in this window: one read, no write
     with transaction.atomic(), connection.cursor() as cursor:
         cursor.execute(
             "INSERT INTO identity_workspace_access_window (actor_id, workspace, window_start)"
             " VALUES (%s, %s, %s) ON CONFLICT DO NOTHING RETURNING id",
-            [scope.actor_id, subject, window_start],
+            [scope.actor_id, workspace, window_start],
         )
         if cursor.fetchone() is None:
             return  # already audited in this window
@@ -154,7 +183,7 @@ def _record_delegated_access(scope: AccessScope) -> None:
             actor_id=scope.actor_id,
             target_type="workspace",
             target_id=subject,
-            subject_user_id=scope.subject_user_id,
+            subject_user_id=subject_user_id,
             metadata={"scope": scope.kind.value},
         )
 

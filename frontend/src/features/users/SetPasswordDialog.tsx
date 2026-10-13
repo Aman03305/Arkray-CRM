@@ -12,6 +12,7 @@ import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
 import type { AdminUser } from "@/lib/api/types";
 
 import { USERS_QUERY_KEY, usersApi } from "./api";
+import { useOutOfReachOn404 } from "./reach";
 
 const EMPTY: NewPasswordValue = { password: "", confirmation: "" };
 
@@ -41,6 +42,8 @@ export function SetPasswordDialog({ user, onClose, onDone }: {
       if (isApiError(error, 409) || isApiError(error, 422)) void queryClient.invalidateQueries({ queryKey: USERS_QUERY_KEY });
     },
   });
+  // Out of reach now (404): the Users page closes this and says why (ADR-0035).
+  useOutOfReachOn404(save.error, user);
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();

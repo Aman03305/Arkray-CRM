@@ -10,7 +10,8 @@ import { NotFoundView } from "@/components/ui/NotFoundView";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { describeError, isApiError } from "@/lib/api/errors";
-import { hasCapability } from "@/lib/viewer";
+import { usersPageLabel } from "@/lib/navigation";
+import { canManageUsers } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
 import { canonicalUserPath, userIdFromPathname } from "@/lib/workspace";
 
@@ -85,14 +86,17 @@ export function UserWorkspaceFrame({ userId, children }: { userId: string; child
     );
   }
   if (viewer?.supportSession?.target.id === userId) return <>{children}</>;
-  const manager = hasCapability(viewer, "users.manage");
+  // Back to the page that lists this user (Users, or a team administrator's My team).
+  const manager = canManageUsers(viewer);
   return (
     <>
       <p ref={announcer} aria-live="polite" className="sr-only" />
       <WorkspaceBanner
         subject={subject.data}
         actor={viewer}
-        back={manager ? { href: "/admin/users", label: "Back to Users" } : { href: "/dashboard", label: "Back to Dashboard" }}
+        back={
+          manager ? { href: "/admin/users", label: `Back to ${usersPageLabel(viewer)}` } : { href: "/dashboard", label: "Back to Dashboard" }
+        }
       />
       {children}
     </>

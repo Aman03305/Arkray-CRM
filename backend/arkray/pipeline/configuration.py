@@ -6,8 +6,15 @@ Who may configure what (checked here for every caller):
   from the organisation-wide workspace ("all");
 - a *personal* pipeline: whoever may write in its owner's workspace (the owner, with
   crm.access_own; an administrator in that user's workspace or organisation-wide, with
-  crm.manage_any, recorded as the actor with the owner as the subject). Seeing a pipeline
-  (because one of your deals sits in it) never implies configuring it.
+  crm.manage_any, or a team administrator in a team member's workspace, with
+  crm.manage_team; recorded as the actor with the owner as the subject). Seeing a pipeline
+  (because one of your deals sits in it) never implies configuring it;
+- nothing from a team administrator's team workspace (scope TEAM, ADR-0035): it holds
+  several owners' pipelines and the shared ones, and none of them is "the team's". A
+  member's personal pipeline is configured from that member's workspace, shared ones by a
+  super administrator organisation-wide (403 `permission_denied`, TEAM_CONFIGURES_NOTHING,
+  before anything is changed; field_values refuses a team scope too, so nothing here can
+  ever act on "every deal" for one).
 A pipeline the caller may not see is a 404; one they may see but not configure, a 403.
 Configuring a pipeline is never authority over the deals in it either: a deal reassigned
 with its lead stays in its old owner's personal pipeline, out of their sight. Deleting
@@ -75,6 +82,10 @@ AUDIT_RESTORED = "pipeline.restored"
 
 SHARED_ADMIN_ONLY = (
     "Shared pipelines are configured by administrators, from the organization-wide Pipeline."
+)
+TEAM_CONFIGURES_NOTHING = (
+    "Pipelines aren't configured from your team's workspace. Open a user's workspace to "
+    "change their own pipelines; shared pipelines are configured by a super administrator."
 )
 NOT_YOURS = "Only this pipeline's owner (or an administrator) can change it."
 NAME_TAKEN = "There's already a pipeline with this name."
@@ -154,6 +165,8 @@ def can_manage(actor: User, scope: AccessScope, pipeline: m.Pipeline) -> bool:
 
 
 def _require_manage(actor: User, scope: AccessScope, pipeline: m.Pipeline) -> None:
+    if scope.is_team:  # ADR-0035: a team's workspace configures nothing (module docstring)
+        raise PermissionDeniedError(TEAM_CONFIGURES_NOTHING)
     if pipeline.owner_id is None:
         if not scope.is_organization_wide or not has_capability(actor, Capability.CONFIG_MANAGE):
             raise PermissionDeniedError(SHARED_ADMIN_ONLY)
@@ -241,8 +254,10 @@ def create_pipeline(
 ) -> m.Pipeline:
     """A new pipeline with its stages (and custom fields). In one's own workspace it is
     one's own; in a user's workspace (an administrator), that user's; organisation-wide, a
-    shared pipeline (config.manage)."""
+    shared pipeline (config.manage). Never in a team's workspace (403): whose would it be?"""
     authorize_write(actor, scope)
+    if scope.is_team:
+        raise PermissionDeniedError(TEAM_CONFIGURES_NOTHING)
     owner_id = None if scope.is_organization_wide else scope.subject_user_id
     if owner_id is None and not has_capability(actor, Capability.CONFIG_MANAGE):
         raise PermissionDeniedError(SHARED_ADMIN_ONLY)

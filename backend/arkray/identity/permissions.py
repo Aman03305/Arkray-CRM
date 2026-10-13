@@ -19,7 +19,7 @@ from arkray.core.errors import (
 )
 
 from . import mfa_services
-from .policy import Capability, has_capability
+from .policy import Capability, has_any_capability
 
 if TYPE_CHECKING:
     from rest_framework.request import Request
@@ -81,24 +81,44 @@ class IsActiveUser(BasePermission):
 
 
 class HasCapability(BasePermission):
-    """Base for `requires(capability)`; never used directly."""
+    """Base for `requires(capability)` and `requires_any(...)`; never used directly."""
 
     capability: ClassVar[Capability | None] = None
+    # requires_any: holders of any one of these pass (the services then apply its reach).
+    any_of: ClassVar[tuple[Capability, ...]] = ()
 
     def has_permission(self, request: Request, view: APIView) -> bool:
-        if self.capability is None or not has_capability(request.user, self.capability):
+        wanted = self.any_of or ((self.capability,) if self.capability is not None else ())
+        if not wanted or not has_any_capability(request.user, *wanted):
             return False
         _account_gates(request, view)
         return True
 
 
-_CAPABILITY_PERMISSIONS: dict[Capability, type[HasCapability]] = {}
+_CAPABILITY_PERMISSIONS: dict[tuple[Capability, ...], type[HasCapability]] = {}
 
 
 def requires(capability: Capability) -> type[HasCapability]:
     """The permission class granting access to holders of `capability`."""
-    if capability not in _CAPABILITY_PERMISSIONS:
-        _CAPABILITY_PERMISSIONS[capability] = type(
+    key = (capability,)
+    if key not in _CAPABILITY_PERMISSIONS:
+        _CAPABILITY_PERMISSIONS[key] = type(
             f"Requires[{capability.value}]", (HasCapability,), {"capability": capability}
         )
-    return _CAPABILITY_PERMISSIONS[capability]
+    return _CAPABILITY_PERMISSIONS[key]
+
+
+def requires_any(*capabilities: Capability) -> type[HasCapability]:
+    """The permission class granting access to holders of any of `capabilities`: an
+    organisation-wide capability and its team counterpart (ADR-0035). Passing it says only
+    that the caller may ask; the service decides whom their reach covers."""
+    if len(capabilities) < 2:  # one capability is `requires`
+        raise ValueError("requires_any needs at least two capabilities; use requires().")
+    key = tuple(capabilities)
+    if key not in _CAPABILITY_PERMISSIONS:
+        _CAPABILITY_PERMISSIONS[key] = type(
+            f"RequiresAny[{'|'.join(c.value for c in capabilities)}]",
+            (HasCapability,),
+            {"any_of": key},
+        )
+    return _CAPABILITY_PERMISSIONS[key]

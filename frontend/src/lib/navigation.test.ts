@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { makeViewer } from "@/test/fixtures";
+import { makeViewer, TEAM_ADMIN_CAPABILITIES } from "@/test/fixtures";
 
-import { administrationNavigation, navigationWorkspace, showsSettings, supportSessionPath, workspaceNavigation } from "./navigation";
+import {
+  administrationNavigation,
+  navigationWorkspace,
+  showsSettings,
+  supportSessionPath,
+  usersPageLabel,
+  workspaceNavigation,
+} from "./navigation";
 import type { Viewer } from "./viewer";
 import type { Workspace } from "./workspace";
 
@@ -87,5 +94,39 @@ describe("during a support session", () => {
   it("leaves the supported user's own pages alone", () => {
     expect(supportSessionPath(`/admin/users/${TARGET}/activities`, session)).toBeNull();
     expect(supportSessionPath(`/admin/users/${TARGET.toUpperCase()}/pipeline/new`, session)).toBeNull();
+  });
+});
+
+describe("a team administrator (ADR-0035)", () => {
+  const RAHUL = "3f2b8c1e-9a4d-4e2f-8b7a-1c2d3e4f5a6b";
+  const teamAdmin: Viewer = makeViewer({ id: "t1", capabilities: [...TEAM_ADMIN_CAPABILITIES] });
+
+  it("keeps a team member's workspace (workspace.view_team) and its links", () => {
+    expect(navigationWorkspace(`/admin/users/${RAHUL}/pipeline`, teamAdmin)).toEqual({ kind: "user", userId: RAHUL });
+    expect(workspaceNavigation(navigationWorkspace(`/admin/users/${RAHUL}/pipeline`, teamAdmin))[0]!.href).toBe(
+      `/admin/users/${RAHUL}/dashboard`,
+    );
+  });
+
+  it("their own pages are the team's overview", () => {
+    expect(navigationWorkspace("/dashboard", teamAdmin)).toEqual({ kind: "team" });
+  });
+
+  it("without either workspace capability, a user's workspace leads back to one's own pages", () => {
+    const viewOnly = makeViewer({ capabilities: ["crm.access_own", "crm.view_team"] });
+    expect(navigationWorkspace(`/admin/users/${RAHUL}/pipeline`, viewOnly)).toEqual({ kind: "team" });
+    expect(navigationWorkspace(`/admin/users/${RAHUL}/pipeline`, salesUser)).toEqual({ kind: "self" });
+  });
+
+  it("offers the Users page as My team (users.manage_team); a Super admin's is Users", () => {
+    expect(administrationNavigation(teamAdmin)).toEqual([expect.objectContaining({ label: "My team", href: "/admin/users" })]);
+    expect(administrationNavigation(admin)).toEqual([expect.objectContaining({ label: "Users", href: "/admin/users" })]);
+    expect(usersPageLabel(teamAdmin)).toBe("My team");
+    expect(usersPageLabel(admin)).toBe("Users");
+  });
+
+  it("not during a support session", () => {
+    const session = { id: "s1", target: { id: RAHUL, fullName: "Rahul Sharma" }, reason: "", startedAt: "", expiresAt: "" };
+    expect(administrationNavigation({ ...teamAdmin, supportSession: session })).toEqual([]);
   });
 });

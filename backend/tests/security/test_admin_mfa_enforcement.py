@@ -25,6 +25,7 @@ from arkray.identity.policy import ROLE_CAPABILITIES, Capability
 from tests.architecture.test_authorization_baseline import api_views
 from tests.architecture.test_production_settings import load_production_settings
 from tests.authz_matrix import AUTHZ_MATRIX
+from tests.factories import TeamAdminFactory
 from tests.helpers import signed_in
 
 pytestmark = pytest.mark.django_db
@@ -75,6 +76,16 @@ def path_of(route: str) -> str:
     return "/" + PARAMETER.sub(
         lambda match: "me" if match.group(1) == "str" else str(uuid4()), route
     )
+
+
+def may_ask(role: str, access: str) -> bool:
+    """Whether `role` passes a route's permission class: a capability rule names one
+    capability, or several of which any one will do (`a|b`, ADR-0035)."""
+    kind, _, capabilities = access.partition(":")
+    if kind != "capability":
+        return True
+    held = {capability.value for capability in ROLE_CAPABILITIES[role]}
+    return any(capability in held for capability in capabilities.split("|"))
 
 
 def send(client, method: str, route: str):
@@ -130,6 +141,23 @@ def test_every_other_route_refuses_an_administrator_without_a_second_factor(admi
     else:
         assert response.status_code == 403, (method, route, response.content)
         assert error_code(response) == "mfa_enrollment_required", (method, route)
+
+
+@pytest.mark.parametrize(("route", "method"), GATED)
+def test_every_other_route_refuses_a_team_administrator_without_a_second_factor(route, method):
+    """ADR-0035: an Admin is an administrator for two-step verification too. A route their
+    role may not ask at all answers 403 `permission_denied` first (nothing let through)."""
+    response = send(signed_in(TeamAdminFactory()), method, route)
+    if route in ALLOWED_BEFORE_ENROLMENT:
+        assert error_code(response) != "mfa_enrollment_required", response.content
+        return
+    assert response.status_code == 403, (method, route, response.content)
+    expected = (
+        "mfa_enrollment_required"
+        if may_ask("team_admin", AUTHZ_MATRIX[route].access)
+        else "permission_denied"
+    )
+    assert error_code(response) == expected, (method, route)
 
 
 def test_the_probes_and_metrics_give_an_unenrolled_administrator_nothing(admin, settings):

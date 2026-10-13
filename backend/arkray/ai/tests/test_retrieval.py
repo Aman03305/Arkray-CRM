@@ -15,7 +15,7 @@ from arkray.ai.sources import SourceModule
 from arkray.core.access import AccessScope
 from arkray.core.models import OutboxEvent
 from tests.ai_fixtures import index, note, own
-from tests.factories import LeadFactory
+from tests.factories import LeadFactory, TeamAdminFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -52,6 +52,20 @@ class TestPreFilter:
     def test_an_admin_in_one_users_workspace_sees_only_that_user(self, admin, user_a, twin_notes):
         found = retrieval.retrieve(AccessScope.for_user(admin.pk, user_a.pk), QUERY)
         assert texts(found) == [f"Text: Rahul: {QUERY}."]
+
+    def test_a_team_is_filtered_by_its_owners_in_the_query(self, user_a, twin_notes):
+        """ADR-0035: a team administrator's team (several owners) is pre-filtered like one
+        person's, never read as the organisation."""
+        from arkray.ai.embeddings import get_embedder
+
+        tara = TeamAdminFactory()
+        team = AccessScope.team(tara.pk, [user_a.pk])
+        vector = get_embedder().embed_query(QUERY)
+        candidates = retrieval._candidates(
+            team, vector, lead_id=None, opportunity_id=None, source_types=None, limit=50
+        )
+        assert {c.source_id for c in candidates} == {twin_notes["rahul"].pk}
+        assert texts(retrieval.retrieve(team, QUERY)) == [f"Text: Rahul: {QUERY}."]
 
     def test_organisation_wide_sees_both_through_the_ann_index(self, admin, twin_notes):
         found = retrieval.retrieve(AccessScope.organization(admin.pk), QUERY)

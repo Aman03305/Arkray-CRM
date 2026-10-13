@@ -9,7 +9,7 @@ from django.urls import URLPattern, URLResolver, get_resolver, include, path
 from rest_framework.permissions import AllowAny
 
 from arkray.core.api import ApiView
-from arkray.identity.permissions import IsActiveUser, requires
+from arkray.identity.permissions import IsActiveUser, requires, requires_any
 from arkray.identity.policy import Capability
 from tests.authz_matrix import AUTHZ_MATRIX
 
@@ -38,6 +38,8 @@ def expected_permissions(access: str) -> list[type]:
         return [IsActiveUser]
     kind, _, capability = access.partition(":")
     assert kind == "capability", f"unknown access rule {access!r}"
+    if "|" in capability:  # any of them (ADR-0035: a capability and its team counterpart)
+        return [requires_any(*(Capability(c) for c in capability.split("|")))]
     return [requires(Capability(capability))]
 
 

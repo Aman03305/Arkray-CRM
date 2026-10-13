@@ -36,7 +36,15 @@ class UserFactory(factory.django.DjangoModelFactory[User]):
 
 
 class AdminFactory(UserFactory):
+    """A super administrator (the role value "admin", ADR-0035)."""
+
     role = Role.ADMIN
+
+
+class TeamAdminFactory(UserFactory):
+    """A team administrator ("Admin", ADR-0035). Their team: `UserFactory(manager=...)`."""
+
+    role = Role.TEAM_ADMIN
 
 
 class InvitedUserFactory(UserFactory):

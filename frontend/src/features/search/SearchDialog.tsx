@@ -11,7 +11,7 @@ import { selectedUserId, useWorkspaceSubject } from "@/features/workspace/api";
 import { ApiError } from "@/lib/api/client";
 import type { SearchResults } from "@/lib/api/types";
 import { formatDate, formatDateTime } from "@/lib/format";
-import { activityHref, leadHref, opportunityHref, type Workspace } from "@/lib/workspace";
+import { activityHref, isOverview, leadHref, opportunityHref, type Workspace } from "@/lib/workspace";
 
 import { useGlobalSearch } from "./api";
 import { Highlight } from "./Highlight";
@@ -90,7 +90,7 @@ function dealCustomer(deal: SearchResults["opportunities"]["results"][number]): 
 /** Every result as an option, in group order. Text only: React escapes all of it. */
 function toGroups(data: SearchResults, workspace: Workspace): Group[] {
   const terms = data.terms;
-  const owner = (person: { full_name: string }) => (workspace.kind === "organization" ? [person.full_name] : []);
+  const owner = (person: { full_name: string }) => (isOverview(workspace) ? [person.full_name] : []);
   const hl = (text: string) => <Highlight text={text} terms={terms} />;
   const build: Record<GroupKey, Option[]> = {
     leads: data.leads.results.map((lead) => {
@@ -168,6 +168,7 @@ function toGroups(data: SearchResults, workspace: Workspace): Group[] {
 function scopeText(workspace: Workspace, subjectName: string | undefined): string {
   if (workspace.kind === "self") return "Searching your records.";
   if (workspace.kind === "organization") return "Searching all users' records.";
+  if (workspace.kind === "team") return "Searching your team's records.";
   return subjectName ? `Searching ${subjectName}'s records.` : "Searching the selected user's records.";
 }
 

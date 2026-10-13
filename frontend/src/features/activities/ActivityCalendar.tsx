@@ -13,7 +13,7 @@ import { describeError, isApiError } from "@/lib/api/errors";
 import type { ActivityListItem } from "@/lib/api/types";
 import { businessToday } from "@/lib/format";
 import { useViewer } from "@/lib/viewer-context";
-import { activityHref, type Workspace, workspaceApiSegment } from "@/lib/workspace";
+import { activityHref, isOverview, type Workspace, workspaceApiSegment } from "@/lib/workspace";
 
 import { activitiesApi, activityKeys, CALENDAR_MAX_PAGES, CALENDAR_PAGE_SIZE, type CalendarRange } from "./api";
 import { typeLabel } from "./ActivityBits";
@@ -450,8 +450,8 @@ function DayColumn({
 /**
  * The Activities calendar: tasks (at their due time) and meetings (start to end) by month,
  * week or day, in India time like every time on screen. Cancelled and archived ones are left
- * out; completed ones stay, struck through. Organisation-wide, "My calendar" narrows it to
- * the viewer's own. Choosing a day (or, in the week and day views, a time) opens the form
+ * out; completed ones stay, struck through. In the overview (the organisation's, or a team
+ * administrator's team's: "My team"), "My calendar" narrows it to the viewer's own. Choosing a day (or, in the week and day views, a time) opens the form
  * for a meeting or a task then; an entry opens its activity page.
  *
  * It reads the activities list API (the same scope, filters and authorisation as the list),
@@ -463,12 +463,12 @@ export function ActivityCalendar({ workspace, canWrite, onSchedule }: { workspac
   const calendar = useCalendarState(segment);
   const clock = useClock();
   const today = businessToday(new Date(clock));
-  const organisation = workspace.kind === "organization";
+  const overview = isOverview(workspace);
   const days = visibleDays(calendar.view, calendar.anchor);
   const range: CalendarRange = {
     from: days[0]!,
     to: days[days.length - 1]!,
-    owner: organisation && calendar.mine ? (viewer?.id ?? "") : "",
+    owner: overview && calendar.mine ? (viewer?.id ?? "") : "",
   };
   const query = useQuery({
     queryKey: activityKeys.calendar(workspace, range),
@@ -484,7 +484,7 @@ export function ActivityCalendar({ workspace, canWrite, onSchedule }: { workspac
 
   const error = query.isError ? describeError(query.error) : null;
   const openDay = (day: string) => calendar.update({ view: "day", anchor: day });
-  const grid: GridProps = { workspace, today, entries, canWrite, showOwner: organisation && !calendar.mine, onSchedule, onOpenDay: openDay };
+  const grid: GridProps = { workspace, today, entries, canWrite, showOwner: overview && !calendar.mine, onSchedule, onOpenDay: openDay };
   const unit = calendar.view;
 
   return (
@@ -521,14 +521,14 @@ export function ActivityCalendar({ workspace, canWrite, onSchedule }: { workspac
           </span>
         ) : null}
         <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
-          {organisation && viewer ? (
+          {overview && viewer ? (
             <Segmented
               label="Whose activities"
               value={calendar.mine}
               onChange={(mine) => calendar.update({ mine })}
               options={[
                 { value: true, label: "My calendar" },
-                { value: false, label: "Everyone" },
+                { value: false, label: workspace.kind === "team" ? "My team" : "Everyone" },
               ]}
             />
           ) : null}
@@ -557,7 +557,7 @@ export function ActivityCalendar({ workspace, canWrite, onSchedule }: { workspac
           {query.data?.truncated ? (
             <Alert tone="info" title="Not everything fits">
               {`This ${unit} has more than ${CALENDAR_MAX_PAGES * CALENDAR_PAGE_SIZE} tasks or meetings; only the first ${CALENDAR_MAX_PAGES * CALENDAR_PAGE_SIZE} of each are shown. `}
-              {organisation && !calendar.mine ? "Choose My calendar, or a week or a day, to see them all." : "Choose a week or a day to see them all."}
+              {overview && !calendar.mine ? "Choose My calendar, or a week or a day, to see them all." : "Choose a week or a day to see them all."}
             </Alert>
           ) : null}
         </div>

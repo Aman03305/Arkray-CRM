@@ -43,6 +43,9 @@ export function describeSecurityEvent(event: SecurityEvent): string {
     }
     case "user.email_changed":
       return `${by} changed ${user}'s email`;
+    // A user moved between teams (ADR-0035); the Admins are named in the audit log only.
+    case "user.manager_changed":
+      return `${by} changed ${user}'s Admin`;
     case "support_session.started":
       return `${by} started a support session for ${user}`;
     case "support_session.ended": {

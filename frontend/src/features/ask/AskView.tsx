@@ -51,6 +51,7 @@ const FAILURES: Record<string, string> = {
 function whose(workspace: Workspace, subjectName: string | undefined): string {
   if (workspace.kind === "self") return "your records";
   if (workspace.kind === "organization") return "all users' records";
+  if (workspace.kind === "team") return "your team's records";
   return subjectName ? `${subjectName}'s records` : "the selected user's records";
 }
 

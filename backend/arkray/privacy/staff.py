@@ -37,8 +37,9 @@ to its pseudonym (deactivated, no usable password, this name and email: CHECK
 `identity_user_pseudonym_final`; a trigger keeps the mark), and identity.services refuses it
 every change with 422 `account_pseudonymised`.
 
-An administrator's account (its *role* is administrator, whatever its status: a deactivated
-former administrator too) is changed only by that administrator (ADR-0030), and nobody
+An administrator's account (its *role* is administrator, of either kind: a super or a team
+administrator, ADR-0035; whatever its status: a deactivated former administrator too;
+identity.services.is_administrator) is changed only by that administrator (ADR-0030), and nobody
 pseudonymises themselves, so no administrator pseudonymises another through the API: 403,
 nothing changed (audit SEC-2: it replaced the other's email and password). The one way is
 the higher-trust operator path, `manage.py pseudonymise_user --allow-administrator` (shell
@@ -250,7 +251,8 @@ def pseudonymise(
     # The user-administration lock, then the account's row (identity's order): a promotion or
     # demotion is either committed before the check reads the role, or waits for this one.
     serialise_user_administration()
-    user = User.objects.select_for_update().filter(pk=user_id).first()
+    # FOR NO KEY UPDATE, as everywhere in user administration (identity.services).
+    user = User.objects.select_for_update(no_key=True).filter(pk=user_id).first()
     if user is None:
         raise NotFoundError()
     administrator = is_administrator(user)

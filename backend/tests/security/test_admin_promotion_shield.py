@@ -82,7 +82,8 @@ class TestTheOwnerIsTold:
         drain_outbox()
         (subject,) = mail_to(user_a.email)
         assert "role" in subject.lower()
-        assert "Admin" in mail.outbox[-1].body
+        # The role's label (ADR-0035: "admin" is the super administrator).
+        assert "Super admin" in mail.outbox[-1].body
 
     def test_an_email_change_still_tells_the_old_address(self, admin_client, user_a):
         old = user_a.email

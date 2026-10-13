@@ -39,6 +39,7 @@ TABLE_WIDE = [
     "pipeline.0006_ownership_negotiation_fields",  # product enhancement phase
     "leads.0007_lead_erased_at",  # deep security audit M-1
     "identity.0008_account_takeover_limits",  # review of 73ff1e3, L4: the pseudonym backfill
+    "ai.0005_team_administrators",  # ADR-0035: a constraint checked against every conversation
 ]
 CONCURRENT = [
     "leads.0005_owner_index_covers_archive",  # Phase 5
@@ -66,6 +67,7 @@ REFUSE_REVERSE = {
     "activities.0012_created_by_index",  # review of 73ff1e3, M6 round 1: write budget
     "activities.0013_attachment_purge_backoff",  # review of 73ff1e3, M3 round 3: purge backoff
     "ai.0004_conversation_forgotten_at",  # adversarial review M1: tombstones
+    "ai.0005_team_administrators",  # ADR-0035: team conversations
     "audit.0003_support_sessions",
     "audit.0004_support_session_index",
     "audit.0005_audit_details",  # privacy remediation
@@ -77,6 +79,7 @@ REFUSE_REVERSE = {
     "identity.0006_mfa_consecutive_failures",  # deep security audit M-4
     "identity.0007_mfa_cumulative_failures",  # R133: the cap a new password doesn't clear
     "identity.0008_account_takeover_limits",  # review of 73ff1e3, L1 and L4
+    "identity.0009_team_administrators",  # ADR-0035: team administrators, `manager`
     "leads.0007_lead_erased_at",  # deep security audit M-1
     "pipeline.0006_ownership_negotiation_fields",
     "pipeline.0007_search_customer_names",

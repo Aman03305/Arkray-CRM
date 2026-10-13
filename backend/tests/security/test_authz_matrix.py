@@ -1,4 +1,5 @@
-"""Every route in the authorization matrix, exercised as anonymous, sales user and admin.
+"""Every route in the authorization matrix, exercised as anonymous, sales user, super
+administrator and team administrator (ADR-0035).
 
 Complements tests/architecture (which checks what each view *declares*) by checking what
 each route *does*: the backend refuses, whatever the frontend shows.
@@ -6,15 +7,17 @@ each route *does*: the backend refuses, whatever the frontend shows.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import pytest
 from django.conf import settings
 from rest_framework.test import APIClient
 
 from arkray.identity.models import Role, User
 from arkray.identity.policy import ROLE_CAPABILITIES, Capability
-from tests.authz_matrix import AUTHZ_MATRIX
+from tests.authz_matrix import AUTHZ_MATRIX, PIPELINE
 from tests.factories import UserFactory
-from tests.helpers import signed_in
+from tests.helpers import signed_in, without_request_id
 
 pytestmark = pytest.mark.django_db
 
@@ -46,6 +49,14 @@ def call(client: APIClient, method: str, path: str, body=None):
     return getattr(client, method.lower())(path, body or {}, format="json")
 
 
+def holds_any(capabilities: Iterable[Capability], access: str) -> bool:
+    """Whether holders of `capabilities` pass a `capability:` rule: one capability, or
+    several of which any one will do (`a|b`, ADR-0035)."""
+    held = {capability.value for capability in capabilities}
+    _, _, wanted = access.partition(":")
+    return any(capability in held for capability in wanted.split("|"))
+
+
 @pytest.mark.parametrize(("route", "method"), CASES)
 def test_anonymous_callers_reach_only_public_routes(route, method, user_b):
     response = call(APIClient(), method, concrete(route, user_b))
@@ -60,9 +71,11 @@ def test_anonymous_callers_reach_only_public_routes(route, method, user_b):
 def test_sales_users_never_reach_user_administration(route, method, user_a, user_b):
     client = signed_in(user_a)
     response = call(client, method, concrete(route, user_b))
-    kind, _, capability = AUTHZ_MATRIX[route].access.partition(":")
+    access = AUTHZ_MATRIX[route].access
     # Capabilities a sales user holds (ai.query: Ask Arkray in their own workspace) pass.
-    if kind == "capability" and capability not in ROLE_CAPABILITIES[Role.SALES_USER]:
+    if access.startswith("capability:") and not holds_any(
+        ROLE_CAPABILITIES[Role.SALES_USER], access
+    ):
         assert response.status_code == 403
         assert response.json()["error"]["code"] == "permission_denied"
     else:
@@ -201,14 +214,14 @@ def test_a_view_only_role_reads_everywhere_and_writes_nowhere_but_home(
     monkeypatch.setitem(ROLE_CAPABILITIES, Role.ADMIN, VIEW_ONLY)
     client = signed_in(admin)
     rule = AUTHZ_MATRIX[route]
-    kind, _, capability = rule.access.partition(":")
+    kind = rule.access.partition(":")[0]
     workspaces = [str(user_b.pk), "all"] if "<str:workspace>" in route else [""]
     for workspace in workspaces:
         path = in_workspace(route, user_b, workspace) if workspace else concrete(route, user_b)
         response = call(client, method, path)
         status = response.status_code
         if kind == "capability":
-            if capability in VIEW_ONLY:
+            if holds_any(VIEW_ONLY, rule.access):
                 assert status not in (401, 403), (path, status)
             else:
                 assert status == 403, (path, status)
@@ -235,3 +248,82 @@ def test_a_deactivated_users_open_session_reaches_nothing(route, method, admin, 
     response = call(client, method, concrete(route, user_b))
     assert response.status_code == 401, response.content
     assert response.json()["error"]["code"] == "not_authenticated"
+
+
+# --- ADR-0035: a team administrator on every route --------------------------------------------
+# Pipeline configuration is refused in the team scope (workspace `all` of a team administrator):
+# a member's personal pipeline is configured from their own workspace, shared ones by super
+# administrators. Here, with an empty body and a record id that exists nowhere, they may answer
+# 400 or 404 first; never a success (tests/security/test_teams_crm.py proves the 403 with valid
+# requests).
+TEAM_SCOPE_CONFIGURATION = {
+    ("api/v1/workspaces/<str:workspace>/pipelines", "POST"),
+    (PIPELINE, "PATCH"),
+    (f"{PIPELINE}/stages", "PUT"),
+    (f"{PIPELINE}/fields", "PUT"),
+    (f"{PIPELINE}/fields/<uuid:field_id>/delete-values", "POST"),
+    (f"{PIPELINE}/archive", "POST"),
+    (f"{PIPELINE}/restore", "POST"),
+}
+
+
+@pytest.mark.parametrize(("route", "method"), CASES)
+def test_team_admins_reach_their_team_and_nothing_organisation_wide(
+    route, method, team_admin, team_member, user_b
+):
+    """Tara (team_admin) with Rahul (her team): the routes her capabilities name answer her,
+    on her member and in her team's workspaces (`all`, Rahul's id); the organisation-wide ones
+    (security events, privacy requests) are 403 whatever the target."""
+    client = signed_in(team_admin)
+    rule = AUTHZ_MATRIX[route]
+    kind = rule.access.partition(":")[0]
+    workspaces = ["me", "all", str(team_member.pk)] if "<str:workspace>" in route else [""]
+    for workspace in workspaces:
+        path = (
+            in_workspace(route, team_member, workspace)
+            if workspace
+            else concrete(route, team_member)
+        )
+        response = call(client, method, path)
+        status = response.status_code
+        if kind == "capability" and not holds_any(ROLE_CAPABILITIES[Role.TEAM_ADMIN], rule.access):
+            assert status == 403, (path, status, response.content)
+            assert response.json()["error"]["code"] == "permission_denied"
+        elif workspace == "all" and (route, method) in TEAM_SCOPE_CONFIGURATION:
+            assert status in (400, 403, 404), (path, status, response.content)
+        else:
+            assert status not in (401, 403), (path, status, response.content)
+
+
+@pytest.mark.parametrize(
+    ("route", "method"),
+    [(r, m) for r, m in CASES if AUTHZ_MATRIX[r].access != "public" and "<uuid:user_id>" in r],
+)
+def test_a_team_admin_learns_nothing_about_accounts_outside_her_team(
+    route, method, team_admin, team_member, user_b, other_team_member
+):
+    """Priya (no team) and Kavya (another team) answer exactly like an account that doesn't
+    exist: 404 where Tara may ask at all, 403 where she may not (or the same 400 for a body
+    the route never accepts, whoever the target)."""
+    client = signed_in(team_admin)
+    ghost = UserFactory.build()  # never saved
+    answers = [call(client, method, concrete(route, u)) for u in (user_b, other_team_member)]
+    missing = call(client, method, concrete(route, ghost))
+    for answer in answers:
+        assert answer.status_code == missing.status_code, (route, answer.content)
+        assert answer.status_code in (400, 403, 404), (route, answer.content)
+        assert without_request_id(answer) == without_request_id(missing)
+
+
+@pytest.mark.parametrize(
+    ("route", "method"), [(r, m) for r, m in CASES if AUTHZ_MATRIX[r].access != "public"]
+)
+def test_a_deactivated_team_admins_open_session_reaches_nothing(
+    route, method, admin, team_admin, team_member
+):
+    from arkray.identity import services as identity_services
+
+    client = signed_in(team_admin)
+    identity_services.deactivate_user(actor_id=admin.pk, user_id=team_admin.pk)
+    response = call(client, method, concrete(route, team_member))
+    assert response.status_code == 401, response.content

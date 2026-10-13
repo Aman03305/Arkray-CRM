@@ -8,6 +8,9 @@ and, if required for their role, set up a new authenticator at once. Audited as 
 (by "operator", with the `--by` administrator as the actor; the reason kept as an expiring
 detail), and the account's own address is told. Confirm the person's identity out of
 band first (docs/runbooks.md#lost-second-factor).
+
+`--by` names a super administrator (users.manage): a team administrator administers only
+their own team's users, and never an administrator's second factor (ADR-0035).
 """
 
 from __future__ import annotations
@@ -32,13 +35,13 @@ class Command(BaseCommand):
         parser.add_argument("--email", required=True, help="the account's sign-in email")
         parser.add_argument("--reason", required=True, help="why (kept in the audit detail)")
         parser.add_argument(
-            "--by", required=True, help="the administrator on whose behalf this is done"
+            "--by", required=True, help="the super admin on whose behalf this is done"
         )
 
     def handle(self, *args: Any, email: str, reason: str, by: str, **options: Any) -> None:
         operator = User.objects.filter(email=normalize_email(by)).first()
         if operator is None or not has_capability(operator, Capability.USERS_MANAGE):
-            raise CommandError(f"--by must name an active administrator ({by!r} isn't one).")
+            raise CommandError(f"--by must name an active super admin ({by!r} isn't one).")
         try:
             text = clean_line(reason)
         except TextRejected as exc:

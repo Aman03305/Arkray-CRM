@@ -8,6 +8,17 @@ Concurrency rules (docs/authorization.md#concurrency):
   demoted a moment ago can no longer act.
 - Account-token flows lock the user row, then the token row (always in that order), so a
   resend racing an activation, or two confirmations of one link, serialise cleanly.
+- A user row is locked FOR NO KEY UPDATE (`select_for_update(no_key=True)`), never FOR
+  UPDATE: ids never change and users are never deleted, and FOR UPDATE would also conflict
+  with the KEY SHARE lock every insert referencing the user takes at its commit (deferred
+  foreign keys). With teams (ADR-0035) user rows are no longer pure leaf locks: a team
+  administrator's CRM write holds FOR SHARE on a member's row (identity.teams.
+  lock_team_member, selectors.lock_assignable_user) and then, at commit, KEY SHARE on her own
+  (created_by); a role change locks her row, then updates her members' rows. FOR UPDATE on
+  her row made that a cycle (deadlock); NO KEY UPDATE still waits for the member's FOR SHARE
+  (a role change or deactivation still waits for an assignment in flight, and the reverse)
+  without conflicting with the key check. Order here: the administrator's row (the target),
+  then her members' rows, then other accounts' rows in id order.
 - Database constraints (unique email, one pending token per user and purpose, lifecycle
   CHECKs) remain the final arbiter.
 
@@ -26,6 +37,15 @@ Adversarial review of 73ff1e3:
   refused every change here, first (422 `account_pseudonymised`).
 - L1: the sign-in lock the daily failure cap places (identity.throttling) is lifted by the
   emailed unlock link or an administrator, here.
+
+Teams (ADR-0035): a super administrator (users.manage) administers everyone; a team
+administrator (users.manage_team) themselves and their team's sales users (identity.teams),
+and creates only sales users, into their own team. Every operation on one account reads the
+target's *locked* row and answers 404 outside the actor's reach, identical to an account that
+doesn't exist, before anything else about the account can show (`_lock_reachable_user`). Roles
+and teams are the super administrators' alone. Administrators of either kind are protected
+alike (ADR-0030: `is_administrator`), and so, for ADMIN_PROMOTION_COOLING_OFF_S, is an account
+another administrator took out of an administrator's role ("demote-then-unshield").
 """
 
 from __future__ import annotations
@@ -39,7 +59,7 @@ from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import IntegrityError, connection, transaction
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 from arkray.audit import services as audit
@@ -56,7 +76,7 @@ from arkray.core.errors import (
 )
 from arkray.core.text import TextRejected, clean_line
 
-from . import emails, selectors, throttling, tokens
+from . import emails, selectors, teams, throttling, tokens
 from .models import (
     RESERVED_EMAIL,
     AccountToken,
@@ -70,7 +90,13 @@ from .models import (
     normalize_email,
 )
 from .passwords import check_new_password
-from .policy import Capability, has_capability, roles_with
+from .policy import (
+    Capability,
+    administrator_roles,
+    has_any_capability,
+    has_capability,
+    roles_with,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +113,8 @@ AUDIT_USER_ACTIVATED = "user.activated"
 AUDIT_USER_DEACTIVATED = "user.deactivated"
 AUDIT_USER_REACTIVATED = "user.reactivated"
 AUDIT_ROLE_CHANGED = "user.role_changed"
+# A sales user moved into a team, out of one, or between two (ADR-0035): {from, to} ids.
+AUDIT_MANAGER_CHANGED = "user.manager_changed"
 AUDIT_PROFILE_UPDATED = "user.profile_updated"
 AUDIT_EMAIL_CHANGED = "user.email_changed"
 AUDIT_PASSWORD_RESET_ISSUED = "auth.password_reset_issued"  # noqa: S105
@@ -99,10 +127,14 @@ AUDIT_MFA_UNLOCKED = "mfa.unlocked"
 # (L1; `by`: email_link or administrator).
 AUDIT_SIGN_IN_LOCKED = "auth.sign_in_locked"
 AUDIT_SIGN_IN_UNLOCKED = "auth.sign_in_unlocked"
+# A temporary password an administrator set, voided because they lost their reach over the
+# account (ADR-0035): `reason` team_moved, setter_demoted or setter_deactivated.
+AUDIT_TEMPORARY_PASSWORD_VOIDED = "auth.temporary_password_voided"  # noqa: S105
 # What an administrator did to an account's credentials that keeps it from being promoted
 # for ADMIN_PROMOTION_COOLING_OFF_S (L3): its password set, its email changed, its second
 # factor reset (mfa_services.AUDIT_RESET, by an administrator or an operator's command), or
-# created with a password (`user.created` with activation `set_by_admin`).
+# created with a password (`user.created` with activation `set_by_admin`), or created at all
+# by a team administrator (`creator_scope` team, ADR-0035: they chose the address).
 _CREDENTIALS_CHANGED_BY_AN_ADMINISTRATOR = (
     "auth.password_set_by_admin",
     "user.email_changed",
@@ -115,8 +147,19 @@ ACCOUNT_NOTICES = ("password_set_by_admin", "role_changed")
 # NEW credentials).
 CREDENTIAL_LINKS = (TokenPurpose.PASSWORD_RESET, TokenPurpose.SIGN_IN_UNLOCK)
 
-EDITABLE_FIELDS = frozenset({"first_name", "last_name", "role"})
+EDITABLE_FIELDS = frozenset({"first_name", "last_name", "role", "manager"})
 EMAIL_TAKEN = "A user with this email address already exists."
+# Teams (ADR-0035).
+MANAGER_INVALID = "Choose an Admin whose account is active or invited."
+MANAGER_ONLY_FOR_USERS = "Only users belong to an Admin's team: administrators don't."
+TEAM_ADMINISTRATORS_CREATE_USERS = "Admins add users to their own team only."
+ROLES_AND_TEAMS_REFUSED = "Only a super admin changes roles and teams."
+INVITED_PROMOTION_REFUSED = (
+    "This user hasn't accepted their invitation yet, so they can't be made an administrator:"
+    " promote them once they have signed in, or invite the administrator with their role."
+)
+# `user.created` metadata: the account was created by a team administrator (ADR-0035).
+CREATOR_SCOPE_TEAM = "team"
 # Advisory lock (namespace "ARK2", key 1) serialising user-administration writes.
 _ADMIN_LOCK = (0x41524B32, 1)
 
@@ -149,29 +192,70 @@ def serialise_user_administration() -> None:
 
 
 def _acting_manager(actor_id: UUID) -> User:
-    """The acting administrator, re-read under the admin lock."""
+    """The acting administrator, organisation-wide or a team's (ADR-0035), re-read under the
+    admin lock: one demoted or deactivated a moment ago can no longer act. What they may act
+    on is their reach (`_lock_reachable_user`)."""
+    actor = User.objects.filter(pk=actor_id).first()
+    if actor is None or not has_any_capability(
+        actor, Capability.USERS_MANAGE, Capability.USERS_MANAGE_TEAM
+    ):
+        raise PermissionDeniedError()
+    return actor
+
+
+def _acting_super_administrator(actor_id: UUID) -> User:
+    """A super administrator (users.manage), re-read under the admin lock: for what only they
+    may ask, such as an operator's command naming the administrator it acts for (ADR-0035)."""
     actor = User.objects.filter(pk=actor_id).first()
     if actor is None or not has_capability(actor, Capability.USERS_MANAGE):
         raise PermissionDeniedError()
     return actor
 
 
+def _is_super_administrator(actor: User) -> bool:
+    return has_capability(actor, Capability.USERS_MANAGE)
+
+
+def _reaches(actor: User, user: User) -> bool:
+    """A super administrator reaches every account; a team administrator themselves and their
+    team's sales users, any status (ADR-0035); nobody else reaches anyone."""
+    if _is_super_administrator(actor):
+        return True
+    return has_capability(actor, Capability.USERS_MANAGE_TEAM) and teams.in_reach(actor.pk, user)
+
+
 def _lock_user(user_id: UUID) -> User:
-    user = User.objects.select_for_update().filter(pk=user_id).first()
+    user = User.objects.select_for_update(no_key=True).filter(pk=user_id).first()
     if user is None:
         raise NotFoundError()
     return user
 
 
+def _lock_reachable_user(actor: User, user_id: UUID) -> User:
+    """The target's row, locked, when the actor's reach covers it; otherwise 404, identical to
+    an account that doesn't exist and raised before anything about the account (its version,
+    status, role, pseudonymisation) can show, so a team administrator learns nothing of the
+    accounts outside their team (ADR-0035). Decided on the locked row under the admin lock: a
+    team move or a demotion committed a moment ago is seen, one that waits sees this one's
+    result."""
+    user = _lock_user(user_id)
+    if not _reaches(actor, user):
+        raise NotFoundError()
+    return user
+
+
 def _manages_users(user: User) -> bool:
+    """An active super administrator: whom the last-administrator guard counts (ADR-0035: a
+    team administrator can't administer the organisation, so doesn't count)."""
     return user.status == UserStatus.ACTIVE and user.role in roles_with(Capability.USERS_MANAGE)
 
 
 def is_administrator(user: User) -> bool:
-    """An administrator account whatever its status: an invited or deactivated one is
-    protected like an active one, or deactivating it would unlock its credentials. The one
-    definition ADR-0030 is enforced with, here and in privacy.staff (SEC-2)."""
-    return user.role in roles_with(Capability.USERS_MANAGE)
+    """An administrator account of either kind (super or team, ADR-0035) whatever its status:
+    an invited or deactivated one is protected like an active one, or deactivating it would
+    unlock its credentials. The one definition ADR-0030 is enforced with, here, in
+    identity.support and mfa_services, and in privacy.staff (SEC-2)."""
+    return user.role in administrator_roles()
 
 
 def refuse_if_pseudonymised(user: User) -> None:
@@ -187,6 +271,68 @@ def _refuse_for_another_administrator(actor: User, user: User, message: str) -> 
     or demotion can't slip between the check and the write."""
     if user.pk != actor.pk and is_administrator(user):
         raise BusinessRuleViolation(message)
+
+
+def _refuse_role_change_of_another_super_administrator(actor: User, user: User) -> None:
+    """Another super administrator's role is never changed (ADR-0030: deactivate them
+    instead). A team administrator's may be, by a super administrator (ADR-0035): the only
+    ones who change roles at all. On the locked row, under the admin lock."""
+    if user.pk != actor.pk and user.role in roles_with(Capability.USERS_MANAGE):
+        raise BusinessRuleViolation(ADMINISTRATOR_ROLE_REFUSED)
+
+
+def _team_administrator(manager_id: UUID) -> User:
+    """The team administrator a sales user is to answer to: an Admin whose account is active
+    or invited and not pseudonymised (ADR-0035), else 400 `details.manager`, the same answer
+    for an id that names nobody. Read under the admin lock, which every change of a role, a
+    status (but an invitation's acceptance: active or invited, both allowed) or a
+    pseudonymisation takes: it can't stop being one before this commits."""
+    manager = User.objects.filter(pk=manager_id).first()
+    if (
+        manager is None
+        or manager.role not in roles_with(Capability.USERS_MANAGE_TEAM)
+        or manager.status not in (UserStatus.ACTIVE, UserStatus.INVITED)
+        or manager.is_pseudonymised
+    ):
+        raise InvalidInputError(details={"manager": [MANAGER_INVALID]})
+    return manager
+
+
+def _demotion_cooling_off_until(user: User, now: datetime) -> datetime | None:
+    """When another administrator may next change `user`'s credentials, if someone else took
+    the account out of an administrator's role within ADMIN_PROMOTION_COOLING_OFF_S
+    (ADR-0035: "demote-then-unshield", the mirror of promote-then-shield), else None. Without
+    it, a super administrator could make a team administrator a user, then set their password
+    or change their email and sign in as them. Read from the audit trail (append-only): the
+    demotion and who made it (an operator's, with no actor, counts), whatever happened since."""
+    cooling_off = timedelta(seconds=settings.ADMIN_PROMOTION_COOLING_OFF_S)
+    administrators = sorted(administrator_roles())
+    latest = (
+        AuditEvent.objects.filter(
+            action=AUDIT_ROLE_CHANGED,
+            target_type="user",
+            target_id=str(user.pk),
+            metadata__from__in=administrators,
+            occurred_at__gte=now - cooling_off,
+        )
+        .exclude(metadata__to__in=administrators)
+        .exclude(actor_id=user.pk)
+        .order_by("-occurred_at")
+        .values_list("occurred_at", flat=True)
+        .first()
+    )
+    return None if latest is None else latest + cooling_off
+
+
+def _refuse_if_recently_demoted(actor: User, user: User) -> None:
+    """Another's email change, password or MFA reset of an account recently demoted from an
+    administrator's role by someone else: refused until the cooling-off ends (ADR-0035). On
+    the locked row, under the admin lock (a demotion can't commit between this and the
+    change)."""
+    if user.pk == actor.pk:
+        return
+    if until := _demotion_cooling_off_until(user, timezone.now()):
+        raise BusinessRuleViolation(_unshield_refused(until))
 
 
 def _another_manager_remains(excluding: UUID) -> bool:
@@ -225,8 +371,9 @@ def _revoke_pending(
 
 
 def _revoke_invitations_sent_by(manager: User, now: datetime) -> int:
-    """A manager who is removed or demoted takes their outstanding invitations with them,
-    so they cannot leave a pre-approved account (possibly an admin) behind."""
+    """An administrator (of either kind) who is removed or demoted takes their outstanding
+    invitations with them, so they cannot leave a pre-approved account (possibly an admin)
+    behind."""
     return AccountToken.objects.filter(
         created_by=manager, purpose=TokenPurpose.INVITATION, status=TokenStatus.PENDING
     ).update(status=TokenStatus.REVOKED, revoked_at=now)
@@ -269,16 +416,102 @@ def _notify_account(user: User, change: str, **details: str) -> None:
     )
 
 
+def _temporary_password_setter(user: User) -> UUID | None:
+    """Who chose the account's current administrator-set password: the latest `auth.
+    password_set_by_admin` or `user.created` with activation `set_by_admin` (the audit trail,
+    append-only). Meaningful only while `password_change_required` (until the owner chooses
+    their own)."""
+    setter: UUID | None = (
+        AuditEvent.objects.filter(
+            Q(action=AUDIT_PASSWORD_SET_BY_ADMIN)
+            | Q(action=AUDIT_USER_CREATED, metadata__activation="set_by_admin"),
+            target_type="user",
+            target_id=str(user.pk),
+        )
+        .order_by("-occurred_at", "-id")
+        .values_list("actor_id", flat=True)
+        .first()
+    )
+    return setter
+
+
+def _void_temporary_passwords_set_by(
+    setter_id: UUID, *, actor: User, reason: str, now: datetime, only: UUID | None = None
+) -> int:
+    """An administrator who loses their reach over an account takes the temporary password
+    they set with them (ADR-0035; like `_revoke_invitations_sent_by`): otherwise a team
+    administrator could set a password, have the user moved out of their team (or be demoted
+    or deactivated themselves) and still sign in as the user with it. Every account (`only`:
+    that one) still on a temporary password whose latest one `setter_id` chose gets, as an
+    administrator reactivated by another does (R126), a random password nobody knows, its
+    sessions and trusted browsers retired (`session_epoch`), its pending credential links
+    revoked and, when active, a password-reset link at its own address. Called under the
+    user-administration lock; the accounts' rows are locked here, in id order."""
+    chosen = AuditEvent.objects.filter(
+        Q(action=AUDIT_PASSWORD_SET_BY_ADMIN)
+        | Q(action=AUDIT_USER_CREATED, metadata__activation="set_by_admin"),
+        target_type="user",
+        actor_id=setter_id,
+    )
+    if only is not None:
+        chosen = chosen.filter(target_id=str(only))
+    target_ids = {UUID(target_id) for target_id in chosen.values_list("target_id", flat=True)}
+    if not target_ids:
+        return 0
+    voided = 0
+    candidates = (
+        User.objects.select_for_update(no_key=True)
+        .filter(pk__in=target_ids, password_change_required=True)
+        .order_by("pk")
+    )
+    for user in candidates:
+        if _temporary_password_setter(user) != setter_id:
+            continue  # someone else chose the password they hold now
+        user.set_password(secrets.token_urlsafe(32))  # nobody knows it: never stored
+        user.password_change_required = False  # nothing an administrator chose is left
+        user.password_changed_at = now
+        user.session_epoch += 1
+        user.version += 1
+        user.save(
+            update_fields=[
+                "password",
+                "password_change_required",
+                "password_changed_at",
+                "session_epoch",
+                "version",
+                "updated_at",
+            ]
+        )
+        revoked = _revoke_pending(user, now, CREDENTIAL_LINKS)
+        audit.record(
+            AUDIT_TEMPORARY_PASSWORD_VOIDED,
+            actor_id=actor.pk,
+            target_type="user",
+            target_id=user.pk,
+            subject_user_id=user.pk,
+            metadata={"reason": reason, "set_by": str(setter_id), "revoked_links": revoked},
+        )
+        if user.status == UserStatus.ACTIVE:
+            # The owner chooses a password through their own mailbox (a deactivated account
+            # uses Forgot password once reactivated).
+            _issue_token(user, TokenPurpose.PASSWORD_RESET, created_by=actor, now=now)
+            _audit_user(AUDIT_PASSWORD_RESET_ISSUED, actor.pk, user, reason=reason)
+        voided += 1
+    return voided
+
+
 def _promotion_cooling_off_until(user: User, now: datetime) -> datetime | None:
     """When `user` may next be made an administrator, if an administrator changed their
     credentials within ADMIN_PROMOTION_COOLING_OFF_S (L3), else None. Read from the audit
     trail (append-only): the change and who made it, whatever happened since; the user's own
-    changes don't count."""
+    changes don't count. A team administrator's creation of the account counts like an email
+    change (ADR-0035): they chose the address its invitation or password reset goes to."""
     cooling_off = timedelta(seconds=settings.ADMIN_PROMOTION_COOLING_OFF_S)
     latest = (
         AuditEvent.objects.filter(
             Q(action__in=_CREDENTIALS_CHANGED_BY_AN_ADMINISTRATOR)
-            | Q(action=AUDIT_USER_CREATED, metadata__activation="set_by_admin"),
+            | Q(action=AUDIT_USER_CREATED, metadata__activation="set_by_admin")
+            | Q(action=AUDIT_USER_CREATED, metadata__creator_scope=CREATOR_SCOPE_TEAM),
             target_type="user",
             target_id=str(user.pk),
             occurred_at__gte=now - cooling_off,
@@ -361,11 +594,17 @@ def create_user(
     last_name: str,
     role: str,
     password: str | None = None,
+    manager: UUID | None = None,
 ) -> User:
     """Create a user. With `password` (the administrator enters an initial password) the
     account is active at once and the user must choose their own password when they first
     sign in; only the hash is stored. Without it, the user is invited: the email job
-    delivers a one-time activation link and the user sets their password themselves."""
+    delivers a one-time activation link and the user sets their password themselves.
+
+    Teams (ADR-0035): a team administrator creates sales users only, always into their own
+    team (`manager` null or themselves; anything else 403). A super administrator creates
+    any role, and may name a sales user's team administrator (`manager`: an active or
+    invited Admin, else 400 `details.manager`)."""
     email = normalize_email(email)
     first_name = _clean_name(first_name, "first_name")
     last_name = _clean_name(last_name, "last_name")
@@ -374,14 +613,26 @@ def create_user(
     _refuse_reserved(email)
     if not first_name:
         raise InvalidInputError(details={"first_name": ["This field may not be blank."]})
-    if password is not None and role in roles_with(Capability.USERS_MANAGE):
+    if password is not None and role in administrator_roles():
         # An administrator choosing another administrator's first password could sign in as
-        # them before they do (enhancement security review): administrators are invited.
+        # them before they do (enhancement security review): administrators of either kind
+        # are invited (ADR-0035).
         raise InvalidInputError(details={"password": [ADMINISTRATOR_INVITED]})
     try:
         with transaction.atomic():
             serialise_user_administration()
             actor = _acting_manager(actor_id)
+            team: User | None = None
+            if not _is_super_administrator(actor):
+                # A team administrator (re-read under the lock: demoted a moment ago, they are
+                # refused above): a sales user, in their own team, whatever was asked.
+                if role != Role.SALES_USER or manager not in (None, actor.pk):
+                    raise PermissionDeniedError(TEAM_ADMINISTRATORS_CREATE_USERS)
+                team = actor
+            elif manager is not None:
+                if role != Role.SALES_USER:
+                    raise InvalidInputError(details={"manager": [MANAGER_ONLY_FOR_USERS]})
+                team = _team_administrator(manager)
             if conflict := _email_conflict(email):
                 raise conflict
             now = timezone.now()
@@ -392,7 +643,13 @@ def create_user(
                 role=role,
                 status=UserStatus.INVITED,
                 is_active=False,
+                manager=team,
             )
+            # The team in the audit trail: who answers for the new account, and that a team
+            # administrator chose its address (promote-then-shield counts it; ADR-0035).
+            in_team = {"manager": str(team.pk)} if team is not None else {}
+            if not _is_super_administrator(actor):
+                in_team["creator_scope"] = CREATOR_SCOPE_TEAM
             if password is not None:
                 # The policy (length, similarity to the name and email, common passwords).
                 check_new_password(password, user, field="password")
@@ -402,13 +659,20 @@ def create_user(
                 user.password_changed_at = now
                 user.save()
                 _audit_user(
-                    AUDIT_USER_CREATED, actor.pk, user, role=role, activation="set_by_admin"
+                    AUDIT_USER_CREATED,
+                    actor.pk,
+                    user,
+                    role=role,
+                    activation="set_by_admin",
+                    **in_team,
                 )
                 return selectors.admin_user_detail(user.pk)
             user.set_unusable_password()
             user.save()
             invitation = _issue_token(user, TokenPurpose.INVITATION, created_by=actor, now=now)
-            _audit_user(AUDIT_USER_CREATED, actor.pk, user, role=role, activation="invitation")
+            _audit_user(
+                AUDIT_USER_CREATED, actor.pk, user, role=role, activation="invitation", **in_team
+            )
             _audit_user(
                 AUDIT_INVITATION_CREATED,
                 actor.pk,
@@ -423,68 +687,68 @@ def create_user(
     return selectors.admin_user_detail(user.pk)
 
 
-def update_user(*, actor_id: UUID, user_id: UUID, version: int, changes: Mapping[str, str]) -> User:
-    """Edit names and role. Email and status have dedicated, audited operations. Another
-    administrator's role is not changed here (deactivate them instead): demote, then set a
-    password, was a takeover of their account (R100)."""
+def update_user(
+    *, actor_id: UUID, user_id: UUID, version: int, changes: Mapping[str, object]
+) -> User:
+    """Edit names, role and team. Email and status have dedicated, audited operations.
+
+    - Roles and teams are changed by super administrators only (403 for a team
+      administrator who sends either; ADR-0035). Another *super* administrator's role is not
+      changed here (deactivate them instead): demote, then set a password, was a takeover of
+      their account (R100). A team administrator's may be: to a user (their team is left
+      unassigned, their pending invitations revoked) or a super administrator.
+    - `manager` (a sales user's team administrator, or None) names an active or invited
+      Admin; only a sales user has one, so the target must be one, or become one in the same
+      request. Becoming an administrator leaves the team (the database's CHECK)."""
     unknown = set(changes) - EDITABLE_FIELDS
     if unknown:
         raise InvalidInputError(details={"non_field_errors": ["These fields cannot be edited."]})
     with transaction.atomic():
         serialise_user_administration()
         actor = _acting_manager(actor_id)
-        user = _lock_user(user_id)
+        if not _is_super_administrator(actor) and {"role", "manager"} & set(changes):
+            # Before the target is read: the answer depends on who asks, never on whom.
+            raise PermissionDeniedError(ROLES_AND_TEAMS_REFUSED)
+        user = _lock_reachable_user(actor, user_id)
         refuse_if_pseudonymised(user)
-        if changes.get("role", user.role) != user.role:
+        previous_role, previous_manager = user.role, user.manager_id
+        new_role = str(changes.get("role", previous_role))
+        if new_role != previous_role:
             # Before the version check: a stale page gets the reason, not a conflict.
-            _refuse_for_another_administrator(actor, user, ADMINISTRATOR_ROLE_REFUSED)
+            _refuse_role_change_of_another_super_administrator(actor, user)
         _require_version(user, version)
 
         changed: list[str] = []
         for field in ("first_name", "last_name"):
             if field in changes:
-                value = _clean_name(changes[field], field)
+                value = _clean_name(str(changes[field]), field)
                 if field == "first_name" and not value:
                     raise InvalidInputError(details={field: ["This field may not be blank."]})
                 if value != getattr(user, field):
                     setattr(user, field, value)
                     changed.append(field)
 
-        previous_role = user.role
-        new_role = changes.get("role", previous_role)
         if new_role != previous_role:
-            if new_role not in Role.values:
-                raise InvalidInputError(details={"role": ["Choose a valid role."]})
-            if user.pk == actor.pk:
-                raise BusinessRuleViolation("You can't change your own role.")
-            if user.password_change_required and new_role in roles_with(Capability.USERS_MANAGE):
-                # The password an administrator set is still theirs to know: promoting the
-                # account now would hand them an administrator's (demote, set, promote: the
-                # enhancement security review's takeover).
-                raise BusinessRuleViolation(PROMOTION_REFUSED_UNTIL_OWN_CHOICE)
-            if new_role in roles_with(Capability.USERS_MANAGE) and (
-                until := _promotion_cooling_off_until(user, timezone.now())
-            ):
-                # Promote-then-shield (L3): whoever changed the credentials may have signed in
-                # as the user and chosen the password since; as an administrator the account
-                # would be out of every other administrator's reach (R100).
-                raise BusinessRuleViolation(_promotion_refused(until))
-            if (
-                _manages_users(user)
-                and new_role not in roles_with(Capability.USERS_MANAGE)
-                and not _another_manager_remains(user.pk)
-            ):
-                raise BusinessRuleViolation(
-                    "Arkray CRM must keep at least one active administrator."
-                )
+            _check_role_change(actor, user, new_role)
             user.role = new_role
             changed.append("role")
 
-        revoked_invitations = 0
-        if "role" in changed and new_role not in roles_with(Capability.USERS_MANAGE):
-            revoked_invitations = _revoke_invitations_sent_by(user, timezone.now())
+        new_manager = _new_manager(user, changes) if "manager" in changes else previous_manager
+        if user.role != Role.SALES_USER:
+            new_manager = None  # an administrator answers to no team (ADR-0035)
+        if new_manager != previous_manager:
+            user.manager_id = new_manager
+            changed.append("manager")
+
         if not changed:
             return selectors.admin_user_detail(user.pk)
+        now = timezone.now()
+        revoked_invitations = unassigned_members = 0
+        if "role" in changed and previous_role in administrator_roles():
+            revoked_invitations = _revoke_invitations_sent_by(user, now)
+        left_a_team = "role" in changed and previous_role in roles_with(
+            Capability.USERS_MANAGE_TEAM
+        )
         extra: list[str] = []
         if "role" in changed:
             # Signed out everywhere (deep security audit L-2): a session (and a trusted
@@ -495,7 +759,14 @@ def update_user(*, actor_id: UUID, user_id: UUID, version: int, changes: Mapping
             extra.append("session_epoch")
         user.version += 1
         user.save(update_fields=[*changed, *extra, "version", "updated_at"])
-        name_fields = [f for f in changed if f != "role"]
+        if left_a_team:
+            # Their team is left to the super administrators (ADR-0035), in this transaction:
+            # no member is ever managed by an account that is no longer a team administrator.
+            # A change of those rows, like an edit: their version moves on.
+            unassigned_members = User.objects.filter(manager_id=user.pk).update(
+                manager=None, version=F("version") + 1, updated_at=now
+            )
+        name_fields = [f for f in changed if f in ("first_name", "last_name")]
         if name_fields:
             _audit_user(AUDIT_PROFILE_UPDATED, actor.pk, user, fields=name_fields)
         if "role" in changed:
@@ -505,10 +776,81 @@ def update_user(*, actor_id: UUID, user_id: UUID, version: int, changes: Mapping
                 user,
                 **{"from": previous_role, "to": new_role},
                 revoked_invitations=revoked_invitations,
+                **({"unassigned_members": unassigned_members} if left_a_team else {}),
             )
             if user.status == UserStatus.ACTIVE:
                 _notify_account(user, "role_changed", role=new_role)
+        if "manager" in changed:
+            _audit_user(
+                AUDIT_MANAGER_CHANGED,
+                actor.pk,
+                user,
+                **{
+                    "from": None if previous_manager is None else str(previous_manager),
+                    "to": None if new_manager is None else str(new_manager),
+                },
+            )
+        # Who lost their reach takes the temporary passwords they set with them (ADR-0035):
+        # an administrator who is one no longer reaches anybody; a team administrator no
+        # longer reaches a user moved out of their team.
+        if (
+            "role" in changed
+            and previous_role in administrator_roles()
+            and new_role not in administrator_roles()
+        ):
+            _void_temporary_passwords_set_by(user.pk, actor=actor, reason="setter_demoted", now=now)
+        if "manager" in changed and previous_manager is not None:
+            _void_temporary_passwords_set_by(
+                previous_manager, actor=actor, reason="team_moved", now=now, only=user.pk
+            )
     return selectors.admin_user_detail(user.pk)
+
+
+def _check_role_change(actor: User, user: User, new_role: str) -> None:
+    """A super administrator's change of `user`'s role, on the locked row: refused for their
+    own account, and a promotion to either administrator role keeps its guards."""
+    if new_role not in Role.values:
+        raise InvalidInputError(details={"role": ["Choose a valid role."]})
+    if user.pk == actor.pk:
+        raise BusinessRuleViolation("You can't change your own role.")
+    if new_role in administrator_roles():
+        if user.status == UserStatus.INVITED:
+            # Its pending invitation, and the address it goes to, were chosen by whoever
+            # invited the account: accepted after a promotion, it would activate an
+            # administrator someone else may hold. Administrators are invited with their role
+            # (ADR-0035).
+            raise BusinessRuleViolation(INVITED_PROMOTION_REFUSED)
+        if user.password_change_required:
+            # The password an administrator set is still theirs to know: promoting the
+            # account now would hand them an administrator's (demote, set, promote: the
+            # enhancement security review's takeover).
+            raise BusinessRuleViolation(PROMOTION_REFUSED_UNTIL_OWN_CHOICE)
+        if until := _promotion_cooling_off_until(user, timezone.now()):
+            # Promote-then-shield (L3): whoever changed the credentials may have signed in
+            # as the user and chosen the password since; as an administrator the account
+            # would be out of every other administrator's reach (R100).
+            raise BusinessRuleViolation(_promotion_refused(until))
+    if (
+        _manages_users(user)
+        and new_role not in roles_with(Capability.USERS_MANAGE)
+        and not _another_manager_remains(user.pk)
+    ):
+        raise BusinessRuleViolation("Arkray CRM must keep at least one active super admin.")
+
+
+def _new_manager(user: User, changes: Mapping[str, object]) -> UUID | None:
+    """The team asked for, validated: a sales user's (the role already applied), an active or
+    invited Admin other than the account itself (400 `details.manager` otherwise)."""
+    wanted = changes["manager"]
+    if wanted is None:
+        return None
+    if not isinstance(wanted, UUID):
+        raise InvalidInputError(details={"manager": [MANAGER_INVALID]})
+    if user.role != Role.SALES_USER:
+        raise InvalidInputError(details={"manager": [MANAGER_ONLY_FOR_USERS]})
+    if wanted == user.pk:
+        raise InvalidInputError(details={"manager": [MANAGER_INVALID]})
+    return _team_administrator(wanted).pk
 
 
 # A change to one's own account refused because the requesting session ended meanwhile.
@@ -535,13 +877,14 @@ def change_user_email(
         with transaction.atomic():
             serialise_user_administration()
             actor = _acting_manager(actor_id)
-            user = _lock_user(user_id)
+            user = _lock_reachable_user(actor, user_id)
             refuse_if_pseudonymised(user)
             if still_signed_in is not None and not still_signed_in(user):
                 raise PermissionDeniedError(SESSION_ENDED)
             # No exception for an invited administrator: the new address would receive the
             # invitation. A mistyped one is deactivated and the right address invited.
             _refuse_for_another_administrator(actor, user, ADMINISTRATOR_EMAIL_REFUSED)
+            _refuse_if_recently_demoted(actor, user)
             _require_version(user, version)
             previous_email = user.email
             if new_email == previous_email:
@@ -598,8 +941,9 @@ ADMINISTRATOR_ACCOUNT_REFUSED = (
 ADMINISTRATOR_INVITED = "Administrators choose their own password: send an invitation instead."
 # Another administrator's sign-in email and role are theirs alone (R100).
 ADMINISTRATOR_EMAIL_REFUSED = "Administrators change their own email address in Settings."
+# A super administrator's role (ADR-0035: a team administrator's may be changed by one).
 ADMINISTRATOR_ROLE_REFUSED = (
-    "An administrator's role can't be changed by another administrator. To remove their"
+    "A super admin's role can't be changed by another administrator. To remove their"
     " access, deactivate the account."
 )
 PROMOTION_REFUSED_UNTIL_OWN_CHOICE = (
@@ -612,8 +956,19 @@ def _promotion_refused(until: datetime) -> str:
     days = max(1, settings.ADMIN_PROMOTION_COOLING_OFF_S // (24 * 60 * 60))
     when = until.astimezone(ZoneInfo(settings.CRM_TIME_ZONE)).strftime("%d %b %Y, %H:%M %Z")
     return (
-        f"An administrator changed this user's password, email or two-step verification in the"
-        f" last {days} days, so they can't be made an administrator until {when}."
+        f"An administrator created this account or changed its password, email or two-step"
+        f" verification in the last {days} days, so they can't be made an administrator until"
+        f" {when}."
+    )
+
+
+def _unshield_refused(until: datetime) -> str:
+    days = max(1, settings.ADMIN_PROMOTION_COOLING_OFF_S // (24 * 60 * 60))
+    when = until.astimezone(ZoneInfo(settings.CRM_TIME_ZONE)).strftime("%d %b %Y, %H:%M %Z")
+    return (
+        f"This account stopped being an administrator in the last {days} days, so another"
+        f" administrator can't change its password, email or two-step verification until"
+        f" {when}."
     )
 
 
@@ -629,10 +984,11 @@ def set_user_password(*, actor_id: UUID, user_id: UUID, version: int, new_passwo
         actor = _acting_manager(actor_id)
         if user_id == actor.pk:
             raise BusinessRuleViolation(OWN_ACCOUNT_REFUSED)
-        user = _lock_user(user_id)
+        user = _lock_reachable_user(actor, user_id)
         refuse_if_pseudonymised(user)
         # By role, before the status: a deactivated or invited administrator is refused too.
         _refuse_for_another_administrator(actor, user, ADMINISTRATOR_ACCOUNT_REFUSED)
+        _refuse_if_recently_demoted(actor, user)
         _require_version(user, version)
         if user.status != UserStatus.ACTIVE:
             raise BusinessRuleViolation(INACTIVE_ACCOUNT_REFUSED)
@@ -674,16 +1030,19 @@ def deactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
     with transaction.atomic():
         serialise_user_administration()
         actor = _acting_manager(actor_id)
-        user = _lock_user(user_id)
+        user = _lock_reachable_user(actor, user_id)
         if user.pk == actor.pk:
             raise BusinessRuleViolation("You can't deactivate your own account.")
         if user.status == UserStatus.DEACTIVATED:
             return selectors.admin_user_detail(user.pk)  # idempotent
         if _manages_users(user) and not _another_manager_remains(user.pk):
-            raise BusinessRuleViolation("Arkray CRM must keep at least one active administrator.")
+            raise BusinessRuleViolation("Arkray CRM must keep at least one active super admin.")
         now = timezone.now()
         previous_status = user.status
-        was_manager = _manages_users(user)
+        # An administrator of either kind takes their pending invitations with them; a team
+        # administrator's team stays assigned to them (ADR-0035: the super administrators
+        # manage it meanwhile, or move it).
+        was_manager = is_administrator(user)
         user.status = UserStatus.DEACTIVATED
         user.is_active = False
         user.deactivated_at = now
@@ -701,6 +1060,12 @@ def deactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
         )
         revoked_links = _revoke_pending(user, now)
         revoked_invitations = _revoke_invitations_sent_by(user, now) if was_manager else 0
+        if was_manager:
+            # An administrator who leaves takes the temporary passwords they set with them,
+            # as their invitations (ADR-0035).
+            _void_temporary_passwords_set_by(
+                user.pk, actor=actor, reason="setter_deactivated", now=now
+            )
         _audit_user(
             AUDIT_USER_DEACTIVATED,
             actor.pk,
@@ -727,7 +1092,7 @@ def reactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
     with transaction.atomic():
         serialise_user_administration()
         actor = _acting_manager(actor_id)
-        user = _lock_user(user_id)
+        user = _lock_reachable_user(actor, user_id)
         refuse_if_pseudonymised(user)
         if user.status == UserStatus.ACTIVE:
             return selectors.admin_user_detail(user.pk)  # idempotent
@@ -778,7 +1143,7 @@ def resend_invitation(*, actor_id: UUID, user_id: UUID) -> User:
     with transaction.atomic():
         serialise_user_administration()
         actor = _acting_manager(actor_id)
-        user = _lock_user(user_id)
+        user = _lock_reachable_user(actor, user_id)
         refuse_if_pseudonymised(user)
         if user.status != UserStatus.INVITED:
             raise BusinessRuleViolation(
@@ -811,7 +1176,7 @@ def clear_sign_in_lock(*, actor_id: UUID, user_id: UUID) -> User:
     with transaction.atomic():
         serialise_user_administration()
         actor = _acting_manager(actor_id)
-        user = _lock_user(user_id)
+        user = _lock_reachable_user(actor, user_id)
         refuse_if_pseudonymised(user)
         if throttling.forget_account_failures(user.email):
             audit.record(
@@ -844,7 +1209,7 @@ def _lock_live_token(
 ) -> tuple[User, AccountToken]:
     """Lock user then token, and re-validate everything under the locks."""
     found = _find_token(secret, purpose)
-    user = User.objects.select_for_update().get(pk=found.user_id)
+    user = User.objects.select_for_update(no_key=True).get(pk=found.user_id)
     token = AccountToken.objects.select_for_update().get(pk=found.pk)
     if (
         token.status != TokenStatus.PENDING
@@ -942,7 +1307,7 @@ def notify_sign_in_locked(email: str) -> None:
     if candidate is None:
         return
     with transaction.atomic():
-        user = User.objects.select_for_update().get(pk=candidate.pk)
+        user = User.objects.select_for_update(no_key=True).get(pk=candidate.pk)
         if user.status != UserStatus.ACTIVE or throttling.sign_in_locked_at(user.email) is None:
             return
         _issue_token(user, TokenPurpose.SIGN_IN_UNLOCK, created_by=None, now=timezone.now())
@@ -979,7 +1344,7 @@ def issue_password_reset(email: str, requested_from: str | None = None) -> None:
     if candidate is None:
         return
     with transaction.atomic():
-        user = User.objects.select_for_update().get(pk=candidate.pk)
+        user = User.objects.select_for_update(no_key=True).get(pk=candidate.pk)
         if user.status != UserStatus.ACTIVE:
             return
         now = timezone.now()

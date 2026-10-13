@@ -39,7 +39,10 @@ purpose and only then:
   values lies outside the caller's scope, and the job only touches the deals of the
   workspace the request came from (`owner_id`, recorded in the job and its ledger entry):
   a deal reassigned between the request and the job keeps its value. Organisation-wide, an
-  administrator deletes them on every deal;
+  administrator deletes them on every deal. A team administrator's team workspace (scope
+  TEAM, ADR-0035) has no single owner and is never organisation-wide: refused (403) here
+  too, not only by configuration's checks, so no path can turn "no subject" into "every
+  deal";
 - deals whose lead is under a legal hold keep the value (counted, `held`); run the request
   again once the hold is released. Each batch reads the holds under the hold barrier
   (core.holds), so a hold placed while the job runs is honoured from the batch after it
@@ -121,7 +124,11 @@ def require_deletable(
 
     Outside the scope also means a deal the caller still owns whose customer they may not
     see (a closed deal kept after its lead was reassigned: pipeline.customer). Its values are
-    the customer's, which they can't write either (deep security audit M-2; review P3-1)."""
+    the customer's, which they can't write either (deep security audit M-2; review P3-1).
+
+    A team's workspace is refused outright (module docstring; configuration refuses it
+    first)."""
+    _refuse_team(scope)
     if scope.is_organization_wide or not field_ids:
         return
     holding = m.Opportunity.objects.filter(
@@ -130,6 +137,15 @@ def require_deletable(
     subject = scope.subject_user_id
     if holding.exclude(owner_id=subject, lead__owner_id=subject).exists():
         raise PermissionDeniedError(message)
+
+
+def _refuse_team(scope: AccessScope) -> None:
+    """A team's workspace (ADR-0035) deletes nothing: its scope has no single owner to limit
+    the job to, and is never the organisation (which the job's "no owner" means)."""
+    if scope.is_team:
+        from .configuration import TEAM_CONFIGURES_NOTHING
+
+        raise PermissionDeniedError(TEAM_CONFIGURES_NOTHING)
 
 
 def request_for(actor_id: UUID, field: m.CustomField, scope: AccessScope) -> None:
@@ -147,6 +163,7 @@ def request_for_fields(actor_id: UUID, fields: Sequence[m.CustomField], scope: A
     budget (429, before anything is written: review round 1)."""
     if not fields:
         return
+    _refuse_team(scope)  # before the owner below: None would mean every deal
     owner_id = scope.subject_user_id
     _charge_daily_budget(actor_id, len(fields))
     for field in fields:

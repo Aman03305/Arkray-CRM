@@ -19,6 +19,11 @@ learning, using or resetting the user's password, and without impersonation:
   administrator, or the administrator lost the capability): checked on every request, so
   nothing outlives its conditions. An hourly sweep closes expired sessions nobody used again.
 Starting and ending are audited (`support_session.started` / `.ended`).
+
+Teams (ADR-0035): a super administrator (support.access) may start one with any CRM user; a
+team administrator (support.access_team) only with their own team's members, and anyone else
+is the same 404 as a user who doesn't exist. Every request re-checks it: a session whose user
+has left the team, or whose administrator stopped being theirs, ends there (`NOT_ALLOWED`).
 """
 
 from __future__ import annotations
@@ -45,9 +50,10 @@ from arkray.core.errors import (
 )
 from arkray.core.text import TextRejected, clean_line
 
+from . import teams
 from .models import SupportEnd, SupportSession, User, UserStatus
-from .policy import Capability, has_capability, roles_with
-from .services import refuse_if_pseudonymised
+from .policy import Capability, has_any_capability, has_capability
+from .services import is_administrator, refuse_if_pseudonymised
 
 SESSION_KEY = "_arkray_support"
 AUDIT_STARTED = "support_session.started"
@@ -64,8 +70,16 @@ def _digest(session_key: str | None) -> str:
     return hashlib.sha256((session_key or "").encode()).hexdigest()
 
 
-def _is_manager(user: User) -> bool:
-    return user.role in roles_with(Capability.USERS_MANAGE)
+def _may_support(admin: User, target: User) -> bool:
+    """Whether `admin` may be in a support session with `target` (ADR-0035): any user for a
+    super administrator; their own team's members for a team administrator; nobody else."""
+    if has_capability(admin, Capability.SUPPORT_ACCESS):
+        return True
+    return (
+        has_capability(admin, Capability.SUPPORT_ACCESS_TEAM)
+        and target.pk != admin.pk
+        and teams.in_reach(admin.pk, target)
+    )
 
 
 def _clean_reason(reason: str) -> str:
@@ -107,7 +121,7 @@ def _end(session: SupportSession, reason: SupportEnd, *, actor_id: UUID | None) 
 def start(request: HttpRequest, actor: User, target_id: UUID, reason: str = "") -> SupportSession:
     """Start a support session for `target_id` in this browser session. Any earlier live
     session of the administrator (elsewhere) ends first: at most one at a time."""
-    if not has_capability(actor, Capability.SUPPORT_ACCESS):
+    if not has_any_capability(actor, Capability.SUPPORT_ACCESS, Capability.SUPPORT_ACCESS_TEAM):
         raise PermissionDeniedError()
     if getattr(request, "support_session", None) is not None:
         raise ConflictError(ALREADY_ACTIVE)
@@ -118,12 +132,15 @@ def start(request: HttpRequest, actor: User, target_id: UUID, reason: str = "") 
     try:
         with transaction.atomic():
             target = User.objects.filter(pk=target_id).first()
-            if target is None or target.pk == actor.pk:
+            # Outside the actor's reach is the answer for a user who doesn't exist, before
+            # anything about the account can show (ADR-0035). A team move committed after
+            # this read ends the session at its next request (`resolve`).
+            if target is None or target.pk == actor.pk or not _may_support(actor, target):
                 raise NotFoundError()
             refuse_if_pseudonymised(target)  # review of 73ff1e3, L4
             if target.status != UserStatus.ACTIVE:
                 raise BusinessRuleViolation(NOT_ACTIVE_USER)
-            if _is_manager(target):
+            if is_administrator(target):  # either kind (ADR-0035)
                 raise BusinessRuleViolation(NOT_FOR_ADMINS)
             if not has_capability(target, Capability.CRM_ACCESS_OWN):
                 raise BusinessRuleViolation(NO_CRM)
@@ -210,9 +227,9 @@ def resolve(request: HttpRequest, now: datetime) -> SupportSession | None:
         problem = SupportEnd.SESSION_CHANGED
     elif (
         not user.is_active
-        or not has_capability(user, Capability.SUPPORT_ACCESS)
+        or not _may_support(user, session.target)  # the capability, and the team (ADR-0035)
         or session.target.status != UserStatus.ACTIVE
-        or _is_manager(session.target)
+        or is_administrator(session.target)
     ):
         problem = SupportEnd.NOT_ALLOWED
     if problem is not None:

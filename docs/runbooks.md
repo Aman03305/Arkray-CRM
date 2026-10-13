@@ -202,7 +202,8 @@ reconciliation re-indexes any source whose chunks drifted.
    browser (5) and per address (50) in 15 minutes.
 2. A whole office being throttled at sign-in is the shared-address case (R77): raise
    `API_THROTTLE_AUTH`, not the failure budgets.
-3. `workspace.accessed`: which administrator opened whose workspace, once per window.
+3. `workspace.accessed`: which administrator opened whose workspace, once per window (an
+   Admin's team overview is target `all` with metadata `scope: team`).
    Unexpected access: [Security incident](#security-incident).
 4. Support sessions and administrator-set passwords: the security events feed (Admin home,
    *Security activity*; `GET /api/v1/admin/security-events`) lists who started a session for
@@ -225,12 +226,19 @@ reconciliation re-indexes any source whose chunks drifted.
 7. `ArkraySignInFailureStorm`: more than 200 failed sign-ins of real accounts in an hour, for
    10 minutes: guessing or password spraying. Check the source addresses (`login_failed`); if
    one network dominates, block it at the edge or the CDN.
-8. `ArkrayAdministratorPromoted` (L3): confirm with the promoting administrator and the person
-   (`user.role_changed` in the security events). Not intended: demote with the operator
-   procedure ([security.md](security.md#administrator-account-protection)) or deactivate, and
-   treat it as a [Security incident](#security-incident). A promotion refused with "can't be
+8. `ArkrayAdministratorPromoted` (L3): someone was made a Super admin or an Admin (either
+   counts, ADR-0035). Confirm with the promoting super admin and the person
+   (`user.role_changed` in the security events). Not intended: make an Admin a User on the
+   Users page; demote a super admin with the operator procedure
+   ([security.md](security.md#administrator-account-protection)); or deactivate, and treat it
+   as a [Security incident](#security-incident). A promotion refused with "can't be
    made an administrator until …" is the 7-day cooling-off after an administrator changed the
-   account's password, email or second factor: wait, or have the owner confirm the change.
+   account's password, email or second factor, or an Admin created it: wait, or have the
+   owner confirm the change. "This user hasn't accepted their invitation yet…": promote them
+   once they have signed in, or invite the administrator with their role.
+   A password, email or second-factor change refused with "This account stopped being an
+   administrator in the last 7 days…" is its mirror after a demotion: wait, or the owner uses
+   *Forgot password* themselves.
 
 ## Administrator deactivated
 
@@ -238,29 +246,85 @@ reconciliation re-indexes any source whose chunks drifted.
 last hour; it stays raised for that hour).*
 
 1. Security events (Admin home, *Security activity*): who deactivated whom, when
-   (`user.deactivated` with role `admin`).
-2. Planned off-boarding: nothing to do. Otherwise call the deactivated administrator on a
-   known number. One administrator can deactivate the others (only the last active one is
-   protected): if it wasn't intended, treat it as a [Security incident](#security-incident).
+   (`user.deactivated` with role `admin`, a Super admin, or `team_admin`, an Admin).
+2. Planned off-boarding: nothing to do (for an Admin, see [Admins and teams](#admins-and-teams)
+   for their team). Otherwise call the deactivated administrator on a
+   known number. A super admin can deactivate any other administrator (only the last active
+   super admin is protected; an Admin can't deactivate anyone outside their own team): if it
+   wasn't intended, treat it as a [Security incident](#security-incident).
 3. Reactivating them (Users page) doesn't bring the old password back: they get a reset link
-   at their own address and keep their second factor (ADR-0033, R126).
+   at their own address and keep their second factor (ADR-0033, R126). A reactivated Admin
+   still has their team (a deactivation leaves it assigned).
+
+## Admins and teams
+
+[ADR-0035](adr/0035-super-administrators-and-teams.md): a **Super admin** (role `admin`)
+manages everyone; an **Admin** (role `team_admin`) manages only the users in their team
+(the users whose Admin they are), sees only their own and their team's CRM records, and
+can't configure shared pipelines, read the security events or handle privacy requests. All of
+the following is a super admin's job, on the Users page (each change asks for a recent second
+factor):
+
+- **After the upgrade**: every existing administrator is a Super admin and every existing
+  user is in no team, so nothing changes until a super admin creates Admins and assigns
+  users to them ([production-checklist.md](production-checklist.md)).
+- **Make someone an Admin**: *New user* with the role Admin (always invited: they choose their
+  own password), or *Change role* on an existing user (refused while the user is still
+  invited: invite the administrator with their role instead; while an administrator-set
+  password is still unchanged; and for 7 days after an administrator changed the account's
+  password, email or second factor, or an Admin created it). They set up two-step
+  verification at their next sign-in where it is required. A user made an Admin leaves their
+  own team.
+- **Give users an Admin** (put them in a team): *Change role or Admin* on the user, or the
+  Admin field when adding one; only an Admin whose account is active or invited can be chosen.
+  *Filter by Admin* → *No admin* lists the users in no team (`GET /api/v1/admin/users?manager=none`).
+  API: `PATCH /api/v1/admin/users/{id} {manager, version}` (`manager: null` takes them out of
+  every team). Audited `user.manager_changed`; nobody is signed out; it takes effect at each
+  person's next request (a write already under way completes). A temporary password the
+  previous Admin set for that user, still unchanged, is voided: the user is mailed a reset
+  link (`auth.temporary_password_voided`).
+- **An Admin's own day-to-day**: they add users (into their own team only, with an
+  invitation or an initial password), and edit, deactivate, reactivate, re-invite, set
+  passwords for, reset the second factor of and clear sign-in locks for their team's users.
+  Anything about another account is a 404 to them.
+- **Off-board an Admin**:
+  1. Decide where their users go: *Filter by Admin* → that Admin, then move each user to
+     another Admin, or to *No admin* (the super admins then manage them).
+  2. Deactivate the Admin. Their sessions end, the invitations they sent are revoked, and the
+     temporary passwords they set that are still unchanged are voided (those users are mailed
+     a reset link). A deactivated Admin's team stays assigned to them (R174): until it is
+     moved, only super admins manage those users.
+  3. Reassign their own open work (*Change owner* on their deals) as for any leaver
+     ([Staff leaving](#staff-leaving)).
+
+  Or, if they stay but stop being an Admin, *Change role* to User: their team is unassigned
+  in the same step (every member to *No admin*; the count is in the audit event), their
+  pending invitations are revoked, the temporary passwords they set are voided, and their
+  password, email and second factor stay out of other administrators' reach for 7 days
+  (demote-then-unshield).
+- **An Admin's credentials** are theirs alone, as a super admin's: no administrator sets their
+  password, changes their email or resets their second factor. A lost second factor is the
+  operator's `reset_mfa` ([Lost second factor](#lost-second-factor)).
 
 ## Lost second factor
 
 A user without their authenticator and without any recovery code.
 
 - **Ordinary user**: an administrator resets it (Users page, *Reset two-step verification*;
-  `POST /api/v1/admin/users/{id}/mfa/reset`, needs the administrator's own recent code). Their
+  `POST /api/v1/admin/users/{id}/mfa/reset`, needs the administrator's own recent code): a
+  super admin for anyone, an Admin for their own team's users. Their
   sessions end; they sign in with their password and may set it up again.
-- **Administrator**: never another administrator (ADR-0030/0033). Confirm the person's
+- **Administrator** (a Super admin or an Admin): never another administrator
+  (ADR-0030/0033/0035). Confirm the person's
   identity out of band (a call on a known number, their manager), then on a server:
 
   ```sh
   manage.py reset_mfa --email bina@example.com --by anita@example.com --reason "lost phone, ticket 1234"
   ```
 
-  `--by` names the active administrator who asked for it (the sole administrator may name
-  themselves). Audited as `mfa.reset` (by `operator`, that administrator as the actor, the
+  `--by` names the active **super** admin who asked for it ("--by must name an active super
+  admin" otherwise: an Admin can't; the sole super admin may name themselves). Audited as
+  `mfa.reset` (by `operator`, that super admin as the actor, the
   reason kept as an expiring detail); the owner is emailed; their sessions end; they sign in with their password and must set up a new authenticator before
   anything else.
 - **Locked until an MFA reset** (they see "Resetting your password won't unlock it";
@@ -1343,8 +1407,10 @@ confirmed gone ([privacy.md](privacy.md#access-requests)). Signals:
 Deactivate the user (Users page) at once; reassign their open work. When the organisation no
 longer needs to know who they were (its retention policy), pseudonymise them: `manage.py
 pseudonymise_user <user id> --by <admin email>` (a dry run, then `--yes`) or the user's page
-([privacy.md](privacy.md#staff)). A former **administrator** is pseudonymised only on the
-server, by an operator, with `--allow-administrator` added (the API refuses it, ADR-0030).
+([privacy.md](privacy.md#staff)). A former **administrator** (a Super admin or an Admin) is
+pseudonymised only on the server, by an operator, with `--allow-administrator` added (the API
+refuses it, ADR-0030). Every operator command's `--by` names a super admin (an Admin holds
+none of the capabilities they check). A leaving Admin's team: [Admins and teams](#admins-and-teams).
 Pseudonymisation is final (adversarial review of 73ff1e3, L4): the account can't be renamed,
 reactivated, re-invited or given a password again (422 `account_pseudonymised`); someone who
 comes back is invited as a new user.

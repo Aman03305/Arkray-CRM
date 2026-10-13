@@ -1,7 +1,7 @@
 /**
  * Who can own CRM records: active users who work in a CRM workspace
- * (GET /api/v1/assignees, crm.assign_any). Not workspace-scoped: the list is the same
- * everywhere.
+ * (GET /api/v1/assignees, crm.assign_any; a team administrator's own team with
+ * crm.assign_team, ADR-0035). Not workspace-scoped: the list is the same everywhere.
  */
 import { apiFetch } from "@/lib/api/client";
 import type { AssigneePage } from "@/lib/api/types";

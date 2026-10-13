@@ -149,7 +149,9 @@ A hold keeps every conversation that concerns its subject, whole (every question
 in it), until it is released:
 
 - a **user** hold: every conversation they asked, and every conversation an administrator
-  asked in their workspace;
+  asked in their workspace. An Admin's team conversations (kind `team`, ADR-0035) have no
+  subject, like the organisation's: a hold on a team member doesn't keep them (one on the
+  Admin does: they asked them), and a lead hold keeps those that touch its customer, below;
 - a **lead** hold: every conversation one of whose questions or answers cites the customer's
   lead, deals or activities, or names them (name, email, phone numbers), matched exactly as
   an [erasure](#erasure) of that customer matches them.
@@ -207,7 +209,10 @@ authorised and audited operation that changes old audit rows; the application ne
 
 ### Access requests
 
-An administrator who has verified the requester's identity exports their data from the
+Privacy requests are organisation-wide and need `privacy.manage`, which only super admins
+hold: an Admin (team administrator, [ADR-0035](adr/0035-super-administrators-and-teams.md))
+can't request exports or pseudonymise anyone, even for their own team.
+A super admin who has verified the requester's identity exports their data from the
 customer's (lead's) page or the user's details (**Export data**; the **Data requests** page
 under Admin lists the administrator's own exports and their downloads): the request names a reference (the ticket),
 confirms the identity check, and is audited (`privacy.export_requested`). A job builds a ZIP:
@@ -286,8 +291,8 @@ left as they are. The answer counts only the deals the caller can see; copies on
 lead.corrected`), so a correction reveals nothing about deals out of the caller's sight
 (adversarial review of 73ff1e3, L5, R158). Search, the dashboard and Ask Arkray (re-indexed)
 show the corrected details. An erased lead can't be corrected. A staff member's name and email are corrected by
-an administrator on the Users page (another administrator's email only by that
-administrator, R100); the change is audited, an email change with its old and new address in
+an administrator on the Users page (a super admin for anyone, an Admin for their own team's
+users; another administrator's email only by that administrator, R100); the change is audited, an email change with its old and new address in
 the expiring audit detail.
 
 ### Erasure
@@ -372,8 +377,9 @@ marks it).
 ### Staff
 
 Users are never deleted: their id attributes the history they made. When the organisation no
-longer needs to know who a former colleague was, an administrator pseudonymises them
-(`manage.py pseudonymise_user <id> --by <admin> [--yes]`, or the user's page): only a
+longer needs to know who a former colleague was, a super admin pseudonymises them
+(`manage.py pseudonymise_user <id> --by <admin> [--yes]`, or the user's page; `privacy.manage`,
+which Admins don't hold): only a
 **deactivated** account that owns no current work (reassign it first), never under a legal
 hold, never one's own. Their name becomes "Former user <8 hex>", their email
 `former-<id>@pseudonymised.invalid`, their password unusable and their last sign-in
@@ -383,6 +389,9 @@ question or answer names them (full name or email, as whole words, ignoring case
 Lee" doesn't match "Hanna Leeds"; deep security audit L-5), except those a
 legal hold keeps ([legal holds](#legal-holds)), the audit details about them (addresses, emails, reasons), the reasons of support sessions
 involving them, failed-sign-in evidence, queued email payloads naming them and their second factor (the encrypted TOTP secret and recovery-code hashes, ADR-0033) are deleted.
+An Admin's team conversations (kind `team`, ADR-0035) have no subject, like the
+organisation's: they go when the Admin is the one pseudonymised (their own) or when a question
+or answer names the person, never merely because the person was in the team.
 Their id, role, dates, ownership, the append-only trail and every amount and negotiated
 price stay. Audited (`user.pseudonymised`, counts only), recorded in the erasure ledger,
 irreversible, idempotent. This is not lead erasure: their customers are untouched. The
@@ -414,7 +423,8 @@ change or new account may use it. Someone who returns is invited as a new user.
 [ADR-0030](adr/0030-administrator-accounts-change-only-by-their-owner.md)): pseudonymising
 replaces the account's email and password, which only the administrator themselves may
 change, and nobody pseudonymises their own account. So for an account whose **role** is
-administrator, whatever its status (a deactivated former administrator included), the API
+administrator of either kind (a Super admin or an Admin, ADR-0035), whatever its status (a
+deactivated former administrator included), the API
 answers 403 `permission_denied` and changes nothing, and the user's page doesn't offer it. The
 service (`privacy.staff`) enforces it, not only the view: it takes the user-administration
 lock and the account's row lock and reads the role from the locked row, so a promotion racing

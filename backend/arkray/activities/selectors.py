@@ -124,7 +124,7 @@ class ActivityFilters:
     status: str | None = None
     lead_id: UUID | None = None
     opportunity_id: UUID | None = None
-    owner_id: UUID | None = None  # organisation-wide workspace only; narrows, never widens
+    owner_id: UUID | None = None  # organisation-wide or a team's only; narrows, never widens
     # Inclusive business dates on the schedule (a task's due date, a meeting's day, a
     # note's creation day).
     date_from: date | None = None

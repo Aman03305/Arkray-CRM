@@ -1,9 +1,14 @@
 """Read queries for identity. Callers are already authorised (views check capabilities,
-workspaces are resolved to an AccessScope before anything here runs)."""
+workspaces are resolved to an AccessScope before anything here runs).
+
+Teams (ADR-0035): what a capability lets an administrator see of the users is narrowed to
+their reach here: `administered_users` and `assignable_users` take the actor, and a team
+administrator gets themselves and their team only."""
 
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable
+from typing import Literal
 from uuid import UUID
 
 from django.db import connection
@@ -14,16 +19,23 @@ from arkray.core.access import AccessScope
 from arkray.core.errors import NotFoundError
 from arkray.core.text import search_terms
 
+from . import teams
 from .models import MfaDevice, Role, TokenPurpose, TokenStatus, User, UserStatus
-from .policy import Capability, roles_with
+from .policy import Capability, has_capability, roles_with
+
+# The users list's `manager` filter: a team administrator's id, or the sales users in no team.
+NO_MANAGER = "none"
 
 
 def _with_pending_invitation(queryset: QuerySet[User]) -> QuerySet[User]:
     """Annotate the live invitation (at most one per user: a DB constraint) in one join, and
     whether the user has a confirmed second factor (ADR-0033), in the same query, with its
     wrong-code counts (one join: at most one device per user), for whether it is locked
-    (MfaDevice.lock_for; R133: was in security events only)."""
+    (MfaDevice.lock_for; R133: was in security events only), and the name of their team's
+    administrator (ADR-0035; one join, only the names: never the manager's other fields)."""
     return queryset.annotate(
+        manager_first_name=F("manager__first_name"),
+        manager_last_name=F("manager__last_name"),
         mfa_enabled=Exists(
             MfaDevice.objects.filter(user=OuterRef("pk"), confirmed_at__isnull=False)
         ),
@@ -44,13 +56,31 @@ def _with_pending_invitation(queryset: QuerySet[User]) -> QuerySet[User]:
     )
 
 
+def administered_users(actor: User) -> QuerySet[User]:
+    """The accounts `actor` administers (ADR-0035): everyone for a super administrator
+    (users.manage); themselves and their team's sales users, any status, for a team
+    administrator (users.manage_team); nobody otherwise."""
+    if has_capability(actor, Capability.USERS_MANAGE):
+        return User.objects.all()
+    if has_capability(actor, Capability.USERS_MANAGE_TEAM):
+        return User.objects.filter(teams.reach_condition(actor.pk))
+    return User.objects.none()
+
+
 def admin_user_list(
-    *, q: str = "", status: UserStatus | None = None, role: Role | None = None
+    *,
+    actor: User,
+    q: str = "",
+    status: UserStatus | None = None,
+    role: Role | None = None,
+    manager: UUID | Literal["none"] | None = None,
 ) -> QuerySet[User]:
-    """Users for the admin table. Each search term matches first name, last name or email
-    (case-insensitive substring, served by trigram indexes). Unpaginated: the view
-    paginates with a keyset cursor."""
-    queryset = User.objects.all()
+    """Users for the admin table, within the actor's reach. Each search term matches first
+    name, last name or email (case-insensitive substring, served by trigram indexes).
+    `manager`: a team administrator's id (their team), or NO_MANAGER (the sales users in no
+    team); intersected with the reach like every filter. Unpaginated: the view paginates with
+    a keyset cursor."""
+    queryset = administered_users(actor)
     for term in search_terms(q):
         queryset = queryset.filter(
             Q(first_name__icontains=term) | Q(last_name__icontains=term) | Q(email__icontains=term)
@@ -59,18 +89,37 @@ def admin_user_list(
         queryset = queryset.filter(status=status)
     if role is not None:
         queryset = queryset.filter(role=role)
+    if isinstance(manager, UUID):
+        queryset = queryset.filter(manager_id=manager)
+    elif manager == NO_MANAGER:
+        queryset = queryset.filter(role=Role.SALES_USER, manager__isnull=True)
     return _with_pending_invitation(queryset)
 
 
 def admin_user_detail(user_id: UUID) -> User:
+    """One account as administrators see it, by id: for identity.services, which has
+    already decided the actor reaches it (on the locked row). The API reads through
+    `administered_user_detail`."""
     user = _with_pending_invitation(User.objects.filter(pk=user_id)).first()
     if user is None:
         raise NotFoundError()
     return user
 
 
+def administered_user_detail(actor: User, user_id: UUID) -> User:
+    """One account within the actor's reach; 404 otherwise, identical to an account that
+    doesn't exist (ADR-0035)."""
+    user = _with_pending_invitation(administered_users(actor).filter(pk=user_id)).first()
+    if user is None:
+        raise NotFoundError()
+    return user
+
+
 def workspace_subject(scope: AccessScope) -> User | None:
-    """The user whose workspace this is, or None for the organisation-wide workspace."""
+    """The user whose workspace this is, or None for the organisation-wide workspace and a
+    team administrator's team (ADR-0035)."""
+    if scope.is_team:
+        return None
     subject_id = scope.subject_user_id
     if subject_id is None:
         return None
@@ -84,12 +133,19 @@ def workspace_subject(scope: AccessScope) -> User | None:
     return user
 
 
-def assignable_users(*, q: str = "") -> QuerySet[User]:
-    """Users CRM records may be assigned to: active accounts whose role works in a CRM
-    workspace. Each search term matches first name, last name or email. Unpaginated."""
+def assignable_users(*, actor: User, q: str = "") -> QuerySet[User]:
+    """Users CRM records may be assigned to by `actor`: active accounts whose role works in a
+    CRM workspace, everyone's for crm.assign_any; for crm.assign_team only the actor and their
+    team's members (ADR-0035; the assignment services check the same, under share locks:
+    teams.lock_team_member and lock_assignable_user); nobody otherwise. Each search term
+    matches first name, last name or email. Unpaginated."""
     queryset = User.objects.filter(
         status=UserStatus.ACTIVE, role__in=roles_with(Capability.CRM_ACCESS_OWN)
     ).only("id", "first_name", "last_name", "email")
+    if not has_capability(actor, Capability.CRM_ASSIGN_ANY):
+        if not has_capability(actor, Capability.CRM_ASSIGN_TEAM):
+            return queryset.none()
+        queryset = queryset.filter(teams.reach_condition(actor.pk))
     for term in search_terms(q):
         queryset = queryset.filter(
             Q(first_name__icontains=term) | Q(last_name__icontains=term) | Q(email__icontains=term)
@@ -132,6 +188,9 @@ SECURITY_ACTIONS: dict[str, tuple[str, ...]] = {
     "auth.password_changed": (),
     "auth.password_reset_completed": (),
     "auth.password_set_by_admin": (),
+    # The administrator who set it lost their reach over the account (ADR-0035): `reason`
+    # team_moved, setter_demoted or setter_deactivated; the owner was mailed a reset link.
+    "auth.temporary_password_voided": ("reason",),
     # The daily failure cap locked sign-in from new browsers, and what lifted it (review of
     # 73ff1e3, L1): `by` email_link or administrator.
     "auth.sign_in_locked": ("failures",),
@@ -141,6 +200,9 @@ SECURITY_ACTIONS: dict[str, tuple[str, ...]] = {
     # `reset_link`: an administrator reactivated by another must set a new password (R126).
     "user.reactivated": ("reset_link",),
     "user.role_changed": ("from", "to"),
+    # Moved into, out of or between teams (ADR-0035): who can see their CRM changed. The
+    # teams themselves are ids (in the audit log), not shown here.
+    "user.manager_changed": (),
     "user.email_changed": (),
     "support_session.started": ("reason",),
     "support_session.ended": ("end",),

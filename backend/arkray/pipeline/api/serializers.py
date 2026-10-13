@@ -615,7 +615,8 @@ class OpportunityCreateSerializer(OpportunityFieldsSerializer):
     owner = serializers.UUIDField(
         required=False,
         help_text="Without a lead: who owns the new opportunity. Required organisation-wide "
-        "(crm.assign_any); elsewhere the workspace's user, so it may be omitted.",
+        "(crm.assign_any) and in a team's workspace (a member of the team, crm.assign_team); "
+        "elsewhere the workspace's user, so it may be omitted.",
     )
     pipeline = serializers.UUIDField(required=False, help_text="The default pipeline if omitted.")
     stage = serializers.UUIDField(
@@ -778,7 +779,10 @@ class LeadConvertSerializer(OpportunityFieldsSerializer):
 
 
 class _FilterSerializer(StrictInputSerializer):
-    owner = serializers.UUIDField(required=False, help_text="Organisation-wide workspace only.")
+    owner = serializers.UUIDField(
+        required=False,
+        help_text="Organisation-wide or a team's workspace only; narrows it, never widens.",
+    )
     lead = serializers.UUIDField(required=False)
     expected_close_from = serializers.DateField(required=False, help_text="Inclusive.")
     expected_close_to = serializers.DateField(required=False, help_text="Inclusive.")

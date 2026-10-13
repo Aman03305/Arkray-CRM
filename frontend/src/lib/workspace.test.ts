@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { makeViewer } from "@/test/fixtures";
+import { makeViewer, TEAM_ADMIN_CAPABILITIES } from "@/test/fixtures";
 
 import type { Viewer } from "./viewer";
 import {
   activeSection,
   canonicalUserPath,
+  canWriteIn,
+  isOverview,
   leadHref,
   newOpportunityHref,
   opportunityHref,
@@ -194,5 +196,50 @@ describe("canonical user-workspace URLs", () => {
   it("builds every selected-user link from the one route builder", () => {
     expect(userWorkspaceHref(RAHUL.toUpperCase())).toBe(`/admin/users/${RAHUL}/dashboard`);
     expect(userWorkspaceHref(RAHUL, "pipeline")).toBe(`/admin/users/${RAHUL}/pipeline`);
+  });
+});
+
+describe("a team administrator's overview (ADR-0035)", () => {
+  const teamAdmin: Viewer = makeViewer({ id: "t1", capabilities: [...TEAM_ADMIN_CAPABILITIES] });
+
+  it("the top-level pages are their team's: the API's \"all\", named as the team", () => {
+    expect(workspaceFromPathname("/pipeline", teamAdmin)).toEqual({ kind: "team" });
+    expect(workspaceApiPath({ kind: "team" }, "opportunities")).toBe("/api/v1/workspaces/all/opportunities");
+    expect(workspaceHref({ kind: "team" }, "activities")).toBe("/activities");
+    expect(leadHref({ kind: "team" }, "l1")).toBe("/leads/l1");
+  });
+
+  it("a team member's workspace is a user workspace, like a super administrator's", () => {
+    expect(workspaceFromPathname(`/admin/users/${RAHUL}/pipeline`, teamAdmin)).toEqual({ kind: "user", userId: RAHUL });
+  });
+
+  it("the overview is the organisation's or the team's; never one's own or a user's", () => {
+    expect(isOverview({ kind: "organization" })).toBe(true);
+    expect(isOverview({ kind: "team" })).toBe(true);
+    expect(isOverview({ kind: "self" })).toBe(false);
+    expect(isOverview({ kind: "user", userId: RAHUL })).toBe(false);
+    expect(isOverview(null)).toBe(false);
+  });
+});
+
+describe("canWriteIn (mirrors identity.workspaces.authorize_write)", () => {
+  const teamAdmin: Viewer = makeViewer({ id: "t1", capabilities: [...TEAM_ADMIN_CAPABILITIES] });
+  const superAdmin: Viewer = makeViewer({ id: "a1", capabilities: ["crm.access_own", "crm.view_all", "workspace.view_any", "crm.manage_any"] });
+  const viewOnly: Viewer = makeViewer({ id: "v1", capabilities: ["crm.access_own", "crm.view_team", "workspace.view_team"] });
+  const workspaces: Workspace[] = [{ kind: "self" }, { kind: "organization" }, { kind: "team" }, { kind: "user", userId: RAHUL }];
+
+  it.each<[string, Viewer, boolean[]]>([
+    ["a sales user", salesUser, [true, false, false, false]],
+    ["a super administrator", superAdmin, [true, true, true, true]],
+    // Never the organisation (a team administrator's overview is the team).
+    ["a team administrator", teamAdmin, [true, false, true, true]],
+    // Viewing the team never implies changing it.
+    ["a viewer without crm.manage_team", viewOnly, [true, false, false, false]],
+  ])("%s", (_who, viewer, expected) => {
+    expect(workspaces.map((w) => canWriteIn(viewer, w))).toEqual(expected);
+  });
+
+  it("nothing while the viewer is unknown", () => {
+    expect(workspaces.map((w) => canWriteIn(null, w))).toEqual([false, false, false, false]);
   });
 });

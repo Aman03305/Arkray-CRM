@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ArrowUpRight, FileArchive, KeyRound, LifeBuoy, UserX } from "lucide-react";
+import { ArrowUpRight, FileArchive, KeyRound, LifeBuoy, UserCog, UserX } from "lucide-react";
 import Link from "next/link";
 import type { ReactNode } from "react";
 
@@ -11,11 +11,13 @@ import { Drawer } from "@/components/ui/Drawer";
 import { describeError } from "@/lib/api/errors";
 import type { AdminUser } from "@/lib/api/types";
 import { formatDate, formatDateTime, formatRelative } from "@/lib/format";
-import { hasCapability } from "@/lib/viewer";
+import { canManageAdmins, canManageUsers, canOpenUserWorkspaces, canStartSupport, hasCapability } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
 import { userWorkspaceHref } from "@/lib/workspace";
 
-import { userDetailKey, usersApi } from "./api";
+import { isAdministratorRole, roleChangeBlockedReason, userDetailKey, usersApi } from "./api";
+import { NO_ADMIN_LABEL } from "./ManagerSelect";
+import { useOutOfReachOn404 } from "./reach";
 import { TwoStepBadge } from "./UsersTable";
 import { UserStatus } from "./UserStatus";
 
@@ -35,7 +37,8 @@ export function supportBlockedReason(user: AdminUser, isSelf: boolean): string |
   if (isSelf) return "This is you. Change your own password in Settings.";
   // Never changed again (review of 73ff1e3, L4; the API refuses).
   if (user.pseudonymised_at) return "This former user was pseudonymised: their account can't be changed.";
-  if (user.role === "admin") return "Not available for administrators.";
+  // A Super admin's or an Admin's (ADR-0030, ADR-0035): only they change their credentials.
+  if (isAdministratorRole(user.role)) return "Not available for administrators.";
   if (user.status === "invited") return "Not available until they accept their invitation.";
   if (user.status === "deactivated") return "Not available for deactivated users.";
   return null;
@@ -51,16 +54,28 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 }
 
 /**
- * A user's details beside the Users list (their name opens it): who they are, their status,
- * the administrator's sign-in tools for them, and, for those who handle privacy requests,
- * exporting their data or (once deactivated) pseudonymising them. Their CRM is a separate,
- * explicit link.
+ * A user's details beside the Users list (their name opens it): who they are, their status
+ * and (for a Super admin) their Admin, the administrator's sign-in tools for them, changing
+ * their role or Admin (a Super admin's, ADR-0035), and, for those who handle privacy
+ * requests, exporting their data or (once deactivated) pseudonymising them. Their CRM is a
+ * separate, explicit link.
  */
-export function UserDetailsDrawer({ user: listed, notice, onClose, onSetPassword, onAccess, onExport, onPseudonymise }: {
+export function UserDetailsDrawer({
+  user: listed,
+  notice,
+  onClose,
+  onEdit,
+  onSetPassword,
+  onAccess,
+  onExport,
+  onPseudonymise,
+}: {
   /** As listed; the latest copy is loaded while the panel is open. */
   user: AdminUser;
   notice: string | null;
   onClose: () => void;
+  /** Change their role or Admin (the edit dialog). */
+  onEdit: (user: AdminUser) => void;
   onSetPassword: (user: AdminUser) => void;
   onAccess: (user: AdminUser) => void;
   onExport: (user: AdminUser) => void;
@@ -72,14 +87,21 @@ export function UserDetailsDrawer({ user: listed, notice, onClose, onSetPassword
     queryFn: () => usersApi.get(listed.id),
     placeholderData: listed,
   });
+  // Out of reach now (404, e.g. moved to another team): the Users page closes this panel, so
+  // its actions, which could only fail, aren't left on screen (ADR-0035).
+  useOutOfReachOn404(detail.error, listed);
   const user = detail.data ?? listed;
-  const manages = hasCapability(viewer, "users.manage");
-  const supports = hasCapability(viewer, "support.access");
-  const opensCrm = hasCapability(viewer, "workspace.view_any");
+  const manages = canManageUsers(viewer);
+  // Roles and teams are a Super admin's (ADR-0035); an Admin sees only their own team.
+  const superAdmin = canManageAdmins(viewer);
+  const supports = canStartSupport(viewer);
+  const opensCrm = canOpenUserWorkspaces(viewer);
   // Privacy requests are refused inside a support session (and the Users page isn't offered there).
   const privacy = hasCapability(viewer, "privacy.manage") && !viewer?.supportSession;
-  // Never an administrator's account (ADR-0030; the API refuses it): an operator does that on the server.
-  const administrator = user.role === "admin";
+  // Never an administrator's account, a Super admin's or an Admin's (ADR-0030; the API
+  // refuses it): an operator does that on the server.
+  const administrator = isAdministratorRole(user.role);
+  const roleBlocked = roleChangeBlockedReason(user, user.id === viewer?.id);
   const pseudonymisable =
     user.status === "deactivated" && !user.pseudonymised_at && user.id !== viewer?.id && !administrator;
   const blocked = supportBlockedReason(user, user.id === viewer?.id);
@@ -115,6 +137,7 @@ export function UserDetailsDrawer({ user: listed, notice, onClose, onSetPassword
         ) : null}
         <dl className="divide-y divide-slate-100 text-sm">
           <Row label="Role">{user.role_label}</Row>
+          {superAdmin && user.role === "sales_user" ? <Row label="Admin">{user.manager?.full_name ?? NO_ADMIN_LABEL}</Row> : null}
           <Row label="Status">
             <UserStatus user={user} />
           </Row>
@@ -156,6 +179,17 @@ export function UserDetailsDrawer({ user: listed, notice, onClose, onSetPassword
             </Row>
           ) : null}
         </dl>
+        {superAdmin && !user.pseudonymised_at ? (
+          <div className="border-t border-slate-200 pt-4">
+            {roleBlocked ? (
+              <p className="text-sm text-slate-500">{roleBlocked}</p>
+            ) : (
+              <Button variant="secondary" icon={<UserCog aria-hidden="true" className="size-4" />} onClick={() => onEdit(user)}>
+                {user.role === "sales_user" ? "Change role or Admin" : "Change role"}
+              </Button>
+            )}
+          </div>
+        ) : null}
         {manages ? (
           <div className="border-t border-slate-200 pt-4">
             {blocked ? (

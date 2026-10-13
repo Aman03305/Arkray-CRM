@@ -55,6 +55,12 @@ function renderPage() {
   return renderWithProviders(<UsersPage />, { viewer: adminViewer });
 }
 
+/** The list's own requests: a Super admin's page also loads the Admins (role=team_admin) for
+ * its Admin filter (ADR-0035). */
+function listCalls(api: ReturnType<typeof mockApi>) {
+  return api.callsTo("GET", "/api/v1/admin/users").filter((c) => c.query.get("role") !== "team_admin");
+}
+
 async function openActions(name: string) {
   const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: `Actions for ${name}` }));
@@ -87,7 +93,8 @@ describe("UsersPage: states", () => {
     renderPage();
     await screen.findByRole("button", { name: "Rahul Sharma" });
     const headers = screen.getAllByRole("columnheader").map((h) => h.textContent);
-    expect(headers).toEqual(["Name", "Email", "Role", "Status", "Two-step", "Last login", "Created", "Actions"]);
+    // ADR-0035: a Super admin also sees each user's Admin.
+    expect(headers).toEqual(["Name", "Email", "Role", "Admin", "Status", "Two-step", "Last login", "Created", "Actions"]);
     expect(screen.queryByText(/pipeline value|active leads/i)).not.toBeInTheDocument();
   });
 
@@ -112,7 +119,8 @@ describe("UsersPage: states", () => {
   it("shows server errors with a retry and a reference", async () => {
     let attempts = 0;
     mockApi({
-      [LIST]: () => {
+      [LIST]: (call: RecordedCall) => {
+        if (call.query.get("role") === "team_admin") return page([]); // the Admin filter's choices
         attempts += 1;
         return attempts === 1 ? apiError(500, "server_error", "Boom") : page([rahul]);
       },
@@ -314,7 +322,7 @@ describe("UsersPage: creating a user", () => {
       email: "new@example.test",
       role: "sales_user",
     });
-    await waitFor(() => expect(api.callsTo("GET", "/api/v1/admin/users").length).toBeGreaterThan(1));
+    await waitFor(() => expect(listCalls(api).length).toBeGreaterThan(1));
   });
 
   it("switching back to an invitation drops a typed password, and to a password again asks for one", async () => {
@@ -687,8 +695,9 @@ describe("UsersPage: editing and lifecycle", () => {
       await user.click(screen.getByRole("menuitem", { name: "Edit details" }));
       const role = screen.getByLabelText("Role");
       expect(role).toBeDisabled();
+      // ADR-0035: another Super admin's (an Admin's role can be changed).
       expect(role).toHaveAccessibleDescription(
-        "An administrator's role can't be changed here. To remove their access, deactivate the account.",
+        "A Super admin's role can't be changed. To remove their access, deactivate the account.",
       );
       const lastName = screen.getByLabelText(/Last name/);
       await user.clear(lastName);
@@ -732,7 +741,7 @@ describe("UsersPage: editing and lifecycle", () => {
         await user.click(screen.getByRole("button", { name: "Save changes" }));
       }
       expect(await screen.findByRole("alert")).toHaveTextContent(message);
-      await waitFor(() => expect(api.callsTo("GET", "/api/v1/admin/users").length).toBeGreaterThan(1));
+      await waitFor(() => expect(listCalls(api).length).toBeGreaterThan(1));
     });
   });
 

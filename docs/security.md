@@ -60,7 +60,7 @@ flowchart LR
 | **XSS** | React escapes by default; no `dangerouslySetInnerHTML` anywhere (Ask Arkray answers are typed blocks rendered as text nodes; script, image and attribute payloads tested); API is JSON-only (`X-Content-Type-Options: nosniff`); search results are plain text and their highlighting is built from text slices and `<mark>` elements, never HTML strings (script, attribute, entity and bidi payloads tested); a nonce-based Content-Security-Policy on every page (`frontend/src/proxy.ts`: scripts and styles only from this origin or carrying the page's fresh nonce, no inline code, no `eval` in production, `object-src 'none'`, `base-uri`/`form-action 'self'`; unit-tested and checked in the browser for violations), and the API's JSON carries `default-src 'none'`; `mailto:` links encode header delimiters and lead emails containing them are refused (a lead email could add a Bcc to a colleague's draft) | built (P7 search; CSP and mailto P9) |
 | **CSRF** | SameSite=Lax session cookie; over HTTPS the session and CSRF cookies are `__Host-` cookies (Secure, host-only, Path=/: a sibling subdomain can't set or shadow them; P9); Django CSRF double-submit (`X-CSRFToken`) and Origin check on **every** unsafe API request, signed in or not (`core.api.ApiView`), so login CSRF is refused too; a matrix test covers every unsafe route; reads another site makes the browser send (`Sec-Fetch-Site: cross-site` or `same-site`) answer 404 before anything runs ([below](#security-headers); deep security audit L-3, R37) | built (P1; L-3 deep security audit) |
 | **IDOR / broken object-level authorization** | workspace-nested routes; every lookup through `AccessScope.apply()`, in the services as well as the views; 404 outside scope, with bodies identical to a missing record; cursors are sealed (encrypted and authenticated), bound to their list, user, workspace and filters, and expire with the longest session (P9: replays across users, workspaces, records, lists and filters are 400s, tested and mutation-checked); the duplicate check looks only inside the caller's workspace; authorization matrix and a cross-user suite (User A vs User B both ways, every channel) | built for leads (P2), pipeline (P3: opportunities, boards, **totals and per-stage values**, history, conversion), activities and timelines (P4), the dashboard (P5: every figure and list), selected-user workspaces (P6) and global search (P7: the scope applied before any word is matched; marked records from every workspace; another workspace's exact secret indistinguishable from nothing); suite P8 |
-| **Broken function-level authorization** | DRF global `DenyAll`; per-endpoint capabilities; route-inventory test fails on any unlisted `/api/` route; delegated writes need `crm.manage_any` and ownership changes `crm.assign_any`, checked in the services for every caller and, since Phase 9, before a write's body is even read; the matrix also runs every route as a view-only role (reads pass, every write elsewhere refused) and as a deactivated user's open session (401 everywhere) | built (view-only and deactivated principals P9) |
+| **Broken function-level authorization** | DRF global `DenyAll`; per-endpoint capabilities; route-inventory test fails on any unlisted `/api/` route; delegated writes need `crm.manage_any` and ownership changes `crm.assign_any`, checked in the services for every caller and, since Phase 9, before a write's body is even read; the matrix also runs every route as a view-only role (reads pass, every write elsewhere refused) and as a deactivated user's open session (401 everywhere). Team administrators ([ADR-0035](adr/0035-super-administrators-and-teams.md)) hold distinct `*_team` capabilities, never the organisation-wide ones, so any check not written for teams denies them (fail closed); routes open to both name both and the services apply the caller's reach (404 outside it); the matrix runs every route as a team administrator too | built (view-only and deactivated principals P9; team administrators ADR-0035) |
 | **Mass assignment** | strict input serializers reject undeclared keys with a 400 (`is_superuser`, `capabilities`, `status`, `password`, `owner`, `created_by`, `archived_at`, ...); the services check fields against their own allowlist too; ownership, status, archive state, provenance, timestamps and version are never directly writable; transitions go through action endpoints | built (P1: users; P2: leads; P3: opportunities: owner, status, stage, closed_at, probability flags, version and provenance are never writable; the owner always follows the lead) |
 | **Open redirects** | no user-controlled redirect targets in the API; the frontend's post-login `next` accepts same-origin absolute paths only, checked on the raw input **and** after URL normalisation (the review found `/.//evil.com` resolving to `//evil.com`); no `//`, backslashes, control characters or auth pages (tested); and only a page's shape after normalisation (lower-case `[a-z0-9-]` segments), never `/api`, `/health`, `/_next` or a file (adversarial review of 73ff1e3, L9: `next=/api/v1/workspaces/<id>` made an administrator's browser write a `workspace.accessed` event; R161) | built (P1; L9) |
 | **Brute-force login / password spraying** | PostgreSQL-backed throttling keyed by the submitted email (HMAC) and browser, plus per IP; bounded exponential lockout (max 15 min); trusted-browser budgets so attackers can't lock owners out, the trusted-browser cookie bound to the account's credentials so a reset or password change retires every browser trusted before it (P9); refused before the password check; advisory lock against parallel bursts; audited once per threshold ([ADR-0014](adr/0014-durable-login-throttling.md)); an unrecognised browser's budget per account and network (IPv4 /24, IPv6 /64); 50 failures from unrecognised browsers in a day lock the account's sign-in from them until the owner's emailed unlock link, a reset, an administrator or 30 days (trusted browsers unaffected; `ArkraySignInLocked`, `ArkraySignInFailureStorm`); the per-address limit counts unrecognised browsers only; two-step verification for every user when `MFA_REQUIRED_FOR_ALL_USERS` is on (production default) (adversarial review of 73ff1e3, L1, R154; [authorization.md](authorization.md#sign-in-throttling)) | built (P1; daily cap L1) |
@@ -68,7 +68,7 @@ flowchart LR
 | **Account enumeration** | identical status, body and cookies for every failed sign-in, with the hasher run in every case (decoy hash), and the same database work whether or not the email has an account (an unknown email's audit rows are written in a savepoint and rolled back; adversarial review of 73ff1e3, L1, superseding R135's acceptance); the daily sign-in lock is identical for unknown emails; throttling keyed by the submitted email, whether or not it exists; password-reset requests do constant work (the job decides eligibility); workspace 404s identical for missing and forbidden users; admin-only 403s never depend on whether the target exists | built (P1) |
 | **Privilege escalation via admin impersonation** | no impersonation feature exists; admin workspace access is scoped reads/writes as the admin, audited; a test fails if any route looks like "login as" / "switch user", and the session stays the admin's through a whole workspace visit | built (P0); verified end to end (P6) |
 | **Wrong-workspace data on screen** (one user's records under another user's banner) | the workspace comes from the URL, parsed once like the route param and failing closed (a malformed id is "not found", never the organisation or one's own records); the selected-user frame renders only when the URL's and the layout's user agree and canonicalises other spellings; every query key carries the workspace; views remount per workspace; placeholders never cross workspaces; failures show errors, not fallbacks ([admin-user-workspace.md](admin-user-workspace.md#cache-isolation)) | built (P6; the review found and fixed a percent-encoded id showing organisation data under a user's banner) |
-| **Privilege escalation via user management** | capability checks (`users.manage`) in the view **and** under the admin lock in every service; no self role change or self deactivation; at least one active administrator always remains; deactivation takes effect on the next request, and a role change signs the user out everywhere (deep security audit L-2, R136); another administrator's email, password and role can't be changed at all ([below](#administrator-account-protection)); an account whose credentials an administrator changed can't be promoted for 7 days, and the owner is emailed (adversarial review of 73ff1e3, L3, R156); a pseudonymised account can't be changed at all (L4, R157) | built (P1; R100; L3, L4) |
+| **Privilege escalation via user management** | capability checks (`users.manage`, or a team administrator's `users.manage_team`) in the view **and** under the admin lock in every service; a team administrator reaches only themselves and their team's users (404 for anyone else, before anything about the account shows), creates sales users only, into their own team, and never changes a role or a team (ADR-0035); no self role change or self deactivation; at least one active super administrator always remains; deactivation takes effect on the next request, and a role change signs the user out everywhere (deep security audit L-2, R136); another administrator's (either kind) email and password, and another super administrator's role, can't be changed at all ([below](#administrator-account-protection)); an account whose credentials an administrator changed can't be promoted for 7 days, nor can an account another administrator demoted have its credentials changed for 7 days, and the owner is emailed (adversarial review of 73ff1e3, L3, R156; ADR-0035); a pseudonymised account can't be changed at all (L4, R157) | built (P1; R100; L3, L4; ADR-0035) |
 | **Data left on a shared browser** | a sign-in, sign-out or session end reloads the page after rendering nothing; pages restored from the back/forward cache reload; app pages are `Cache-Control: no-store`; other tabs are told (BroadcastChannel) and reload; the viewer is re-checked when a tab regains focus | built (P1) |
 | **Account takeover via emailed links** | 256-bit random, single-use, expiring, superseded on reissue, purpose-bound; only SHA-256 digests stored; the secret is minted by the email job so it never touches a web request, the outbox or logs; email changes revoke pending links; link pages send `Referrer-Policy: no-referrer` and `Cache-Control: no-store` ([ADR-0013](adr/0013-account-lifecycle-and-one-time-tokens.md)); the sign-in unlock link (L1) is revoked by an email change, a password set or changed, a reset and a reactivation, its page names the account before anything is used up, and it never takes a browser's trust from another account (adversarial review of 73ff1e3, its review round 1, IDENTITY-1 and IDENTITY-2) | built (P1; unlock link L1) |
 | **Audit tampering** | append-only at ORM and DB-trigger level (`audit_event`, `pipeline_stage_history`, `activities_timeline_entry`, and since then `pipeline_negotiation_price` and `pipeline_opportunity_correction`, the corrections of closed deals: adversarial review of 73ff1e3, M2); the trigger binds the application's role only when that role neither owns the tables nor is a superuser (an owner can disable triggers or TRUNCATE: shown by the Phase 9 review), so production runs the app as a separate, non-owner role (P11); the actor is always the authenticated user (body fields, `X-Request-ID` and forwarding headers are never adopted); delegated viewing's audit window lives in PostgreSQL, so no cache entry can suppress an audit row (P9); metadata redacts secret keys and `key=value` secrets, bounds keys, depth and size, drops NUL, control and bidi characters (P9) | trigger built; window and metadata P9; roles P11 |
@@ -85,7 +85,7 @@ flowchart LR
 | **Log injection / id spoofing** | ASCII-escaped JSON logs (control characters and Unicode line separators escaped), and the console format escapes too; correlation ids are minted server-side; a client `X-Request-ID` (validated against `^[A-Za-z0-9._-]{8,64}$`) is adopted only from a trusted proxy, otherwise logged separately and never written to audit; no query strings or bodies logged | built |
 | **Request-body decompression bomb** (Phase 2 review, P1, present since Phase 1) | the only parser decodes JSON as UTF-8 and refuses any other `charset` with 415 before reading (Django accepted any Python codec, including `zlib`/`bz2`, so 100 KB inflated to 100 MB, and a body under the 2.5 MB limit to gigabytes, on every endpoint, signed in or not); deep nesting is a 400 | built (P2) |
 | **Excessive requests / DoS** | DRF throttles (anon 60/min, user 600/min, scoped stricter limits for login, reset, ask, search (120/min), import); bounded page sizes; statement timeouts; gunicorn timeouts; proxy body-size limits; global search is bounded per request whatever the words (input 2-100 characters, at most 5 words a trigram index can look up, 5 results per kind, a fixed recent pass, and an older pass gated on the index returning under 2 % of records; in one user's workspace only their activities are looked up; 24-120 ms per search at 1M leads / 2M activities, the worst shapes found 0.2-0.5 s organisation-wide (R59); [search.md](search.md#how-a-search-runs)); refused (401/403) requests count against the rate limits (throttles run before permissions), and the edge rate-limits every API route per session, per anonymous address and per address (L2, R155); per-user write budgets and fair background queues: one account can neither delay others' background work beyond one turn per user nor grow a customer past what its export and erasure handle (M6, R153; [reliability.md](reliability.md#fairness-between-users)) (adversarial review of 73ff1e3) | baseline built (P7: search; L2, M6) |
-| **Prompt injection / RAG authorization bypass** | scope-bound, read-only tools over the modules' selectors (no SQL, ORM, shell, file or HTTP tool); no owner/workspace parameter in any schema; the organisation tool absent outside organisation scope; every argument re-validated; vector candidates pre-filtered by owner in SQL, every hit re-read through the caller's scope and hash-checked, text sliced from the live record; user text returned as `untrusted_text`; answers rendered from typed blocks (no HTML, no model URLs), links only to records a tool returned; conversations bound to actor and workspace, history server-written | built (P8): the Rahul/Priya secret matrix over 5 viewpoints × 4 questions with and without an adversarial scripted model (no foreign text reaches the provider or the answer), direct and indirect injection, stale-vector reassignment, malicious tool arguments; each isolation layer mutation-checked |
+| **Prompt injection / RAG authorization bypass** | scope-bound, read-only tools over the modules' selectors (no SQL, ORM, shell, file or HTTP tool); no owner/workspace parameter in any schema; the tool comparing people absent from one person's scope (offered organisation-wide and in a team administrator's team only); every argument re-validated; vector candidates pre-filtered by owner in SQL, every hit re-read through the caller's scope and hash-checked, text sliced from the live record; user text returned as `untrusted_text`; answers rendered from typed blocks (no HTML, no model URLs), links only to records a tool returned; conversations bound to actor and workspace, history server-written | built (P8): the Rahul/Priya secret matrix over 5 viewpoints × 4 questions with and without an adversarial scripted model (no foreign text reaches the provider or the answer), direct and indirect injection, stale-vector reassignment, malicious tool arguments; each isolation layer mutation-checked |
 | **Stack-trace disclosure** | `DEBUG=False` in production (enforced); JSON 500 handler with a generic message and request id | built |
 | **Clickjacking** | `X-Frame-Options: DENY` on API and web; CSP `frame-ancestors 'none'` on both (P9) | built |
 | **Dependency vulnerabilities** | lockfiles (`uv.lock`, `pnpm-lock.yaml`); `pip-audit` and `pnpm audit --prod` in CI (both clean in Phase 9; the dev-only `braces` advisory is R54); base images pinned by digest, OS packages upgraded at build; Dependabot (`.github/dependabot.yml`: uv, npm, the Dockerfiles' and Compose files' images, GitHub Actions; weekly, one grouped pull request per ecosystem, a 7-day cooldown, security updates at once; the tool images named in workflow scripts are moved by hand; adversarial review of 73ff1e3, L14: before it this row claimed Dependabot with no configuration in the repository, R166) | built |
@@ -116,7 +116,7 @@ flowchart LR
 | Threat | Control |
 |---|---|
 | An administrator learning a user's password | Never stored or returned in plaintext; admin-set passwords are temporary (forced change, 72 h expiry) and audited; administrators are invited, never given a password, and can't be promoted while one is pending; a sign-in with a temporary password is a security event; administrators see that a password changed, never what it is ([authorization.md](authorization.md#password-change-notification); [password secrecy](#password-secrecy)) |
-| One administrator taking over another's account (R100) | Another administrator's email, password and role can't be changed, whatever the account's status ([below](#administrator-account-protection)) |
+| One administrator taking over another's account (R100) | Another administrator's (either kind) email and password, and another super administrator's role, can't be changed, whatever the account's status; an account another administrator demoted keeps that protection for 7 days ([below](#administrator-account-protection)) |
 | "Log in as" turning into impersonation | Support sessions keep the administrator's identity, bind to their browser session, expire in 30 minutes, open only the target's workspace, refuse identity and security operations, and stamp every write with actor, subject and session ([admin-user-workspace.md](admin-user-workspace.md#support-sessions)); no route named like impersonation exists (tested) |
 | Support-session fixation or reuse | The session's marker is server-side and checked against a digest of the browser session's key; a copied marker, a rotated key, sign-out, expiry or a deactivated target ends it |
 | Malicious uploads (executables, scripts, HTML/SVG XSS, macro documents, polyglots, zip bombs) | Extension allowlist **and** content recognition; OOXML refused with any macro, OLE object, ActiveX control, or anything fetched from elsewhere when opened (remote template, linked picture/object/media, link to another workbook, data connection): part names and embedded types are checked, and `[Content_Types].xml` and every `.rels` part are **parsed** with defusedxml (no DTD/entities; UTF-8 or UTF-16 only, the declared encoding must agree; a part that doesn't parse refuses the file): refused relationship types (oleObject, attachedTemplate, ActiveX/control, vbaProject, subDocument, frame, externalLink, connections, aFChunk, webextension/taskpane), documents Word imports (altChunk: RTF, MHT, HTML, by relationship, content type or part name) and Office add-ins (web extensions, task panes), and any relationship other than a hyperlink (its exact Transitional or Strict Type URI) whose `TargetMode` isn't `Internal` or whose target is a URL/UNC path (deep security audit M-3 and its review, R132); every other part is judged by what it holds: an OLE compound file is refused, an OOXML package (wherever it sits, whatever it is called) is opened and checked one level deep with the same rules and its own content check (Word fields, workbook formulas) under budgets shared by the upload, and a package under a picture's name or inside another package is refused (adversarial review of 73ff1e3, L7, R159, and its review round 1); a member compressed with anything but deflate or stored is refused unread (R167); spreadsheet formulas that fetch or call out (`WEBSERVICE`, `IMAGE`, `RTD`, `CALL`, `REGISTER`, `EXEC`, `IMPORT*`) are refused in `.xlsx` and `.csv` (L8, R160); each upload's checks share one bounded work pool (about a second of CPU at most), its packages' directories are sized and their records walked before they are parsed, a part named twice refuses the package, and every check also runs against a CPU deadline (`UPLOAD_CPU_SECONDS`, 5 s of the request thread's CPU), so past any of its budgets an upload is refused as "too large to check" (review rounds 1 to 4; `test_upload_parser_costs.py` holds every shape the reviews found to 2 s of CPU and 40 MiB). **The one deliberate exception to "nothing fetched from elsewhere"**: a hyperlink (a document's hyperlink relationship or `HYPERLINK` field, a workbook's or CSV's `HYPERLINK` formula) is kept, because it fetches nothing until someone clicks it, and Office asks first; bounded reads (1 MiB per XML part, 4 MiB in all, 10,000 entries); files served as `attachment` with `nosniff` and a `default-src 'none'; sandbox` CSP; images previewed only when validated; optional ClamAV scanning; a per-person storage quota (`ATTACHMENT_MAX_BYTES_PER_USER`, default 2 GiB; deep security audit L-7, R138) |
@@ -128,33 +128,59 @@ flowchart LR
 
 ## Administrator account protection
 
-**Policy (R100):** an administrator's credentials and standing are changed only by that
-administrator. The audit found that Admin A could change Admin B's sign-in email to a mailbox
+**Policy (R100):** an administrator's credentials are changed only by that administrator,
+and a super administrator's role only by an operator (since ADR-0035 a super administrator
+may change an Admin's role, below). The audit found that Admin A could change Admin B's sign-in email to a mailbox
 A reads and then use *Forgot password* there, or demote B, set a temporary password and choose
 a new one at B's forced change: either way A held B's account and B was locked out. Every step
 was audited, but nothing stopped it.
 
-For another account whose **role** is administrator (active, invited or deactivated alike),
-the API now refuses with 422 `business_rule_violation` and a plain reason:
+**Two kinds of administrator** ([ADR-0035](adr/0035-super-administrators-and-teams.md),
+amending ADR-0030): a **super admin** (role `admin`, organisation-wide) and an **Admin**
+(role `team_admin`, their own team). The policy covers both kinds
+(`identity.services.is_administrator`, `identity.policy.administrator_roles`): a super admin
+controls an Admin's role and team, never their password, email or second factor, so nobody
+can sign in as an Admin either. An Admin never reaches another administrator at all: every
+user-administration route answers 404 for anyone outside their team, as for an account that
+doesn't exist, so only super admins edit or off-board Admins.
+
+For another account whose **role** is administrator of either kind (active, invited or
+deactivated alike), the API refuses with 422 `business_rule_violation` and a plain reason:
 
 - changing its **email** (the administrator changes it in Settings, with their password);
 - **setting its password** (they use *Forgot password*, which mails only their own address);
-- changing its **role** (demotion).
+- resetting its **second factor** (an operator does, below);
+- changing the **role** of another **super** admin (demotion; "A super admin's role can't be
+  changed by another administrator. To remove their access, deactivate the account.").
+
+A super admin **may change an Admin's role** (to User or Super admin; ADR-0035): it gives
+no credential, signs them out everywhere, leaves their team unassigned and revokes their
+pending invitations. Because demote, then set a password, was R100's takeover, an account
+another administrator (or an operator) took out of an administrator role within
+`ADMIN_PROMOTION_COOLING_OFF_S` (7 days) keeps the protection for that long
+(**demote-then-unshield**, the mirror of promote-then-shield below): its email, password
+and second factor can't be changed by another administrator (422 naming the date), read
+from the append-only audit trail (the latest such `user.role_changed`, whoever made it but
+the account itself; an operator's, with no actor, counts too).
 
 Still allowed, and audited: editing the name, **deactivating** (sessions end at once, pending
-links and the invitations they sent are revoked; it raises `ArkrayAdministratorDeactivated`)
+links and the invitations they sent are revoked, and the temporary passwords they set are
+voided; it raises `ArkrayAdministratorDeactivated`; a deactivated Admin's team stays assigned
+to them, managed by the super admins meanwhile)
 and reactivating, resending an invitation. Since ADR-0033 (R126) a reactivated administrator
 doesn't get the old password back: it is replaced by a random one nobody knows, sessions and
 trusted browsers stay retired, pending reset links are revoked and a new reset link goes to
 the account's own address (their second factor is kept). A never-activated one gets an
-invitation at its own address; an ordinary user comes back with their own password. The last active administrator can't be deactivated. Promoting a user to
-administrator is unchanged, except that it signs the user out everywhere (deep security
+invitation at its own address; an ordinary user comes back with their own password. The last active **super** administrator can't be deactivated (Admins don't count). Promoting a user to
+administrator of either kind is unchanged, except that it signs the user out everywhere (deep security
 audit L-2: promoting an account increments its `session_epoch`, so a stale or stolen session,
 and a trusted browser, doesn't silently become an administrator's; the user signs in again,
 with the second factor the new role may require). The checks run in the service layer, under the
 user-administration lock, against the target's locked row, so a concurrent promotion can't
 slip between the check and the write (`tests/security/test_admin_takeover.py`, including real
-races). The admin Users page doesn't offer the refused actions for another administrator.
+races; the team rules in `tests/security/test_teams_identity.py`, with real races between
+demotions, team moves, creations and password sets). The admin Users page doesn't offer the
+refused actions for another administrator.
 
 **Promote-then-shield** (adversarial review of 73ff1e3, L3, R156; [ADR-0034](adr/0034-staging-security-remediation.md)):
 a compromised administrator could set an ordinary user's password (the owner wasn't told) or
@@ -164,8 +190,20 @@ is emailed when an administrator sets their password and on any role change, and
 whose password, email or second factor an administrator changed, or that an administrator
 created with a password, can't be made an administrator for 7 days
 (`ADMIN_PROMOTION_COOLING_OFF_S`; 422 naming the date, read from the append-only audit trail).
-Every promotion raises `ArkrayAdministratorPromoted`. ADR-0033's acceptance of this path is
-withdrawn.
+This applies to promotions to either administrator role, and to an Admin's changes of their
+team members' credentials too; an account an Admin created counts from its creation (they
+chose the address its invitation or reset goes to), and an invited account is never promoted
+(its pending invitation goes to an address someone else chose: administrators are invited
+with their role). Every promotion to either role raises
+`ArkrayAdministratorPromoted`. ADR-0033's acceptance of this path is withdrawn.
+
+**A temporary password goes with its setter's reach** (ADR-0035): when the administrator who
+set a user's password loses their reach over the account (the user moved out of their team,
+the administrator demoted to User or deactivated), a password still unchanged is replaced by
+a random one nobody knows, the account's sessions end, and an active owner is mailed a reset
+link (`auth.temporary_password_voided`, in the security events). Otherwise an Admin could set
+a password, have the user moved out of their team and still sign in as them
+([authorization.md](authorization.md#admin-set-passwords)).
 
 **A pseudonymised former user is final** (L4, R157): every change to such an account (name,
 role, email, password, reactivation, invitation, MFA reset, clearing a sign-in lock, a support
@@ -178,13 +216,17 @@ administrator could fix another administrator's email or demote them in the UI.
 
 **When the policy is in the way:**
 
-- *Remove an administrator's access*: deactivate the account (Users page).
+- *Remove an administrator's access*: a super admin deactivates the account (Users page).
 - *Wrong or obsolete email*: the administrator changes it themselves in Settings. If they
   can't (they left, or the invitation went to a mistyped address), deactivate the account and
   invite the right address as a new user; reassign their records if needed.
-- *Demote an administrator who stays*: ask them to sign out, then an operator with database
+- *Demote an Admin who stays*: a super admin changes their role on the Users page (*Change
+  role*); their team is left unassigned in the same step, so move its users to another Admin
+  afterwards if they should stay in a team ([runbooks.md](runbooks.md#admins-and-teams)).
+- *Demote a super admin who stays*: ask them to sign out, then an operator with database
   access makes the change in `manage.py shell` and leaves an audit note in the same
-  transaction, for example:
+  transaction, for example (it works for an Admin too, whose team it unassigns as the API
+  does):
 
   ```python
   from django.db import transaction
@@ -195,20 +237,35 @@ administrator could fix another administrator's email or demote them in the UI.
 
   with transaction.atomic():
       user = User.objects.select_for_update().get(email="bina@example.com")
+      previous = user.role  # "admin" or "team_admin"
+      now = timezone.now()
       User.objects.filter(pk=user.pk).update(
           role="sales_user", version=F("version") + 1, session_epoch=F("session_epoch") + 1
       )
       revoked = AccountToken.objects.filter(
           created_by=user, purpose="invitation", status="pending"
-      ).update(status="revoked", revoked_at=timezone.now())
+      ).update(status="revoked", revoked_at=now)
+      # An Admin's team: leave it to the super admins, as the API does.
+      unassigned = User.objects.filter(manager=user).update(
+          manager=None, version=F("version") + 1, updated_at=now
+      )
       audit.record(
           "user.role_changed", actor_id=None, target_type="user", target_id=user.pk,
-          metadata={"from": "admin", "to": "sales_user", "revoked_invitations": revoked,
+          metadata={"from": previous, "to": "sales_user", "revoked_invitations": revoked,
+                    "unassigned_members": unassigned,
                     "reason": "operator: <ticket reference>"},
       )
   ```
 
-  It appears in the security events as a role change by the system.
+  It appears in the security events as a role change by the system, and, because it is a
+  demotion audited with no actor, the account's credentials stay out of every
+  administrator's reach for 7 days (demote-then-unshield). Keep at least one active super
+  admin. Unlike the API, it doesn't void the temporary passwords the demoted administrator
+  set: for any account still on one (their `auth.password_set_by_admin` events), a super
+  admin sets a new one or the owner uses *Forgot password*. To make a super admin an Admin instead (after the upgrade to ADR-0035, for an
+  existing administrator who should manage only a team), set `role="team_admin"` and
+  `"to": "team_admin"`: the account stays an administrator's, protected as before, and its
+  team starts empty until a super admin assigns users to it.
 - *Pseudonymise a former administrator*: no administrator can through the API (403, audit
   SEC-2: it replaces the account's email and password). Once the account is deactivated and
   its work reassigned, an operator runs `manage.py pseudonymise_user <id> --by <admin>
@@ -217,13 +274,15 @@ administrator could fix another administrator's email or demote them in the UI.
 
 - *Reset an administrator's second factor* (lost phone and recovery codes): no
   administrator can, not even their own (422, ADR-0033). After confirming the person out of
-  band, an operator runs `manage.py reset_mfa --email <address> --by <administrator>
-  --reason "<ticket>"` (audited as `mfa.reset` by `operator`, that administrator the actor;
-  the owner is emailed); they sign in with their password and enrol again.
+  band, an operator runs `manage.py reset_mfa --email <address> --by <super admin>
+  --reason "<ticket>"` (`--by` must name an active super admin, ADR-0035; audited as
+  `mfa.reset` by `operator`, that super admin the actor; the owner is emailed); they sign in
+  with their password and enrol again. The same for an Admin's second factor.
 
 ## Two-step verification
 
-Required for administrators in production (ADR-0033, R125; details in
+Required for administrators of both kinds, super admins and Admins, in production (ADR-0033,
+R125; ADR-0035; details in
 [authorization.md](authorization.md#two-step-verification)), and for every user when
 `MFA_REQUIRED_FOR_ALL_USERS` is on, the production default (adversarial review of 73ff1e3,
 L1: a phished or reused password alone no longer opens a sales account either;
@@ -251,10 +310,10 @@ acceptance) a failed sign-in of an unknown email writes the same audit rows in a
 rolls them back, so both run the same statements and nothing an anonymous caller chose is
 kept.
 
-Residual: an administrator can still create or promote *new* administrator accounts (that is
-what the role is for); off-boarding an administrator should include reviewing the
-administrators they created or promoted (security events: `user.created`,
-`user.role_changed`).
+Residual: a super admin can still create or promote *new* administrator accounts of either
+kind (that is what the role is for; an Admin creates users only, into their own team);
+off-boarding a super admin should include reviewing the administrators they created or
+promoted (security events: `user.created`, `user.role_changed`).
 
 ## Password secrecy
 

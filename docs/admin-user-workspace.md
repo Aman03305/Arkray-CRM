@@ -12,6 +12,12 @@ this journey. The design decisions are [ADR-0005](adr/0005-admin-workspace-witho
 (URL-derived workspaces, shared module views). This page describes how the pieces fit
 together and how they are verified.
 
+**Two kinds of administrator** ([ADR-0035](adr/0035-super-administrators-and-teams.md)): a
+**Super admin** opens any user's workspace; an **Admin** (team administrator) opens only the
+workspaces of the users in their own team, whose Users page is "My team". For an Admin,
+any other user's id is the same 404 as a user who doesn't exist, so the journey below is the
+same for both, within their reach ([authorization.md](authorization.md#teams-adr-0035)).
+
 **There is one CRM, not two.** The selected user's pages are the module views everyone
 uses for their own records. The selected user's API is the one everyone uses:
 `/api/v1/workspaces/{userId}/...` instead of `/api/v1/workspaces/me/...`. No admin-only
@@ -54,9 +60,11 @@ anyone learning, using or resetting the user's password and without impersonatio
 `backend/arkray/identity/support.py`):
 
 - **Start**: Users → a user → *Access as user* (optional reason) →
-  `POST /api/v1/admin/support-sessions {user, reason}` (`support.access`). Only for an
-  **active, non-administrator** user with a CRM (422 otherwise: deactivated users stay
-  inaccessible this way). The session is bound to the administrator's browser session (a
+  `POST /api/v1/admin/support-sessions {user, reason}` (`support.access`: a super admin, with
+  any user; or `support.access_team`: an Admin, with a member of their own team only, and
+  anyone else, themselves or a missing id is the same 404, ADR-0035). Only for an
+  **active, non-administrator** user with a CRM (422 otherwise, for an administrator of either
+  kind too: deactivated users stay inaccessible this way). The session is bound to the administrator's browser session (a
   SHA-256 of its key) and lasts `SUPPORT_SESSION_TTL_S` (30 min), never extended; starting one
   ends any earlier one of the same administrator (at most one live: a partial unique index).
 - **During it** the administrator is still themselves: `/auth/me` returns them (plus
@@ -74,8 +82,8 @@ anyone learning, using or resetting the user's password and without impersonatio
   session is worthless), and a new sign-in in the same browser ends it at once, once the
   password is right (`session_changed`; deep security audit I-1: it used to show as active
   until it expired), or conditions failing (the user deactivated or made an administrator,
-  the administrator losing the capability) — checked on every request, so nothing outlives
-  its conditions. An hourly sweep closes expired sessions nobody used again.
+  the administrator losing the capability, or, for an Admin, the user leaving their team) —
+  checked on every request, so nothing outlives its conditions (`not_allowed`). An hourly sweep closes expired sessions nobody used again.
 - **Audit**: `support_session.started` (administrator, user, expiry; the reason in the
   event's expiring detail) and `support_session.ended` (how: exited, expired, signed_out,
   not_allowed, session_changed; the system is the actor when it ended it), both carrying the
@@ -132,21 +140,24 @@ unchanged; a support session is the explicit, time-boxed form of it.
 The backend is authoritative. The frontend shows or hides by capability only for
 convenience.
 
-| Capability | Grants | Without it |
+| Capability (Super admin / Admin) | Grants | Without it |
 |---|---|---|
-| `workspace.view_any` | Opening any user's workspace (`resolve_workspace`, audited) | 404 for every `/workspaces/{uuid}/…`, the same as for a user who doesn't exist; user names on the Users page are plain text, not links |
-| `crm.manage_any` | Creating and changing records in another user's workspace (`authorize_write`) | 403 on writes; the UI hides create, edit and lifecycle actions |
-| `crm.assign_any` | Creating records for another user, changing a deal's owner (ADR-0027) | 403; no *Change owner* action |
-| `users.manage` | The Users page | The banner offers "Back to Dashboard" instead of "Back to Users" |
+| `workspace.view_any` / `workspace.view_team` | Opening any user's workspace, or a team member's (`resolve_workspace`, audited) | 404 for every `/workspaces/{uuid}/…` outside the reach, the same as for a user who doesn't exist; user names on the Users page are plain text, not links |
+| `crm.manage_any` / `crm.manage_team` | Creating and changing records in another user's workspace, or a team member's while they are in the team (`authorize_write`) | 403 on writes; the UI hides create, edit and lifecycle actions |
+| `crm.assign_any` / `crm.assign_team` | Creating records for another user, changing a deal's owner (ADR-0027); an Admin within the team only | 403; no *Change owner* action |
+| `users.manage` / `users.manage_team` | The Users page ("My team" for an Admin) | The banner offers "Back to Dashboard" instead of "Back to Users" ("Back to My team") |
 
-Today only the Admin role holds these. A future role that may only *view* workspaces (an
-auditor, say) would see the workspace read-only, which a test simulates. Opening one's own
-id (`/admin/users/{self}`) resolves to one's own workspace (SELF scope) and the banner says
-"(you)".
+The Super admin holds the organisation-wide capabilities, the Admin their team counterparts
+(ADR-0035; [authorization.md](authorization.md#roles--capabilities-built)); the web app
+checks each pair (`frontend/src/lib/viewer.ts`) and the API applies the reach. A future role
+that may only *view* workspaces (an auditor, say) would see the workspace read-only, which a
+test simulates. Opening one's own id (`/admin/users/{self}`) resolves to one's own workspace
+(SELF scope) and the banner says "(you)".
 
 ## Selected-user lifecycle
 
-1. **Open.** The layout validates the id (UUID or 404) and checks `workspace.view_any`.
+1. **Open.** The layout validates the id (UUID or 404) and checks `workspace.view_any` or
+   `workspace.view_team` (whether this user is in the team is the API's answer: 404 if not).
    `UserWorkspaceFrame` then sends one `GET /api/v1/workspaces/{id}`, which authorises the
    access, writes the `workspace.accessed` audit event, and returns
    `{kind, subject: {id, full_name, status}}`: only what the banner needs, with no email,
@@ -163,8 +174,8 @@ id (`/admin/users/{self}`) resolves to one's own workspace (SELF scope) and the 
    their account is invited or deactivated. The current module is marked with `aria-current="page"`, a bar and
    a heavier weight, and Users is not marked at the same time. Companies and Products don't
    exist. Settings stays the administrator's own profile.
-4. **Leave.** "Back to Users" (or "Back to Dashboard" without `users.manage`), the sidebar's
-   Users link, or the browser's Back button. Nothing about the selected user is stored
+4. **Leave.** "Back to Users" ("Back to My team" for an Admin; "Back to Dashboard" without
+   `users.manage` or `users.manage_team`), the sidebar's Users link, or the browser's Back button. Nothing about the selected user is stored
    outside the URL and the query cache: no browser storage, no global "selected user".
    Two tabs on two users stay independent.
 
@@ -180,7 +191,8 @@ id (`/admin/users/{self}`) resolves to one's own workspace (SELF scope) and the 
   The board offers no "New opportunity" button for such a workspace instead of a form that
   can't be saved.
 - Nothing is reactivated or reassigned automatically. Reassigning the user's leads to an
-  active user is an explicit admin action (`crm.assign_any`).
+  active user is an explicit admin action (`crm.assign_any`; an Admin's `crm.assign_team`,
+  to themselves or an active member of their team).
 - An **invited** user (who hasn't accepted the invitation) is treated the same way: readable,
   and unable to receive new work until activated.
 - Restoring archived *open* work (an open deal, an open task, a scheduled meeting) is new
@@ -257,6 +269,10 @@ order; Priya's request failing; and Back/Forward across Users → Rahul Dashboar
   every row records a real access; nothing goes unaudited.
 - Every write is audited individually by its domain service, with actor = admin and
   subject = user (table above).
+- An Admin's `all` (their team, ADR-0035) is audited as target `all` with metadata
+  `scope: team` and no subject, once per window like the organisation's, under a window
+  marker of its own (`team`): an Admin made a Super admin within the same 15 minutes is
+  audited again when they first open the organisation.
 - Log lines of a delegated request carry `user_id` (the actor) and `subject_user_id` (the
   selected user, or `all`), alongside the request id. CRM content (note text, descriptions,
   contact data, amounts) is never logged.
@@ -284,6 +300,7 @@ order; Priya's request failing; and Back/Forward across Users → Rahul Dashboar
 | Actor vs subject for lead, opportunity, task, meeting and note writes, including audit and stage history; no payload field (owner, created_by, workspace, user_id, actor, role, capabilities, completed_by, version, id) moves a write out of the URL's workspace | same |
 | Deactivation race, delegated-access audit window, no impersonation, query counts | same |
 | Earlier cross-user suites (sales users, admin workspaces per module) | `tests/security/test_{leads,pipeline,activities,dashboard}_cross_user.py` |
+| Admins (ADR-0035): a member's workspace opens, anyone else's is the 404 of nobody on every route; the team's `all`; writes re-check the team; support sessions with team members only, ended when the member leaves the team | `tests/security/test_teams_workspaces.py`, `test_teams_crm.py`, `test_teams_identity.py` |
 | Frontend: name link, banner, sidebar, every page's links and API calls, create and edit flows, switch, slow-response race, rapid switching, failures, Back/Forward, deep link, tabs and storage, URL canonicalisation, deactivated users, view-only managers, mutation cache isolation | `frontend/src/features/workspace/admin-user-workspace.test.tsx`, `src/lib/workspace.test.ts`, `src/components/shell/*.test.tsx` |
 
 ## Query counts

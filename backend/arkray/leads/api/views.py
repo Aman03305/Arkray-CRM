@@ -24,7 +24,7 @@ from arkray.core.api import IDEMPOTENCY_HEADER, ApiView, idempotency_key, valida
 from arkray.core.errors import InvalidInputError, PermissionDeniedError
 from arkray.core.keyset import CursorBinding, KeysetPaginator, page_links
 from arkray.identity.models import User
-from arkray.identity.permissions import IsActiveUser, requires
+from arkray.identity.permissions import IsActiveUser, requires_any
 from arkray.identity.policy import Capability
 from arkray.identity.workspaces import authorize_write, resolve_workspace, workspace_segment
 
@@ -34,6 +34,15 @@ from ..models import Rating
 from . import serializers as s
 
 OWNER_FILTER_ORG_ONLY = "Filtering by owner is only available in the organization-wide workspace."
+
+
+def owner_filter_allowed(scope: AccessScope) -> bool:
+    """An `owner` filter is offered where a workspace has several owners: organisation-wide,
+    and a team administrator's team (ADR-0035). It narrows the scope only (selectors filter
+    within `scope.apply()`), so an owner outside it lists nothing, exactly as an id that
+    exists nowhere."""
+    return scope.is_organization_wide or scope.is_team
+
 
 IDEMPOTENCY_PARAMETER = OpenApiParameter(
     IDEMPOTENCY_HEADER,
@@ -79,7 +88,7 @@ class LeadListView(ApiView):
     def get(self, request: Request, workspace: str) -> Response:
         _, scope = _scope(request, workspace)
         params = validated(s.LeadListQuerySerializer, request.query_params)
-        if "owner" in params and not scope.is_organization_wide:
+        if "owner" in params and not owner_filter_allowed(scope):
             raise InvalidInputError(details={"owner": [OWNER_FILTER_ORG_ONLY]})
         leads = selectors.lead_list(
             scope,
@@ -209,10 +218,11 @@ class LeadStatusView(ApiView):
 
 
 class LeadAssignView(ApiView):
-    """Reassign a lead (crm.assign_any). The response shows the lead as reassigned, even if
-    it has thereby left the workspace it was reassigned from."""
+    """Reassign a lead (crm.assign_any; or crm.assign_team, within the team: the service
+    applies the reach, ADR-0035). The response shows the lead as reassigned, even if it has
+    thereby left the workspace it was reassigned from."""
 
-    permission_classes = [requires(Capability.CRM_ASSIGN_ANY)]
+    permission_classes = [requires_any(Capability.CRM_ASSIGN_ANY, Capability.CRM_ASSIGN_TEAM)]
 
     @extend_schema(
         operation_id="leads_assign",

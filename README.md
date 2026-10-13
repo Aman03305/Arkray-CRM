@@ -7,9 +7,13 @@ frontend.
 Normal users work in three modules — **Dashboard, Pipeline, Activities**. A new opportunity
 creates its lead (the canonical customer record) in the same transaction; leads are shown
 read-only (their page, the dashboard's new leads, search) but there is no Leads module
-([ADR-0027](docs/adr/0027-leads-removed-from-the-ui.md), [ADR-0028](docs/adr/0028-opportunity-creates-its-lead.md)). Admins
-additionally manage **Users** and can open any user's CRM workspace
-(`/admin/users/{id}/dashboard`), with every such access authorised and audited server-side.
+([ADR-0027](docs/adr/0027-leads-removed-from-the-ui.md), [ADR-0028](docs/adr/0028-opportunity-creates-its-lead.md)).
+Administrators come in two kinds ([ADR-0035](docs/adr/0035-super-administrators-and-teams.md)):
+**Super admins** manage every user, open any user's CRM workspace
+(`/admin/users/{id}/dashboard`) and own the organisation-wide areas (shared pipeline
+configuration, security events, privacy requests); **Admins** manage only the users of their
+own team and see only their own and their team's records. Every such access is authorised
+and audited server-side.
 **Ask Arkray** answers questions about CRM data strictly within the asker's permissions.
 
 > Status: **all eleven phases built** (identity and users, leads, pipeline, activities,

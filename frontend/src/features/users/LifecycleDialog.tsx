@@ -6,7 +6,8 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { describeError } from "@/lib/api/errors";
 import type { AdminUser } from "@/lib/api/types";
 
-import { usersApi } from "./api";
+import { isAdministratorRole, usersApi } from "./api";
+import { useOutOfReachOn404 } from "./reach";
 
 export type LifecycleAction = "deactivate" | "activate" | "resend";
 
@@ -20,6 +21,10 @@ function copy(action: LifecycleAction, user: AdminUser) {
         body: [
           "They'll be signed out everywhere immediately and won't be able to sign in.",
           "Their records and history are kept, and you can reactivate them later.",
+          // ADR-0035: an Admin's team isn't reassigned automatically.
+          ...(user.role === "team_admin"
+            ? ["Their users stay in their team, managed only by Super admins until you give them another Admin."]
+            : []),
         ],
         done: (u: AdminUser) => `${u.full_name} was deactivated.`,
       };
@@ -31,8 +36,8 @@ function copy(action: LifecycleAction, user: AdminUser) {
         body: [
           !user.activated_at
             ? "They never set a password, so a new invitation will be emailed to them."
-            : user.role === "admin"
-              ? // ADR-0033 (R126): an administrator's old password never works again.
+            : isAdministratorRole(user.role)
+              ? // ADR-0033 (R126), both kinds of administrator (ADR-0035): their old password never works again.
                 `Their old password won't work again: a link to choose a new one will be emailed to ${user.email}.`
               : "They'll be able to sign in again with their existing password.",
         ],
@@ -67,6 +72,8 @@ export function LifecycleDialog({ action, user, onClose, onDone }: {
     mutationFn: () => RUN[action](user.id),
     onSuccess: (updated) => onDone(updated, text.done(updated)),
   });
+  // Out of reach now (404): the Users page closes this and says why (ADR-0035).
+  useOutOfReachOn404(run.error, user);
   return (
     <ConfirmDialog
       open

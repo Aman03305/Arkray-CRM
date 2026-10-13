@@ -8,6 +8,7 @@ import type { AdminUser } from "@/lib/api/types";
 import { formatDateTime } from "@/lib/format";
 
 import { usersApi } from "./api";
+import { useOutOfReachOn404 } from "./reach";
 
 /**
  * Lifting the lock too many failed sign-ins in a day put on a user's sign-in from new browsers
@@ -22,6 +23,8 @@ export function ClearSignInLockDialog({ user, onClose, onDone }: {
     mutationFn: () => usersApi.clearSignInLock(user.id),
     onSuccess: (updated) => onDone(updated, `${updated.full_name} can sign in from a new browser again.`),
   });
+  // Out of reach now (404): the Users page closes this and says why (ADR-0035).
+  useOutOfReachOn404(clear.error, user);
   return (
     <ConfirmDialog
       open

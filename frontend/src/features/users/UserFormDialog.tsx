@@ -10,9 +10,13 @@ import { PasswordField, SelectField, TextField } from "@/components/ui/Field";
 import { useFocusFirstInvalid } from "@/components/ui/useFocusFirstInvalid";
 import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
 import type { AdminUser, Role, UserCreateRequest, UserUpdateRequest } from "@/lib/api/types";
+import { canManageAdmins } from "@/lib/viewer";
+import { useViewer } from "@/lib/viewer-context";
 
-import { ROLE_OPTIONS, USERS_QUERY_KEY, usersApi } from "./api";
+import { isAdministratorRole, ROLE_OPTIONS, roleChangeBlockedReason, USERS_QUERY_KEY, usersApi } from "./api";
+import { ManagerSelect } from "./ManagerSelect";
 import { generatePassword } from "./password";
+import { useOutOfReachOn404 } from "./reach";
 
 type Mode = { kind: "create" } | { kind: "edit"; user: AdminUser; isSelf: boolean };
 
@@ -27,30 +31,65 @@ interface Draft {
   lastName: string;
   email: string;
   role: Role;
+  /** A sales user's Admin (ADR-0035): a team administrator's id, or "" for none. */
+  manager: string;
+  managerLabel: string;
 }
 
 function initialDraft(mode: Mode): Draft {
   return mode.kind === "edit"
-    ? { firstName: mode.user.first_name, lastName: mode.user.last_name, email: mode.user.email, role: mode.user.role }
-    : { firstName: "", lastName: "", email: "", role: "sales_user" };
+    ? {
+        firstName: mode.user.first_name,
+        lastName: mode.user.last_name,
+        email: mode.user.email,
+        role: mode.user.role,
+        manager: mode.user.manager?.id ?? "",
+        managerLabel: mode.user.manager?.full_name ?? "",
+      }
+    : { firstName: "", lastName: "", email: "", role: "sales_user", manager: "", managerLabel: "" };
 }
 
-function changes(user: AdminUser, draft: Draft): UserUpdateRequest {
-  const body: { first_name?: string; last_name?: string; role?: Role; version: number } = { version: user.version };
+/**
+ * What changed. Role and Admin only from a Super admin: the API refuses both from
+ * a team administrator. Only a sales user has an Admin: one becoming an administrator loses
+ * theirs on the server, so none is sent then.
+ */
+function changes(user: AdminUser, draft: Draft, superAdmin: boolean): UserUpdateRequest {
+  const body: { first_name?: string; last_name?: string; role?: Role; manager?: string | null; version: number } = {
+    version: user.version,
+  };
   if (draft.firstName.trim() !== user.first_name) body.first_name = draft.firstName.trim();
   if (draft.lastName.trim() !== user.last_name) body.last_name = draft.lastName.trim();
-  if (draft.role !== user.role) body.role = draft.role;
+  if (superAdmin) {
+    if (draft.role !== user.role) body.role = draft.role;
+    if (draft.role === "sales_user" && draft.manager !== (user.manager?.id ?? "")) body.manager = draft.manager || null;
+  }
   return body;
 }
+
+/** The chosen role's description; for an Admin leaving the role, what happens to their team. */
+function roleHint(mode: Mode, role: Role): string | undefined {
+  const description = ROLE_OPTIONS.find((o) => o.value === role)?.description;
+  if (mode.kind === "edit" && mode.user.role === "team_admin" && role !== "team_admin") {
+    return `${description ?? ""} Their users will have no Admin until you choose one, and invitations they sent will be cancelled.`.trim();
+  }
+  return description;
+}
+
+const NOBODY = { id: "", full_name: "" };
 
 const LINK_BUTTON = "rounded-sm text-sm font-medium text-brand-700 hover:underline disabled:opacity-50";
 
 /**
- * Create a user, or edit names and role (email changes are a separate, explicit operation).
- * A new user gets an emailed invitation to choose their own password (the default: no one
- * else ever knows it) or, if preferred, an initial password from the administrator (they
- * must replace it when they first sign in). That password lives only in this form: it is
- * cleared once the user exists and is never shown again.
+ * Create a user, or edit names, role and Admin (email changes are a separate, explicit
+ * operation). A new user gets an emailed invitation to choose their own password (the
+ * default: no one else ever knows it) or, if preferred, an initial password from the
+ * administrator (they must replace it when they first sign in). That password lives only in
+ * this form: it is cleared once the user exists and is never shown again.
+ *
+ * Teams (ADR-0035): a Super admin chooses the role (User, Admin, Super admin) and a User's
+ * Admin. An Admin (team administrator) chooses neither: whoever they create is a User in
+ * their own team, and roles are not theirs to change.
  */
 export function UserFormDialog({ mode, onClose, onSaved }: {
   mode: Mode;
@@ -64,20 +103,25 @@ export function UserFormDialog({ mode, onClose, onSaved }: {
   const [clientErrors, setClientErrors] = useState<Record<string, string[]>>({});
   const form = useRef<HTMLFormElement>(null);
   const queryClient = useQueryClient();
-  // Administrators always choose their own password (the server refuses one set for them).
-  const invitedOnly = mode.kind === "create" && draft.role === "admin";
-  // Your own role, and another administrator's, can't be changed here (the API refuses both).
-  const roleLocked = mode.kind === "edit" && (mode.isSelf || mode.user.role === "admin");
+  // Roles and teams are the Super admin's (users.manage); an Admin's new users join their team.
+  const superAdmin = canManageAdmins(useViewer());
+  const role: Role = superAdmin ? draft.role : mode.kind === "edit" ? mode.user.role : "sales_user";
+  // Administrators of either kind always choose their own password (the server refuses one
+  // set for them).
+  const invitedOnly = mode.kind === "create" && isAdministratorRole(role);
+  const lockReason = mode.kind === "edit" ? roleChangeBlockedReason(mode.user, mode.isSelf) : null;
+  const choosesManager = superAdmin && role === "sales_user";
   const withPassword = mode.kind === "create" && activation === "password" && !invitedOnly;
 
   const save = useMutation({
     mutationFn: () => {
-      if (mode.kind === "edit") return usersApi.update(mode.user.id, changes(mode.user, draft));
+      if (mode.kind === "edit") return usersApi.update(mode.user.id, changes(mode.user, draft, superAdmin));
       const body: UserCreateRequest = {
         first_name: draft.firstName.trim(),
         last_name: draft.lastName.trim(),
         email: draft.email.trim(),
-        role: draft.role,
+        role,
+        ...(choosesManager && draft.manager ? { manager: draft.manager } : {}),
         ...(withPassword ? { password } : {}),
       };
       return usersApi.create(body);
@@ -103,6 +147,8 @@ export function UserFormDialog({ mode, onClose, onSaved }: {
       }
     },
   });
+  // The edited user is out of reach now (404): the Users page closes this and says why (ADR-0035).
+  useOutOfReachOn404(mode.kind === "edit" ? save.error : null, mode.kind === "edit" ? mode.user : NOBODY);
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
@@ -131,7 +177,14 @@ export function UserFormDialog({ mode, onClose, onSaved }: {
   const errors = { ...server, ...clientErrors };
   useFocusFirstInvalid(form, Object.keys(clientErrors).length ? clientErrors : save.error);
   const stale = isApiError(save.error, 409) && mode.kind === "edit";
-  const knownFields = ["first_name", "last_name", "email", "role", ...(withPassword ? ["password"] : [])];
+  const knownFields = [
+    "first_name",
+    "last_name",
+    "email",
+    ...(superAdmin ? ["role"] : []),
+    ...(choosesManager ? ["manager"] : []),
+    ...(withPassword ? ["password"] : []),
+  ];
   const showBanner = save.isError && !knownFields.some((f) => server[f]?.length);
   const banner = describeError(save.error);
   const set = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }));
@@ -183,22 +236,31 @@ export function UserFormDialog({ mode, onClose, onSaved }: {
             hint="Used to sign in."
           />
         ) : null}
-        <SelectField
-          label="Role"
-          name="role"
-          value={draft.role}
-          onChange={(e) => set({ role: e.target.value as Role })}
-          options={ROLE_OPTIONS}
-          disabled={roleLocked}
-          errors={errors.role}
-          hint={
-            mode.kind === "edit" && mode.isSelf
-              ? "You can't change your own role."
-              : roleLocked
-                ? "An administrator's role can't be changed here. To remove their access, deactivate the account."
-                : ROLE_OPTIONS.find((o) => o.value === draft.role)?.description
-          }
-        />
+        {superAdmin ? (
+          <SelectField
+            label="Role"
+            name="role"
+            value={draft.role}
+            onChange={(e) => set({ role: e.target.value as Role })}
+            options={ROLE_OPTIONS}
+            disabled={lockReason !== null}
+            errors={errors.role}
+            hint={lockReason ?? roleHint(mode, draft.role)}
+          />
+        ) : mode.kind === "create" ? (
+          <p className="rounded-md bg-slate-50 px-3 py-2 text-sm text-slate-600">
+            New users join your team: you manage their account and can open their CRM.
+          </p>
+        ) : null}
+        {choosesManager ? (
+          <ManagerSelect
+            value={draft.manager}
+            valueLabel={draft.managerLabel}
+            onChange={(manager, managerLabel) => set({ manager, managerLabel })}
+            errors={errors.manager}
+            excludeId={mode.kind === "edit" ? mode.user.id : undefined}
+          />
+        ) : null}
         {invitedOnly ? (
           <p className="rounded-md bg-slate-50 px-3 py-2 text-sm text-slate-600">
             Administrators are invited: we&apos;ll email them a link to set their own password.

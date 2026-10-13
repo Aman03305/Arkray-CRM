@@ -32,10 +32,15 @@ from arkray.core.api import (
 from arkray.core.errors import InvalidInputError, PermissionDeniedError
 from arkray.core.keyset import CursorBinding, KeysetPaginator, page_links
 from arkray.identity.models import User
-from arkray.identity.permissions import IsActiveUser, requires
+from arkray.identity.permissions import IsActiveUser, requires_any
 from arkray.identity.policy import Capability
 from arkray.identity.workspaces import authorize_write, resolve_workspace, workspace_segment
-from arkray.leads.api.views import IDEMPOTENCY_PARAMETER, NOT_FOUND, OWNER_FILTER_ORG_ONLY
+from arkray.leads.api.views import (
+    IDEMPOTENCY_PARAMETER,
+    NOT_FOUND,
+    OWNER_FILTER_ORG_ONLY,
+    owner_filter_allowed,
+)
 
 from .. import (
     configuration,
@@ -81,7 +86,7 @@ def _scope(request: Request, workspace: str) -> tuple[User, AccessScope]:
 
 
 def _filters(params: dict[str, Any], scope: AccessScope, **extra: Any) -> OpportunityFilters:
-    if "owner" in params and not scope.is_organization_wide:
+    if "owner" in params and not owner_filter_allowed(scope):
         raise InvalidInputError(details={"owner": [OWNER_FILTER_ORG_ONLY]})
     return OpportunityFilters(
         lead_id=params.get("lead"),
@@ -644,12 +649,13 @@ class OpportunityRestoreView(ApiView):
 
 
 class OpportunityAssignView(ApiView):
-    """Change an open opportunity's owner (crm.assign_any). Ownership follows the customer
-    record, so its other open opportunities and current work move too (ADR-0027). The
-    response shows the opportunity as reassigned, even if it has thereby left the workspace
-    it was reassigned from (as leads' assign)."""
+    """Change an open opportunity's owner (crm.assign_any; or crm.assign_team, within the
+    team: the service applies the reach, ADR-0035). Ownership follows the customer record, so
+    its other open opportunities and current work move too (ADR-0027). The response shows the
+    opportunity as reassigned, even if it has thereby left the workspace it was reassigned
+    from (as leads' assign)."""
 
-    permission_classes = [requires(Capability.CRM_ASSIGN_ANY)]
+    permission_classes = [requires_any(Capability.CRM_ASSIGN_ANY, Capability.CRM_ASSIGN_TEAM)]
 
     @extend_schema(
         operation_id="opportunities_assign",
@@ -743,11 +749,12 @@ class OpportunityCorrectionsView(ApiView):
 class OpportunityCorrectView(ApiView):
     """An administrator corrects a won or lost deal's value or dates, which no edit changes
     while it is closed (adversarial review of 73ff1e3, M2): with a reason, at the version
-    last seen, appended to the deal's corrections. crm.manage_any, a recent second factor
+    last seen, appended to the deal's corrections. crm.manage_any, or crm.manage_team for a
+    deal of the team (ADR-0035; the service applies the reach), a recent second factor
     (ADR-0033), and never in a support session (the administrator's own context, as for user
     administration)."""
 
-    permission_classes = [requires(Capability.CRM_MANAGE_ANY)]
+    permission_classes = [requires_any(Capability.CRM_MANAGE_ANY, Capability.CRM_MANAGE_TEAM)]
     refused_in_support_session = True
     requires_recent_mfa = True
 

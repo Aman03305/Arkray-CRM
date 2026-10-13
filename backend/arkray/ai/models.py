@@ -92,6 +92,7 @@ class WorkspaceKind(models.TextChoices):
     # The AccessScope kinds (core.access.ScopeKind), stored with the conversation.
     SELF = "self"
     USER = "user"
+    TEAM = "team"  # a team administrator's team (ADR-0035)
     ORGANIZATION = "organization"
 
 
@@ -99,7 +100,7 @@ class Conversation(UUIDPrimaryKeyModel):
     actor = models.ForeignKey(User, on_delete=models.CASCADE, related_name="+", db_index=False)
     workspace_kind = models.CharField(max_length=16, choices=WorkspaceKind.choices)
     # The workspace's user: the actor for their own workspace, the selected user for an
-    # administrator's view of one user, NULL for the organisation.
+    # administrator's view of one user, NULL for the organisation and a team.
     subject = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name="+", null=True, blank=True, db_index=False
     )
@@ -118,6 +119,7 @@ class Conversation(UUIDPrimaryKeyModel):
             models.CheckConstraint(
                 condition=(
                     Q(workspace_kind=WorkspaceKind.ORGANIZATION, subject__isnull=True)
+                    | Q(workspace_kind=WorkspaceKind.TEAM, subject__isnull=True)
                     | Q(
                         workspace_kind=WorkspaceKind.SELF,
                         subject__isnull=False,

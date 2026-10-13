@@ -20,6 +20,15 @@ export const CAPABILITIES = [
   "ai.query",
   "support.access",
   "privacy.manage",
+  // A team administrator's counterparts (ADR-0035): the same powers over themselves and the
+  // users they manage only. Distinct strings, so a check written for the organisation-wide
+  // capability shows a team administrator nothing (fail closed).
+  "crm.view_team",
+  "workspace.view_team",
+  "crm.assign_team",
+  "crm.manage_team",
+  "users.manage_team",
+  "support.access_team",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -92,6 +101,55 @@ export function canAsk(viewer: Viewer | null | undefined): boolean {
 
 export function hasCapability(viewer: Viewer | null | undefined, capability: Capability): boolean {
   return viewer?.capabilities.includes(capability) ?? false;
+}
+
+export function hasAnyCapability(viewer: Viewer | null | undefined, capabilities: readonly Capability[]): boolean {
+  return capabilities.some((capability) => hasCapability(viewer, capability));
+}
+
+// --- Super administrators and team administrators (ADR-0035) ---------------------------------
+// Each power exists organisation-wide (a super administrator's) and for a team (a team
+// administrator's: themselves and the users they manage). These name the pair, so call sites
+// read as what they offer; the API applies the reach.
+
+/** The Users page: everyone (users.manage), or oneself and one's team (users.manage_team). */
+export function canManageUsers(viewer: Viewer | null | undefined): boolean {
+  return hasAnyCapability(viewer, ["users.manage", "users.manage_team"]);
+}
+
+/** Roles and teams, and administrators' accounts: the super administrator only. */
+export function canManageAdmins(viewer: Viewer | null | undefined): boolean {
+  return hasCapability(viewer, "users.manage");
+}
+
+/** Open another user's CRM workspace (anyone's, or a team member's). */
+export function canOpenUserWorkspaces(viewer: Viewer | null | undefined): boolean {
+  return hasAnyCapability(viewer, ["workspace.view_any", "workspace.view_team"]);
+}
+
+/** Choose who owns a record (the owner pickers, GET /assignees). */
+export function canAssign(viewer: Viewer | null | undefined): boolean {
+  return hasAnyCapability(viewer, ["crm.assign_any", "crm.assign_team"]);
+}
+
+/** Write in someone else's workspace or the overview, and correct a closed deal. */
+export function canManageOthersRecords(viewer: Viewer | null | undefined): boolean {
+  return hasAnyCapability(viewer, ["crm.manage_any", "crm.manage_team"]);
+}
+
+/** Start a support session in a user's CRM. */
+export function canStartSupport(viewer: Viewer | null | undefined): boolean {
+  return hasAnyCapability(viewer, ["support.access", "support.access_team"]);
+}
+
+/**
+ * What the viewer's "all" workspace covers: the whole organisation (crm.view_all), their team
+ * (crm.view_team), or nothing (null: their own workspace is their home).
+ */
+export function overviewKind(viewer: Viewer | null | undefined): "organization" | "team" | null {
+  if (hasCapability(viewer, "crm.view_all")) return "organization";
+  if (hasCapability(viewer, "crm.view_team")) return "team";
+  return null;
 }
 
 export function initials(fullName: string): string {

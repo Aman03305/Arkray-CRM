@@ -19,7 +19,7 @@ import { formatPercent } from "@/lib/money";
 import { receivesNewWork, selectedUserId, useWorkspaceSubject } from "@/features/workspace/api";
 import { hasCapability } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
-import { opportunityHref, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
+import { isOverview, opportunityHref, type Workspace, workspaceApiSegment, workspaceHref } from "@/lib/workspace";
 
 import type { AgreedTerms } from "./AgreedTerms";
 import { activeBoardFilterCount, type BoardFilters, CARDS_PER_STAGE, pipelineApi, pipelineKeys } from "./api";
@@ -37,7 +37,8 @@ type Problem = MoveProblem;
 
 /**
  * The Pipeline, rendered unchanged in every workspace: a salesperson's own (/pipeline),
- * the organisation for administrators (/pipeline), and one user's pipeline opened by an
+ * the overview for administrators (/pipeline: the organisation, or a team administrator's
+ * team), and one user's pipeline opened by an
  * administrator (/admin/users/{id}/pipeline). Only the API path differs, and every query
  * key carries the workspace, so one user's cards or totals never appear under another's.
  */
@@ -166,9 +167,10 @@ export function PipelineBoardView({ workspace, create = false }: { workspace: Wo
   ) : null;
   const activePipelines = (pipelines.data?.results ?? []).filter((p) => p.is_active);
   const current = activePipelines.find((p) => p.id === (data?.pipeline.id ?? filters.pipeline));
-  // A pipeline of one's own (or, organisation-wide, a shared one) can be created here.
-  const canCreatePipeline =
-    workspace.kind === "organization" ? hasCapability(viewer, "config.manage") : permissions.canWrite;
+  // A pipeline of one's own (or, organisation-wide, a shared one) can be created here. Never
+  // in a team's overview (ADR-0035: shared pipelines are a super administrator's; a member's
+  // own pipeline is configured from their workspace): config.manage is the super administrator's.
+  const canCreatePipeline = isOverview(workspace) ? hasCapability(viewer, "config.manage") : permissions.canWrite;
   // Opened by a route (the header's "New opportunity"): closing returns to the board; saving
   // lands on the new deal, with its notice.
   const closeCreate = () => {
@@ -177,7 +179,7 @@ export function PipelineBoardView({ workspace, create = false }: { workspace: Wo
   };
   const total = columns.reduce((sum, c) => sum + c.count, 0);
   const filtered = activeBoardFilterCount(filters) > 0;
-  const showOwner = workspace.kind === "organization";
+  const showOwner = isOverview(workspace);
   const listStage = wide ? columns.find((c) => c.stage.id === state.stage) : null;
 
   return (
@@ -728,11 +730,11 @@ function BoardFiltersBar({
             The end date must be on or after the start date.
           </p>
         ) : null}
-        {workspace.kind === "organization" ? (
+        {isOverview(workspace) ? (
           <div className="min-w-56">
             <OwnerSelect
               label="Owner"
-              placeholder="Everyone"
+              placeholder={workspace.kind === "team" ? "Everyone in my team" : "Everyone"}
               value={filters.owner}
               valueLabel={filters.ownerLabel}
               onChange={(id, label) => onChange({ owner: id, ownerLabel: label })}

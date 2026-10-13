@@ -50,7 +50,14 @@ def _trigram_index(field: str, name: str) -> GinIndex:
 
 
 class Role(models.TextChoices):
-    ADMIN = "admin", "Admin"
+    # The organisation-wide administrator. The stored value stays "admin" (ADR-0035): every
+    # administrator from before teams keeps exactly the powers they had, with no data
+    # migration, and a previous release reading the table during a rolling deploy sees the
+    # role it knows.
+    ADMIN = "admin", "Super admin"
+    # An administrator of their own team: the sales users whose `manager` they are
+    # (ADR-0035). A value the previous release doesn't know, so it grants nothing there.
+    TEAM_ADMIN = "team_admin", "Admin"
     SALES_USER = "sales_user", "User"
 
 
@@ -207,6 +214,19 @@ class User(UUIDPrimaryKeyModel, TimeStampedModel, AbstractBaseUser):
     # trigger refuses clearing the mark), and user administration refuses every change to it
     # (adversarial review of 73ff1e3, L4: it was an email-domain test nothing else asked).
     pseudonymised_at = models.DateTimeField(null=True, blank=True)
+    # The team administrator (role team_admin) who manages this sales user, or NULL: managed
+    # by the super administrators only (ADR-0035). Only sales users have one (CHECK below);
+    # that it names a team administrator is kept by identity.services under the
+    # user-administration lock, and every reader re-checks the manager's own role
+    # (identity.teams), so a stale reference grants nothing.
+    manager = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="team_members",
+        db_index=False,  # the partial index below
+    )
 
     USERNAME_FIELD = "email"
     EMAIL_FIELD = "email"
@@ -223,8 +243,25 @@ class User(UUIDPrimaryKeyModel, TimeStampedModel, AbstractBaseUser):
             _trigram_index("first_name", "identity_user_first_trgm"),
             _trigram_index("last_name", "identity_user_last_trgm"),
             _trigram_index("email", "identity_user_email_trgm"),
+            # A team administrator's team (identity.teams: workspace resolution, the users
+            # list, assignment checks).
+            models.Index(
+                fields=["manager"],
+                name="identity_user_manager_idx",
+                condition=Q(manager__isnull=False),
+            ),
         ]
         constraints = [
+            # Only a sales user is managed by a team administrator; administrators of either
+            # kind answer to the super administrators (ADR-0035).
+            models.CheckConstraint(
+                condition=Q(manager__isnull=True) | Q(role="sales_user"),
+                name="identity_user_manager_only_for_sales_users",
+            ),
+            models.CheckConstraint(
+                condition=Q(manager__isnull=True) | ~Q(manager=F("id")),
+                name="identity_user_manager_not_self",
+            ),
             models.CheckConstraint(
                 condition=Q(email=Lower("email")), name="identity_user_email_lowercase"
             ),
@@ -514,7 +551,9 @@ class WorkspaceAccessWindow(models.Model):
 
     id = models.BigAutoField(primary_key=True)
     actor_id = models.UUIDField()
-    workspace = models.CharField(max_length=36)  # a user id, or "all"
+    # A user id, "all" (the organisation) or "team" (a team administrator's "all", ADR-0035:
+    # its own window, so a promotion within one still audits the organisation).
+    workspace = models.CharField(max_length=36)
     window_start = models.DateTimeField()
 
     class Meta:

@@ -73,7 +73,7 @@ interface OpportunityDrawerProps {
  * behind it on wide screens; full width on phones. Grouped: customer, instrument, timeline,
  * pipeline, additional (the pipeline's custom fields). Nobody names the opportunity or picks
  * a lead: the server names it after its customer and instrument and makes its lead from the
- * customer details, with it, in one transaction (ADR-0028). Organisation-wide its owner is
+ * customer details, with it, in one transaction (ADR-0028). In the overview its owner is
  * chosen here; elsewhere it is the workspace's user.
  */
 export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPipeline, onClose, onSaved }: OpportunityDrawerProps) {
@@ -318,7 +318,7 @@ export function OpportunityDrawer({ workspace, opportunity, pipelineId: boardPip
     save.reset();
   };
 
-  // An owner error shows under the Owner field organisation-wide; elsewhere there is none (a
+  // An owner error shows under the Owner field in the overview; elsewhere there is none (a
   // deactivated user's workspace takes nothing new), so it is the banner's.
   // The agreed terms only while their fields are shown: a stage retyped to negotiation
   // after the panel opened is refused with nothing on screen, so the banner says why (review).

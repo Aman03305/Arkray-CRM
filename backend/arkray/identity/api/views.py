@@ -31,7 +31,7 @@ from arkray.core.throttling import AnonRateThrottle, ScopedRateThrottle, UserRat
 from .. import authentication, mfa_services, selectors, services, support, throttling
 from ..emails import mask_email
 from ..models import Role, User, UserStatus
-from ..permissions import IsActiveUser, requires
+from ..permissions import IsActiveUser, requires, requires_any
 from ..policy import Capability
 from ..workspaces import resolve_workspace
 from . import serializers as s
@@ -439,7 +439,10 @@ class InvitationAcceptView(ApiView):
         return Response({"email": user.email, "first_name": user.first_name})
 
 
-# --- user administration (users.manage) -----------------------------------------------------
+# --- user administration (users.manage, or users.manage_team: ADR-0035) ----------------------
+# A super administrator or a team administrator may ask; identity.services and the selectors
+# then apply the caller's reach (a team administrator: themselves and their team, 404 for
+# anyone else, whatever the method).
 ADMIN_USER_ORDERING = KeysetOrdering(
     "-created_at", (SortKey("created_at", descending=True), SortKey("id", descending=True))
 )
@@ -447,7 +450,7 @@ ADMIN_USER_PAGE_SIZE = 25
 
 
 class AdminUserListView(ApiView):
-    permission_classes = [requires(Capability.USERS_MANAGE)]
+    permission_classes = [requires_any(Capability.USERS_MANAGE, Capability.USERS_MANAGE_TEAM)]
     refused_in_support_session = True
     requires_recent_mfa = frozenset({"POST"})  # creating a user; listing needs no code
     query_param_methods = frozenset({"GET"})
@@ -460,9 +463,11 @@ class AdminUserListView(ApiView):
     def get(self, request: Request) -> Response:
         params = _validated(s.UserListQuerySerializer, request.query_params)
         users = selectors.admin_user_list(
+            actor=_actor(request),
             q=params.get("q", ""),
             status=UserStatus(params["status"]) if "status" in params else None,
             role=Role(params["role"]) if "role" in params else None,
+            manager=params.get("manager"),
         )
         # Signed, bound and expiring page links like every other list (Phase 9 review: DRF's
         # cursor was readable, unbound and never expired).
@@ -491,13 +496,14 @@ class AdminUserListView(ApiView):
 
 
 class AdminUserDetailView(ApiView):
-    permission_classes = [requires(Capability.USERS_MANAGE)]
+    permission_classes = [requires_any(Capability.USERS_MANAGE, Capability.USERS_MANAGE_TEAM)]
     refused_in_support_session = True
     requires_recent_mfa = frozenset({"PATCH"})
 
     @extend_schema(responses={200: s.AdminUserSerializer})
     def get(self, request: Request, user_id: UUID) -> Response:
-        return Response(s.AdminUserSerializer(selectors.admin_user_detail(user_id)).data)
+        user = selectors.administered_user_detail(_actor(request), user_id)
+        return Response(s.AdminUserSerializer(user).data)
 
     @extend_schema(request=s.UserUpdateSerializer, responses={200: s.AdminUserSerializer})
     def patch(self, request: Request, user_id: UUID) -> Response:
@@ -510,7 +516,7 @@ class AdminUserDetailView(ApiView):
 
 
 class AdminUserEmailView(ApiView):
-    permission_classes = [requires(Capability.USERS_MANAGE)]
+    permission_classes = [requires_any(Capability.USERS_MANAGE, Capability.USERS_MANAGE_TEAM)]
     refused_in_support_session = True
     requires_recent_mfa = True
 
@@ -549,7 +555,7 @@ class AdminUserEmailView(ApiView):
 
 
 class AdminUserDeactivateView(ApiView):
-    permission_classes = [requires(Capability.USERS_MANAGE)]
+    permission_classes = [requires_any(Capability.USERS_MANAGE, Capability.USERS_MANAGE_TEAM)]
     refused_in_support_session = True
     requires_recent_mfa = True
 
@@ -560,7 +566,7 @@ class AdminUserDeactivateView(ApiView):
 
 
 class AdminUserActivateView(ApiView):
-    permission_classes = [requires(Capability.USERS_MANAGE)]
+    permission_classes = [requires_any(Capability.USERS_MANAGE, Capability.USERS_MANAGE_TEAM)]
     refused_in_support_session = True
     requires_recent_mfa = True
 
@@ -571,7 +577,7 @@ class AdminUserActivateView(ApiView):
 
 
 class AdminUserResendInvitationView(ApiView):
-    permission_classes = [requires(Capability.USERS_MANAGE)]
+    permission_classes = [requires_any(Capability.USERS_MANAGE, Capability.USERS_MANAGE_TEAM)]
     refused_in_support_session = True
     requires_recent_mfa = True
 
@@ -586,7 +592,7 @@ class AdminUserSetPasswordView(ApiView):
     end and they must choose their own password at their next sign-in. The password is never
     stored in plaintext, logged, audited or returned."""
 
-    permission_classes = [requires(Capability.USERS_MANAGE)]
+    permission_classes = [requires_any(Capability.USERS_MANAGE, Capability.USERS_MANAGE_TEAM)]
     refused_in_support_session = True
     requires_recent_mfa = True
     throttle_classes = AUTH_THROTTLES
@@ -607,9 +613,10 @@ class AdminUserSetPasswordView(ApiView):
 class AdminUserMfaResetView(ApiView):
     """Remove an ordinary user's second factor (they lost the device and the recovery codes):
     their sessions end; they sign in with their password and may set up a new one. 422 for
-    an administrator, whoever asks (ADR-0033: an operator runs `manage.py reset_mfa`)."""
+    an administrator of either kind, whoever asks (ADR-0033/0035: an operator runs
+    `manage.py reset_mfa`); 404 outside the caller's reach (a team administrator: their team)."""
 
-    permission_classes = [requires(Capability.USERS_MANAGE)]
+    permission_classes = [requires_any(Capability.USERS_MANAGE, Capability.USERS_MANAGE_TEAM)]
     refused_in_support_session = True
     requires_recent_mfa = True
 
@@ -625,7 +632,7 @@ class AdminUserClearSignInLockView(ApiView):
     """Lift the lock too many failed sign-ins in a day placed on the account's sign-in from
     new browsers (L1), when the owner can't use the emailed link. Audited."""
 
-    permission_classes = [requires(Capability.USERS_MANAGE)]
+    permission_classes = [requires_any(Capability.USERS_MANAGE, Capability.USERS_MANAGE_TEAM)]
     refused_in_support_session = True
     requires_recent_mfa = True
 
@@ -713,7 +720,7 @@ class SupportSessionStartView(ApiView):
     """Start a support session in one user's CRM (docs/admin-user-workspace.md#support-sessions):
     time-limited and audited; the administrator never learns or uses the user's password."""
 
-    permission_classes = [requires(Capability.SUPPORT_ACCESS)]
+    permission_classes = [requires_any(Capability.SUPPORT_ACCESS, Capability.SUPPORT_ACCESS_TEAM)]
     refused_in_support_session = True
     requires_recent_mfa = True
 
@@ -733,7 +740,7 @@ class SupportSessionStartView(ApiView):
 class SupportSessionCurrentView(ApiView):
     """Exit this browser session's support session (idempotent)."""
 
-    permission_classes = [requires(Capability.SUPPORT_ACCESS)]
+    permission_classes = [requires_any(Capability.SUPPORT_ACCESS, Capability.SUPPORT_ACCESS_TEAM)]
 
     @extend_schema(operation_id="support_sessions_exit", request=None, responses={204: None})
     def delete(self, request: Request) -> Response:
@@ -741,7 +748,7 @@ class SupportSessionCurrentView(ApiView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-# --- assignees (crm.assign_any) ----------------------------------------------------------------
+# --- assignees (crm.assign_any, or crm.assign_team: the actor and their team, ADR-0035) ---------
 # Names are private sort keys: never copied into cursors (URLs), see core.keyset.
 ASSIGNEE_ORDERING = KeysetOrdering(
     "name",
@@ -750,9 +757,10 @@ ASSIGNEE_ORDERING = KeysetOrdering(
 
 
 class AssigneeListView(ApiView):
-    """Who CRM records can be assigned to (owner pickers). Active users only, by name."""
+    """Who CRM records can be assigned to (owner pickers). Active users only, by name; a team
+    administrator's: themselves and their team's active members (ADR-0035)."""
 
-    permission_classes = [requires(Capability.CRM_ASSIGN_ANY)]
+    permission_classes = [requires_any(Capability.CRM_ASSIGN_ANY, Capability.CRM_ASSIGN_TEAM)]
     query_param_methods = frozenset({"GET"})
 
     @extend_schema(
@@ -762,7 +770,7 @@ class AssigneeListView(ApiView):
     )
     def get(self, request: Request) -> Response:
         params = _validated(s.AssigneeQuerySerializer, request.query_params)
-        users = selectors.assignable_users(q=params.get("q", ""))
+        users = selectors.assignable_users(actor=_actor(request), q=params.get("q", ""))
         binding = CursorBinding.of("users.assignees", params, actor_id=_actor(request).pk)
         page = KeysetPaginator(
             ASSIGNEE_ORDERING, page_size=params["page_size"], binding=binding

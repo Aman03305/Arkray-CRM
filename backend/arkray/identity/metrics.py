@@ -26,6 +26,11 @@
   seconds later; L1). Raises ArkraySignInLocked: someone guessed that account's password
   about 50 times.
 
+"Administrator" means either kind (ADR-0035): a super administrator (role `admin`) or a
+team administrator (`team_admin`), as `identity.policy.administrator_roles` says. A team
+administrator's deactivation or a promotion to one is worth the same look: they manage
+accounts too.
+
 All from PostgreSQL at scrape time, in one count over the `audit_action_idx` index: a
 database-wide figure every pod reports alike. No cache read (a stalled cache must not slow
 the scrape). Labels: none.
@@ -44,7 +49,7 @@ from arkray.core.metrics import Gauge
 from .authentication import AUDIT_LOGIN_FAILED
 from .mfa_services import AUDIT_LOCKED
 from .models import MfaLock
-from .policy import Capability, roles_with
+from .policy import administrator_roles
 from .services import AUDIT_ROLE_CHANGED, AUDIT_SIGN_IN_LOCKED, AUDIT_USER_DEACTIVATED
 
 
@@ -76,7 +81,7 @@ def gauges() -> list[Gauge]:
         " (auth.sign_in_locked audit events).",
     )
     since = timezone.now() - timedelta(hours=1)
-    administrators = sorted(roles_with(Capability.USERS_MANAGE))
+    administrators = sorted(administrator_roles())
     counts = AuditEvent.objects.filter(
         action__in=[
             AUDIT_USER_DEACTIVATED,

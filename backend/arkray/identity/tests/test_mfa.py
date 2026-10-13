@@ -17,6 +17,7 @@ from django.db import connection
 from rest_framework.test import APIClient
 
 from arkray.audit.models import AuditEvent
+from arkray.core.errors import PermissionDeniedError
 from arkray.identity import mfa, mfa_services
 from arkray.identity.models import AuthThrottleEvent, MfaDevice, MfaRecoveryCode, ThrottleKind
 from arkray.identity.permissions import needs_recent_mfa
@@ -756,6 +757,19 @@ class TestOperatorCommands:
                     "reset_mfa", "--email", user_a.email, "--reason", "x", "--by", operator
                 )
         assert MfaDevice.objects.filter(user=user_a).exists()
+
+    def test_only_a_super_administrator_is_the_operators_principal(self, team_admin, team_member):
+        """ADR-0035: a team administrator administers only their team's users, and never an
+        administrator's second factor; the command (and the service under it) name a super
+        administrator."""
+        enrol(team_member)
+        with pytest.raises(CommandError, match="--by must name an active super admin"):
+            call_command(
+                "reset_mfa", "--email", team_member.email, "--reason", "x", "--by", team_admin.email
+            )
+        with pytest.raises(PermissionDeniedError):
+            mfa_services.operator_reset(team_member.email, "x", operator_id=team_admin.pk)
+        assert MfaDevice.objects.filter(user=team_member).exists()
 
     def test_mfa_reencrypt_moves_every_secret_to_the_current_key(self, user_a, clock, settings):
         old_key = "old-key-" + "q1w2e3r4" * 8

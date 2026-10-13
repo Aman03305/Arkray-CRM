@@ -190,7 +190,7 @@ const OPTIONAL_TEXT = ["account_name", "customer_name", "contact_phone", "contac
 export function createRequest(
   draft: Draft,
   target: {
-    /** Organisation-wide only: who owns it (elsewhere the workspace's user does). */
+    /** In the overview only: who owns it (elsewhere the workspace's user does). */
     owner?: string;
     pipeline?: string;
     stage?: string;
