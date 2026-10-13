@@ -181,8 +181,8 @@ describe("the header", () => {
 
   it("names its controls with words that include what they show (axe label-content-name-mismatch, final audit UI-6a)", () => {
     renderWithProviders(<Topbar onMenuClick={() => undefined} />, { viewer: salesViewer });
-    // The account button shows initials ("PP"), the product link a mark ("A") and, where
-    // there is room, "Arkray CRM": neither is named by an aria-label that leaves those out.
+    // The account button shows initials ("PP"), the product link the Arkray logo and, where
+    // there is room, "CRM": neither is named by an aria-label that leaves those out.
     const account = screen.getByRole("button", { name: "Account: Priya Patel" });
     const home = screen.getByRole("link", { name: "Arkray CRM" });
     for (const control of [account, home]) expect(control).not.toHaveAttribute("aria-label");

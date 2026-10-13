@@ -22,7 +22,7 @@ import { initials } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
 import { activeSection, isAskPath } from "@/lib/workspace";
 
-import { BrandMark } from "./BrandMark";
+import { ArkrayLogo } from "./ArkrayLogo";
 
 const NAV_LINK = "focus-on-shell flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors";
 // The current page is marked by more than colour: a bar at its left edge and a heavier weight.
@@ -77,8 +77,9 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <div className="flex h-full flex-col bg-shell text-white">
       <div className="flex h-12 items-center gap-2 border-b border-white/10 px-5">
-        <BrandMark />
-        <span className="text-sm font-semibold tracking-tight">Arkray CRM</span>
+        <ArkrayLogo tone="white" label={null} className="h-7 w-auto" />
+        <span className="sr-only">Arkray</span>{" "}
+        <span className="text-sm font-semibold tracking-tight">CRM</span>
       </div>
 
       <nav aria-label="Main" className="scroll-slim flex-1 space-y-6 overflow-y-auto px-3 py-4">

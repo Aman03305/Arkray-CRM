@@ -25,7 +25,10 @@ describe("Sidebar", () => {
 
   it("shows the product name, the three modules (no Leads), Settings and the current user", () => {
     renderSidebar(salesUser);
-    expect(screen.getByText("Arkray CRM")).toBeInTheDocument();
+    // The white Arkray logo (decorative: its word is read out from hidden text), then "CRM".
+    const brand = screen.getByText("CRM").parentElement!;
+    expect(brand.textContent).toBe("Arkray CRM");
+    expect(brand.querySelector("svg[aria-hidden='true'] rect")).toHaveAttribute("stroke", "#FFFFFF");
     const nav = screen.getByRole("navigation", { name: "Main" });
     expect(within(nav).getAllByRole("link").map((l) => l.textContent)).toEqual([
       "Dashboard",

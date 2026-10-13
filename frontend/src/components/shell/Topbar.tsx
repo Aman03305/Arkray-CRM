@@ -15,7 +15,7 @@ import { initials } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
 import { newOpportunityHref, userWorkspaceHref } from "@/lib/workspace";
 
-import { BrandMark } from "./BrandMark";
+import { ArkrayLogo } from "./ArkrayLogo";
 import { HEADER_MENU_ITEM, HeaderMenu } from "./HeaderMenu";
 
 /**
@@ -47,7 +47,8 @@ export function Topbar({ onMenuClick }: { onMenuClick: () => void }) {
   );
 }
 
-/** The product name, leading home (during a support session: the supported user's Dashboard). */
+/** The Arkray logo and "CRM", leading home (during a support session: the supported user's
+ * Dashboard). */
 function HomeLink() {
   const session = useViewer()?.supportSession;
   return (
@@ -55,10 +56,12 @@ function HomeLink() {
       href={session ? userWorkspaceHref(session.target.id) : "/dashboard"}
       className="focus-on-shell flex shrink-0 items-center gap-2 rounded-md lg:w-18 lg:justify-center xl:w-auto xl:pl-5 xl:pr-3"
     >
-      <BrandMark />
-      {/* The link's name at every width: shown where there is room, read out everywhere
-          (not an aria-label, which would leave out the text shown: WCAG 2.5.3). */}
-      <span className="sr-only text-[15px] font-semibold tracking-tight sm:not-sr-only lg:sr-only xl:not-sr-only">Arkray CRM</span>
+      <ArkrayLogo tone="white" label={null} className="h-6 w-auto sm:h-7 lg:h-6 xl:h-7" />
+      {/* The link's name at every width, "Arkray CRM": the logo's word read out from hidden
+          text, then "CRM", shown where there is room (not an aria-label, which would leave out
+          the text shown: WCAG 2.5.3). The space sits outside the hidden span, or it is lost. */}
+      <span className="sr-only">Arkray</span>{" "}
+      <span className="sr-only text-[15px] font-semibold tracking-tight sm:not-sr-only lg:sr-only xl:not-sr-only">CRM</span>
     </Link>
   );
 }

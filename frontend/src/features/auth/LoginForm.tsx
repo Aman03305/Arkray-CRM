@@ -14,7 +14,7 @@ import { hardNavigate } from "@/lib/browser";
 import { safeNextPath } from "@/lib/safe-redirect";
 
 import { authApi, type LoginResult, useViewerQuery } from "./api";
-import { AuthCard } from "./AuthCard";
+import { AuthCard, LOGIN_TITLE } from "./AuthCard";
 import { LoginMfaStep } from "./LoginMfaStep";
 
 const REASONS = new Map<string, { tone: "info" | "success"; text: string }>([
@@ -105,7 +105,7 @@ export function LoginForm() {
   const otherSession = existingSession.isSuccess && reason ? existingSession.data : null;
 
   return (
-    <AuthCard title="Sign in" subtitle="Use your work email and password.">
+    <AuthCard title={LOGIN_TITLE} subtitle="Sign in with your work email and password.">
       <form ref={form} onSubmit={onSubmit} noValidate className="space-y-4">
         {reason && !login.isError && !restarted ? <Alert tone={reason.tone}>{reason.text}</Alert> : null}
         {restarted && !login.isError ? <Alert tone="error">{restarted}</Alert> : null}

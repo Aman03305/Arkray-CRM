@@ -36,6 +36,17 @@ describe("LoginForm", () => {
     nav.hardNavigate.mockReset();
   });
 
+  it("welcomes with the Arkray logo above the sign-in form", () => {
+    mockApi({ "GET /api/v1/auth/me": NOT_SIGNED_IN });
+    renderWithProviders(<LoginForm />);
+    const logo = screen.getByRole("img", { name: "Arkray" });
+    const heading = screen.getByRole("heading", { level: 1, name: "Welcome to Arkray" });
+    expect(logo.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText("Sign in with your work email and password.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.queryByText("Arkray CRM")).not.toBeInTheDocument();
+  });
+
   it("signs in and reloads into the dashboard", async () => {
     const api = mockApi({ "GET /api/v1/auth/me": NOT_SIGNED_IN, "POST /api/v1/auth/login": { status: 200, body: VIEWER } });
     renderWithProviders(<LoginForm />);
@@ -256,7 +267,7 @@ describe("LoginForm: two-step verification (ADR-0033)", () => {
     const { user } = await reachSecondStep({ "POST /api/v1/auth/login/mfa": apiError(400, "mfa_challenge_expired", message) });
     await user.type(screen.getByLabelText("Authentication code"), "123456");
     await user.click(screen.getByRole("button", { name: "Verify" }));
-    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Welcome to Arkray" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent(message);
     expect(screen.getByLabelText("Email")).toHaveValue("rahul@example.test");
     expect(screen.getByLabelText("Password")).toHaveValue("");
@@ -269,7 +280,7 @@ describe("LoginForm: two-step verification (ADR-0033)", () => {
     });
     await user.type(screen.getByLabelText("Authentication code"), "123456");
     await user.click(screen.getByRole("button", { name: "Verify" }));
-    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Welcome to Arkray" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent(/Too many wrong codes were entered, so two-step verification is locked/);
     expect(screen.getByRole("alert")).toHaveTextContent(/Reset your password/);
     expect(screen.getByRole("link", { name: /Forgot password/ })).toBeInTheDocument();
@@ -302,7 +313,7 @@ describe("LoginForm: two-step verification (ADR-0033)", () => {
   it("Back returns to the email and password", async () => {
     const { api, user } = await reachSecondStep({});
     await user.click(screen.getByRole("button", { name: "Back to sign in" }));
-    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Welcome to Arkray" })).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(api.callsTo("POST", "/api/v1/auth/login/mfa")).toHaveLength(0);
   });
