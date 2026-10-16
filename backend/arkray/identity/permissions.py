@@ -34,7 +34,7 @@ def _account_gates(request: Request, view: APIView) -> None:
     - an administrator in a support session can't use views marked
       `refused_in_support_session` (user administration, passwords, security events):
       identity and security work needs their normal administrator context;
-    - an administrator who must have a second factor and hasn't set one up reaches only the
+    - a Super Admin who must have a second factor and hasn't set one up reaches only the
       views marked `allowed_before_mfa_enrollment` (who am I, change password, two-step
       setup): 403 `mfa_enrollment_required` (ADR-0033);
     - views marked `requires_recent_mfa` (True: every method; or a set of methods) need a

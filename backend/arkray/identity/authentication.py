@@ -177,7 +177,7 @@ def sign_in(request: HttpRequest, email: str, password: str) -> SignIn | SecondF
     # After the password, so a mistyped one leaves a live support session alone.
     support.end_on_sign_out(request, SupportEnd.SESSION_CHANGED)
 
-    if mfa_services.has_confirmed_device(user):
+    if mfa_services.required_for(user) and mfa_services.has_confirmed_device(user):
         # Not a failure, but nothing is forgiven until the second factor is proved.
         throttle.release()
         return SecondFactorNeeded(expires_in=mfa_services.begin_challenge(request, user))

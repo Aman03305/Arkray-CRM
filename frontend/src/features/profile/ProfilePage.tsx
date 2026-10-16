@@ -15,6 +15,7 @@ import { confirmationErrors, NewPasswordFields, type NewPasswordValue } from "@/
 import { useSignOut } from "@/features/auth/useSignOut";
 import { describeError, fieldErrors } from "@/lib/api/errors";
 import { useViewer } from "@/lib/viewer-context";
+import { hasCapability } from "@/lib/viewer";
 
 import { TwoStepSection } from "./TwoStepSection";
 
@@ -126,7 +127,7 @@ export function ProfilePage() {
         </Section>
 
         {/* Not inside a support session: the API refuses every two-step change there (ADR-0033). */}
-        {viewer && !viewer.supportSession ? (
+        {viewer && !viewer.supportSession && hasCapability(viewer, "users.manage") ? (
           <Section
             title="Two-step verification"
             description="A code from an app on your phone at sign-in, as well as your password."

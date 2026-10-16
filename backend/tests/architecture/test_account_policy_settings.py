@@ -1,10 +1,8 @@
-"""The account-takeover settings of the review of 73ff1e3 (L1, L3) in each environment.
+"""Account-takeover policy settings in each environment.
 
-`MFA_REQUIRED_FOR_ALL_USERS` (two-step verification for every user, not only
-administrators) is on by default in production, off in development and tests; an
-organisational policy, so production accepts it off, but refuses a value that isn't
-recognisably true or false (env.bool reads "ture" as false). The sign-in caps are fixed
-values in config/settings/base.py, checked for consistency at start (arkray.E031).
+``MFA_REQUIRED_FOR_ALL_USERS`` is retained only so old environment files are parseable
+during upgrades. It defaults off and is ignored by the role policy; mandatory MFA belongs
+to Super Admins only. The sign-in caps remain fixed values in config/settings/base.py.
 """
 
 from __future__ import annotations
@@ -17,18 +15,18 @@ from arkray.identity.throttling import check_daily_window
 from tests.architecture.test_production_settings import load_production_settings
 
 
-def test_every_user_needs_a_second_factor_by_default_in_production():
+def test_the_retired_all_users_flag_defaults_off_in_production():
     printed = load_production_settings("settings.MFA_REQUIRED_FOR_ALL_USERS")
     assert printed.returncode == 0, printed.stderr
-    assert printed.stdout.strip() == "True"
+    assert printed.stdout.strip() == "False"
 
 
-def test_production_accepts_it_off_as_an_organisational_choice():
+def test_production_keeps_parsing_the_legacy_flag_during_upgrades():
     printed = load_production_settings(
-        "settings.MFA_REQUIRED_FOR_ALL_USERS", MFA_REQUIRED_FOR_ALL_USERS="false"
+        "settings.MFA_REQUIRED_FOR_ALL_USERS", MFA_REQUIRED_FOR_ALL_USERS="true"
     )
     assert printed.returncode == 0, printed.stderr
-    assert printed.stdout.strip() == "False"
+    assert printed.stdout.strip() == "True"
 
 
 @pytest.mark.parametrize("value", ["", "ture", "for sales only"])

@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { adminViewer } from "@/test/fixtures";
+import { adminViewer, salesViewer, teamAdminViewer } from "@/test/fixtures";
 import { darkModules, makeMfaStatus, MFA_SETUP, QR_FIXTURE_DARK_MODULES, RECOVERY_CODES } from "@/test/mfa-fixtures";
 import { apiError, mockApi, renderWithProviders } from "@/test/render";
 
@@ -88,6 +88,16 @@ describe("ProfilePage: two-step verification (ADR-0033)", () => {
   function twoStep() {
     return screen.getByRole("region", { name: "Two-step verification" });
   }
+
+  it.each([
+    ["Admin", teamAdminViewer],
+    ["User", salesViewer],
+  ])("doesn't show controls or request MFA status for a %s", (_, viewer) => {
+    const api = mockApi({});
+    renderWithProviders(<ProfilePage />, { viewer });
+    expect(screen.queryByRole("region", { name: "Two-step verification" })).not.toBeInTheDocument();
+    expect(api.callsTo("GET", "/api/v1/auth/mfa")).toHaveLength(0);
+  });
 
   it("shows it's off and sets it up: password, QR code, a first code, then the recovery codes once", async () => {
     let enabled = false;

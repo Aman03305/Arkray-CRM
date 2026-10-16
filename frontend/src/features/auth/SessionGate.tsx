@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { describeError, isApiError } from "@/lib/api/errors";
 import { currentLocation, hardNavigate } from "@/lib/browser";
 import { VIEWER_QUERY_KEY } from "@/lib/query-client";
+import { hasCapability } from "@/lib/viewer";
 import { ViewerProvider } from "@/lib/viewer-context";
 
 import { useViewerQuery } from "./api";
@@ -21,19 +22,22 @@ import { MfaEnrollment } from "./MfaEnrollment";
  *
  * Someone whose password was set by an administrator must choose their own before anything
  * else: until then the password form replaces the app. Then, when the API says their account
- * must have two-step verification and it isn't set up (`mfa_enrollment_required`: ADR-0033's
- * administrators, or every account when the organisation requires it), the set-up replaces the
- * app.
+ * must have two-step verification and it isn't set up (`mfa_enrollment_required`), the set-up
+ * replaces the app. The capability check is deliberate defense in depth: an older or stale
+ * backend response must never force an Admin or User into the retired all-users MFA flow.
  */
 export function SessionGate({ children }: { children: ReactNode }) {
   const viewer = useViewerQuery();
   const queryClient = useQueryClient();
-  const id = viewer.data?.id;
+  const currentViewer = viewer.data;
+  const id = currentViewer?.id;
   // Once shown, the set-up stays until the user has saved their recovery codes: the viewer
   // stops saying "required" as soon as the first code is confirmed (a refetch on focus, say
   // after switching to a password manager), and the codes must not vanish then.
   const [enrolling, setEnrolling] = useState(false);
-  if (viewer.data?.mfaEnrollmentRequired && !viewer.data.passwordChangeRequired && !enrolling) setEnrolling(true);
+  const mustEnroll =
+    currentViewer?.mfaEnrollmentRequired === true && hasCapability(currentViewer, "users.manage");
+  if (mustEnroll && !currentViewer.passwordChangeRequired && !enrolling) setEnrolling(true);
   // Who this page was loaded for: the first viewer it saw.
   const [signedInAs, setSignedInAs] = useState<string | null>(null);
   if (id && signedInAs === null) setSignedInAs(id);

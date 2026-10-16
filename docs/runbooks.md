@@ -221,8 +221,8 @@ reconciliation re-indexes any source whose chunks drifted.
    that opens it). If they can't use it, confirm who is asking out of band, then *Clear
    sign-in lock* on the Users page (step-up, audited `auth.sign_in_unlocked` by
    `administrator`), or have them reset the password. Repeated locks mean the password is
-   under attack: advise a new one, and two-step verification where `MFA_REQUIRED_FOR_ALL_USERS`
-   is off. It lifts by itself after 30 days.
+   under attack: advise a new password. Super Admin accounts also have mandatory two-step
+   verification; Admin and User accounts do not. It lifts by itself after 30 days.
 7. `ArkraySignInFailureStorm`: more than 200 failed sign-ins of real accounts in an hour, for
    10 minutes: guessing or password spraying. Check the source addresses (`login_failed`); if
    one network dominates, block it at the edge or the CDN.
@@ -1487,9 +1487,8 @@ Record that it was done (who, when, the cut-off) outside the application.
   the unlock link emailed to them, or resets their password; an administrator can *Clear
   sign-in lock* on the Users page after confirming who is asking (see
   [Security events](#security-events), step 6).
-- With `MFA_REQUIRED_FOR_ALL_USERS` on (the production default), every user, not only
-  administrators, sets up two-step verification at their next sign-in; tell them before the
-  upgrade that turns it on.
+- Every Super Admin sets up two-step verification at their next sign-in. Admin and User
+  accounts sign in with their password and have no MFA enrolment or step-up flow.
 - A user whose two-step verification is locked (20 wrong codes in a row; they see "Too many
   wrong codes...") resets their password with Forgot password, which unlocks it; see
   [Second factor locked](#second-factor-locked).

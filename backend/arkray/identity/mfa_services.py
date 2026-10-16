@@ -1,8 +1,7 @@
 """Two-step verification use cases (ADR-0033; the primitives are in identity.mfa).
 
-- **State**: a user has a second factor once their device is confirmed. Administrators must
-  have one when MFA_REQUIRED_FOR_ADMINS is on, and every user when MFA_REQUIRED_FOR_ALL_USERS
-  is (adversarial review of 73ff1e3, L1; `enrollment_required`): until then they reach
+- **State**: a user has a second factor once their device is confirmed. Super Admins must
+  have one when MFA_REQUIRED_FOR_ADMINS is on (`enrollment_required`): until then they reach
   only the views marked `allowed_before_mfa_enrollment` (identity.permissions).
 - **Step-up**: the session records when a code was last verified (`SESSION_VERIFIED_AT`):
   at the second step of a sign-in, at confirmation, at POST /auth/mfa/verify. Views marked
@@ -69,7 +68,7 @@ from arkray.core.errors import (
 )
 
 from . import emails, mfa, selectors, throttling
-from .models import MfaDevice, MfaLock, MfaRecoveryCode, User, normalize_email
+from .models import MfaDevice, MfaLock, MfaRecoveryCode, Role, User, normalize_email
 from .policy import administrator_roles
 from .services import (
     SESSION_ENDED,
@@ -111,10 +110,7 @@ FACTOR_TOTP = "totp"
 FACTOR_RECOVERY_CODE = "recovery_code"
 
 REQUIRED_FOR_ROLE = (
-    "Two-step verification is required for administrators, so it can't be turned off."
-)
-REQUIRED_FOR_EVERYONE = (
-    "Two-step verification is required for every account here, so it can't be turned off."
+    "Two-step verification is required for super administrators, so it can't be turned off."
 )
 ADMINISTRATOR_MFA_REFUSED = (
     "Administrators manage their own two-step verification. If one is locked out, an operator"
@@ -217,19 +213,15 @@ def _forget(user: Any) -> None:
 
 
 def required_for(user: Any) -> bool:
-    """Whether the account must have a second factor: every account when
-    MFA_REQUIRED_FOR_ALL_USERS is on (an organisational policy; review of 73ff1e3, L1),
-    else administrators of either kind (super or team, ADR-0035) when MFA_REQUIRED_FOR_ADMINS
-    is (ADR-0033)."""
-    if settings.MFA_REQUIRED_FOR_ALL_USERS:
-        return True
-    return bool(settings.MFA_REQUIRED_FOR_ADMINS) and (
-        getattr(user, "role", None) in administrator_roles()
-    )
+    """Whether the account must have a second factor: Super Admins only (ADR-0033)."""
+    # Only organisation-wide super administrators are subject to the second factor.
+    # Do not silently broaden this to TEAM_ADMIN, even when an old deployment environment
+    # still contains the retired MFA_REQUIRED_FOR_ALL_USERS flag.
+    return bool(settings.MFA_REQUIRED_FOR_ADMINS) and getattr(user, "role", None) == Role.ADMIN
 
 
 def required_message() -> str:
-    return REQUIRED_FOR_EVERYONE if settings.MFA_REQUIRED_FOR_ALL_USERS else REQUIRED_FOR_ROLE
+    return REQUIRED_FOR_ROLE
 
 
 def enrollment_required(user: Any) -> bool:
@@ -242,6 +234,8 @@ def mark_verified(session: SessionBase) -> None:
 
 def recently_verified(request: Any, user: Any) -> bool:
     """A code verified in this session within MFA_STEP_UP_TTL_S, or no device to ask for."""
+    if not required_for(user):
+        return True  # Non-super-admin accounts never require an MFA step-up.
     at = request.session.get(SESSION_VERIFIED_AT)
     if isinstance(at, int | float) and not isinstance(at, bool):
         age = _now() - at

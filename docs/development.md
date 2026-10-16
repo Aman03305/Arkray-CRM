@@ -47,12 +47,10 @@ Full containerised stack (production settings, Linux containers):
 docker compose --profile app up -d --build   # web :3000, api :8000
 ```
 
-Because it runs the production settings, **every account must set up two-step verification**
-in this stack: `MFA_REQUIRED_FOR_ALL_USERS` defaults to `true` there (adversarial review of
-73ff1e3, L1), and this Compose file doesn't pass the variable through. After rebuilding the
-images, each local account enrols an authenticator app at its next sign-in (any TOTP app; the
-notices land in Mailpit). The switch exists for organisations that decide otherwise in their
-own deployment; the backend run with `uv run` (development settings) keeps it optional.
+Because it runs the production settings, each **Super Admin** must set up two-step
+verification in this stack. Admin and User accounts sign in directly. Authenticator notices
+land in Mailpit. The backend run with `uv run` uses development settings, where tests enable
+the Super Admin requirement explicitly.
 
 ## Ports
 
@@ -117,7 +115,7 @@ pnpm build
 | API 404 returns an HTML page locally | expected with `DEBUG=True` (Django's debug page); tests and production return the JSON envelope |
 | `markAsUncloneable is not a function` from Vitest | Node is too old; use Node 24 LTS |
 | Containers exit with "DJANGO_SECRET_KEY must be a strong, production-only secret" | the app profile uses production settings; run `scripts/init-env.sh` (or put a strong key in `.env`) |
-| The containerised stack asks every account to set up two-step verification | expected: it runs the production settings, where `MFA_REQUIRED_FOR_ALL_USERS` is `true` ([above](#first-time-setup)); enrol with any authenticator app |
+| The containerised stack asks a Super Admin to set up two-step verification | expected: production requires it; enrol with any authenticator app. Admin and User accounts must not be asked. |
 | `python3` fails on Windows | it's the Microsoft Store stub; use `uv run python` |
 | Every new DB connection takes ~5 s on Windows | `localhost` resolves to `::1` first, and Docker publishes on 127.0.0.1 only. Use `127.0.0.1` in `DATABASE_URL`, Redis and SMTP URLs (`.env.example` does). |
 | `backend/openapi.yaml is stale` / `api:check` fails | regenerate the schema (above), then `pnpm api:types`, and commit both |

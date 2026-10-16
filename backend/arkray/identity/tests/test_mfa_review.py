@@ -13,7 +13,7 @@ from rest_framework.test import APIClient
 from arkray.identity import mfa_services
 from arkray.identity.models import AuthThrottleEvent, MfaDevice, ThrottleKind
 from arkray.identity.tasks import housekeeping
-from tests.factories import DEFAULT_PASSWORD
+from tests.factories import DEFAULT_PASSWORD, AdminFactory, UserFactory
 from tests.helpers import drain_outbox, signed_in
 from tests.mfa_helpers import (
     LOGIN_MFA,
@@ -30,6 +30,13 @@ CONFIRM = "/api/v1/auth/mfa/confirm"
 CODES = "/api/v1/auth/mfa/recovery-codes"
 DISABLE = "/api/v1/auth/mfa/disable"
 PASSWORD = "/api/v1/auth/password/change"
+
+
+@pytest.fixture
+def user_a(db, settings):
+    """A real Super Admin for tests of the MFA endpoints and sign-in challenge."""
+    settings.MFA_REQUIRED_FOR_ADMINS = True
+    return AdminFactory(first_name="Rahul", last_name="MFA Admin")
 
 
 def failures() -> int:
@@ -188,7 +195,7 @@ class TestTheOwnersBrowserStaysTrusted:
         attacker_fails(user_a)
         assert password_step(client, user_a).status_code == 202  # not 429
 
-    def test_after_replacing_recovery_codes_and_disabling(self, user_a, clock):
+    def test_after_replacing_recovery_codes(self, user_a, clock):
         enrolment = enrol(user_a)
         client = APIClient()
         assert password_step(client, user_a).status_code == 202
@@ -199,18 +206,6 @@ class TestTheOwnersBrowserStaysTrusted:
         assert replaced.status_code == 200
         attacker_fails(user_a)
         assert password_step(client, user_a).status_code == 202
-        clock.next_step()
-        client.post(LOGIN_MFA, {"code": code_for(enrolment.secret, clock)}, format="json")
-        clock.next_step()
-        disabled = client.post(
-            DISABLE,
-            {"current_password": DEFAULT_PASSWORD, "code": code_for(enrolment.secret, clock)},
-            format="json",
-        )
-        assert disabled.status_code == 204
-        AuthThrottleEvent.objects.all().delete()
-        attacker_fails(user_a)
-        assert password_step(client, user_a).status_code == 200
 
     def test_after_a_password_change(self, user_a):
         client = self.owner(user_a)
@@ -240,7 +235,7 @@ class TestOwnerNotices:
         new = client.post(CODES, {"code": code_for(secret, clock)}, format="json").json()[
             "recovery_codes"
         ]
-        signed_in(admin).post(f"/api/v1/admin/users/{user_a.pk}/mfa/reset", format="json")
+        mfa_services.operator_reset(user_a.email, "lost device", operator_id=admin.pk)
         drain_outbox()
         assert [m.to for m in mail.outbox] == [[user_a.email]] * 4
         # In any order: since the review of 73ff1e3 (M6) the outbox takes turns between the
@@ -257,14 +252,15 @@ class TestOwnerNotices:
             assert value not in bodies
             assert value.replace("-", "") not in bodies
 
-    def test_turning_it_off_is_emailed(self, user_a, clock):
-        enrolment = enrol(user_a)
-        signed_in(user_a).post(
+    def test_non_super_admin_cannot_turn_off_a_legacy_device(self, db, clock):
+        user = UserFactory()
+        enrolment = enrol(user)
+        response = signed_in(user).post(
             DISABLE,
             {"current_password": DEFAULT_PASSWORD, "code": code_for(enrolment.secret, clock)},
             format="json",
         )
         drain_outbox()
-        assert [m.subject for m in mail.outbox] == [
-            "Arkray CRM: Two-step verification was turned off"
-        ]
+        assert (response.status_code, error_code(response)) == (403, "permission_denied")
+        assert MfaDevice.objects.filter(user=user).exists()
+        assert mail.outbox == []

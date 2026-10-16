@@ -1,26 +1,21 @@
-"""Two-step verification for every user, when the organisation requires it (adversarial review
-of 73ff1e3, L1 (f); the owner's remediation brief lists "MFA for all users").
+"""Regression coverage for the retired all-users MFA policy.
 
-`MFA_REQUIRED_FOR_ALL_USERS` extends ADR-0033's enrolment gate from administrators to every
-role: on, a user without a confirmed second factor reaches only who-am-I, sign-out, the
-password change and the two-step setup (403 `mfa_enrollment_required` elsewhere), can't turn
-it off, and the viewer says so (`mfa_enrollment_required`, which the web app follows rather
-than the role). On by default in production, off in development and tests; an organisational
-policy, so it stays a setting (docs/deployment.md;
-tests/architecture/test_account_policy_settings.py). With it off, nothing changes:
-administrators still need one when MFA_REQUIRED_FOR_ADMINS is on.
+Some existing deployments can still carry ``MFA_REQUIRED_FOR_ALL_USERS`` in their
+environment during a rolling upgrade.  It must not broaden MFA beyond Super Admins:
+Admins and Users sign in directly, cannot enrol, and are never caught by MFA gates.
 """
 
 from __future__ import annotations
 
 import pytest
 from django.core.cache import cache
+from rest_framework.test import APIClient
 
 from arkray.identity import mfa_services
 from tests.authz_matrix import AUTHZ_MATRIX
 from tests.factories import AdminFactory, TeamAdminFactory, UserFactory
 from tests.helpers import signed_in
-from tests.mfa_helpers import Clock, code_for, enrol, sign_in_with_code
+from tests.mfa_helpers import Clock, enrol, password_step
 from tests.security.test_admin_mfa_enforcement import (
     ALLOWED_BEFORE_ENROLMENT,
     GATED,
@@ -54,11 +49,11 @@ def code(response) -> str | None:
         return None
 
 
-class TestRequiredForEveryone:
-    def test_a_sales_user_without_one_must_enrol_first(self, required_for_all, user_a):
+class TestLegacyAllUsersFlag:
+    def test_a_sales_user_is_not_forced_to_enrol(self, required_for_all, user_a):
         client = signed_in(user_a)
         viewer = client.get(ME).json()
-        assert viewer["mfa_enrollment_required"] is True
+        assert viewer["mfa_enrollment_required"] is False
         for path in (
             "/api/v1/workspaces/me",
             "/api/v1/workspaces/me/leads",
@@ -66,47 +61,44 @@ class TestRequiredForEveryone:
         ):
             cache.clear()
             response = client.get(path)
-            assert response.status_code == 403, path
-            assert code(response) == "mfa_enrollment_required", path
-        assert client.get("/api/v1/auth/mfa").json()["required"] is True
+            assert code(response) != "mfa_enrollment_required", path
+        assert client.get("/api/v1/auth/mfa").json()["required"] is False
 
-    def test_the_setup_is_reachable(self, required_for_all, user_a):
+    def test_a_sales_user_cannot_enrol(self, required_for_all, user_a):
         client = signed_in(user_a)
         response = client.post(
             "/api/v1/auth/mfa/setup",
             {"current_password": "correct-horse-battery-staple"},
             format="json",
         )
-        assert response.status_code == 200, response.content
+        assert (response.status_code, code(response)) == (403, "permission_denied")
 
-    def test_once_enrolled_the_app_opens(self, required_for_all, user_a):
+    def test_a_legacy_device_does_not_change_sales_user_login(self, required_for_all, user_a):
         enrol(user_a)
-        client = signed_in(user_a)
+        client = APIClient()
+        response = password_step(client, user_a)
+        assert response.status_code == 200
         assert client.get(ME).json()["mfa_enrollment_required"] is False
         assert client.get("/api/v1/workspaces/me").status_code == 200
 
-    def test_it_cant_be_turned_off(self, required_for_all, user_a, clock):
+    def test_a_sales_user_cannot_manage_a_legacy_device(self, required_for_all, user_a):
         enrolment = enrol(user_a)
-        client = signed_in(user_a)
-        assert sign_in_with_code(client, user_a, enrolment.secret, clock).status_code == 200
-        clock.next_step()
-        response = client.post(
+        response = signed_in(user_a).post(
             "/api/v1/auth/mfa/disable",
             {
                 "current_password": "correct-horse-battery-staple",
-                "code": code_for(enrolment.secret, clock),
+                "code": enrolment.recovery_codes[0],
             },
             format="json",
         )
-        assert response.status_code == 422
-        assert "can't be turned off" in response.json()["error"]["message"]
-        status = client.get("/api/v1/auth/mfa").json()
-        assert (status["required"], status["can_disable"]) == (True, False)
+        assert (response.status_code, code(response)) == (403, "permission_denied")
 
-    def test_administrators_are_included(self, required_for_all, admin, settings):
+    def test_the_legacy_flag_does_not_replace_the_super_admin_policy(
+        self, required_for_all, admin, settings
+    ):
         settings.MFA_REQUIRED_FOR_ADMINS = False
-        assert mfa_services.required_for(admin)
-        assert signed_in(admin).get(ME).json()["mfa_enrollment_required"] is True
+        assert not mfa_services.required_for(admin)
+        assert signed_in(admin).get(ME).json()["mfa_enrollment_required"] is False
 
 
 class TestOffUnchanged:
@@ -128,13 +120,12 @@ class TestOffUnchanged:
 
 # --- review round 1 (TESTS-2): the whole route sweep, per role and setting ----------------------
 COMBINATIONS = [
-    # (role, which setting is on): administrators-only must leave a sales user alone; for
-    # everyone it asks both (the administrators-only case for an administrator is
-    # test_admin_mfa_enforcement.py's own sweep).
+    # The legacy "everyone" flag is deliberately inert. The administrators setting applies
+    # to the Super Admin role only.
     ("sales_user", "administrators"),
     ("sales_user", "everyone"),
+    ("admin", "administrators"),
     ("admin", "everyone"),
-    # A team administrator is an administrator here (ADR-0035): asked in both modes.
     ("team_admin", "administrators"),
     ("team_admin", "everyone"),
 ]
@@ -149,7 +140,7 @@ def test_every_route_follows_the_setting_for_every_role(settings, role, mode, ro
     user = FACTORIES[role]()
     response = send(signed_in(user), method, route)
     rule = AUTHZ_MATRIX[route]
-    gated = mode == "everyone" or role in ("admin", "team_admin")
+    gated = mode == "administrators" and role == "admin"
     if route in ALLOWED_BEFORE_ENROLMENT or not gated:
         assert error_code(response) != "mfa_enrollment_required", (method, route)
         return

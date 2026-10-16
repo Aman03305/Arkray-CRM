@@ -1,7 +1,7 @@
-"""Administrators can't get past setting up two-step verification (ADR-0033, R125).
+"""Super Admins can't get past setting up two-step verification (ADR-0033, R125).
 
 While MFA_REQUIRED_FOR_ADMINS is on (production refuses it off, except with the local opt-in
-on a local host), an administrator without a second factor reaches only the views marked
+on a local host), a Super Admin without a second factor reaches only the views marked
 `allowed_before_mfa_enrollment`: every other API route answers 403 `mfa_enrollment_required`.
 Enumerated here from the authorization matrix (which tests/architecture checks against the
 URLconf, with each view's permission class), so a new route is gated or listed below on
@@ -21,7 +21,7 @@ from django.urls import URLPattern, URLResolver, get_resolver
 
 from arkray.identity import mfa_services
 from arkray.identity.models import SupportSession
-from arkray.identity.policy import ROLE_CAPABILITIES, Capability
+from arkray.identity.policy import ROLE_CAPABILITIES
 from tests.architecture.test_authorization_baseline import api_views
 from tests.architecture.test_production_settings import load_production_settings
 from tests.authz_matrix import AUTHZ_MATRIX
@@ -53,8 +53,6 @@ PUBLIC = {
 }
 # Everything outside /api/: the probes and the metrics (a bearer token, never a session).
 NOT_API = {"health/metrics", "health/live", "health/ready"}
-# What a role may hold without being asked for a second factor.
-UNPRIVILEGED = {Capability.CRM_ACCESS_OWN, Capability.AI_QUERY}
 PARAMETER = re.compile(r"<(str|uuid):[a-z_]+>")
 
 
@@ -145,19 +143,17 @@ def test_every_other_route_refuses_an_administrator_without_a_second_factor(admi
 
 @pytest.mark.parametrize(("route", "method"), GATED)
 def test_every_other_route_refuses_a_team_administrator_without_a_second_factor(route, method):
-    """ADR-0035: an Admin is an administrator for two-step verification too. A route their
-    role may not ask at all answers 403 `permission_denied` first (nothing let through)."""
+    """An Admin is never caught by the Super Admin enrolment gate.
+
+    A route outside their team capability can still answer ``permission_denied``; routes
+    they may use proceed to normal validation or lookup.  Neither result may be an MFA gate.
+    """
     response = send(signed_in(TeamAdminFactory()), method, route)
-    if route in ALLOWED_BEFORE_ENROLMENT:
-        assert error_code(response) != "mfa_enrollment_required", response.content
-        return
-    assert response.status_code == 403, (method, route, response.content)
-    expected = (
-        "mfa_enrollment_required"
-        if may_ask("team_admin", AUTHZ_MATRIX[route].access)
-        else "permission_denied"
+    assert error_code(response) not in {"mfa_enrollment_required", "mfa_required"}, (
+        method,
+        route,
+        response.content,
     )
-    assert error_code(response) == expected, (method, route)
 
 
 def test_the_probes_and_metrics_give_an_unenrolled_administrator_nothing(admin, settings):
@@ -167,12 +163,10 @@ def test_the_probes_and_metrics_give_an_unenrolled_administrator_nothing(admin, 
     assert client.get("/health/metrics").status_code == 404  # a session is no token
 
 
-def test_every_privileged_role_must_enrol():
-    """Every role holding more than its own CRM and Ask Arkray (all users, all workspaces,
-    user administration, the audit trail, support sessions, privacy) is one the gate asks."""
-    for role, capabilities in ROLE_CAPABILITIES.items():
-        if set(capabilities) - UNPRIVILEGED:
-            assert mfa_services.required_for(SimpleNamespace(role=role)), role
+def test_only_the_super_admin_role_must_enrol():
+    assert mfa_services.required_for(SimpleNamespace(role="admin"))
+    assert not mfa_services.required_for(SimpleNamespace(role="team_admin"))
+    assert not mfa_services.required_for(SimpleNamespace(role="sales_user"))
 
 
 # --- nothing gets past it -----------------------------------------------------------------------

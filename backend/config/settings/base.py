@@ -286,9 +286,8 @@ LOGIN_DAILY_FAILURE_CAP = 50
 LOGIN_DAILY_WINDOW_S = 24 * 60 * 60
 LOGIN_LOCK_MAX_AGE_S = 30 * 24 * 60 * 60
 SIGN_IN_UNLOCK_TTL_S = 24 * 60 * 60
-# Two-step verification for every role, not only administrators (MFA_REQUIRED_FOR_ADMINS):
-# an organisational policy (docs/deployment.md). On by default in production; off here, for
-# development and tests (dedicated tests turn it on).
+# Retired compatibility setting. Older environment files may still provide it during a
+# rolling upgrade, but identity.mfa_services intentionally ignores it: MFA is Super Admin-only.
 MFA_REQUIRED_FOR_ALL_USERS = env.bool("MFA_REQUIRED_FOR_ALL_USERS", default=False)
 # An account whose password or email an administrator changed (or whose second factor an
 # administrator reset, or that an administrator created with a password) can't be made an

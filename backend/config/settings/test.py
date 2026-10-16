@@ -35,7 +35,7 @@ EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
 # Two-step verification is opt-in per test (`settings.MFA_REQUIRED_FOR_ADMINS = True`), so
 # the many tests that sign administrators in directly keep working (ADR-0033).
 MFA_REQUIRED_FOR_ADMINS = False
-# Likewise for every user (review of 73ff1e3, L1): `settings.MFA_REQUIRED_FOR_ALL_USERS = True`.
+# Retired compatibility setting; tests prove that it cannot broaden the role policy.
 MFA_REQUIRED_FOR_ALL_USERS = False
 LOG_LEVEL = "WARNING"
 LOGGING["root"]["level"] = "WARNING"  # noqa: F405

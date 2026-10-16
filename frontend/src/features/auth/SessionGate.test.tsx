@@ -248,10 +248,37 @@ describe("RequireCapability", () => {
 });
 
 describe("SessionGate: two-step verification required for the role (ADR-0033)", () => {
-  const REQUIRED = { ...ME, role: "admin", password_change_required: false, mfa_enabled: false, mfa_enrollment_required: true, support_session: null };
+  const REQUIRED = {
+    ...ME,
+    role: "admin",
+    capabilities: adminViewer.capabilities,
+    password_change_required: false,
+    mfa_enabled: false,
+    mfa_enrollment_required: true,
+    support_session: null,
+  };
   const SET_UP = { ...REQUIRED, mfa_enabled: true, mfa_enrollment_required: false };
 
   beforeEach(() => nav.hardNavigate.mockReset());
+
+  it.each([
+    ["Admin", "team_admin", ["crm.access_own", "users.manage_team"]],
+    ["User", "sales_user", ["crm.access_own"]],
+  ])("never forces a %s into enrollment, even if a stale response says required", async (_, role, capabilities) => {
+    mockApi({
+      "GET /api/v1/auth/me": {
+        status: 200,
+        body: { ...REQUIRED, role, capabilities, mfa_enrollment_required: true },
+      },
+    });
+    renderWithProviders(
+      <SessionGate>
+        <WhoAmI />
+      </SessionGate>,
+    );
+    expect(await screen.findByText("Signed in as Rahul Sharma")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Set up two-step verification" })).not.toBeInTheDocument();
+  });
 
   it("must be set up before the app opens; the recovery codes stay until saved, even if the viewer is fetched meanwhile", async () => {
     let confirmed = false;

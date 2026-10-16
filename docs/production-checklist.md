@@ -161,9 +161,9 @@ the system can't verify them.
 - [ ] `DJANGO_ALLOW_INSECURE_LOCAL_HTTP` **unset**.
 - [ ] `MFA_REQUIRED_FOR_ADMINS` unset or `true` (ADR-0033); a secret-key rotation includes
       `manage.py mfa_reencrypt` before a fallback key is retired.
-- [ ] `MFA_REQUIRED_FOR_ALL_USERS` decided (default `true` in production): users told that
-      they will set up two-step verification at their next sign-in; if `false`, the decision
-      recorded (R154, [ADR-0034](adr/0034-staging-security-remediation.md)).
+- [ ] `MFA_REQUIRED_FOR_ALL_USERS` removed or set to `false`. It is retained only as an
+      ignored rolling-upgrade compatibility variable; two-step verification is mandatory
+      for Super Admin accounts only.
 - [ ] The write budgets confirmed for this organisation (`ACTIVITY_MAX_CREATED_PER_USER_PER_DAY`
       1,000, `ACTIVITY_MAX_PER_CUSTOMER` 5,000; [reliability.md](reliability.md#write-budgets);
       R153).
@@ -276,10 +276,9 @@ the system can't verify them.
       catalog only) applied by the migrate job; the previous release keeps inserting (one has
       a database default, the other is nullable) and ignores them, so the rolling window holds
       (R150).
-- [ ] Users told before the upgrade if `MFA_REQUIRED_FOR_ALL_USERS` stays on: each sets up
-      two-step verification at their next sign-in (R154). The development Compose file runs
-      the production settings too, so local accounts on rebuilt images must enrol a second
-      factor ([development.md](development.md#first-time-setup)).
+- [ ] Super Admins told before the upgrade that each will set up two-step verification at
+      their next sign-in. Admin and User accounts continue to sign in with their password
+      without an enrolment gate ([development.md](development.md#first-time-setup)).
 - [ ] The migrate job's log checked for `pseudonym_domain_accounts_not_pseudonymised`, and each
       account it lists given a real address on the Users page (R157,
       [runbooks.md](runbooks.md#schema-migration-for-a-release)).
@@ -421,7 +420,8 @@ or a small code change ([ADR-0034](adr/0034-staging-security-remediation.md)).
 - [ ] The daily sign-in cap (default: 50 failures from new browsers in 24 hours, lifted after 30 days, an unlock link valid 24 hours that trusts the browser opening it unless another account's trust is there, networks counted as IPv4 /24 and IPv6 /64; `config/settings/base.py`, `LOGIN_*`, `SIGN_IN_UNLOCK_TTL_S`).
 - [ ] An early warning below the cap (proposed, not built): email the owner at most once a day when failures from new browsers reach 20 in 24 hours, and show it in the security events. Today up to 49 failures a day can go on indefinitely and nobody is told.
 - [ ] The 7-day promotion cooling-off after an administrator changed an account's password, email or second factor, or created it with a password (`ADMIN_PROMOTION_COOLING_OFF_S`, `config/settings/base.py`).
-- [ ] Two-step verification for every user (default `MFA_REQUIRED_FOR_ALL_USERS=true` in production: every sales user enrols at their next sign-in; `false` accepted).
+- [ ] Two-step verification is mandatory for Super Admin accounts only; Admin and User
+      accounts cannot enrol, replace, disable, or use MFA step-up.
 - [ ] The owner's notices (default: an email when the daily cap locks the account, with the unlock link, when an administrator sets their password, and on any role change, sent to the address the account had when the notice was queued, whatever its status by then, never for a pseudonymised account; `identity/services.py`).
 - [ ] Administrators may clear any account's sign-in lock, another administrator's included (default; it changes no credential; audited).
 - [ ] The per-address sign-in limit ignores failures from trusted browsers (default; fairness for shared offices; `identity/throttling.py`).

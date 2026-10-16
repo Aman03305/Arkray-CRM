@@ -45,6 +45,18 @@ CODES = "/api/v1/auth/mfa/recovery-codes"
 DISABLE = "/api/v1/auth/mfa/disable"
 
 
+@pytest.fixture
+def mfa_admin(settings):
+    """A Super Admin under the production MFA policy.
+
+    Most tests in this module pre-date role-specific MFA and used the ordinary ``user_a``
+    fixture as a convenient account.  MFA is now deliberately unavailable to that role, so
+    tests of the factor itself use a real Super Admin instead.
+    """
+    settings.MFA_REQUIRED_FOR_ADMINS = True
+    return AdminFactory(first_name="Mina", last_name="MFA Admin")
+
+
 def error_code(response):
     return response.json()["error"]["code"]
 
@@ -68,8 +80,17 @@ def set_up(client, clock) -> tuple[str, list[str]]:
 
 # --- enrolment ------------------------------------------------------------------------------------
 class TestEnrolment:
-    def test_setup_needs_the_current_password_and_returns_the_secret_once(self, user_a, clock):
-        client = signed_in(user_a)
+    @pytest.mark.parametrize("account", ["sales_user", "team_admin"])
+    def test_non_super_admins_cannot_start_enrolment(self, account, user_a, team_admin):
+        user = user_a if account == "sales_user" else team_admin
+        response = signed_in(user).post(
+            SETUP, {"current_password": DEFAULT_PASSWORD}, format="json"
+        )
+        assert (response.status_code, error_code(response)) == (403, "permission_denied")
+        assert not MfaDevice.objects.filter(user=user).exists()
+
+    def test_setup_needs_the_current_password_and_returns_the_secret_once(self, mfa_admin, clock):
+        client = signed_in(mfa_admin)
         wrong = client.post(SETUP, {"current_password": "not-it-at-all"}, format="json")
         assert wrong.status_code == 400
         assert error_code(wrong) == "validation_error"
@@ -82,20 +103,22 @@ class TestEnrolment:
         assert set(body["qr"]) == {"size", "rows"}
         assert body["qr"]["size"] == len(body["qr"]["rows"])
         assert f"secret={body['secret']}" in body["otpauth_uri"]
-        assert user_a.email in body["otpauth_uri"]
+        assert mfa_admin.email in body["otpauth_uri"]
         # Not active until confirmed.
-        device = MfaDevice.objects.get(user=user_a)
+        device = MfaDevice.objects.get(user=mfa_admin)
         assert device.confirmed_at is None
         assert client.get(STATUS).json()["enabled"] is False
         assert client.get(ME).json()["mfa_enabled"] is False
 
-    def test_the_secret_is_encrypted_at_rest(self, user_a, clock):
-        client = signed_in(user_a)
+    def test_the_secret_is_encrypted_at_rest(self, mfa_admin, clock):
+        client = signed_in(mfa_admin)
         secret = client.post(SETUP, {"current_password": DEFAULT_PASSWORD}, format="json").json()[
             "secret"
         ]
         with connection.cursor() as cursor:
-            cursor.execute("SELECT secret FROM identity_mfa_device WHERE user_id = %s", [user_a.pk])
+            cursor.execute(
+                "SELECT secret FROM identity_mfa_device WHERE user_id = %s", [mfa_admin.pk]
+            )
             (stored,) = cursor.fetchone()
         assert stored != secret
         assert secret not in stored
@@ -103,8 +126,8 @@ class TestEnrolment:
         assert stored.startswith("gAAAAA")
         assert mfa.decrypt(stored) == secret
 
-    def test_a_wrong_code_does_not_activate_it(self, user_a, clock):
-        client = signed_in(user_a)
+    def test_a_wrong_code_does_not_activate_it(self, mfa_admin, clock):
+        client = signed_in(mfa_admin)
         secret = client.post(SETUP, {"current_password": DEFAULT_PASSWORD}, format="json").json()[
             "secret"
         ]
@@ -115,11 +138,11 @@ class TestEnrolment:
         assert response.json()["error"]["message"] == (
             "That code didn't work. Check your authenticator app and try again."
         )
-        assert MfaDevice.objects.get(user=user_a).confirmed_at is None
+        assert MfaDevice.objects.get(user=mfa_admin).confirmed_at is None
         assert not MfaRecoveryCode.objects.exists()
 
-    def test_confirming_activates_it_with_ten_recovery_codes(self, user_a, clock):
-        client = signed_in(user_a)
+    def test_confirming_activates_it_with_ten_recovery_codes(self, mfa_admin, clock):
+        client = signed_in(mfa_admin)
         secret, codes = set_up(client, clock)
         assert len(codes) == len(set(codes)) == 10
         status = client.get(STATUS).json()
@@ -127,8 +150,8 @@ class TestEnrolment:
             "enabled": True,
             "confirmed_at": status["confirmed_at"],
             "recovery_codes_remaining": 10,
-            "required": False,
-            "can_disable": True,
+            "required": True,
+            "can_disable": False,
             "lock": None,  # R133: what unlocks it, once wrong codes locked it
         }
         assert status["confirmed_at"]
@@ -141,15 +164,15 @@ class TestEnrolment:
         assert again.status_code == 409
         assert error_code(again) == "mfa_already_enabled"
         assert secret not in again.content.decode()
-        assert AuditEvent.objects.filter(action="mfa.enabled", target_id=str(user_a.pk)).exists()
+        assert AuditEvent.objects.filter(action="mfa.enabled", target_id=str(mfa_admin.pk)).exists()
 
-    def test_confirm_without_a_setup(self, user_a, clock):
-        response = signed_in(user_a).post(CONFIRM, {"code": "123456"}, format="json")
+    def test_confirm_without_a_setup(self, mfa_admin, clock):
+        response = signed_in(mfa_admin).post(CONFIRM, {"code": "123456"}, format="json")
         assert response.status_code == 400
         assert error_code(response) == "mfa_setup_required"
 
-    def test_restarting_an_unconfirmed_setup_replaces_its_secret(self, user_a, clock):
-        client = signed_in(user_a)
+    def test_restarting_an_unconfirmed_setup_replaces_its_secret(self, mfa_admin, clock):
+        client = signed_in(mfa_admin)
         first = client.post(SETUP, {"current_password": DEFAULT_PASSWORD}, format="json")
         second = client.post(SETUP, {"current_password": DEFAULT_PASSWORD}, format="json")
         assert first.json()["secret"] != second.json()["secret"]
@@ -157,11 +180,11 @@ class TestEnrolment:
             CONFIRM, {"code": code_for(first.json()["secret"], clock)}, format="json"
         )
         assert stale.status_code == 400
-        assert MfaDevice.objects.filter(user=user_a).count() == 1
+        assert MfaDevice.objects.filter(user=mfa_admin).count() == 1
 
-    def test_confirming_ends_every_other_session(self, user_a, clock):
-        other = signed_in(user_a)
-        client = signed_in(user_a)
+    def test_confirming_ends_every_other_session(self, mfa_admin, clock):
+        other = signed_in(mfa_admin)
+        client = signed_in(mfa_admin)
         set_up(client, clock)
         assert other.get(ME).status_code == 401
         assert client.get(ME).status_code == 200
@@ -169,10 +192,10 @@ class TestEnrolment:
 
 # --- the two-step sign-in -------------------------------------------------------------------------
 class TestTwoStepSignIn:
-    def test_the_password_gives_a_challenge_and_the_code_a_session(self, user_a, clock):
-        enrolment = enrol(user_a)
+    def test_the_password_gives_a_challenge_and_the_code_a_session(self, mfa_admin, clock):
+        enrolment = enrol(mfa_admin)
         client = APIClient()
-        first = password_step(client, user_a)
+        first = password_step(client, mfa_admin)
         assert first.status_code == 202
         assert first.json() == {"mfa_required": True, "expires_in": 300}
         assert settings.LOGIN_DEVICE_COOKIE_NAME not in first.cookies
@@ -184,7 +207,7 @@ class TestTwoStepSignIn:
         clock.next_step()
         second = client.post(LOGIN_MFA, {"code": code_for(enrolment.secret, clock)}, format="json")
         assert second.status_code == 200, second.content
-        assert second.json()["id"] == str(user_a.pk)
+        assert second.json()["id"] == str(mfa_admin.pk)
         assert second.json()["mfa_enabled"] is True
         assert settings.LOGIN_DEVICE_COOKIE_NAME in second.cookies
         assert client.get(ME).status_code == 200
@@ -196,23 +219,23 @@ class TestTwoStepSignIn:
         assert response.status_code == 200
         assert AuditEvent.objects.get(action="auth.login").metadata["factor"] == "password_only"
 
-    def test_a_planted_session_never_carries_over(self, user_a, clock):
+    def test_a_planted_session_never_carries_over(self, mfa_admin, clock):
         from django.contrib.sessions.backends.db import SessionStore
 
-        enrol(user_a)
+        enrol(mfa_admin)
         planted = SessionStore()
         planted["attacker"] = True
         planted.create()
         client = APIClient()
         client.cookies[settings.SESSION_COOKIE_NAME] = planted.session_key
-        first = password_step(client, user_a)
+        first = password_step(client, mfa_admin)
         assert first.cookies[settings.SESSION_COOKIE_NAME].value != planted.session_key
         assert not Session.objects.filter(session_key=planted.session_key).exists()
 
-    def test_a_wrong_code_is_refused_and_audited(self, user_a, clock):
-        enrolment = enrol(user_a)
+    def test_a_wrong_code_is_refused_and_audited(self, mfa_admin, clock):
+        enrolment = enrol(mfa_admin)
         client = APIClient()
-        password_step(client, user_a)
+        password_step(client, mfa_admin)
         wrong = str((int(code_for(enrolment.secret, clock)) + 1) % 1_000_000).zfill(6)
         response = client.post(LOGIN_MFA, {"code": wrong}, format="json")
         assert response.status_code == 400
@@ -222,11 +245,11 @@ class TestTwoStepSignIn:
         assert event.metadata == {"reason": "wrong_code", "trusted_device": False}
         assert wrong not in json.dumps(event.metadata)
 
-    def test_five_wrong_codes_void_the_challenge(self, user_a, clock, settings):
+    def test_five_wrong_codes_void_the_challenge(self, mfa_admin, clock, settings):
         settings.LOGIN_ACCOUNT_FAILURE_THRESHOLD = 50  # the challenge's own limit, alone
-        enrolment = enrol(user_a)
+        enrolment = enrol(mfa_admin)
         client = APIClient()
-        password_step(client, user_a)
+        password_step(client, mfa_admin)
         for _ in range(5):
             assert client.post(LOGIN_MFA, {"code": "000000"}, format="json").status_code == 400
         clock.next_step()
@@ -237,40 +260,40 @@ class TestTwoStepSignIn:
             "Your sign-in timed out. Enter your email and password again."
         )
 
-    def test_wrong_codes_count_in_the_durable_throttle(self, user_a, clock):
+    def test_wrong_codes_count_in_the_durable_throttle(self, mfa_admin, clock):
         """Five wrong codes (across challenges too) lock this browser out of the account
         exactly like five wrong passwords."""
-        enrol(user_a)
+        enrol(mfa_admin)
         client = APIClient()
         for _ in range(2):
-            password_step(client, user_a)
+            password_step(client, mfa_admin)
             for _ in range(2):
                 client.post(LOGIN_MFA, {"code": "000000"}, format="json")
-        password_step(client, user_a)
+        password_step(client, mfa_admin)
         assert client.post(LOGIN_MFA, {"code": "000000"}, format="json").status_code == 400
         assert failures() == 5
-        locked = password_step(client, user_a)
+        locked = password_step(client, mfa_admin)
         assert locked.status_code == 429
         assert error_code(locked) == "rate_limited"
         assert locked["Retry-After"]
 
-    def test_the_password_alone_forgives_no_failure(self, user_a, clock):
-        enrolment = enrol(user_a)
+    def test_the_password_alone_forgives_no_failure(self, mfa_admin, clock):
+        enrolment = enrol(mfa_admin)
         client = APIClient()
         for _ in range(3):
-            assert password_step(client, user_a, "wrong-password-1234").status_code == 400
+            assert password_step(client, mfa_admin, "wrong-password-1234").status_code == 400
         assert failures() == 3
-        assert password_step(client, user_a).status_code == 202
+        assert password_step(client, mfa_admin).status_code == 202
         assert failures() == 3  # its own reservation withdrawn, the others stand
         clock.next_step()
         done = client.post(LOGIN_MFA, {"code": code_for(enrolment.secret, clock)}, format="json")
         assert done.status_code == 200
         assert failures() == 0
 
-    def test_the_challenge_expires(self, user_a, clock):
-        enrolment = enrol(user_a)
+    def test_the_challenge_expires(self, mfa_admin, clock):
+        enrolment = enrol(mfa_admin)
         client = APIClient()
-        password_step(client, user_a)
+        password_step(client, mfa_admin)
         clock.advance(301)
         response = client.post(
             LOGIN_MFA, {"code": code_for(enrolment.secret, clock)}, format="json"
@@ -283,20 +306,20 @@ class TestTwoStepSignIn:
         assert error_code(response) == "mfa_challenge_expired"
 
     @pytest.mark.parametrize("change", ["password", "sign_out_everywhere", "deactivated"])
-    def test_a_change_between_the_steps_voids_the_challenge(self, user_a, clock, change):
-        enrolment = enrol(user_a)
+    def test_a_change_between_the_steps_voids_the_challenge(self, mfa_admin, clock, change):
+        enrolment = enrol(mfa_admin)
         client = APIClient()
-        password_step(client, user_a)
+        password_step(client, mfa_admin)
         if change == "password":
-            user_a.set_password("Another-Long-Passphrase-9")
-            user_a.save()
+            mfa_admin.set_password("Another-Long-Passphrase-9")
+            mfa_admin.save()
         elif change == "sign_out_everywhere":
-            user_a.session_epoch += 1
-            user_a.save()
+            mfa_admin.session_epoch += 1
+            mfa_admin.save()
         else:
             from arkray.identity import services
 
-            services.deactivate_user(actor_id=AdminFactory().pk, user_id=user_a.pk)
+            services.deactivate_user(actor_id=AdminFactory().pk, user_id=mfa_admin.pk)
         clock.next_step()
         response = client.post(
             LOGIN_MFA, {"code": code_for(enrolment.secret, clock)}, format="json"
@@ -306,77 +329,77 @@ class TestTwoStepSignIn:
     @pytest.mark.parametrize(
         "body", [{}, {"code": "123456", "recovery_code": "AAAA-AAAA-AAAA-AAAA"}]
     )
-    def test_exactly_one_factor_is_sent(self, user_a, clock, body):
-        enrol(user_a)
+    def test_exactly_one_factor_is_sent(self, mfa_admin, clock, body):
+        enrol(mfa_admin)
         client = APIClient()
-        password_step(client, user_a)
+        password_step(client, mfa_admin)
         response = client.post(LOGIN_MFA, body, format="json")
         assert response.status_code == 400
         assert error_code(response) == "validation_error"
 
 
 class TestReplay:
-    def test_the_same_code_never_signs_in_twice(self, user_a, clock):
-        enrolment = enrol(user_a)
+    def test_the_same_code_never_signs_in_twice(self, mfa_admin, clock):
+        enrolment = enrol(mfa_admin)
         first = APIClient()
-        assert sign_in_with_code(first, user_a, enrolment.secret, clock).status_code == 200
+        assert sign_in_with_code(first, mfa_admin, enrolment.secret, clock).status_code == 200
         code = code_for(enrolment.secret, clock)
         second = APIClient()
-        assert password_step(second, user_a).status_code == 202
+        assert password_step(second, mfa_admin).status_code == 202
         replayed = second.post(LOGIN_MFA, {"code": code}, format="json")
         assert replayed.status_code == 400
         assert error_code(replayed) == "invalid_mfa_code"
 
-    def test_two_servers_racing_with_one_code_let_one_in(self, user_a, clock):
+    def test_two_servers_racing_with_one_code_let_one_in(self, mfa_admin, clock):
         """Two browsers (any two servers: the step is stored on the device's row, checked
         under its lock) both at the second step, the same code: one succeeds."""
-        enrolment = enrol(user_a)
+        enrolment = enrol(mfa_admin)
         a, b = APIClient(), APIClient()
-        password_step(a, user_a)
-        password_step(b, user_a)
+        password_step(a, mfa_admin)
+        password_step(b, mfa_admin)
         clock.next_step()
         code = code_for(enrolment.secret, clock)
         results = [c.post(LOGIN_MFA, {"code": code}, format="json").status_code for c in (a, b)]
         assert sorted(results) == [200, 400]
 
-    def test_an_earlier_code_after_a_later_one_is_refused(self, user_a, clock):
-        enrolment = enrol(user_a)
+    def test_an_earlier_code_after_a_later_one_is_refused(self, mfa_admin, clock):
+        enrolment = enrol(mfa_admin)
         early = code_for(enrolment.secret, clock, steps=-1)
         client = APIClient()
-        password_step(client, user_a)
+        password_step(client, mfa_admin)
         later = code_for(enrolment.secret, clock, steps=1)
         assert client.post(LOGIN_MFA, {"code": later}, format="json").status_code == 200
         other = APIClient()
-        password_step(other, user_a)
+        password_step(other, mfa_admin)
         assert other.post(LOGIN_MFA, {"code": early}, format="json").status_code == 400
 
 
 class TestRecoveryCodes:
-    def test_a_recovery_code_signs_in_once_and_is_audited(self, user_a, clock):
-        enrolment = enrol(user_a)
+    def test_a_recovery_code_signs_in_once_and_is_audited(self, mfa_admin, clock):
+        enrolment = enrol(mfa_admin)
         code = enrolment.recovery_codes[0]
         client = APIClient()
-        password_step(client, user_a)
+        password_step(client, mfa_admin)
         typed = code.lower().replace("-", " ")
         response = client.post(LOGIN_MFA, {"recovery_code": typed}, format="json")
         assert response.status_code == 200, response.content
         used = AuditEvent.objects.get(action="mfa.recovery_code_used")
         assert used.metadata == {"remaining": 9}
         assert AuditEvent.objects.get(action="auth.login").metadata["factor"] == "recovery_code"
-        assert signed_in(user_a).get(STATUS).json()["recovery_codes_remaining"] == 9
+        assert signed_in(mfa_admin).get(STATUS).json()["recovery_codes_remaining"] == 9
 
         again = APIClient()
-        password_step(again, user_a)
+        password_step(again, mfa_admin)
         refused = again.post(LOGIN_MFA, {"recovery_code": code}, format="json")
         assert refused.status_code == 400
         assert error_code(refused) == "invalid_mfa_code"
         failed = AuditEvent.objects.get(action="auth.login_failed")
         assert failed.metadata["reason"] == "wrong_recovery_code"
 
-    def test_replacing_them_voids_the_old_ones_and_ends_other_sessions(self, user_a, clock):
-        enrolment = enrol(user_a)
-        other = signed_in(user_a)
-        client = signed_in(user_a)
+    def test_replacing_them_voids_the_old_ones_and_ends_other_sessions(self, mfa_admin, clock):
+        enrolment = enrol(mfa_admin)
+        other = signed_in(mfa_admin)
+        client = signed_in(mfa_admin)
         clock.next_step()
         response = client.post(CODES, {"code": code_for(enrolment.secret, clock)}, format="json")
         assert response.status_code == 200, response.content
@@ -387,20 +410,20 @@ class TestRecoveryCodes:
         assert client.get(ME).status_code == 200
         assert AuditEvent.objects.filter(action="mfa.recovery_codes_replaced").count() == 1
         stale = APIClient()
-        password_step(stale, user_a)
+        password_step(stale, mfa_admin)
         old = stale.post(LOGIN_MFA, {"recovery_code": enrolment.recovery_codes[1]}, format="json")
         assert old.status_code == 400
         fresh = stale.post(LOGIN_MFA, {"recovery_code": new[1]}, format="json")
         assert fresh.status_code == 200
 
-    def test_replacing_needs_a_right_code_and_is_throttled(self, user_a, clock):
-        enrol(user_a)
-        client = signed_in(user_a)
+    def test_replacing_needs_a_right_code_and_is_throttled(self, mfa_admin, clock):
+        enrol(mfa_admin)
+        client = signed_in(mfa_admin)
         response = client.post(CODES, {"code": "000000"}, format="json")
         assert response.status_code == 400
         assert error_code(response) == "invalid_mfa_code"
         assert failures() == 1
-        assert MfaRecoveryCode.objects.filter(user=user_a).count() == 10
+        assert MfaRecoveryCode.objects.filter(user=mfa_admin).count() == 10
 
 
 # --- step-up --------------------------------------------------------------------------------------
@@ -453,6 +476,10 @@ def call(client, method, route, target):
 
 
 class TestStepUp:
+    @pytest.fixture(autouse=True)
+    def _required(self, settings):
+        settings.MFA_REQUIRED_FOR_ADMINS = True
+
     @pytest.mark.parametrize(("route", "method"), STEP_UP_ROUTES)
     def test_needs_a_recent_code_from_a_user_with_a_second_factor(
         self, admin, user_b, clock, route, method
@@ -481,9 +508,9 @@ class TestStepUp:
         assert error_code(call(client, method, route, user_b)) == "mfa_required"
 
     @pytest.mark.parametrize(("route", "method"), STEP_UP_ROUTES)
-    def test_no_second_factor_no_step_up(self, admin, user_b, route, method):
+    def test_no_second_factor_cannot_bypass_enrolment(self, admin, user_b, route, method):
         response = call(signed_in(admin), method, route, user_b)
-        assert not (response.status_code == 403 and error_code(response) == "mfa_required")
+        assert (response.status_code, error_code(response)) == (403, "mfa_enrollment_required")
 
     def test_signing_in_with_a_code_counts_as_verified(self, admin, user_b, clock):
         enrolment = enrol(admin)
@@ -507,9 +534,11 @@ class TestStepUp:
         assert done.status_code == 204
         assert AuditEvent.objects.filter(action="mfa.recovery_code_used").count() == 1
 
-    def test_step_up_without_a_device(self, user_a):
-        response = signed_in(user_a).post(VERIFY, {"code": "123456"}, format="json")
-        assert error_code(response) == "mfa_setup_required"
+    @pytest.mark.parametrize("account", ["sales_user", "team_admin"])
+    def test_non_super_admins_cannot_use_step_up(self, account, user_a, team_admin):
+        user = user_a if account == "sales_user" else team_admin
+        response = signed_in(user).post(VERIFY, {"code": "123456"}, format="json")
+        assert (response.status_code, error_code(response)) == (403, "permission_denied")
 
     def test_reading_needs_no_step_up(self, admin, clock):
         enrol(admin)
@@ -577,50 +606,103 @@ class TestEnrolmentGate:
         assert body["mfa_enrollment_required"] is True
 
 
+class TestRolePolicyChanges:
+    @pytest.fixture(autouse=True)
+    def _required(self, settings):
+        settings.MFA_REQUIRED_FOR_ADMINS = True
+
+    def test_promoting_an_admin_to_super_admin_ends_the_old_session_and_requires_enrolment(
+        self, admin, team_admin
+    ):
+        from arkray.identity import services
+
+        old_session = signed_in(team_admin)
+        promoted = services.update_user(
+            actor_id=admin.pk,
+            user_id=team_admin.pk,
+            version=team_admin.version,
+            changes={"role": "admin"},
+        )
+        assert promoted.role == "admin"
+        assert old_session.get(ME).status_code == 401
+
+        login = password_step(APIClient(), team_admin)
+        assert login.status_code == 200
+        assert login.json()["mfa_enrollment_required"] is True
+
+    def test_promoting_an_admin_with_a_legacy_device_requires_it_at_next_sign_in(
+        self, admin, team_admin, clock
+    ):
+        from arkray.identity import services
+
+        enrolment = enrol(team_admin)
+        services.update_user(
+            actor_id=admin.pk,
+            user_id=team_admin.pk,
+            version=team_admin.version,
+            changes={"role": "admin"},
+        )
+        client = APIClient()
+        assert password_step(client, team_admin).status_code == 202
+        clock.next_step()
+        assert (
+            client.post(
+                LOGIN_MFA, {"code": code_for(enrolment.secret, clock)}, format="json"
+            ).status_code
+            == 200
+        )
+
+    def test_a_demoted_account_no_longer_requires_its_existing_device(self):
+        account = AdminFactory()
+        enrol(account)
+        # Super Admin demotion is deliberately an operator-only policy in this application;
+        # model the resulting persisted role and epoch without weakening that boundary.
+        account.role = "team_admin"
+        account.session_epoch += 1
+        account.save(update_fields=["role", "session_epoch", "updated_at"])
+
+        response = password_step(APIClient(), account)
+        assert response.status_code == 200
+        assert response.json()["mfa_enabled"] is True
+        assert response.json()["mfa_enrollment_required"] is False
+
+
 # --- disabling ------------------------------------------------------------------------------------
 class TestDisable:
-    def test_needs_the_password_and_a_code_and_ends_other_sessions(self, user_a, clock):
-        enrolment = enrol(user_a)
-        other = signed_in(user_a)
-        client = signed_in(user_a)
-        wrong = client.post(
-            DISABLE, {"current_password": DEFAULT_PASSWORD, "code": "000000"}, format="json"
-        )
-        assert error_code(wrong) == "invalid_mfa_code"
-        bad_password = client.post(
-            DISABLE,
-            {"current_password": "nope-nope-nope", "code": code_for(enrolment.secret, clock)},
-            format="json",
-        )
-        assert bad_password.status_code == 400
-        assert MfaDevice.objects.filter(user=user_a).exists()
-
+    @pytest.mark.parametrize("account", ["sales_user", "team_admin"])
+    def test_non_super_admins_cannot_disable_a_legacy_device(
+        self, account, user_a, team_admin, clock
+    ):
+        user = user_a if account == "sales_user" else team_admin
+        enrolment = enrol(user)
         clock.next_step()
-        done = client.post(
+        response = signed_in(user).post(
             DISABLE,
-            {"current_password": DEFAULT_PASSWORD, "code": code_for(enrolment.secret, clock)},
+            {
+                "current_password": DEFAULT_PASSWORD,
+                "code": code_for(enrolment.secret, clock),
+            },
             format="json",
         )
-        assert done.status_code == 204
-        assert not MfaDevice.objects.filter(user=user_a).exists()
-        assert not MfaRecoveryCode.objects.filter(user=user_a).exists()
-        assert other.get(ME).status_code == 401
-        assert client.get(ME).json()["mfa_enabled"] is False
-        assert AuditEvent.objects.filter(action="mfa.disabled").count() == 1
-        assert password_step(APIClient(), user_a).status_code == 200
+        assert (response.status_code, error_code(response)) == (403, "permission_denied")
+        assert MfaDevice.objects.filter(user=user).exists()
 
-    def test_a_recovery_code_can_stand_in_for_a_lost_device(self, user_a, clock):
-        enrolment = enrol(user_a)
-        response = signed_in(user_a).post(
-            DISABLE,
-            {"current_password": DEFAULT_PASSWORD, "code": enrolment.recovery_codes[2]},
-            format="json",
-        )
-        assert response.status_code == 204
+    @pytest.mark.parametrize("account", ["sales_user", "team_admin"])
+    def test_a_legacy_device_does_not_add_a_login_step(self, account, user_a, team_admin):
+        user = user_a if account == "sales_user" else team_admin
+        enrol(user)
+        response = password_step(APIClient(), user)
+        assert response.status_code == 200
+        assert response.json()["mfa_enabled"] is True
+        assert response.json()["mfa_enrollment_required"] is False
 
 
 # --- support sessions -----------------------------------------------------------------------------
 class TestSupportSessions:
+    @pytest.fixture(autouse=True)
+    def _required(self, settings):
+        settings.MFA_REQUIRED_FOR_ADMINS = True
+
     @pytest.fixture
     def in_support(self, admin, user_a, clock):
         enrolment = enrol(admin)
@@ -771,20 +853,20 @@ class TestOperatorCommands:
             mfa_services.operator_reset(team_member.email, "x", operator_id=team_admin.pk)
         assert MfaDevice.objects.filter(user=team_member).exists()
 
-    def test_mfa_reencrypt_moves_every_secret_to_the_current_key(self, user_a, clock, settings):
+    def test_mfa_reencrypt_moves_every_secret_to_the_current_key(self, mfa_admin, clock, settings):
         old_key = "old-key-" + "q1w2e3r4" * 8
         settings.SECRET_KEY = old_key
         settings.SECRET_KEY_FALLBACKS = []
-        enrolment = enrol(user_a)
+        enrolment = enrol(mfa_admin)
         settings.SECRET_KEY = "new-key-" + "t5y6u7i8" * 8
         settings.SECRET_KEY_FALLBACKS = [old_key]
-        stored = MfaDevice.objects.get(user=user_a).secret
+        stored = MfaDevice.objects.get(user=mfa_admin).secret
         assert not mfa.under_current_key(stored)
         call_command("mfa_reencrypt")
-        assert mfa.under_current_key(MfaDevice.objects.get(user=user_a).secret)
+        assert mfa.under_current_key(MfaDevice.objects.get(user=mfa_admin).secret)
 
         settings.SECRET_KEY_FALLBACKS = []  # the old key retired: sign-in still works
-        assert sign_in_with_code(APIClient(), user_a, enrolment.secret, clock).status_code == 200
+        assert sign_in_with_code(APIClient(), mfa_admin, enrolment.secret, clock).status_code == 200
 
     def test_mfa_reencrypt_reports_secrets_under_no_key(self, user_a, settings):
         enrol(user_a)
@@ -793,23 +875,23 @@ class TestOperatorCommands:
         with pytest.raises(CommandError, match="1 secret"):
             call_command("mfa_reencrypt")
 
-    def test_a_verification_re_encrypts_under_the_current_key(self, user_a, clock, settings):
+    def test_a_verification_re_encrypts_under_the_current_key(self, mfa_admin, clock, settings):
         old_key = "old-key-" + "q1w2e3r4" * 8
         settings.SECRET_KEY = old_key
-        enrolment = enrol(user_a)
+        enrolment = enrol(mfa_admin)
         settings.SECRET_KEY = "new-key-" + "t5y6u7i8" * 8
         settings.SECRET_KEY_FALLBACKS = [old_key]
-        assert sign_in_with_code(APIClient(), user_a, enrolment.secret, clock).status_code == 200
-        assert mfa.under_current_key(MfaDevice.objects.get(user=user_a).secret)
+        assert sign_in_with_code(APIClient(), mfa_admin, enrolment.secret, clock).status_code == 200
+        assert mfa.under_current_key(MfaDevice.objects.get(user=mfa_admin).secret)
 
 
 # --- what the audit trail and the security events show --------------------------------------------
-def test_no_secret_code_or_hash_reaches_the_audit_trail(admin, user_a, clock):
-    enrolment = enrol(user_a)
+def test_no_secret_code_or_hash_reaches_the_audit_trail(mfa_admin, clock):
+    enrolment = enrol(mfa_admin)
     client = APIClient()
-    sign_in_with_code(client, user_a, enrolment.secret, clock)
+    sign_in_with_code(client, mfa_admin, enrolment.secret, clock)
     other = APIClient()
-    password_step(other, user_a)
+    password_step(other, mfa_admin)
     other.post(LOGIN_MFA, {"recovery_code": enrolment.recovery_codes[0]}, format="json")
     clock.next_step()
     replaced = client.post(CODES, {"code": code_for(enrolment.secret, clock)}, format="json")

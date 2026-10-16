@@ -113,7 +113,7 @@ def roles_with(capability: Capability) -> frozenset[str]:
 
 def administrator_roles() -> frozenset[str]:
     """Roles that manage user accounts, organisation-wide or a team's: the administrators
-    whose credentials only they change (ADR-0030), who are always invited, and for whom a
-    second factor is required (ADR-0033). The last-administrator guard counts only the
-    organisation-wide ones (`roles_with(USERS_MANAGE)`)."""
+    whose credentials only they change (ADR-0030) and who are always invited. The
+    last-administrator guard and mandatory MFA policy count only the organisation-wide ones
+    (`roles_with(USERS_MANAGE)`)."""
     return roles_with(Capability.USERS_MANAGE) | roles_with(Capability.USERS_MANAGE_TEAM)

@@ -220,7 +220,7 @@ class MfaSetupView(ApiView):
     """Start (or restart) a setup after the current password: the secret, its otpauth://
     URI and QR code, shown this once. 409 when two-step verification is already on."""
 
-    permission_classes = [IsActiveUser]
+    permission_classes = [requires(Capability.USERS_MANAGE)]
     throttle_classes = AUTH_THROTTLES
     throttle_scope = "auth"
     allowed_before_mfa_enrollment = True
@@ -245,7 +245,7 @@ class MfaConfirmView(ApiView):
     """Turn two-step verification on with a code from the new device: ten recovery codes,
     shown once; every other session of the account ends."""
 
-    permission_classes = [IsActiveUser]
+    permission_classes = [requires(Capability.USERS_MANAGE)]
     throttle_classes = AUTH_THROTTLES
     throttle_scope = "auth"
     allowed_before_mfa_enrollment = True
@@ -268,7 +268,7 @@ class MfaConfirmView(ApiView):
 class MfaRecoveryCodesView(ApiView):
     """Replace the recovery codes (the old ones stop working; other sessions end)."""
 
-    permission_classes = [IsActiveUser]
+    permission_classes = [requires(Capability.USERS_MANAGE)]
     throttle_classes = AUTH_THROTTLES
     throttle_scope = "auth"
     refused_in_support_session = True
@@ -291,7 +291,7 @@ class MfaDisableView(ApiView):
     """Turn two-step verification off (current password and a code): 422 where the role
     requires it; other sessions end."""
 
-    permission_classes = [IsActiveUser]
+    permission_classes = [requires(Capability.USERS_MANAGE)]
     throttle_classes = AUTH_THROTTLES
     throttle_scope = "auth"
     refused_in_support_session = True
@@ -312,7 +312,7 @@ class MfaVerifyView(ApiView):
     """Step-up: a code renews this session's verification for MFA_STEP_UP_TTL_S, for the
     operations that answer 403 `mfa_required`."""
 
-    permission_classes = [IsActiveUser]
+    permission_classes = [requires(Capability.USERS_MANAGE)]
     throttle_classes = AUTH_THROTTLES
     throttle_scope = "auth"
     refused_in_support_session = True

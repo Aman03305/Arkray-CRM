@@ -129,19 +129,18 @@ _role_check = os.environ.get("DB_REQUIRE_RESTRICTED_ROLE")
 if _role_check is not None and _role_check.strip().lower() not in {"true", "false", "1", "0"}:
     raise ImproperlyConfigured("DB_REQUIRE_RESTRICTED_ROLE must be true or false.")
 DB_REQUIRE_RESTRICTED_ROLE = env.bool("DB_REQUIRE_RESTRICTED_ROLE", default=True)
-# Two-step verification for administrators (ADR-0033, R125): on by default here, off only
+# Two-step verification for Super Admins (ADR-0033, R125): on by default here, off only
 # with the insecure opt-in below; an unrecognisable value is refused like the role check's.
 _mfa_required = os.environ.get("MFA_REQUIRED_FOR_ADMINS")
 if _mfa_required is not None and _mfa_required.strip().lower() not in {"true", "false", "1", "0"}:
     raise ImproperlyConfigured("MFA_REQUIRED_FOR_ADMINS must be true or false.")
 MFA_REQUIRED_FOR_ADMINS = env.bool("MFA_REQUIRED_FOR_ADMINS", default=True)
-# Two-step verification for every user (review of 73ff1e3, L1): on by default here, but an
-# organisational policy, so false is accepted (docs/deployment.md); an unrecognisable value
-# is refused like the administrators' setting.
+# Retired compatibility setting. It remains parseable during rolling upgrades but is ignored
+# by the MFA policy; only Super Admins are required to enrol.
 _mfa_everyone = os.environ.get("MFA_REQUIRED_FOR_ALL_USERS")
 if _mfa_everyone is not None and _mfa_everyone.strip().lower() not in {"true", "false", "1", "0"}:
     raise ImproperlyConfigured("MFA_REQUIRED_FOR_ALL_USERS must be true or false.")
-MFA_REQUIRED_FOR_ALL_USERS = env.bool("MFA_REQUIRED_FOR_ALL_USERS", default=True)
+MFA_REQUIRED_FOR_ALL_USERS = env.bool("MFA_REQUIRED_FOR_ALL_USERS", default=False)
 # Rate limits (R77): DRF parses them on the first request, so a typo would surface as
 # 500s there instead of here.
 _RATE = re.compile(r"[1-9][0-9]*/(s|sec|second|m|min|minute|h|hour|d|day)")

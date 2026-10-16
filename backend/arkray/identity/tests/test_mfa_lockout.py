@@ -20,7 +20,7 @@ from arkray.audit.models import AuditEvent
 from arkray.identity import metrics, mfa, mfa_services, selectors
 from arkray.identity import services as identity_services
 from arkray.identity.models import AuthThrottleEvent, MfaDevice, MfaRecoveryCode
-from tests.factories import DEFAULT_PASSWORD
+from tests.factories import DEFAULT_PASSWORD, AdminFactory, UserFactory
 from tests.helpers import drain_outbox, last_secret, signed_in
 from tests.mfa_helpers import (
     LOGIN_MFA,
@@ -41,6 +41,19 @@ NEW_PASSWORD = "freshly-chosen-passphrase-7"
 @pytest.fixture(autouse=True)
 def _limit(settings):
     settings.MFA_MAX_CONSECUTIVE_FAILURES = LIMIT
+
+
+@pytest.fixture
+def user_a(db, settings):
+    """Lockout behavior belongs to a real Super Admin now that MFA is role-specific."""
+    settings.MFA_REQUIRED_FOR_ADMINS = True
+    return AdminFactory(first_name="Rahul", last_name="MFA Admin")
+
+
+@pytest.fixture
+def legacy_user(db):
+    """An ordinary account that still has a device from the former optional-MFA policy."""
+    return UserFactory(first_name="Legacy", last_name="User")
 
 
 def error_code(response) -> str:
@@ -153,27 +166,31 @@ def test_a_password_reset_by_email_unlocks_it(api_client, user_a, clock):
     assert response.status_code == 200, response.content
 
 
-def test_an_administrators_mfa_reset_unlocks_it(admin, user_a, clock):
-    enrolment = enrol(user_a)
-    lock(user_a, enrolment.secret, clock)
-    reset = signed_in(admin).post(f"/api/v1/admin/users/{user_a.pk}/mfa/reset", format="json")
+def test_an_administrators_mfa_reset_unlocks_it(admin, legacy_user):
+    enrol(legacy_user)
+    MfaDevice.objects.filter(user=legacy_user).update(consecutive_failures=LIMIT)
+    reset = signed_in(admin).post(f"/api/v1/admin/users/{legacy_user.pk}/mfa/reset", format="json")
     assert reset.status_code == 200, reset.content
-    assert not MfaDevice.objects.filter(user=user_a).exists()  # the count went with it
-    assert password_step(APIClient(), user_a).status_code == 200  # password only, as before
+    assert not MfaDevice.objects.filter(user=legacy_user).exists()  # the count went with it
+    assert password_step(APIClient(), legacy_user).status_code == 200
 
 
-def test_a_password_set_by_an_administrator_unlocks_it(admin, user_a, clock):
-    enrolment = enrol(user_a)
-    lock(user_a, enrolment.secret, clock)
-    user_a.refresh_from_db()
+def test_a_password_set_by_an_administrator_unlocks_it(admin, legacy_user):
+    enrol(legacy_user)
+    MfaDevice.objects.filter(user=legacy_user).update(consecutive_failures=LIMIT)
+    legacy_user.refresh_from_db()
     identity_services.set_user_password(
-        actor_id=admin.pk, user_id=user_a.pk, version=user_a.version, new_password=NEW_PASSWORD
+        actor_id=admin.pk,
+        user_id=legacy_user.pk,
+        version=legacy_user.version,
+        new_password=NEW_PASSWORD,
     )
-    assert failures(user_a) == 0
+    assert failures(legacy_user) == 0
     unlocked = AuditEvent.objects.get(action=identity_services.AUDIT_MFA_UNLOCKED)
     assert (unlocked.actor_id, unlocked.metadata) == (admin.pk, {"by": "administrator"})
-    # The authenticator is kept: the temporary password and a code sign in.
-    response = sign_in_with_code(APIClient(), user_a, enrolment.secret, clock, NEW_PASSWORD)
+    # The legacy device is kept, but this non-Super Admin signs in with the new password only.
+    assert MfaDevice.objects.filter(user=legacy_user).exists()
+    response = password_step(APIClient(), legacy_user, NEW_PASSWORD)
     assert response.status_code == 200, response.content
 
 

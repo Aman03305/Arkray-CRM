@@ -143,6 +143,41 @@ class TestDelivery:
 
 
 class TestActivation:
+    @pytest.mark.parametrize("role", ["team_admin", "sales_user"])
+    def test_admins_and_users_accept_invitations_then_sign_in_without_mfa(
+        self, invite, api_client, settings, role
+    ):
+        settings.MFA_REQUIRED_FOR_ADMINS = True
+        settings.MFA_REQUIRED_FOR_ALL_USERS = True  # ignored legacy deployment setting
+        user = invite(role=role)
+        drain_outbox()
+        assert accept(api_client, last_secret("activate")).status_code == 200
+
+        login = api_client.post(
+            "/api/v1/auth/login", {"email": user.email, "password": PASSWORD}, format="json"
+        )
+        assert login.status_code == 200
+        assert login.json()["mfa_enrollment_required"] is False
+
+    def test_an_invited_super_admin_must_enrol_before_normal_access(
+        self, invite, api_client, settings
+    ):
+        settings.MFA_REQUIRED_FOR_ADMINS = True
+        user = invite(role="admin")
+        drain_outbox()
+        assert accept(api_client, last_secret("activate")).status_code == 200
+
+        login = api_client.post(
+            "/api/v1/auth/login", {"email": user.email, "password": PASSWORD}, format="json"
+        )
+        assert login.status_code == 200
+        assert login.json()["mfa_enrollment_required"] is True
+        gated = api_client.get("/api/v1/admin/users")
+        assert (gated.status_code, gated.json()["error"]["code"]) == (
+            403,
+            "mfa_enrollment_required",
+        )
+
     def test_verify_shows_who_the_link_is_for(self, invite, api_client):
         user = invite()
         drain_outbox()

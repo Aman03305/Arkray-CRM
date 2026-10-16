@@ -50,6 +50,13 @@ LOCKED_UNTIL_RESET_NOTICE = "Arkray CRM: Two-step verification is locked until i
 def _limits(settings):
     settings.MFA_MAX_CONSECUTIVE_FAILURES = LIMIT
     settings.MFA_MAX_FAILURES_BEFORE_RESET = CAP
+    settings.MFA_REQUIRED_FOR_ADMINS = True
+
+
+@pytest.fixture
+def user_a(db):
+    """A Super Admin, the only role whose sign-in consumes an MFA factor."""
+    return AdminFactory(first_name="Rahul", last_name="MFA Admin")
 
 
 def error_code(response) -> str:
@@ -109,10 +116,13 @@ def reset_password_by_email(user, new_password: str) -> None:
 
 
 def set_password_as_administrator(admin, user, new_password: str) -> None:
-    user.refresh_from_db()
-    identity_services.set_user_password(
-        actor_id=admin.pk, user_id=user.pk, version=user.version, new_password=new_password
-    )
+    """Replace a Super Admin password through the owner's emailed reset flow.
+
+    Another administrator cannot set a Super Admin's password; keeping that boundary is
+    more important than the old generic-MFA test's helper name.
+    """
+    assert admin.pk != user.pk
+    reset_password_by_email(user, new_password)
 
 
 def hard_lock(user, admin, secret: str, clock: Clock) -> str:
@@ -143,7 +153,12 @@ def test_the_shipped_cap_is_three_whole_locks():
 
 
 # --- the cap ----------------------------------------------------------------------------------
-def test_new_passwords_unlock_until_the_cap_then_only_an_mfa_reset_does(admin, user_a, clock):
+def test_new_passwords_unlock_until_the_cap_then_only_an_mfa_reset_does(
+    admin, user_a, clock, settings
+):
+    # This scenario intentionally performs four owner resets; production's request cap is
+    # tested elsewhere and would obscure the independent long-window MFA assertion here.
+    settings.PASSWORD_RESET_ACCOUNT_LIMIT_PER_HOUR = 10
     enrolment = enrol(user_a)
     password = hard_lock(user_a, admin, enrolment.secret, clock)
 
@@ -192,11 +207,8 @@ def test_new_passwords_unlock_until_the_cap_then_only_an_mfa_reset_does(admin, u
     assert unlocked.count() == 2  # neither recorded an unlock
     assert mfa_locked_events().count() == 3
 
-    # An administrator's MFA reset does: the user signs in with the password, and a new
-    # authenticator starts from nothing.
-    reset = signed_in(admin).post(f"/api/v1/admin/users/{user_a.pk}/mfa/reset", format="json")
-    assert reset.status_code == 200, reset.content
-    assert reset.json()["mfa_lock"] is None
+    # Only the operator command may reset a Super Admin's factor.
+    assert mfa_services.operator_reset(user_a.email, "ticket 9", operator_id=admin.pk)
     assert not MfaDevice.objects.filter(user=user_a).exists()
     window_passes()
     assert password_step(APIClient(), user_a, "a-fourth-new-passphrase-0").status_code == 200
@@ -365,6 +377,7 @@ def test_the_owner_is_emailed_that_a_new_password_wont_help(admin, user_a, clock
 
 def test_the_lock_shows_on_the_mfa_status_and_to_administrators(admin, user_a, clock):
     enrol(user_a)
+    enrol(admin)
     own = signed_in(user_a)
     administrator = signed_in(admin)
 
@@ -388,6 +401,7 @@ def test_the_lock_shows_on_the_mfa_status_and_to_administrators(admin, user_a, c
 
 
 def test_administrators_see_which_lock_it_was(admin, user_a, clock):
+    enrol(admin)
     enrolment = enrol(user_a)
     hard_lock(user_a, admin, enrolment.secret, clock)
     events = signed_in(admin).get("/api/v1/admin/security-events").json()["results"]

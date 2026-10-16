@@ -662,11 +662,11 @@ erasure ledger again; round 3 also the AI masking).
   re-applied by the replay after recovery); ClamAV drill PASS, 15 of 15 with the
   end-to-end upload, scan and download (pinned image, the repository's clamd.conf); browser
   regression on an isolated production-build stack 42 of 43 (8.2, the request reference,
-  needs the nginx edge this stack doesn't run, as before; 10.1, new: with
-  `MFA_REQUIRED_FOR_ALL_USERS` on, a sales user is gated in the UI and the API and sets up a
-  factor); **100-user capacity run** through the production-shaped stack's nginx
-  (credential guard, edge rates and write budgets in place; the virtual sales users run with
-  `MFA_REQUIRED_FOR_ALL_USERS` off, as they measure the CRM, not enrolment): 10/25/50/75/100
+  needs the nginx edge this stack doesn't run, as before; 10.1 was the former all-user MFA
+  behavior, which the current Super Admin-only policy supersedes); **100-user capacity run**
+  through the production-shaped stack's nginx (credential guard, edge rates and write
+  budgets in place; the virtual sales users run without MFA enrolment, as they measure the
+  CRM, not enrolment): 10/25/50/75/100
   users, 600 s hold at 100 users, 87 requests/s, **0 errors, 0 rate-limited**, API p50 48 ms,
   p95 162 ms, p99 277 ms (the previous release: p95 347 ms), 9-10 database connections;
   881 creations without a duplicate, 0 lost updates, 0 deadlocks, 0 impossible states,

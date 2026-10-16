@@ -387,17 +387,16 @@ policy is in the way: [security.md](security.md#administrator-account-protection
 30-second steps, one step of drift either way) with any authenticator app; `identity.mfa`
 (primitives) and `identity.mfa_services` (use cases).
 
-- **Who**: available to everyone; **required for administrators** of both kinds (Super admins
-  and Admins, `identity.policy.administrator_roles`; ADR-0035) when
-  `MFA_REQUIRED_FOR_ADMINS` is on (production default; refused off without the local opt-in)
-  and **for every user** when `MFA_REQUIRED_FOR_ALL_USERS` is on (production default `true`;
-  `false` is accepted in production as the organisation's decision; adversarial review of
-  73ff1e3, L1, [ADR-0034](adr/0034-staging-security-remediation.md)). Someone who must have it
+- **Who**: available through the UI and API only to **Super Admins** (`admin`) and required
+  for them when `MFA_REQUIRED_FOR_ADMINS` is on (production default; refused off without the
+  local opt-in). `MFA_REQUIRED_FOR_ALL_USERS` is a retired, ignored compatibility setting;
+  Admins (`team_admin`) and Users (`sales_user`) always use password-only sign-in. A Super
+  Admin who must have MFA
   and has no confirmed device reaches only `GET /auth/me`, sign-out, the password change and
   `/auth/mfa`, `/auth/mfa/setup`, `/auth/mfa/confirm` (`allowed_before_mfa_enrollment`):
   everything else answers `403 mfa_enrollment_required`. The viewer says so
   (`mfa_enrollment_required`), and `GET /auth/mfa` reports `required` and `can_disable`
-  (disabling is refused while it is required: "required for every account").
+  (disabling is refused while it is required).
 - **Enrolment** verifies before it activates: setup (current password, throttled like a
   sign-in) creates an unconfirmed device and returns the secret, the `otpauth://` URI and the
   QR code as a module matrix (`{"size": n, "rows": ["1010…", …]}`, no quiet zone; the web app
