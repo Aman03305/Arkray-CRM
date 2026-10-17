@@ -104,7 +104,8 @@ def test_signing_in_as_someone_else_ends_it_too(in_support):
     ended(SupportEnd.SESSION_CHANGED)
 
 
-def test_a_second_factor_challenge_ends_it_too(admin, in_support):
+def test_a_second_factor_challenge_ends_it_too(admin, in_support, settings):
+    settings.MFA_REQUIRED_FOR_ADMINS = True  # opt-in per test (config.settings.test)
     enrol(admin)
     assert password_step(in_support, admin).status_code == 202
     ended(SupportEnd.SESSION_CHANGED)

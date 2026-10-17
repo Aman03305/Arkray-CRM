@@ -491,11 +491,12 @@ def test_an_archived_closed_deal_is_restored_before_it_is_corrected(admin, user_
     assert OpportunityCorrection.objects.count() == 0
 
 
-def test_a_correction_needs_a_recent_second_factor(admin, user_a):
+def test_a_correction_needs_a_recent_second_factor(admin, user_a, settings):
     """Like every sensitive administrator operation (ADR-0033): an administrator with a second
     factor and no recent code gets 403 `mfa_required` (the web app asks and repeats)."""
     from tests.mfa_helpers import enrol
 
+    settings.MFA_REQUIRED_FOR_ADMINS = True  # opt-in per test (config.settings.test)
     enrol(admin)
     deal = closed_deal(user_a)
     response = correct(signed_in(admin), deal, value="1.00", reason="Needs MFA.")

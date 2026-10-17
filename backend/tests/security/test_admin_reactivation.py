@@ -83,7 +83,7 @@ class TestAnotherAdministratorReactivated:
         shown = next(e for e in events if e["action"] == "user.reactivated")
         assert shown["details"] == {"reset_link": "True"}
 
-    def test_the_second_factor_is_kept(self, admin):
+    def test_the_second_factor_is_kept(self, admin, settings):
         b = AdminFactory()
         enrol(b)
         client = signed_in(admin)
@@ -97,6 +97,7 @@ class TestAnotherAdministratorReactivated:
             {"token": secret, "new_password": NEW_PASSWORD},
             format="json",
         )
+        settings.MFA_REQUIRED_FOR_ADMINS = True  # opt-in per test (config.settings.test)
         assert sign_in(b, NEW_PASSWORD).status_code == 202  # the code is still needed
 
 
