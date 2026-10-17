@@ -213,7 +213,8 @@ the system can't verify them.
       every change to their two-step verification, the rollout's check against someone with
       a phished password enrolling first.
 - [ ] The ClamAV container's health (it also fails on signatures older than 3 days),
-      `ArkrayAdministratorDeactivated`, `ArkrayMfaLocked`, `ArkrayMfaLockedUntilReset`,
+      `ArkrayAdministratorDeactivated`, `ArkrayAccountsDeleted`, `ArkrayMfaLocked`,
+      `ArkrayMfaLockedUntilReset`,
       `ArkrayErasureLedgerGateClosed`, `ArkrayAttachmentScanOverdue` and `ArkrayCacheDown`
       routed to people who act on them (while Redis is down, request limits are counted per
       process: R127).

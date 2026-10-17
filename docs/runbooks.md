@@ -256,6 +256,24 @@ last hour; it stays raised for that hour).*
    at their own address and keep their second factor (ADR-0033, R126). A reactivated Admin
    still has their team (a deactivation leaves it assigned).
 
+## Accounts deleted
+
+*Alert: `ArkrayAccountsDeleted` (five or more accounts were deleted from user administration
+in the last hour; it stays raised for that hour).*
+
+[ADR-0036](adr/0036-account-deletion-and-administrator-password-reset.md): "Delete account"
+hands the user's work over, deactivates the account and erases its identity. It cannot be
+undone, so a burst is either a planned clean-up or a hijacked administrator session.
+
+1. Security events (Admin home, *Security activity*): `user.deleted` shows who deleted whom
+   and when; each deleted user's work went to the person in the audit log (`lead.reassigned`
+   by the same actor).
+2. Planned: nothing to do. Otherwise treat it as a [Security incident](#security-incident):
+   deactivate the acting administrator, rotate their credentials, and restore the data you
+   need from the last backup (the erasure ledger replays the identity erasure after a
+   restore, but not the hand-over: see [privacy.md](privacy.md#deleting-an-account-adr-0036)).
+3. An Admin's deletion also raises `ArkrayAdministratorDeactivated`.
+
 ## Admins and teams
 
 [ADR-0035](adr/0035-super-administrators-and-teams.md): a **Super admin** (role `admin`)

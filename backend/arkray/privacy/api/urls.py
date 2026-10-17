@@ -18,3 +18,13 @@ admin_urlpatterns = [
         name="privacy-pseudonymise-user",
     ),
 ]
+
+# Mounted under /api/v1/admin/users/ (ADR-0036): the user-administration routes that erase.
+account_urlpatterns = [
+    path(
+        "<uuid:user_id>/deletion-preview",
+        views.DeletionPreviewView.as_view(),
+        name="admin-user-deletion-preview",
+    ),
+    path("<uuid:user_id>/delete", views.DeleteAccountView.as_view(), name="admin-user-delete"),
+]

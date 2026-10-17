@@ -215,6 +215,16 @@ groups:
           summary: "An administrator account was deactivated in the last hour: confirm it was intended."
           runbook: docs/runbooks.md#administrator-deactivated
 
+      # "Delete account" cannot be undone (ADR-0036). An off-boarding is a handful of accounts;
+      # five in an hour is a clean-up worth confirming, or an administrator session someone else
+      # is using. A database-wide count every pod reports alike (max over pods).
+      - alert: ArkrayAccountsDeleted
+        expr: max(arkray_account_deletions_last_hour) >= 5
+        labels: {severity: ticket}
+        annotations:
+          summary: "Five or more accounts were deleted in the last hour: confirm it was intended."
+          runbook: docs/runbooks.md#accounts-deleted
+
       # Too many wrong second-factor codes in a row locked an account (deep security audit
       # M-4). Codes are asked for only after the right password, so someone else very
       # probably has it. The owner is emailed too; it stays raised for an hour after each one.

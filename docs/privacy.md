@@ -419,13 +419,69 @@ holding a former user's pseudonym is moved aside to `reserved-<its own hex>@pseu
 (review round 1, IDENTITY-4 and IDENTITY-5). That domain is reserved: no invitation, email
 change or new account may use it. Someone who returns is invited as a new user.
 
-**Never another administrator's account through the API** (audit SEC-2,
+### Deleting an account (ADR-0036)
+
+"Delete account" in user administration (`POST /api/v1/admin/users/{id}/delete`) is
+pseudonymisation made one operation, for the people who run the team day to day: a Super
+admin deletes Admins and Users, an Admin the users of their own team; nobody deletes a Super
+admin (an operator does that with `manage.py pseudonymise_user --allow-administrator`) or
+themselves. CRM business data is never deleted. In one transaction, under the legal-hold
+barrier and the user-administration lock:
+
+1. **Legal holds**: a hold on the person refuses it (409 `legal_hold` for whoever handles
+   privacy requests; an Admin gets a plain 422 that says nothing about why, and the preview
+   shows no hold, as holds are no oracle for anyone else: R148); a hold on one of their leads
+   is respected exactly as everywhere (the customer's data stays frozen; the lead is only
+   handed to its new owner).
+2. **Hand-over**: the leads that are not archived, and archived ones still carrying open
+   work, with the open deals, tasks, meetings and notes that follow them, go to the
+   `reassign_to` user (active, within the caller's reach) through the normal, audited lead
+   reassignment. One lead at a time, each in a transaction of its own that holds only that
+   lead's locks (the project's lock order, lead first); no user-administration lock, row lock
+   or hold barrier is held meanwhile. At most 200 leads or 10 seconds per request (202
+   `completed: false` until none is left; the client repeats the same request). Won/lost
+   deals and finished work keep the person who did them.
+3. **Pipelines**: their personal pipelines holding no open deal are archived, never deleted;
+   one still holding a deal keeps its board.
+4. **Team**: an Admin's members answer to no Admin until a Super admin assigns them; the
+   Admin's pending invitations and the temporary passwords they set are voided.
+5. **Erasure**, in one short final transaction (the hold barrier, the user-administration
+   lock, the account's row, in that order; everything decided again on the locked rows): the
+   account is deactivated (every session ends) and its identity erased by the same step as
+   [Staff](#staff) pseudonymisation, and recorded in the erasure ledger. When the actor
+   doesn't handle privacy requests (an Admin), the erasure is **limited to the account's own
+   traces**: its own Ask Arkray conversations and the audit details of events it caused. A
+   conversation of someone else that merely names the user, and the details of what the Admin
+   (or anyone) did about the account, are not touched, because the user's name and email can
+   be chosen by the Admin; they follow their normal retention. A Super admin's deletion erases
+   everything the privacy step does.
+
+What stays: ids, roles, dates, every record's owner and creator, amounts and negotiated
+prices, and the audit trail (`user.deactivated` with `reason: deleted`, `user.pseudonymised`
+with `deleted: true`, `user.deleted`: actor, target, counts, `erasure` full or limited, no
+personal data). A deleted user stays in their Admin's team (a former member's history stays
+in the team's view, ADR-0035) and in the Users list as "Deleted". Irreversible; the UI asks
+for the account's email to be typed. Retention rules are unchanged: details of audit events
+about them expire on their schedule, and conversations a legal hold keeps are kept.
+
+**After a restore** the hand-over, the pipelines archived and an Admin's released team are
+database changes, not ledger entries: `replay_erasures` erases the account's identity again
+but a backup taken before the deletion returns its leads, pipelines and team to it. Repeat
+the hand-over (a Super admin reassigns the former user's leads again from their deals' *Change
+owner*; a deactivated user's workspace stays open to them).
+A burst of deletions raises `ArkrayAccountsDeleted` (a handful an hour); an Admin's deletion
+also raises `ArkrayAdministratorDeactivated`.
+
+**Never another administrator's account through the privacy endpoint** (audit SEC-2,
 [ADR-0030](adr/0030-administrator-accounts-change-only-by-their-owner.md)): pseudonymising
 replaces the account's email and password, which only the administrator themselves may
 change, and nobody pseudonymises their own account. So for an account whose **role** is
 administrator of either kind (a Super admin or an Admin, ADR-0035), whatever its status (a
-deactivated former administrator included), the API
-answers 403 `permission_denied` and changes nothing, and the user's page doesn't offer it. The
+deactivated former administrator included), `POST …/privacy/users/{id}/pseudonymise`
+answers 403 `permission_denied` and changes nothing, and the user's page doesn't offer it.
+The one exception is [Deleting an account](#deleting-an-account-adr-0036): a Super admin may
+delete an **Admin** (never a Super admin) through user administration, which hands the work
+over first and is audited as a deletion ([ADR-0036](adr/0036-account-deletion-and-administrator-password-reset.md)). The
 service (`privacy.staff`) enforces it, not only the view: it takes the user-administration
 lock and the account's row lock and reads the role from the locked row, so a promotion racing
 it is either seen or finds the account changed (`tests/security/test_staff_pseudonymisation_administrators.py`,

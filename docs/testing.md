@@ -673,6 +673,37 @@ erasure ledger again; round 3 also the AI masking).
   dashboard figures equal to the records for 97 users, 0 cross-user leaks. All of these migrate
   every migration of this release on the 1M-lead benchmark copy first.
 
+## Account deletion and administrator password reset (ADR-0036, 2026-10-16)
+
+Super admins delete and reset Admins and Users; Admins delete and reset the users of their own
+team; nobody touches a Super admin or themselves. The tests, all against real PostgreSQL (the
+races with threads and separate connections):
+
+| What | Where |
+|---|---|
+| Deletion: who may (every refusal changes nothing), the confirmation and version, MFA step-up, hand-over of leads with their deals, tasks and meetings, batches (202), personal pipelines, legal hold on the person and on a lead, the erasure ledger, support sessions, the preview, "Deleted" in the list | `tests/security/test_account_deletion.py` (23) |
+| The review's findings as regressions: no deadlock with a task or pipeline being added, no global lock held during the hand-over, an Admin's limited erasure, archived leads with open work, no hold oracle for an Admin, the reset email, the owner's own budget, Retry-After, the deletions gauge (each mutation-checked against the previous implementation) | `tests/security/test_account_deletion_hardening.py` (16) |
+| Reset: the whole link lifecycle, old password and sessions ended, tokens revoked, the mail only to the account's own address, no secret in responses, logs, audit rows, queues or any text column, the cap, MFA untouched | `tests/security/test_account_reset_password.py` (90) |
+| The permission matrix: caller (Super admin, Admin, user, anonymous) × target (15 kinds) × reset, delete, preview, with a before/after snapshot on every refusal; smuggled fields, IDOR, methods, support session, CSRF, throttle | `tests/security/test_account_permission_matrix.py` (328) |
+| Audit: actor, target, action, time, no password or token in any metadata or detail; the security events feed | `tests/security/test_account_lifecycle_audit.py` (16) |
+| Races: reset × reset, reset × deactivation, reset × team move, reset × deletion, deletion × deletion, an Admin's deletion × her demotion, a CRM write × the deletion of its owner, no deadlock with an Admin's own write, bursts against the cap, a password change × a reset | `tests/security/test_account_lifecycle_races.py` (59) |
+| The UI: who is offered what (the full viewer × role × status × self × deleted table), the dialogs, the batched progress, every error, the notices | `frontend/src/features/users/UserDeletion.test.tsx`, `UserPasswordReset.test.tsx`, `account-operations.test.ts` |
+| Browser (real Chromium, the real Next.js app and API, an isolated Compose stack): 20 checks over the whole journey (Super admin and Admin reset and delete, the email and the single-use link, sessions ended, the API refusing an Admin everything outside their team, an ordinary user, a 375 px phone, the security events), and 6 over the second-factor step-up (a wrong code, the right one, cancelling) | `scripts/browser/` (below) |
+
+Running the browser checks: `scripts/browser/acceptance-stack.sh up` builds the isolated stack
+(project `arkray-accept`, its own database, Redis and mail catcher on ports 55532/56479/51125/58225/8100/3100),
+`seed_account_lifecycle.py` seeds ten accounts (from `backend/`, with the stack's `DATABASE_URL`
+and `DJANGO_SETTINGS_MODULE=config.settings.local`), `node scripts/browser/account-lifecycle.cjs`
+runs the journey (Playwright; `PLAYWRIGHT_MODULE` names the package if it isn't installed here),
+and `acceptance-stack.sh down` removes it. The step-up run uses `ACCEPT_MFA=true`,
+`seed_account_lifecycle_mfa.py` and `account-lifecycle-mfa.cjs`; it ages the session's last
+verification in the session table (`tamper_mfa_session.py`) because the step-up window is 15
+minutes. A 450-lead account through the real UI took 9 s in three requests (202, 202, 200); the
+container logs held no reset link, password or traceback.
+
+The adversarial review of the change (read-only, with failing experiments) found no Critical or
+High issue and four Mediums, all fixed ([R176](risk-register.md)-[R180](risk-register.md); the accepted residuals are R181).
+
 ## What exists after the product enhancement phase
 
 - Backend: `pipeline/tests/test_configuration.py` (pipelines and stages: ownership, limits,

@@ -65,7 +65,30 @@ def send_invitation(
     )
 
 
-def send_password_reset(*, to: str, first_name: str, link: str, expires_at: datetime) -> None:
+def send_password_reset(
+    *,
+    to: str,
+    first_name: str,
+    link: str,
+    expires_at: datetime,
+    by_administrator: bool = False,
+) -> None:
+    """`by_administrator`: an administrator had the link sent (ADR-0036; the same wording for
+    a reactivated administrator's). Then the old password no longer works, so "ignore this
+    email" would be wrong advice."""
+    if by_administrator:
+        _send(
+            to,
+            f"Reset your {PRODUCT_NAME} password",
+            f"Hello {first_name},\n\n"
+            f"An administrator reset the password of your {PRODUCT_NAME} account. Your old "
+            "password no longer works.\n\n"
+            f"Choose a new password here:\n{link}\n\n"
+            f"This link can be used once and expires on {_business_time(expires_at)}. After "
+            "that, use Forgot password on the sign-in page.\n"
+            "If you weren't expecting this, tell your administrator, or another one, now.\n",
+        )
+        return
     _send(
         to,
         f"Reset your {PRODUCT_NAME} password",
@@ -178,6 +201,13 @@ _ACCOUNT_NOTICES = {
         "An administrator set a new password for your account",
         "An administrator set a new, temporary password for your account; you were signed out"
         " everywhere, and you'll choose your own the next time you sign in.",
+    ),
+    "password_reset_by_admin": (
+        "An administrator reset your password",
+        "An administrator reset the password of your account: the old password no longer works"
+        " and you were signed out everywhere. A separate email has a single-use link to choose"
+        " a new password; it expires soon, and you can also use Forgot password on the sign-in"
+        " page.",
     ),
     "role_changed": (
         "Your role was changed",

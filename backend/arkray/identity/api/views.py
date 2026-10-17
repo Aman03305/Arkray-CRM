@@ -610,6 +610,29 @@ class AdminUserSetPasswordView(ApiView):
         return Response(s.AdminUserSerializer(user).data)
 
 
+class AdminUserResetPasswordView(ApiView):
+    """Have a password reset link emailed to an active account in the caller's reach
+    (ADR-0036): a User, or (a Super admin only) an Admin; never a Super admin's. The caller
+    never sees or chooses a password; the account's old one stops working, its sessions end
+    and the owner is told. 404 outside the caller's reach, 403 for a Super admin's account,
+    422 for oneself or an account that isn't active."""
+
+    permission_classes = [requires_any(Capability.USERS_MANAGE, Capability.USERS_MANAGE_TEAM)]
+    refused_in_support_session = True
+    requires_recent_mfa = True
+    throttle_classes = AUTH_THROTTLES
+    throttle_scope = "auth"
+
+    @extend_schema(
+        operation_id="admin_users_reset_password",
+        request=None,
+        responses={200: s.AdminUserSerializer},
+    )
+    def post(self, request: Request, user_id: UUID) -> Response:
+        user = services.send_password_reset_link(actor_id=_actor(request).pk, user_id=user_id)
+        return Response(s.AdminUserSerializer(user).data)
+
+
 class AdminUserMfaResetView(ApiView):
     """Remove an ordinary user's second factor (they lost the device and the recovery codes):
     their sessions end; they sign in with their password and may set up a new one. 422 for

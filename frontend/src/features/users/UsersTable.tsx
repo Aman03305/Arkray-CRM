@@ -7,30 +7,45 @@ import { Badge } from "@/components/ui/Badge";
 import { Skeleton } from "@/components/ui/Skeleton";
 import type { AdminUser } from "@/lib/api/types";
 import { formatDate, formatDateTime, formatRelative } from "@/lib/format";
-import { canManageAdmins, canOpenUserWorkspaces } from "@/lib/viewer";
+import { canManageAdmins, canManageUsers, canOpenUserWorkspaces } from "@/lib/viewer";
 import { useViewer } from "@/lib/viewer-context";
 import { userWorkspaceHref } from "@/lib/workspace";
 
+import { canDeleteAccount, canResetPassword, NO_POWERS, type Operator } from "./account-operations";
 import { isAdministratorRole } from "./api";
 import { UserStatus } from "./UserStatus";
 
 export type UserAction =
   | "edit"
   | "change-email"
+  | "reset-password"
   | "resend"
   | "reset-mfa"
   | "clear-sign-in-lock"
   | "deactivate"
-  | "activate";
+  | "activate"
+  | "delete";
 
-export function actionsFor(user: AdminUser, isSelf: boolean): UserAction[] {
-  // A pseudonymised former user is never changed again (review of 73ff1e3, L4; the API refuses).
+/**
+ * What the row's menu offers. `powers`: what the viewer's capabilities allow (users.manage or
+ * users.manage_team, and whether they are a Super admin); without them, no reset or deletion.
+ */
+export function actionsFor(
+  user: AdminUser,
+  isSelf: boolean,
+  powers: Pick<Operator, "manages" | "superAdmin"> = NO_POWERS,
+): UserAction[] {
+  // A pseudonymised former user (a deleted account) is never changed again (review of 73ff1e3, L4;
+  // the API refuses).
   if (user.pseudonymised_at) return [];
+  const who: Operator = { isSelf, ...powers };
   const actions: UserAction[] = ["edit"];
   // Another administrator (a Super admin or an Admin, ADR-0035) changes their own email in
   // Settings (the API refuses it).
   const administrator = isAdministratorRole(user.role);
   if (isSelf || !administrator) actions.push("change-email");
+  // An emailed reset link (ADR-0036): an active User's, or an active Admin's for a Super admin.
+  if (canResetPassword(user, who)) actions.push("reset-password");
   if (user.status === "invited") actions.push("resend");
   // Never an administrator's (ADR-0033: an operator does that on the server); the API refuses it.
   if (user.mfa_enabled && !administrator && !isSelf) actions.push("reset-mfa");
@@ -38,17 +53,21 @@ export function actionsFor(user: AdminUser, isSelf: boolean): UserAction[] {
   if (user.sign_in_locked_at) actions.push("clear-sign-in-lock");
   if (user.status === "deactivated") actions.push("activate");
   else if (!isSelf) actions.push("deactivate"); // the API refuses self-deactivation too
+  // Last: the one that can't be undone (ADR-0036; never a Super admin's, nor one's own).
+  if (canDeleteAccount(user, who)) actions.push("delete");
   return actions;
 }
 
 const ACTION_LABELS: Record<UserAction, { label: string; tone?: "danger" }> = {
   edit: { label: "Edit details" },
   "change-email": { label: "Change email" },
+  "reset-password": { label: "Reset password" },
   resend: { label: "Resend invitation" },
   "reset-mfa": { label: "Reset two-step verification" },
   "clear-sign-in-lock": { label: "Clear sign-in lock" },
   activate: { label: "Reactivate" },
   deactivate: { label: "Deactivate", tone: "danger" },
+  delete: { label: "Delete account", tone: "danger" },
 };
 
 const COLUMNS = ["Name", "Email", "Role", "Status", "Two-step", "Last login", "Created"] as const;
@@ -75,6 +94,8 @@ export function UsersTable({ users, loading, viewerId, onAction, onOpen }: Users
   // anyone's, or a team administrator's team's (who are all they list).
   const opensCrm = canOpenUserWorkspaces(viewer);
   const showsManager = canManageAdmins(viewer);
+  // What the viewer may do to the accounts they list: reset a password, delete (ADR-0036).
+  const powers = { manages: canManageUsers(viewer), superAdmin: showsManager };
   const columns = showsManager ? COLUMNS_WITH_ADMIN : COLUMNS;
   return (
     <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
@@ -105,7 +126,7 @@ export function UsersTable({ users, loading, viewerId, onAction, onOpen }: Users
               ))
             : users?.map((user) => {
                 const isSelf = user.id === viewerId;
-                const actions: MenuAction[] = actionsFor(user, isSelf).map((action) => ({
+                const actions: MenuAction[] = actionsFor(user, isSelf, powers).map((action) => ({
                   key: action,
                   label: ACTION_LABELS[action].label,
                   tone: ACTION_LABELS[action].tone,

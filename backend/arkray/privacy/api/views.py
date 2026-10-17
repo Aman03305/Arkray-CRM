@@ -18,11 +18,12 @@ from rest_framework.response import Response
 from arkray.activities import storage
 from arkray.core.api import ApiView, validated
 from arkray.core.errors import BusinessRuleViolation, NotFoundError
+from arkray.core.throttling import AnonRateThrottle, ScopedRateThrottle, UserRateThrottle
 from arkray.identity.models import User, normalize_email
-from arkray.identity.permissions import requires
+from arkray.identity.permissions import requires, requires_any
 from arkray.identity.policy import Capability
 
-from .. import exports, staff
+from .. import account_deletion, exports, staff
 from ..models import DataExport
 from . import serializers as s
 
@@ -133,3 +134,54 @@ class PseudonymiseUserView(ApiView):
             raise BusinessRuleViolation(str(exc)) from None
         body = {k: v for k, v in asdict(result).items() if k != "user_id"}
         return Response(s.PseudonymiseResultSerializer(body).data)
+
+
+_ACCOUNT_ADMINS = requires_any(Capability.USERS_MANAGE, Capability.USERS_MANAGE_TEAM)
+
+
+class DeletionPreviewView(ApiView):
+    """What deleting an account would do (ADR-0036): the work they own and why it can't be
+    deleted now, for the confirmation dialog. 404 outside the caller's reach."""
+
+    permission_classes = [_ACCOUNT_ADMINS]
+    refused_in_support_session = True
+
+    @extend_schema(
+        operation_id="admin_users_deletion_preview",
+        responses={200: s.DeletionPreviewSerializer},
+    )
+    def get(self, request: Request, user_id: UUID) -> Response:
+        preview = account_deletion.preview(_actor(request), user_id)
+        return Response(s.DeletionPreviewSerializer(asdict(preview)).data)
+
+
+class DeleteAccountView(ApiView):
+    """Delete an account (ADR-0036): hand its work to `reassign_to`, deactivate it and erase
+    its identity; CRM records and the audit trail stay. A Super admin deletes Admins and
+    Users; an Admin only the users of their team. 202 while leads remain to hand over:
+    send the same request again."""
+
+    permission_classes = [_ACCOUNT_ADMINS]
+    refused_in_support_session = True
+    requires_recent_mfa = True
+    throttle_classes = [AnonRateThrottle, UserRateThrottle, ScopedRateThrottle]
+    throttle_scope = "auth"
+
+    @extend_schema(
+        operation_id="admin_users_delete",
+        request=s.DeleteAccountSerializer,
+        responses={200: s.DeletionResultSerializer, 202: s.DeletionResultSerializer},
+    )
+    def post(self, request: Request, user_id: UUID) -> Response:
+        data = validated(s.DeleteAccountSerializer, request.data)
+        result = account_deletion.delete_account(
+            actor_id=_actor(request).pk,
+            user_id=user_id,
+            version=data["version"],
+            confirm_email=data["confirm_email"],
+            reassign_to=data["reassign_to"],
+        )
+        return Response(
+            s.DeletionResultSerializer(asdict(result)).data,
+            status=http.HTTP_200_OK if result.completed else http.HTTP_202_ACCEPTED,
+        )

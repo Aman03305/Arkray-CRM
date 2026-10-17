@@ -33,6 +33,8 @@ frontend's request and response types are generated from it.
 /api/v1/auth/invitations/verify | accept
 /api/v1/admin/users[/{id}]                        user management (users.manage)
 /api/v1/admin/users/{id}/activate|deactivate|resend-invitation|change-email
+/api/v1/admin/users/{id}/reset-password           emailed reset link (ADR-0036)
+/api/v1/admin/users/{id}/deletion-preview|delete  what deleting would do; delete (200, or 202 while leads remain: repeat)
 /api/v1/workspaces/{workspace}                    whose workspace this is (audited when delegated)
 /api/v1/admin/audit-events                        audit log (audit.view)
 /api/v1/config/pipelines                          pipelines with their stages (GET, any user; Phase 3)

@@ -23,6 +23,8 @@ interface OwnerSelectProps {
   autoFocus?: boolean;
   /** The form field name (server errors are focused by it). */
   name?: string;
+  /** Someone who must not be offered, e.g. the account whose work is being handed over. */
+  excludeId?: string;
 }
 
 /**
@@ -44,6 +46,7 @@ export function OwnerSelect({
   placeholder,
   autoFocus,
   name,
+  excludeId,
 }: OwnerSelectProps) {
   const [search, setSearch] = useState("");
   const [picked, setPicked] = useState<{ id: string; label: string } | null>(null);
@@ -54,7 +57,8 @@ export function OwnerSelect({
     queryFn: () => assigneesApi.list(q),
     staleTime: 60_000,
   });
-  const users = assignees.data?.results ?? [];
+  // Never the excluded user, even while they are still active (the API refuses them too).
+  const users = (assignees.data?.results ?? []).filter((u) => u.id !== excludeId);
   const truncated = Boolean(assignees.data?.next) || q !== "";
   const optionLabel = (u: { full_name: string; email: string }) => `${u.full_name} (${u.email})`;
   const selectedLabel = picked?.id === value ? picked.label : valueLabel || "Selected user";

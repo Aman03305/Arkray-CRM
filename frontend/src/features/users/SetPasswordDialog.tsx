@@ -12,14 +12,19 @@ import { describeError, fieldErrors, isApiError } from "@/lib/api/errors";
 import type { AdminUser } from "@/lib/api/types";
 
 import { USERS_QUERY_KEY, usersApi } from "./api";
+import { generatePassword } from "./password";
 import { useOutOfReachOn404 } from "./reach";
 
 const EMPTY: NewPasswordValue = { password: "", confirmation: "" };
+const LINK_BUTTON = "rounded-sm text-sm font-medium text-brand-700 hover:underline disabled:opacity-50";
 
 /**
- * An administrator sets a new password for a user who can't sign in (forgotten, no email).
- * The user is signed out everywhere and must replace it at their next sign-in. The
- * password exists only in these two fields until it is sent; it is never shown afterwards.
+ * An administrator sets a temporary password for a user who can't sign in (forgotten, no
+ * email); the emailed reset link (ResetPasswordDialog) is the better way, as nobody but its
+ * owner then knows their password. The user is signed out everywhere and must replace it at
+ * their next sign-in. The password can be generated here (16 random characters from the
+ * browser's cryptographic generator, ADR-0036), exists only in these two fields until it is
+ * sent, and is never shown afterwards.
  */
 export function SetPasswordDialog({ user, onClose, onDone }: {
   user: AdminUser;
@@ -28,6 +33,7 @@ export function SetPasswordDialog({ user, onClose, onDone }: {
 }) {
   const [value, setValue] = useState<NewPasswordValue>(EMPTY);
   const [clientErrors, setClientErrors] = useState<Record<string, string[]>>({});
+  const [generated, setGenerated] = useState(false);
   const form = useRef<HTMLFormElement>(null);
   const queryClient = useQueryClient();
   const save = useMutation({
@@ -35,6 +41,7 @@ export function SetPasswordDialog({ user, onClose, onDone }: {
     gcTime: 0, // the request held a password: don't keep it around once the dialog is gone
     onSuccess: (updated) => {
       setValue(EMPTY);
+      setGenerated(false);
       onDone(updated, `${updated.full_name} must choose a new password at next sign-in.`);
     },
     onError: (error) => {
@@ -73,7 +80,33 @@ export function SetPasswordDialog({ user, onClose, onDone }: {
             {stale ? "Someone else changed this user meanwhile. Close this dialog and try again." : banner.message}
           </Alert>
         ) : null}
-        <NewPasswordFields value={value} onChange={setValue} errors={errors} autoComplete="off" />
+        <NewPasswordFields
+          value={value}
+          onChange={(next) => {
+            setValue(next);
+            setGenerated(false);
+          }}
+          errors={errors}
+          autoComplete="off"
+        />
+        <div className="-mt-1 flex flex-wrap items-center gap-x-4 gap-y-1">
+          <button
+            type="button"
+            className={LINK_BUTTON}
+            disabled={save.isPending}
+            onClick={() => {
+              const password = generatePassword();
+              setValue({ password, confirmation: password });
+              setClientErrors({});
+              setGenerated(true);
+            }}
+          >
+            Generate password
+          </button>
+          <span role="status" className="text-xs text-slate-500">
+            {generated ? "Password generated. Use Show to see it, and give it to them in person." : ""}
+          </span>
+        </div>
         <DialogActions>
           <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
             Cancel

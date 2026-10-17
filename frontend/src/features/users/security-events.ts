@@ -31,10 +31,16 @@ export function describeSecurityEvent(event: SecurityEvent): string {
       return `${user} reset their password`;
     case "auth.password_set_by_admin":
       return `${by} set a new password for ${user}`;
+    // A reset link was emailed to the account's own address (ADR-0036); no password is involved.
+    case "auth.password_reset_by_admin":
+      return `${by} sent a password reset link to ${user}`;
     case "user.created":
       return `${by} created ${user}`;
     case "user.deactivated":
       return `${by} deactivated ${user}`;
+    // Handed over, deactivated and erased (ADR-0036): the name here is the pseudonym by now.
+    case "user.deleted":
+      return `${by} deleted the account of ${user}`;
     case "user.reactivated":
       return `${by} reactivated ${user}`;
     case "user.role_changed": {

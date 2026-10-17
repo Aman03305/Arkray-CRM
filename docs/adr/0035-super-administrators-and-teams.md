@@ -3,7 +3,7 @@
 Status: Accepted (product decisions confirmed by the owner on 2026-10-13); amends
 [0030](0030-administrator-accounts-change-only-by-their-owner.md) (a super administrator may
 change a team administrator's role) and [0033](0033-administrator-mfa-and-reactivation.md)
-(team administrators are administrators for two-step verification and reactivation)
+(team administrators are administrators for two-step verification and reactivation); extended by [0036](0036-account-deletion-and-administrator-password-reset.md) (delete account, emailed reset link)
 Date: 2026-10-13
 
 ## Context

@@ -8,6 +8,9 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { activityKeys } from "@/features/activities/api";
+import { leadKeys } from "@/features/leads/api";
+import { pipelineKeys } from "@/features/pipeline/api";
 import { ExportDataDialog } from "@/features/privacy/ExportDataDialog";
 import { PseudonymiseDialog } from "@/features/privacy/PseudonymiseDialog";
 import { workspaceKeys } from "@/features/workspace/api";
@@ -33,10 +36,13 @@ import {
 } from "./api";
 import { AccessAsUserDialog } from "./AccessAsUserDialog";
 import { AdminFilter } from "./AdminFilter";
+import { assigneeKeys } from "./assignees";
 import { ChangeEmailDialog } from "./ChangeEmailDialog";
+import { DeleteAccountDialog } from "./DeleteAccountDialog";
 import { LifecycleDialog } from "./LifecycleDialog";
 import { ClearSignInLockDialog } from "./ClearSignInLockDialog";
 import { ResetMfaDialog } from "./ResetMfaDialog";
+import { ResetPasswordDialog } from "./ResetPasswordDialog";
 import { SetPasswordDialog } from "./SetPasswordDialog";
 import { OutOfReachProvider } from "./reach";
 import { UserDetailsDrawer } from "./UserDetailsDrawer";
@@ -50,8 +56,11 @@ type OpenDialog =
   | { kind: "change-email"; user: AdminUser }
   | { kind: "deactivate" | "activate" | "resend"; user: AdminUser }
   | { kind: "reset-mfa" | "clear-sign-in-lock"; user: AdminUser }
+  // An emailed reset link (ADR-0036); from the details panel the outcome goes back to it.
+  | { kind: "reset-password"; user: AdminUser; fromDetails?: boolean }
   | { kind: "set-password" | "support"; user: AdminUser }
   | { kind: "export" | "pseudonymise"; user: AdminUser }
+  | { kind: "delete"; user: AdminUser }
   | null;
 
 function useDebounced<T>(value: T, delayMs: number): T {
@@ -90,6 +99,19 @@ export function UsersPage() {
   const roleId = useId();
   // Someone the API no longer lets the viewer reach (404): what was open about them closed.
   const [gone, setGone] = useState<string | null>(null);
+  // How many accounts were deleted here (ADR-0036): the row's menu, where focus was, goes with it.
+  const [deletions, setDeletions] = useState(0);
+
+  // After a deletion, focus goes to the page rather than to nowhere: the control that had it (the
+  // row's menu, or the details panel's button) no longer exists. This runs after the closing
+  // dialog has handed focus back to where it came from.
+  useEffect(() => {
+    if (deletions === 0) return;
+    const heading = document.querySelector<HTMLElement>("main h1") ?? document.querySelector<HTMLElement>("main");
+    if (!heading) return;
+    if (!heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
+    heading.focus();
+  }, [deletions]);
 
   const q = useDebounced(filters.q, 300);
   const effective: UserFilters = { ...filters, q: q.trim().length >= SEARCH_MIN_LENGTH ? q.trim() : "" };
@@ -132,6 +154,28 @@ export function UsersPage() {
     setDialog(null); // back to the details panel, which shows the outcome
     setDetailsNotice(message);
     refresh(user);
+  };
+
+  // The account was deleted (ADR-0036): nothing about it stays open, and the list shows it as a
+  // "Former user" (Deleted). Its work went to someone else, so what the CRM's pages cached about
+  // leads, deals and activities is stale too, and it is no longer someone to hand work to.
+  const onDeleted = (user: AdminUser, message: string, handed: number) => {
+    setDialog(null);
+    setDetails(null);
+    setDetailsNotice(null);
+    setGone(null);
+    setNotice(message);
+    setDeletions((n) => n + 1);
+    queryClient.removeQueries({ queryKey: userDetailKey(user.id) });
+    void queryClient.invalidateQueries({ queryKey: USERS_QUERY_KEY });
+    void queryClient.invalidateQueries({ queryKey: SECURITY_EVENTS_QUERY_KEY });
+    void queryClient.invalidateQueries({ queryKey: workspaceKeys.subject(user.id) });
+    void queryClient.invalidateQueries({ queryKey: assigneeKeys.all });
+    if (handed > 0) {
+      for (const key of [pipelineKeys.all, activityKeys.all, leadKeys.all]) {
+        void queryClient.invalidateQueries({ queryKey: key });
+      }
+    }
   };
 
   // A 404 about a listed user (their details, or an action on them): they are out of the
@@ -250,7 +294,8 @@ export function UsersPage() {
         <p className="-mt-2 mb-4 text-xs text-slate-500">Type at least {SEARCH_MIN_LENGTH} characters to search.</p>
       ) : null}
 
-      <div aria-live="polite" className="mb-4 empty:hidden">
+      {/* A notice names an address ("Reset link sent to ..."): it wraps instead of running off a phone's edge. */}
+      <div aria-live="polite" className="mb-4 empty:hidden [overflow-wrap:anywhere]">
         {notice ? <Alert tone="success">{notice}</Alert> : null}
         {gone ? <Alert tone="info">{gone}</Alert> : null}
       </div>
@@ -334,8 +379,18 @@ export function UsersPage() {
       {dialog?.kind === "clear-sign-in-lock" ? (
         <ClearSignInLockDialog user={dialog.user} onClose={() => setDialog(null)} onDone={onSaved} />
       ) : null}
+      {dialog?.kind === "reset-password" ? (
+        <ResetPasswordDialog
+          user={dialog.user}
+          onClose={() => setDialog(null)}
+          onDone={dialog.fromDetails ? onSavedToDetails : onSaved}
+        />
+      ) : null}
       {dialog?.kind === "set-password" ? (
         <SetPasswordDialog user={dialog.user} onClose={() => setDialog(null)} onDone={onPasswordSet} />
+      ) : null}
+      {dialog?.kind === "delete" ? (
+        <DeleteAccountDialog user={dialog.user} onClose={() => setDialog(null)} onDeleted={onDeleted} />
       ) : null}
       {dialog?.kind === "support" ? <AccessAsUserDialog user={dialog.user} onClose={() => setDialog(null)} /> : null}
       {dialog?.kind === "export" ? (
@@ -354,6 +409,10 @@ export function UsersPage() {
             setDetailsNotice(null);
             setDialog({ kind: "edit", user, fromDetails: true });
           }}
+          onResetPassword={(user) => {
+            setDetailsNotice(null);
+            setDialog({ kind: "reset-password", user, fromDetails: true });
+          }}
           onSetPassword={(user) => {
             setDetailsNotice(null);
             setDialog({ kind: "set-password", user });
@@ -369,6 +428,10 @@ export function UsersPage() {
           onPseudonymise={(user) => {
             setDetailsNotice(null);
             setDialog({ kind: "pseudonymise", user });
+          }}
+          onDelete={(user) => {
+            setDetailsNotice(null);
+            setDialog({ kind: "delete", user });
           }}
         />
       ) : null}

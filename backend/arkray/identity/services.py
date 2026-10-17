@@ -53,6 +53,7 @@ from __future__ import annotations
 import logging
 import secrets
 from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -120,6 +121,8 @@ AUDIT_EMAIL_CHANGED = "user.email_changed"
 AUDIT_PASSWORD_RESET_ISSUED = "auth.password_reset_issued"  # noqa: S105
 AUDIT_PASSWORD_RESET_COMPLETED = "auth.password_reset_completed"  # noqa: S105
 AUDIT_PASSWORD_SET_BY_ADMIN = "auth.password_set_by_admin"  # noqa: S105
+# An administrator had a reset link sent to the account's own address (ADR-0036).
+AUDIT_PASSWORD_RESET_BY_ADMIN = "auth.password_reset_by_admin"  # noqa: S105
 AUDIT_PASSWORD_RESET_SUPPRESSED = "auth.password_reset_suppressed"  # noqa: S105
 # A locked second factor unlocked by a new password (deep security audit M-4).
 AUDIT_MFA_UNLOCKED = "mfa.unlocked"
@@ -141,7 +144,7 @@ _CREDENTIALS_CHANGED_BY_AN_ADMINISTRATOR = (
     "mfa.reset",
 )
 # What the owner is told (identity.emails.send_account_notice).
-ACCOUNT_NOTICES = ("password_set_by_admin", "role_changed")
+ACCOUNT_NOTICES = ("password_set_by_admin", "role_changed", "password_reset_by_admin")
 # Links whose use depends on the account's current credentials: a new password or email voids
 # both (review round 1, IDENTITY-2: an unlock link outlived them and trusted a browser for the
 # NEW credentials).
@@ -946,6 +949,21 @@ ADMINISTRATOR_ROLE_REFUSED = (
     "A super admin's role can't be changed by another administrator. To remove their"
     " access, deactivate the account."
 )
+# ADR-0036: an emailed reset link, for the users and (a super admin only) Admins in reach.
+SUPER_ADMIN_ACCOUNT_REFUSED = (
+    "A super admin's account is managed only by that super admin:"
+    " it can't be reset or deleted here."
+)
+DELETE_OWN_ACCOUNT_REFUSED = "You can't delete your own account."
+RESET_INACTIVE_REFUSED = (
+    "Only active accounts can be sent a reset link. Resend the invitation to a user who hasn't"
+    " accepted it; a deactivated account has to be reactivated first."
+)
+RESET_LINK_LIMIT_PER_HOUR = 3
+RESET_LINK_LIMIT_REFUSED = (
+    "A reset link was already sent to this account several times in the last hour. Ask them to"
+    " use the latest one, or try again later."
+)
 PROMOTION_REFUSED_UNTIL_OWN_CHOICE = (
     "This user must first choose their own password (at their next sign-in): then they can be"
     " made an administrator."
@@ -1025,6 +1043,92 @@ def set_user_password(*, actor_id: UUID, user_id: UUID, version: int, new_passwo
     return selectors.admin_user_detail(user.pk)
 
 
+def refuse_account_operation_unless_permitted(actor: User, user: User) -> None:
+    """The one authorization rule of account deletion and password reset (ADR-0036), on the
+    target's *locked* row, under the user-administration lock, after the reach check
+    (`_lock_reachable_user`: 404 outside it). Deny by default: only the roles named here are
+    ever operated on, so a role added later is refused until it is added deliberately.
+
+    - never one's own account (Settings; a Super admin leaves by another's deactivation);
+    - never a Super admin's account, whoever asks (ADR-0030);
+    - a team administrator's (Admin's) account only by a Super admin: an Admin reaches no
+      other administrator, so this is also what stops one Admin acting on another;
+    - a User's by a Super admin, or the Admin whose team they are in (the reach)."""
+    if user.pk == actor.pk:
+        raise BusinessRuleViolation(OWN_ACCOUNT_REFUSED)
+    if user.role == Role.SALES_USER:
+        return
+    if user.role == Role.TEAM_ADMIN and _is_super_administrator(actor):
+        return
+    raise PermissionDeniedError(SUPER_ADMIN_ACCOUNT_REFUSED)
+
+
+def send_password_reset_link(*, actor_id: UUID, user_id: UUID) -> User:
+    """An administrator has a password reset link emailed to an account in their reach
+    (ADR-0036). They never learn or choose a password: the account's current one stops
+    working (replaced by a random one nobody knows), every session and trusted browser ends,
+    pending credential links are revoked, and a single-use link goes to the account's own
+    address, with a notice that an administrator did this. The owner then chooses a password
+    under the password policy (`confirm_password_reset`). Only an active User, or an active
+    Admin (a Super admin asks); at most RESET_LINK_LIMIT_PER_HOUR links per account per hour.
+    Audited without any secret."""
+    with transaction.atomic():
+        serialise_user_administration()
+        actor = _acting_manager(actor_id)
+        if user_id == actor.pk:
+            raise BusinessRuleViolation(OWN_ACCOUNT_REFUSED)
+        user = _lock_reachable_user(actor, user_id)
+        refuse_if_pseudonymised(user)
+        refuse_account_operation_unless_permitted(actor, user)
+        if user.status != UserStatus.ACTIVE:
+            raise BusinessRuleViolation(RESET_INACTIVE_REFUSED)
+        now = timezone.now()
+        recent = list(
+            AccountToken.objects.filter(
+                user=user,
+                purpose=TokenPurpose.PASSWORD_RESET,
+                created_by__isnull=False,
+                created_at__gte=now - timedelta(hours=1),
+            )
+            .order_by("-created_at")
+            .values_list("created_at", flat=True)[:RESET_LINK_LIMIT_PER_HOUR]
+        )
+        if len(recent) >= RESET_LINK_LIMIT_PER_HOUR:
+            # Free again when the oldest of the counted links is an hour old.
+            wait = recent[-1] + timedelta(hours=1) - now
+            raise RateLimitedError(
+                RESET_LINK_LIMIT_REFUSED, retry_after=max(1, int(wait.total_seconds()) + 1)
+            )
+        user.set_password(secrets.token_urlsafe(32))  # nobody knows it: never stored
+        user.password_change_required = False  # the old one is gone; the owner picks the next
+        user.password_changed_at = now
+        user.session_epoch += 1  # every session, and every trusted browser, ends
+        user.version += 1
+        user.save(
+            update_fields=[
+                "password",
+                "password_change_required",
+                "password_changed_at",
+                "session_epoch",
+                "version",
+                "updated_at",
+            ]
+        )
+        revoked = _revoke_pending(user, now, CREDENTIAL_LINKS)
+        _issue_token(user, TokenPurpose.PASSWORD_RESET, created_by=actor, now=now)
+        audit.record(
+            AUDIT_PASSWORD_RESET_BY_ADMIN,
+            actor_id=actor.pk,
+            target_type="user",
+            target_id=user.pk,
+            subject_user_id=user.pk,
+            metadata={"role": user.role, "revoked_links": revoked},
+        )
+        _audit_user(AUDIT_PASSWORD_RESET_ISSUED, actor.pk, user, reason="administrator")
+        _notify_account(user, "password_reset_by_admin")
+    return selectors.admin_user_detail(user.pk)
+
+
 def deactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
     """Block sign-in and end every session now. History and references are kept."""
     with transaction.atomic():
@@ -1078,6 +1182,89 @@ def deactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
             revoked_invitations=revoked_invitations,
         )
     return selectors.admin_user_detail(user.pk)
+
+
+@dataclass(frozen=True, slots=True)
+class Removal:
+    """What deactivating an account for its deletion released (counts for the audit trail)."""
+
+    revoked_links: int
+    revoked_invitations: int
+    unassigned_members: int
+
+
+def lock_account_for_removal(actor_id: UUID, user_id: UUID) -> tuple[User, User]:
+    """The acting administrator and the account to delete (ADR-0036), re-read and locked.
+    The caller (privacy.account_deletion) is inside a transaction that took the legal-hold
+    barrier and `serialise_user_administration()`, in that order. 404 outside the actor's
+    reach; 422 for oneself or an account already pseudonymised; 403 for any role the actor
+    may not delete (`refuse_account_operation_unless_permitted`)."""
+    actor = _acting_manager(actor_id)
+    if user_id == actor.pk:
+        raise BusinessRuleViolation(DELETE_OWN_ACCOUNT_REFUSED)
+    user = _lock_reachable_user(actor, user_id)
+    refuse_if_pseudonymised(user)
+    refuse_account_operation_unless_permitted(actor, user)
+    return actor, user
+
+
+def reread_account_for_removal(actor_id: UUID, user_id: UUID) -> tuple[User, User]:
+    """The same decision as `lock_account_for_removal`, from unlocked reads: for the steps of
+    a deletion that run in transactions of their own, between its checks and its final
+    transaction (privacy.account_deletion hands work over one lead at a time, each with only
+    that lead's locks, so it never holds this account's row while it waits for CRM rows: the
+    reverse of the project's lock order). Whoever lost the right to delete this account a
+    moment ago is refused before the next step; the final transaction decides again under the
+    locks."""
+    actor = _acting_manager(actor_id)
+    if user_id == actor.pk:
+        raise BusinessRuleViolation(DELETE_OWN_ACCOUNT_REFUSED)
+    user = User.objects.filter(pk=user_id).first()
+    if user is None or not _reaches(actor, user):
+        raise NotFoundError()
+    refuse_if_pseudonymised(user)
+    refuse_account_operation_unless_permitted(actor, user)
+    return actor, user
+
+
+def deactivate_for_removal(actor: User, user: User, *, now: datetime) -> Removal:
+    """Deactivate the locked account as the first step of its deletion (like `deactivate_user`,
+    plus the team an Admin leaves behind): sign-in blocked, every session ended, pending links
+    revoked; an Admin's pending invitations and the temporary passwords they set go with them
+    and their team's members answer to no Admin until a Super admin assigns them (as when an
+    Admin is demoted, ADR-0035). Never the last active Super admin. Audited
+    `user.deactivated` with `reason: deleted`."""
+    if _manages_users(user) and not _another_manager_remains(user.pk):
+        raise BusinessRuleViolation("Arkray CRM must keep at least one active super admin.")
+    previous_status = user.status
+    was_administrator = is_administrator(user)
+    fields = ["version", "updated_at"]
+    if user.status != UserStatus.DEACTIVATED:
+        user.status, user.is_active, user.deactivated_at = UserStatus.DEACTIVATED, False, now
+        fields += ["status", "is_active", "deactivated_at"]
+    user.session_epoch += 1
+    user.version += 1
+    user.save(update_fields=[*fields, "session_epoch"])
+    revoked_links = _revoke_pending(user, now)
+    revoked_invitations = _revoke_invitations_sent_by(user, now) if was_administrator else 0
+    unassigned = 0
+    if was_administrator:
+        _void_temporary_passwords_set_by(user.pk, actor=actor, reason="setter_deactivated", now=now)
+        unassigned = User.objects.filter(manager_id=user.pk).update(
+            manager=None, version=F("version") + 1, updated_at=now
+        )
+    _audit_user(
+        AUDIT_USER_DEACTIVATED,
+        actor.pk,
+        user,
+        role=user.role,
+        previous_status=previous_status,
+        revoked_links=revoked_links,
+        revoked_invitations=revoked_invitations,
+        unassigned_members=unassigned,
+        reason="deleted",
+    )
+    return Removal(revoked_links, revoked_invitations, unassigned)
 
 
 def reactivate_user(*, actor_id: UUID, user_id: UUID) -> User:
@@ -1348,9 +1535,12 @@ def issue_password_reset(email: str, requested_from: str | None = None) -> None:
         if user.status != UserStatus.ACTIVE:
             return
         now = timezone.now()
+        # The owner's own requests only: links an administrator had sent (ADR-0036, a
+        # reactivation) have their own limit and must not use up the owner's.
         issued_last_hour = AccountToken.objects.filter(
             user=user,
             purpose=TokenPurpose.PASSWORD_RESET,
+            created_by__isnull=True,
             created_at__gte=now - timedelta(hours=1),
         ).count()
         if issued_last_hour >= settings.PASSWORD_RESET_ACCOUNT_LIMIT_PER_HOUR:
@@ -1431,6 +1621,7 @@ def deliver_account_token(token_id: UUID) -> None:
         token.save(update_fields=["token_hash", "issued_at"])
         recipient, first_name = token.user.email, token.user.first_name
         inviter = token.created_by.full_name if token.created_by else None
+        by_administrator = token.created_by_id is not None
         purpose, expires_at = token.purpose, token.expires_at
 
     if purpose == TokenPurpose.INVITATION:
@@ -1454,6 +1645,7 @@ def deliver_account_token(token_id: UUID) -> None:
             first_name=first_name,
             link=emails.account_link("reset-password", secret),
             expires_at=expires_at,
+            by_administrator=by_administrator,
         )
     AccountToken.objects.filter(pk=token_id, token_hash=tokens.digest(secret)).update(
         sent_at=timezone.now()

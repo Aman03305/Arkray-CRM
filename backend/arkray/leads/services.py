@@ -440,7 +440,13 @@ def change_status(
 
 
 def reassign_lead(
-    *, actor: User, scope: AccessScope, lead_id: UUID, version: int, owner_id: UUID
+    *,
+    actor: User,
+    scope: AccessScope,
+    lead_id: UUID,
+    version: int,
+    owner_id: UUID,
+    allow_archived: bool = False,
 ) -> Lead:
     """Hand a lead to another salesperson: the explicit ownership operation.
 
@@ -452,6 +458,10 @@ def reassign_lead(
     a lead of their workspace (the scope, as every write), to themselves or an active member
     of their team, checked under the member's row lock (`lock_assignee`); anyone else is the
     same 400 as an inactive user, so it reveals nobody's existence.
+
+    An archived lead is read-only and is refused, except for `allow_archived`: deleting its
+    owner's account (privacy.account_deletion, ADR-0036) hands over an archived lead that
+    still carries open work, which would otherwise keep the account from ever being deleted.
     """
     if not may_assign(actor):
         raise PermissionDeniedError()
@@ -461,7 +471,8 @@ def reassign_lead(
         if lead.owner_id == owner_id:
             return selectors.lead_by_id(lead.pk)
         _require_version(lead, version)
-        _require_not_archived(lead)
+        if not allow_archived:
+            _require_not_archived(lead)
         if not lock_assignee(actor, owner_id):
             raise InvalidInputError(details={"owner": [OWNER_NOT_ASSIGNABLE]})
         previous = lead.owner_id

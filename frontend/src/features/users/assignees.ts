@@ -9,6 +9,8 @@ import type { AssigneePage } from "@/lib/api/types";
 export const ASSIGNEE_SEARCH_MIN_LENGTH = 2;
 
 export const assigneeKeys = {
+  /** Every cached list (a deleted user must not stay on offer). */
+  all: ["assignees"] as const,
   list: (q: string) => ["assignees", q] as const,
 };
 

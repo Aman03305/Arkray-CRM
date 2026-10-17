@@ -450,6 +450,9 @@ def test_the_step_up_routes_are_exactly_these():
                 (f"{member}/activate", "POST"),
                 (f"{member}/resend-invitation", "POST"),
                 (f"{member}/set-password", "POST"),
+                # ADR-0036: an emailed reset link, and deleting an account.
+                (f"{member}/reset-password", "POST"),
+                (f"{member}/delete", "POST"),
                 (f"{member}/mfa/reset", "POST"),
                 # Lifting a sign-in lock (review of 73ff1e3, L1).
                 (f"{member}/clear-sign-in-lock", "POST"),

@@ -163,6 +163,43 @@ both cases ([ADR-0026](adr/0026-user-pipelines-support-sessions-attachments.md))
   administrator knows the temporary password; the forced change, its expiry, its voiding when
   the administrator loses their reach and the audit trail bound that.
 
+### Resetting a password and deleting an account (ADR-0036)
+
+| Action | Super admin | Admin | User |
+|---|---|---|---|
+| Create Admin | yes | no (403) | no |
+| Create User | yes | yes, into their team | no |
+| View Admin accounts | yes | no (404: the same as a missing account) | no |
+| View managed users | all | their team | no |
+| Delete Admin | yes | no (404) | no |
+| Delete User | yes | yes, own team only (404 otherwise) | no |
+| Reset Admin password | yes (emailed link) | no (404) | no |
+| Reset User password | yes | yes, own team only | no |
+| Change own password | yes | yes | yes |
+
+Nobody resets or deletes a **Super admin** here (403), nor their own account (422): the one
+function `identity.services.refuse_account_operation_unless_permitted` decides it on the
+target's locked row after the reach check, so a role added later is refused until it is named.
+Both operations also need `users.manage` or `users.manage_team`, a recent second factor where
+the caller's role requires one (Super admins, ADR-0033), are throttled (`auth` scope) and are
+refused in a support session.
+
+- **Reset password** (`POST /api/v1/admin/users/{id}/reset-password`): the caller never learns
+  or chooses a password. The account's current password is replaced by a random one nobody
+  knows, its sessions and trusted browsers end, pending reset/unlock links are revoked and a
+  single-use link (`PASSWORD_RESET_TTL_S`, one hour) is emailed to **the account's own
+  address**, which no other administrator can change (ADR-0030). The owner chooses a password
+  through `password-reset/confirm`, under the password policy. The address also gets a
+  notice. Only an active account; at most 3 administrator-issued links per account per hour
+  (429). Audited `auth.password_reset_by_admin` + `auth.password_reset_issued`
+  (`reason: administrator`), never the link or a password. The existing
+  [temporary password](#admin-set-passwords) stays for Users only.
+- **Delete account** (`GET .../deletion-preview`, `POST .../delete`): see
+  [ADR-0036](adr/0036-account-deletion-and-administrator-password-reset.md) and
+  [privacy.md](privacy.md#deleting-an-account-adr-0036). The work is handed to a named active
+  user within the caller's reach, the account is deactivated and its identity erased, and CRM
+  records and the audit trail stay. Refused under a legal hold on the person (409).
+
 ### Password change notification
 
 The request "if a user updates their password, the admin gets the updated password" is **not
@@ -351,7 +388,9 @@ so the table describes what a super admin gets:
 | Edit first or last name | allowed |
 | Deactivate, reactivate, resend invitation | allowed and audited (off-boarding; gives no credentials: an administrator reactivated by another comes back with no known password and a reset link at their own address, R126; invitations go to the account's own address). The last active **super** administrator still can't be deactivated; Admins don't count toward it. |
 | Support session | refused (support sessions are for CRM users only) |
-| Pseudonymise (privacy) | 403 `permission_denied`, nothing changed (audit SEC-2): it replaces the account's email and password. Checked in `privacy.staff` under the same lock, on the locked row. Only an operator, on the server: `manage.py pseudonymise_user --allow-administrator` ([privacy.md](privacy.md#staff)). |
+| Pseudonymise (privacy endpoint) | 403 `permission_denied`, nothing changed (audit SEC-2): it replaces the account's email and password. Checked in `privacy.staff` under the same lock, on the locked row. Only an operator, on the server: `manage.py pseudonymise_user --allow-administrator` ([privacy.md](privacy.md#staff)). |
+| Delete account | An **Admin's** by a Super admin only (ADR-0036: it hands the Admin's work over first, ends their sessions and releases their team); a **Super admin's** by nobody (403 for a Super admin, 404 for an Admin, who never reaches it). |
+| Reset password (emailed link) | An **Admin's** by a Super admin only, active accounts only (ADR-0036); the link goes to the Admin's own address and no password is chosen or shown. A Super admin's: never (403). |
 | Anything on a pseudonymised former user (any role) | 422 `account_pseudonymised`: name, role, email, password, reactivation, invitation, MFA reset, clearing a sign-in lock, a support session; deactivating stays a no-op. The database holds the account to its pseudonym (adversarial review of 73ff1e3, L4) |
 
 The checks are in `identity.services` (`_refuse_for_another_administrator`,
@@ -441,8 +480,8 @@ policy is in the way: [security.md](security.md#administrator-account-protection
   `POST /auth/mfa/verify`). Views marked `requires_recent_mfa` answer `403 mfa_required` when
   the caller has a confirmed device and that is older than `MFA_STEP_UP_TTL_S` (15 minutes):
   creating and changing users (`POST /admin/users`, `PATCH /admin/users/{id}`, change-email,
-  deactivate, activate, resend-invitation, set-password, `mfa/reset`), starting a support
-  session, requesting a data export and pseudonymising. Reads need no code; an export's
+  deactivate, activate, resend-invitation, set-password, `reset-password`, `delete`,
+  `mfa/reset`), starting a support session, requesting a data export and pseudonymising. Reads need no code; an export's
   download (an ordinary link, for its requester only) doesn't ask again. Erasure and legal
   holds are operator commands, with no API. The web app asks for a code and repeats the
   request once. Deliberately outside the step-up (ADR-0033): reassignment, Ask Arkray,

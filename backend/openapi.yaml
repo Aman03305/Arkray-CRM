@@ -409,6 +409,68 @@ paths:
               schema:
                 $ref: '#/components/schemas/AdminUser'
           description: ''
+  /api/v1/admin/users/{user_id}/delete:
+    post:
+      operationId: admin_users_delete
+      description: |-
+        Delete an account (ADR-0036): hand its work to `reassign_to`, deactivate it and erase
+        its identity; CRM records and the audit trail stay. A Super admin deletes Admins and
+        Users; an Admin only the users of their team. 202 while leads remain to hand over:
+        send the same request again.
+      parameters:
+      - in: path
+        name: user_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - admin
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteAccountRequest'
+        required: true
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeletionResult'
+          description: ''
+        '202':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeletionResult'
+          description: ''
+  /api/v1/admin/users/{user_id}/deletion-preview:
+    get:
+      operationId: admin_users_deletion_preview
+      description: |-
+        What deleting an account would do (ADR-0036): the work they own and why it can't be
+        deleted now, for the confirmation dialog. 404 outside the caller's reach.
+      parameters:
+      - in: path
+        name: user_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - admin
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeletionPreview'
+          description: ''
   /api/v1/admin/users/{user_id}/mfa/reset:
     post:
       operationId: admin_users_mfa_reset
@@ -438,6 +500,33 @@ paths:
   /api/v1/admin/users/{user_id}/resend-invitation:
     post:
       operationId: admin_users_resend_invitation_create
+      parameters:
+      - in: path
+        name: user_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - admin
+      security:
+      - sessionAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+          description: ''
+  /api/v1/admin/users/{user_id}/reset-password:
+    post:
+      operationId: admin_users_reset_password
+      description: |-
+        Have a password reset link emailed to an active account in the caller's reach
+        (ADR-0036): a User, or (a Super admin only) an Admin; never a Super admin's. The caller
+        never sees or chooses a password; the account's old one stops working, its sessions end
+        and the owner is told. 404 outside the caller's reach, 403 for a Super admin's account,
+        422 for oneself or an account that isn't active.
       parameters:
       - in: path
         name: user_id
@@ -4818,6 +4907,79 @@ components:
         * `ready` - Ready to download
         * `failed` - Failed
         * `expired` - Expired
+    DeleteAccountRequest:
+      type: object
+      properties:
+        version:
+          type: integer
+          minimum: 1
+          description: The user's version, as listed.
+        confirm_email:
+          type: string
+          minLength: 1
+          description: The account's current email address, to confirm.
+          maxLength: 254
+        reassign_to:
+          type: string
+          format: uuid
+          nullable: true
+          description: Who takes over the user's leads and their open deals, tasks
+            and meetings. Required while the user still owns any.
+      required:
+      - confirm_email
+      - version
+    DeletionPreview:
+      type: object
+      properties:
+        leads:
+          type: integer
+          description: 'Leads to hand over: those they own that are not archived,
+            and archived ones still carrying their open work.'
+        open_deals:
+          type: integer
+        open_activities:
+          type: integer
+          description: Open tasks and scheduled meetings.
+        personal_pipelines:
+          type: integer
+          description: Their active personal pipelines.
+        team_members:
+          type: integer
+          description: Users in their team (an Admin's).
+        legal_hold:
+          type: boolean
+        needs_new_owner:
+          type: boolean
+          description: The delete request must name `reassign_to`.
+        blocked_reason:
+          type: string
+          nullable: true
+          description: Why the account can't be deleted now, or null.
+      required:
+      - blocked_reason
+      - leads
+      - legal_hold
+      - needs_new_owner
+      - open_activities
+      - open_deals
+      - personal_pipelines
+      - team_members
+    DeletionResult:
+      type: object
+      properties:
+        completed:
+          type: boolean
+          description: 'False (HTTP 202): this request handed over some leads and
+            more remain; send the same request again.'
+        reassigned_leads:
+          type: integer
+          description: Handed over by this request.
+        remaining_leads:
+          type: integer
+      required:
+      - completed
+      - reassigned_leads
+      - remaining_leads
     Detail:
       type: object
       properties:

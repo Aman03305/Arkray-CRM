@@ -22,6 +22,7 @@ api_v1_patterns: list[URLPattern | URLResolver] = [
     path("auth/", include(identity_urls.auth_urlpatterns)),
     path("admin/", include(identity_urls.admin_urlpatterns)),
     path("admin/privacy/", include(privacy_urls.admin_urlpatterns)),
+    path("admin/users/", include(privacy_urls.account_urlpatterns)),
     path("assignees", include(identity_urls.directory_urlpatterns)),
     path("workspaces/", include(identity_urls.workspace_urlpatterns)),
     path("workspaces/<str:workspace>/", include(leads_urls.workspace_urlpatterns)),

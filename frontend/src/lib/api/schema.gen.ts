@@ -233,6 +233,48 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/admin/users/{user_id}/delete": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Delete an account (ADR-0036): hand its work to `reassign_to`, deactivate it and erase
+         *     its identity; CRM records and the audit trail stay. A Super admin deletes Admins and
+         *     Users; an Admin only the users of their team. 202 while leads remain to hand over:
+         *     send the same request again.
+         */
+        readonly post: operations["admin_users_delete"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/users/{user_id}/deletion-preview": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * @description What deleting an account would do (ADR-0036): the work they own and why it can't be
+         *     deleted now, for the confirmation dialog. 404 outside the caller's reach.
+         */
+        readonly get: operations["admin_users_deletion_preview"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/admin/users/{user_id}/mfa/reset": {
         readonly parameters: {
             readonly query?: never;
@@ -265,6 +307,29 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         readonly post: operations["admin_users_resend_invitation_create"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/users/{user_id}/reset-password": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * @description Have a password reset link emailed to an active account in the caller's reach
+         *     (ADR-0036): a User, or (a Super admin only) an Admin; never a Super admin's. The caller
+         *     never sees or chooses a password; the account's old one stops working, its sessions end
+         *     and the owner is told. 404 outside the caller's reach, 403 for a Super admin's account,
+         *     422 for oneself or an account that isn't active.
+         */
+        readonly post: operations["admin_users_reset_password"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -2184,6 +2249,40 @@ export interface components {
          * @enum {string}
          */
         readonly DataExportStatusEnum: "queued" | "ready" | "failed" | "expired";
+        readonly DeleteAccountRequest: {
+            /** @description The user's version, as listed. */
+            readonly version: number;
+            /** @description The account's current email address, to confirm. */
+            readonly confirm_email: string;
+            /**
+             * Format: uuid
+             * @description Who takes over the user's leads and their open deals, tasks and meetings. Required while the user still owns any.
+             */
+            readonly reassign_to?: string | null;
+        };
+        readonly DeletionPreview: {
+            /** @description Leads to hand over: those they own that are not archived, and archived ones still carrying their open work. */
+            readonly leads: number;
+            readonly open_deals: number;
+            /** @description Open tasks and scheduled meetings. */
+            readonly open_activities: number;
+            /** @description Their active personal pipelines. */
+            readonly personal_pipelines: number;
+            /** @description Users in their team (an Admin's). */
+            readonly team_members: number;
+            readonly legal_hold: boolean;
+            /** @description The delete request must name `reassign_to`. */
+            readonly needs_new_owner: boolean;
+            /** @description Why the account can't be deleted now, or null. */
+            readonly blocked_reason: string | null;
+        };
+        readonly DeletionResult: {
+            /** @description False (HTTP 202): this request handed over some leads and more remain; send the same request again. */
+            readonly completed: boolean;
+            /** @description Handed over by this request. */
+            readonly reassigned_leads: number;
+            readonly remaining_leads: number;
+        };
         readonly Detail: {
             readonly detail: string;
         };
@@ -3885,6 +3984,60 @@ export interface operations {
             };
         };
     };
+    readonly admin_users_delete: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly user_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["DeleteAccountRequest"];
+            };
+        };
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["DeletionResult"];
+                };
+            };
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["DeletionResult"];
+                };
+            };
+        };
+    };
+    readonly admin_users_deletion_preview: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly user_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["DeletionPreview"];
+                };
+            };
+        };
+    };
     readonly admin_users_mfa_reset: {
         readonly parameters: {
             readonly query?: never;
@@ -3907,6 +4060,27 @@ export interface operations {
         };
     };
     readonly admin_users_resend_invitation_create: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly user_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AdminUser"];
+                };
+            };
+        };
+    };
+    readonly admin_users_reset_password: {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;

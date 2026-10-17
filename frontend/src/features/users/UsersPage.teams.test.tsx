@@ -326,7 +326,7 @@ describe("a Super admin", () => {
     await user.click(screen.getByRole("button", { name: "Tara Singh" }));
     const drawer = screen.getByRole("dialog", { name: "Tara Singh" });
     expect(drawer).toHaveTextContent("Not available for administrators.");
-    expect(within(drawer).queryByRole("button", { name: "Set new password" })).not.toBeInTheDocument();
+    expect(within(drawer).queryByRole("button", { name: "Set temporary password" })).not.toBeInTheDocument();
     expect(within(drawer).queryByRole("button", { name: "Pseudonymise…" })).not.toBeInTheDocument();
   });
 
@@ -411,7 +411,7 @@ describe("an Admin (team administrator)", () => {
     renderAs(teamAdminViewer);
     await userEvent.setup().click(await screen.findByRole("button", { name: "Rahul Sharma" }));
     const drawer = screen.getByRole("dialog", { name: "Rahul Sharma" });
-    expect(within(drawer).getByRole("button", { name: "Set new password" })).toBeInTheDocument();
+    expect(within(drawer).getByRole("button", { name: "Set temporary password" })).toBeInTheDocument();
     // support.access_team
     expect(within(drawer).getByRole("button", { name: "Access as user" })).toBeInTheDocument();
     expect(within(drawer).getByRole("link", { name: "Open CRM" })).toHaveAttribute("href", `/admin/users/${rahul.id}/dashboard`);
@@ -525,7 +525,7 @@ describe("a user who left the viewer's reach (404)", () => {
     await userEvent.setup().click(await screen.findByRole("button", { name: "Rahul Sharma" }));
     expect(await screen.findByRole("status")).toHaveTextContent(GONE);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Set new password" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Set temporary password" })).not.toBeInTheDocument();
     await waitFor(() => expect(api.callsTo("GET", "/api/v1/admin/users").length).toBeGreaterThan(1));
   });
 

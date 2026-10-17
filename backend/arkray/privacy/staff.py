@@ -49,11 +49,18 @@ the locked row: a promotion committed a moment earlier is seen, one that waits s
 account changed. The operator is re-read there too (privacy.manage). A replay
 (privacy.replay) re-applies a pseudonymisation that was authorised when it happened, so it
 is never refused for the role.
+
+Deleting an account from user administration (privacy.account_deletion, ADR-0036) reuses the
+erasure itself (`erase_locked`, with its own authorization, after handing the work over and
+deactivating the account): a Super admin may thereby delete an Admin, which this module's own
+`pseudonymise` and the privacy endpoint still refuse, and an Admin a user of their team, with
+the erasure limited to the account's own traces.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from uuid import UUID
 
 from django.db import connection, transaction
@@ -130,7 +137,7 @@ def pseudonymised(user: User) -> bool:
     return user.is_pseudonymised
 
 
-def _owned_work(user: User) -> tuple[int, int, int]:
+def owned_work(user: User) -> tuple[int, int, int]:
     leads = Lead.objects.filter(owner=user, archived_at__isnull=True).count()
     deals = Opportunity.objects.filter(
         owner=user, status=StageCategory.OPEN, archived_at__isnull=True
@@ -176,6 +183,12 @@ def _conversations(user: User) -> list[UUID]:
     return sorted(about - subjects.held_conversations(among=about))
 
 
+def _own_conversations(user: User) -> list[UUID]:
+    """The account's own Ask Arkray conversations, except those a legal hold keeps."""
+    own = set(Conversation.objects.filter(actor_id=user.pk).values_list("pk", flat=True))
+    return sorted(own - subjects.held_conversations(among=own))
+
+
 def _require_operator(operator_id: UUID) -> None:
     """The operator, re-read (under the lock when pseudonymising): one who lost privacy.manage
     a moment ago, or a sales user calling the service, is refused."""
@@ -197,7 +210,7 @@ def _check(user: User, operator_id: UUID, *, allow_administrator: bool) -> None:
         holds.refuse_if_held(HoldSubject.USER, user.pk)
     elif holds.is_held(HoldSubject.USER, user.pk):  # preview: a read, nothing to serialise
         raise holds.UnderLegalHold("user", user.pk)
-    leads, deals, work = _owned_work(user)
+    leads, deals, work = owned_work(user)
     if leads or deals or work:
         raise BusinessRuleViolation(OWNS_WORK.format(leads=leads, deals=deals, work=work))
 
@@ -265,6 +278,34 @@ def pseudonymise(
         assert operator_id is not None  # noqa: S101 — refused above
         _require_operator(operator_id)
         _check(user, operator_id, allow_administrator=allow_administrator)
+    result, now = erase_locked(
+        user, operator_id=operator_id, replay=replay, administrator=administrator
+    )
+    if not replay:
+        ledger.append("user_pseudonymised", user.pk, at=now)  # last: all the above succeeded
+    return result
+
+
+def erase_locked(
+    user: User,
+    *,
+    operator_id: UUID | None,
+    replay: bool = False,
+    administrator: bool = False,
+    by_deletion: bool = False,
+    limited: bool = False,
+) -> tuple[StaffErasure, datetime]:
+    """Erase `user`'s identity (the body of `pseudonymise`, after its checks). The caller holds
+    the hold barrier, the user-administration lock and the account's row lock, has decided the
+    operator may do this (`pseudonymise`: privacy.manage and `_check`; account deletion: its
+    own reach and role rules, ADR-0036) and writes the erasure ledger entry afterwards.
+    `by_deletion`: the erasure is part of deleting the account (the audit entry says so).
+    `limited`: for an actor without privacy.manage (an Admin deleting a team member,
+    ADR-0036). The account's identity and its own traces go as always; what reaches other
+    people's data does not, because the account's name and email can be chosen by the actor:
+    only the account's own Ask Arkray conversations go (not every conversation that merely
+    names them), and only the audit details of events the account itself caused (not the
+    actor's address on actions taken about it). Those follow their normal retention."""
     now = timezone.now()
     original_email = user.email
     with connection.cursor() as cursor:  # matching their name reads every stored answer
@@ -272,20 +313,25 @@ def pseudonymise(
     # What only identifies them, first (their name and email still find it). The
     # conversations are locked before the delete collects their questions, as an erasure
     # locks them (privacy.services): one being added meanwhile is collected too.
+    erased_conversations = _own_conversations(user) if limited else _conversations(user)
     conversation_ids = list(
         Conversation.objects.select_for_update()
-        .filter(pk__in=_conversations(user))
+        .filter(pk__in=erased_conversations)
         .order_by("pk")
         .values_list("pk", flat=True)
     )
     _, deleted = Conversation.objects.filter(pk__in=conversation_ids).delete()
     conversations = deleted.get(Conversation._meta.label, 0)
-    details, _ = AuditDetail.objects.filter(_details_about(user.pk)).delete()
+    details, _ = AuditDetail.objects.filter(
+        Q(event__actor_id=user.pk) if limited else _details_about(user.pk)
+    ).delete()
     sessions = SupportSession.objects.filter(Q(admin=user) | Q(target=user))
     ended = sessions.filter(ended_at__isnull=True).update(
         ended_at=now, end_reason=SupportEnd.NOT_ALLOWED
     )
-    reasons = sessions.exclude(reason="").update(reason="")
+    # A limited erasure keeps the reasons others typed for sessions about the account.
+    reason_sessions = SupportSession.objects.filter(admin=user) if limited else sessions
+    reasons = reason_sessions.exclude(reason="").update(reason="")
     tokens = AccountToken.objects.filter(user=user, status=TokenStatus.PENDING).update(
         status=TokenStatus.REVOKED, revoked_at=now
     )
@@ -349,11 +395,11 @@ def pseudonymise(
         subject_user_id=user.pk,
         metadata={
             **counts,
+            **({"deleted": True} if by_deletion else {}),
+            **({"limited": True} if limited else {}),
             **({"exports_withdrawn": withdrawn} if withdrawn else {}),
             **({"administrator_target": True} if administrator else {}),
             **({"replay": True} if replay else {}),
         },
     )
-    if not replay:
-        ledger.append("user_pseudonymised", user.pk, at=now)  # last: all the above succeeded
-    return result
+    return result, now

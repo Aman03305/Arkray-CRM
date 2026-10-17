@@ -80,6 +80,11 @@ AUTHZ_MATRIX: dict[str, RouteRule] = {
     # --- product enhancement phase: admin-set passwords, security events, support sessions
     # (refused during a support session where marked; identity.permissions) ----------------
     "api/v1/admin/users/<uuid:user_id>/set-password": _rule(USERS_MANAGE, "POST"),
+    # ADR-0036: an emailed reset link (Users, and Admins for a super admin; never a super
+    # admin), and deleting an account (hand over, deactivate, erase the identity).
+    "api/v1/admin/users/<uuid:user_id>/reset-password": _rule(USERS_MANAGE, "POST"),
+    "api/v1/admin/users/<uuid:user_id>/deletion-preview": _rule(USERS_MANAGE, "GET"),
+    "api/v1/admin/users/<uuid:user_id>/delete": _rule(USERS_MANAGE, "POST"),
     # An ordinary user's second factor; never an administrator's (ADR-0033).
     "api/v1/admin/users/<uuid:user_id>/mfa/reset": _rule(USERS_MANAGE, "POST"),
     # Lifting the daily sign-in lock (review of 73ff1e3, L1).

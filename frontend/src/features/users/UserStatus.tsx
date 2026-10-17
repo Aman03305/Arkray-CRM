@@ -2,15 +2,20 @@ import { Badge } from "@/components/ui/Badge";
 import type { AdminUser } from "@/lib/api/types";
 import { formatDateTime, formatRelative } from "@/lib/format";
 
+import { isDeleted } from "./account-operations";
+
 const BADGE = {
   active: { tone: "green", label: "Active" },
   invited: { tone: "amber", label: "Invited" },
   deactivated: { tone: "neutral", label: "Deactivated" },
 } as const;
 
+/** A deleted account (ADR-0036) is deactivated for good and pseudonymised: it reads "Deleted". */
+const DELETED = { tone: "neutral", label: "Deleted" } as const;
+
 /** Status badge, plus the invitation's delivery and expiry for invited users. */
 export function UserStatus({ user, now }: { user: AdminUser; now?: Date }) {
-  const badge = BADGE[user.status];
+  const badge = isDeleted(user) ? DELETED : BADGE[user.status];
   const invitation = user.invitation;
   let detail: { text: string; title?: string; urgent?: boolean } | null = null;
   if (user.status === "invited" && !invitation) {

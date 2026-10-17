@@ -26,7 +26,10 @@ export function AdminFilter({ value, onChange, className }: {
   const selectId = useId();
   const searchId = useId();
   const q = useDebounced(search.trim().length >= SEARCH_MIN_LENGTH ? search.trim() : "", 300);
-  const { query, admins, truncated } = useTeamAdmins(q, true);
+  const { query, admins: listed, truncated } = useTeamAdmins(q, true);
+  // A deleted Admin (ADR-0036) is a "Former user" with no team left to filter by: their users
+  // were released when the account was deleted.
+  const admins = listed.filter((a) => !a.pseudonymised_at);
   const label = (a: (typeof admins)[number]) => (a.status === "deactivated" ? `${a.full_name} (deactivated)` : a.full_name);
   const kept = value !== "" && value !== NO_MANAGER && !admins.some((a) => a.id === value);
 

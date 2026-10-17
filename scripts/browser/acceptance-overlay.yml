@@ -1,0 +1,6 @@
+# Overlay for scripts/browser/acceptance-stack.sh: whether Super admins must use a second factor
+# (the browser run signs in with a password; the step-up run turns it on: ACCEPT_MFA=true).
+services:
+  backend:
+    environment:
+      MFA_REQUIRED_FOR_ADMINS: ${ACCEPT_MFA:-false}

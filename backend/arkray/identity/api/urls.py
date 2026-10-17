@@ -65,6 +65,11 @@ admin_urlpatterns = [
         name="admin-user-set-password",
     ),
     path(
+        "users/<uuid:user_id>/reset-password",
+        views.AdminUserResetPasswordView.as_view(),
+        name="admin-user-reset-password",
+    ),
+    path(
         "users/<uuid:user_id>/mfa/reset",
         views.AdminUserMfaResetView.as_view(),
         name="admin-user-mfa-reset",

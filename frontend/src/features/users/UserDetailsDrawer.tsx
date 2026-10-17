@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ArrowUpRight, FileArchive, KeyRound, LifeBuoy, UserCog, UserX } from "lucide-react";
+import { ArrowUpRight, FileArchive, KeyRound, LifeBuoy, MailCheck, Trash2, UserCog, UserX } from "lucide-react";
 import Link from "next/link";
 import type { ReactNode } from "react";
 
@@ -15,6 +15,14 @@ import { canManageAdmins, canManageUsers, canOpenUserWorkspaces, canStartSupport
 import { useViewer } from "@/lib/viewer-context";
 import { userWorkspaceHref } from "@/lib/workspace";
 
+import {
+  canDeleteAccount,
+  canResetPassword,
+  DEACTIVATED_REASON,
+  INVITED_REASON,
+  type Operator,
+  signInToolNotes,
+} from "./account-operations";
 import { isAdministratorRole, roleChangeBlockedReason, userDetailKey, usersApi } from "./api";
 import { NO_ADMIN_LABEL } from "./ManagerSelect";
 import { useOutOfReachOn404 } from "./reach";
@@ -30,8 +38,9 @@ export function passwordState(user: AdminUser): string {
 }
 
 /**
- * Why an administrator can't set this user's password or open a support session for them
- * (null when they can). The API refuses the same cases.
+ * Why an administrator can't set this user's temporary password or open a support session for
+ * them (null when they can). The API refuses the same cases. (A reset link, which an Admin's
+ * owner receives at their own address, has its own rules: account-operations.)
  */
 export function supportBlockedReason(user: AdminUser, isSelf: boolean): string | null {
   if (isSelf) return "This is you. Change your own password in Settings.";
@@ -39,8 +48,8 @@ export function supportBlockedReason(user: AdminUser, isSelf: boolean): string |
   if (user.pseudonymised_at) return "This former user was pseudonymised: their account can't be changed.";
   // A Super admin's or an Admin's (ADR-0030, ADR-0035): only they change their credentials.
   if (isAdministratorRole(user.role)) return "Not available for administrators.";
-  if (user.status === "invited") return "Not available until they accept their invitation.";
-  if (user.status === "deactivated") return "Not available for deactivated users.";
+  if (user.status === "invited") return INVITED_REASON;
+  if (user.status === "deactivated") return DEACTIVATED_REASON;
   return null;
 }
 
@@ -55,9 +64,10 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 
 /**
  * A user's details beside the Users list (their name opens it): who they are, their status
- * and (for a Super admin) their Admin, the administrator's sign-in tools for them, changing
- * their role or Admin (a Super admin's, ADR-0035), and, for those who handle privacy
- * requests, exporting their data or (once deactivated) pseudonymising them. Their CRM is a
+ * and (for a Super admin) their Admin, the administrator's sign-in tools for them (a reset link
+ * emailed to the account, a temporary password, support access), changing their role or Admin
+ * (a Super admin's, ADR-0035), for those who handle privacy requests, exporting their data or
+ * (once deactivated) pseudonymising them, and deleting the account (ADR-0036). Their CRM is a
  * separate, explicit link.
  */
 export function UserDetailsDrawer({
@@ -65,10 +75,12 @@ export function UserDetailsDrawer({
   notice,
   onClose,
   onEdit,
+  onResetPassword,
   onSetPassword,
   onAccess,
   onExport,
   onPseudonymise,
+  onDelete,
 }: {
   /** As listed; the latest copy is loaded while the panel is open. */
   user: AdminUser;
@@ -76,10 +88,15 @@ export function UserDetailsDrawer({
   onClose: () => void;
   /** Change their role or Admin (the edit dialog). */
   onEdit: (user: AdminUser) => void;
+  /** Email them a reset link (ADR-0036). */
+  onResetPassword: (user: AdminUser) => void;
+  /** Set a temporary password they must replace at their next sign-in. */
   onSetPassword: (user: AdminUser) => void;
   onAccess: (user: AdminUser) => void;
   onExport: (user: AdminUser) => void;
   onPseudonymise: (user: AdminUser) => void;
+  /** Delete the account (ADR-0036). */
+  onDelete: (user: AdminUser) => void;
 }) {
   const viewer = useViewer();
   const detail = useQuery({
@@ -104,7 +121,13 @@ export function UserDetailsDrawer({
   const roleBlocked = roleChangeBlockedReason(user, user.id === viewer?.id);
   const pseudonymisable =
     user.status === "deactivated" && !user.pseudonymised_at && user.id !== viewer?.id && !administrator;
-  const blocked = supportBlockedReason(user, user.id === viewer?.id);
+  const isSelf = user.id === viewer?.id;
+  const blocked = supportBlockedReason(user, isSelf);
+  // The account operations of ADR-0036 and what the panel says about the tools it doesn't offer.
+  const who: Operator = { isSelf, manages, superAdmin };
+  const resets = canResetPassword(user, who);
+  const deletes = canDeleteAccount(user, who);
+  const notes = signInToolNotes(user, who, blocked);
   const loadError = detail.isError ? describeError(detail.error) : null;
 
   return (
@@ -127,7 +150,7 @@ export function UserDetailsDrawer({
       }
     >
       <div className="space-y-4">
-        <div aria-live="polite" className="empty:hidden">
+        <div aria-live="polite" className="empty:hidden [overflow-wrap:anywhere]">
           {notice ? <Alert tone="success">{notice}</Alert> : null}
         </div>
         {loadError ? (
@@ -192,20 +215,33 @@ export function UserDetailsDrawer({
         ) : null}
         {manages ? (
           <div className="border-t border-slate-200 pt-4">
-            {blocked ? (
-              <p className="text-sm text-slate-500">{blocked}</p>
-            ) : (
+            {resets || !blocked ? (
               <div className="flex flex-wrap gap-2">
-                <Button variant="secondary" icon={<KeyRound aria-hidden="true" className="size-4" />} onClick={() => onSetPassword(user)}>
-                  Set new password
-                </Button>
-                {supports ? (
-                  <Button variant="secondary" icon={<LifeBuoy aria-hidden="true" className="size-4" />} onClick={() => onAccess(user)}>
-                    Access as user
+                {resets ? (
+                  // The way to help someone who forgot their password: they choose the next one themselves.
+                  <Button icon={<MailCheck aria-hidden="true" className="size-4" />} onClick={() => onResetPassword(user)}>
+                    Reset password
                   </Button>
                 ) : null}
+                {!blocked ? (
+                  <>
+                    <Button variant="secondary" icon={<KeyRound aria-hidden="true" className="size-4" />} onClick={() => onSetPassword(user)}>
+                      Set temporary password
+                    </Button>
+                    {supports ? (
+                      <Button variant="secondary" icon={<LifeBuoy aria-hidden="true" className="size-4" />} onClick={() => onAccess(user)}>
+                        Access as user
+                      </Button>
+                    ) : null}
+                  </>
+                ) : null}
               </div>
-            )}
+            ) : null}
+            {notes.map((note) => (
+              <p key={note} className={`text-sm text-slate-500${resets || !blocked ? " mt-2" : ""}`}>
+                {note}
+              </p>
+            ))}
           </div>
         ) : null}
         {privacy ? (
@@ -230,6 +266,18 @@ export function UserDetailsDrawer({
                     : "Only a deactivated user can be pseudonymised."}
               </p>
             )}
+          </div>
+        ) : null}
+        {deletes ? (
+          // Last, and on its own: the one thing here that can't be taken back (ADR-0036).
+          <div className="border-t border-slate-200 pt-4">
+            <Button variant="secondary" icon={<Trash2 aria-hidden="true" className="size-4 text-red-600" />} onClick={() => onDelete(user)}>
+              Delete account
+            </Button>
+            <p className="mt-2 text-xs text-slate-500">
+              Hands their work to someone else, deactivates the account and erases their personal details. This can&apos;t
+              be undone.
+            </p>
           </div>
         ) : null}
       </div>

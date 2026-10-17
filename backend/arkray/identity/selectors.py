@@ -188,6 +188,8 @@ SECURITY_ACTIONS: dict[str, tuple[str, ...]] = {
     "auth.password_changed": (),
     "auth.password_reset_completed": (),
     "auth.password_set_by_admin": (),
+    # An administrator had a reset link emailed to the account's own address (ADR-0036).
+    "auth.password_reset_by_admin": (),
     # The administrator who set it lost their reach over the account (ADR-0035): `reason`
     # team_moved, setter_demoted or setter_deactivated; the owner was mailed a reset link.
     "auth.temporary_password_voided": ("reason",),
@@ -197,6 +199,8 @@ SECURITY_ACTIONS: dict[str, tuple[str, ...]] = {
     "auth.sign_in_unlocked": ("by",),
     "user.created": ("role", "activation"),
     "user.deactivated": ("role",),
+    # Deleted by an administrator (ADR-0036): work handed over, deactivated, identity erased.
+    "user.deleted": ("role",),
     # `reset_link`: an administrator reactivated by another must set a new password (R126).
     "user.reactivated": ("reset_link",),
     "user.role_changed": ("from", "to"),

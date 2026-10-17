@@ -116,6 +116,7 @@ flowchart LR
 | Threat | Control |
 |---|---|
 | An administrator learning a user's password | Never stored or returned in plaintext; admin-set passwords are temporary (forced change, 72 h expiry) and audited; administrators are invited, never given a password, and can't be promoted while one is pending; a sign-in with a temporary password is a security event; administrators see that a password changed, never what it is ([authorization.md](authorization.md#password-change-notification); [password secrecy](#password-secrecy)) |
+| An administrator taking over, or learning the password of, another account through a reset or a deletion | Reset is an emailed single-use link to the account's own address (no password is chosen or shown; the old one stops working, sessions end, the owner is told, 3 links per account per hour); Admins are reset only by a Super admin, whose own address changes only by the owner (ADR-0030); a Super admin's account is never reset or deleted by anyone; deleting hands work over inside the caller's reach, then erases the identity, under the legal-hold barrier ([ADR-0036](adr/0036-account-deletion-and-administrator-password-reset.md)) |
 | One administrator taking over another's account (R100) | Another administrator's (either kind) email and password, and another super administrator's role, can't be changed, whatever the account's status; an account another administrator demoted keeps that protection for 7 days ([below](#administrator-account-protection)) |
 | "Log in as" turning into impersonation | Support sessions keep the administrator's identity, bind to their browser session, expire in 30 minutes, open only the target's workspace, refuse identity and security operations, and stamp every write with actor, subject and session ([admin-user-workspace.md](admin-user-workspace.md#support-sessions)); no route named like impersonation exists (tested) |
 | Support-session fixation or reuse | The session's marker is server-side and checked against a digest of the browser session's key; a copied marker, a rotated key, sign-out, expiry or a deactivated target ends it |
@@ -266,9 +267,11 @@ administrator could fix another administrator's email or demote them in the UI.
   existing administrator who should manage only a team), set `role="team_admin"` and
   `"to": "team_admin"`: the account stays an administrator's, protected as before, and its
   team starts empty until a super admin assigns users to it.
-- *Pseudonymise a former administrator*: no administrator can through the API (403, audit
-  SEC-2: it replaces the account's email and password). Once the account is deactivated and
-  its work reassigned, an operator runs `manage.py pseudonymise_user <id> --by <admin>
+- *Delete an Admin*: a Super admin, from the Users page (ADR-0036; hands the Admin's work
+  over, ends their sessions, releases their team, erases their identity). Never a Super admin.
+- *Pseudonymise a former administrator* through the privacy endpoint: no administrator can
+  (403, audit SEC-2: it replaces the account's email and password). Once the account is
+  deactivated and its work reassigned, an operator runs `manage.py pseudonymise_user <id> --by <admin>
   --allow-administrator`, then again with `--yes`; audited as `user.pseudonymised` with
   `administrator_target` ([privacy.md](privacy.md#staff)).
 

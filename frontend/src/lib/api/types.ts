@@ -39,6 +39,13 @@ export type AssigneePage = Schemas["AssigneePage"];
 export type LoginRequest = Schemas["LoginRequest"];
 export type EmailChangeRequest = Schemas["EmailChangeRequest"];
 export type SetPasswordRequest = Schemas["SetPasswordRequest"];
+// --- Deleting an account (ADR-0036) ---------------------------------------------------------------
+/** What deleting the account would do and whether it can be done now (GET .../deletion-preview). */
+export type DeletionPreview = Schemas["DeletionPreview"];
+/** `version`, the typed `confirm_email` and, while the account owns work, who takes it over. */
+export type DeleteAccountRequest = Schemas["DeleteAccountRequest"];
+/** `completed: false` (HTTP 202): a batch of leads was handed over; send the same request again. */
+export type DeletionResult = Schemas["DeletionResult"];
 export type SupportSessionDto = Schemas["SupportSession"];
 export type SupportSessionStartRequest = Schemas["SupportSessionStartRequest"];
 export type SecurityEvent = Schemas["SecurityEvent"];

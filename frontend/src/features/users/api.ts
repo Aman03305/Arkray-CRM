@@ -4,6 +4,9 @@ import { apiFetch } from "@/lib/api/client";
 import type {
   AdminUser,
   AdminUserPage,
+  DeleteAccountRequest,
+  DeletionPreview,
+  DeletionResult,
   EmailChangeRequest,
   Role,
   SecurityEventPage,
@@ -20,6 +23,8 @@ const USERS = "/api/v1/admin/users";
 export const USERS_QUERY_KEY = ["admin-users"] as const;
 /** One user, freshly loaded (under USERS_QUERY_KEY, so list refreshes include it). */
 export const userDetailKey = (id: string) => [...USERS_QUERY_KEY, "detail", id] as const;
+/** What deleting one account would do (under USERS_QUERY_KEY, so a refresh of the users reads it again). */
+export const deletionPreviewKey = (id: string) => [...USERS_QUERY_KEY, "deletion-preview", id] as const;
 export const SECURITY_EVENTS_QUERY_KEY = ["security-events"] as const;
 export const SEARCH_MIN_LENGTH = 2;
 
@@ -79,6 +84,19 @@ export const usersApi = {
   resetMfa: (id: string) => apiFetch<AdminUser>(user(id, "mfa/reset"), { method: "POST" }),
   /** Lifts the lock too many failed sign-ins put on new browsers (review of 73ff1e3, L1). */
   clearSignInLock: (id: string) => apiFetch<AdminUser>(user(id, "clear-sign-in-lock"), { method: "POST" }),
+  /**
+   * Emails the account a single-use reset link (ADR-0036): their old password stops working and
+   * their sessions end. The administrator never sees or chooses a password.
+   */
+  resetPassword: (id: string) => apiFetch<AdminUser>(user(id, "reset-password"), { method: "POST" }),
+  /** What deleting the account would do, and why it can't be done now, if so (ADR-0036). */
+  deletionPreview: (id: string) => apiFetch<DeletionPreview>(user(id, "deletion-preview")),
+  /**
+   * Deletes the account (ADR-0036): 200 `completed` when done; 202 (`completed: false`) after
+   * handing over a batch of leads, then the SAME request is sent again until it is 200.
+   */
+  deleteAccount: (id: string, body: DeleteAccountRequest) =>
+    apiFetch<DeletionResult>(user(id, "delete"), { method: "POST", body }),
 };
 
 const SUPPORT_SESSIONS = "/api/v1/admin/support-sessions";

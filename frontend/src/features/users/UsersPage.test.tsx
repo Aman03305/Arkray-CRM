@@ -413,7 +413,7 @@ describe("UsersPage: user details", () => {
     ({ user, drawer } = await openDetails("Neha Verma"));
     expect(drawer).toHaveTextContent("Invitation pending");
     expect(drawer).toHaveTextContent("Not available until they accept their invitation.");
-    expect(within(drawer).queryByRole("button", { name: "Set new password" })).not.toBeInTheDocument();
+    expect(within(drawer).queryByRole("button", { name: "Set temporary password" })).not.toBeInTheDocument();
   });
 
   it("sets a new password with the user's version, then shows what happens next", async () => {
@@ -428,7 +428,7 @@ describe("UsersPage: user details", () => {
     });
     renderPage();
     const { user, drawer } = await openDetails();
-    await user.click(within(drawer).getByRole("button", { name: "Set new password" }));
+    await user.click(within(drawer).getByRole("button", { name: "Set temporary password" }));
     const dialog = screen.getByRole("dialog", { name: "Set a new password for Rahul Sharma" });
     expect(within(dialog).getByLabelText("New password")).toHaveAttribute("autocomplete", "off");
     await user.type(within(dialog).getByLabelText("New password"), NEW_PASSWORD);
@@ -445,11 +445,43 @@ describe("UsersPage: user details", () => {
     expect(document.body.innerHTML).not.toContain(NEW_PASSWORD);
   });
 
+  it("can generate the temporary password, sets both fields, and sends only that password", async () => {
+    let current = rahul;
+    const api = mockApi({
+      [LIST]: () => page([current]),
+      [DETAIL]: () => ({ status: 200, body: current }),
+      [SET_PASSWORD]: () => {
+        current = { ...rahul, password_change_required: true, version: 2 };
+        return { status: 200, body: current };
+      },
+    });
+    renderPage();
+    const { user, drawer } = await openDetails();
+    await user.click(within(drawer).getByRole("button", { name: "Set temporary password" }));
+    const dialog = screen.getByRole("dialog", { name: "Set a new password for Rahul Sharma" });
+    await user.click(within(dialog).getByRole("button", { name: "Generate password" }));
+    expect(within(dialog).getByRole("status")).toHaveTextContent("Password generated. Use Show to see it");
+    const first = (within(dialog).getByLabelText("New password") as HTMLInputElement).value;
+    expect(first).toMatch(/^[a-zA-Z2-9]{4}(-[a-zA-Z2-9]{4}){3}$/);
+    expect((within(dialog).getByLabelText("Confirm password") as HTMLInputElement).value).toBe(first);
+    // Another click makes another one; typing over it clears the note.
+    await user.click(within(dialog).getByRole("button", { name: "Generate password" }));
+    const second = (within(dialog).getByLabelText("New password") as HTMLInputElement).value;
+    expect(second).not.toBe(first);
+    await user.click(within(dialog).getByRole("button", { name: "Set password" }));
+    await screen.findByRole("dialog", { name: "Rahul Sharma" });
+    expect(api.callsTo("POST", `/api/v1/admin/users/${rahul.id}/set-password`)[0]!.body).toEqual({
+      version: 1,
+      new_password: second,
+    });
+    expect(document.body.innerHTML).not.toContain(second); // never shown after it was sent
+  });
+
   it("checks that the two passwords match before sending", async () => {
     const api = mockApi({ [LIST]: page([rahul]), [DETAIL]: { status: 200, body: rahul } });
     renderPage();
     const { user, drawer } = await openDetails();
-    await user.click(within(drawer).getByRole("button", { name: "Set new password" }));
+    await user.click(within(drawer).getByRole("button", { name: "Set temporary password" }));
     const dialog = screen.getByRole("dialog", { name: "Set a new password for Rahul Sharma" });
     await user.type(within(dialog).getByLabelText("New password"), NEW_PASSWORD);
     await user.type(within(dialog).getByLabelText("Confirm password"), "something-else-entirely");
@@ -465,7 +497,7 @@ describe("UsersPage: user details", () => {
     mockApi({ [LIST]: page([rahul]), [DETAIL]: { status: 200, body: rahul }, [SET_PASSWORD]: apiError(status, code, message) });
     renderPage();
     const { user, drawer } = await openDetails();
-    await user.click(within(drawer).getByRole("button", { name: "Set new password" }));
+    await user.click(within(drawer).getByRole("button", { name: "Set temporary password" }));
     const dialog = screen.getByRole("dialog", { name: "Set a new password for Rahul Sharma" });
     await user.type(within(dialog).getByLabelText("New password"), NEW_PASSWORD);
     await user.type(within(dialog).getByLabelText("Confirm password"), NEW_PASSWORD);
@@ -482,7 +514,7 @@ describe("UsersPage: user details", () => {
     renderPage();
     const { drawer } = await openDetails(target.full_name);
     expect(drawer).toHaveTextContent(reason);
-    expect(within(drawer).queryByRole("button", { name: "Set new password" })).not.toBeInTheDocument();
+    expect(within(drawer).queryByRole("button", { name: "Set temporary password" })).not.toBeInTheDocument();
     expect(within(drawer).queryByRole("button", { name: "Access as user" })).not.toBeInTheDocument();
   });
 
@@ -713,7 +745,7 @@ describe("UsersPage: editing and lifecycle", () => {
       await userEvent.setup().click(await screen.findByRole("button", { name: "Bina Admin" }));
       const drawer = screen.getByRole("dialog", { name: "Bina Admin" });
       expect(drawer).toHaveTextContent("Not available for administrators.");
-      expect(within(drawer).queryByRole("button", { name: "Set new password" })).not.toBeInTheDocument();
+      expect(within(drawer).queryByRole("button", { name: "Set temporary password" })).not.toBeInTheDocument();
     });
 
     // The list said "User", but they were made an administrator meanwhile: the server's
@@ -779,6 +811,9 @@ describe("row action menu keyboard support", () => {
     await user.keyboard("{ArrowDown}");
     expect(screen.getByRole("menuitem", { name: "Change email" })).toHaveFocus();
     await user.keyboard("{End}");
+    // Last: the one that can't be undone (ADR-0036), just after Deactivate.
+    expect(screen.getByRole("menuitem", { name: "Delete account" })).toHaveFocus();
+    await user.keyboard("{ArrowUp}");
     expect(screen.getByRole("menuitem", { name: "Deactivate" })).toHaveFocus();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
@@ -917,7 +952,7 @@ describe("UsersPage: sign-in locks and pseudonymised accounts (review of 73ff1e3
     await userEvent.setup().click(name);
     const drawer = await screen.findByRole("dialog", { name: "Former user 4c3b2a19" });
     expect(drawer).toHaveTextContent("This former user was pseudonymised");
-    expect(within(drawer).queryByRole("button", { name: "Set new password" })).not.toBeInTheDocument();
+    expect(within(drawer).queryByRole("button", { name: "Set temporary password" })).not.toBeInTheDocument();
     expect(within(drawer).queryByRole("button", { name: /Pseudonymise/ })).not.toBeInTheDocument();
   });
 });

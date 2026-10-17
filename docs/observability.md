@@ -331,6 +331,7 @@ The metric-based rows are shipped as Prometheus rules in `infrastructure/alerts/
 | Attachment storage down | `arkray_attachment_storage_up` = 0 for 5 min (`ArkrayAttachmentStorageDown`); storage errors and timeouts above 20 % of uploads in an hour (`ArkrayAttachmentUploadsFailing`) | runbooks: attachment storage degraded |
 | Attachment object missing | `arkray_attachment_objects_missing_last_hour` > 0 (`ArkrayAttachmentObjectMissing`) | runbooks: attachment object missing |
 | Administrator deactivated | any administrator account deactivated in the last hour (`ArkrayAdministratorDeactivated`, ticket) | runbooks: administrator deactivated |
+| Accounts deleted | five or more accounts deleted by administrators in the last hour (`ArkrayAccountsDeleted`, ticket; `arkray_account_deletions_last_hour`, ADR-0036) | runbooks: accounts deleted |
 | Second factor locked | any `mfa.locked` in the last hour (`ArkrayMfaLocked`, ticket): someone probably has that user's password | runbooks: second factor locked |
 | Second factor locked until an MFA reset | any `mfa.locked` with `until: mfa_reset` in the last hour (`ArkrayMfaLockedUntilReset`, ticket): someone probably has that user's password and mailbox | runbooks: second factor locked |
 | Administrator promoted | any account made an administrator in the last hour (`ArkrayAdministratorPromoted`, ticket): confirm it was intended (adversarial review of 73ff1e3, L3: promote-then-shield) | runbooks: security events |

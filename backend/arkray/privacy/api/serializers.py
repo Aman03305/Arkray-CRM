@@ -76,3 +76,44 @@ class PseudonymiseResultSerializer(serializers.Serializer[Any]):
     throttle_events = serializers.IntegerField()
     queued_payloads = serializers.IntegerField()
     access_windows = serializers.IntegerField()
+
+
+class DeleteAccountSerializer(StrictInputSerializer):
+    version = serializers.IntegerField(min_value=1, help_text="The user's version, as listed.")
+    confirm_email = serializers.CharField(
+        max_length=254, help_text="The account's current email address, to confirm."
+    )
+    reassign_to = serializers.UUIDField(
+        required=False,
+        allow_null=True,
+        default=None,
+        help_text="Who takes over the user's leads and their open deals, tasks and meetings."
+        " Required while the user still owns any.",
+    )
+
+
+class DeletionPreviewSerializer(serializers.Serializer[Any]):
+    leads = serializers.IntegerField(
+        help_text="Leads to hand over: those they own that are not archived, and archived ones"
+        " still carrying their open work."
+    )
+    open_deals = serializers.IntegerField()
+    open_activities = serializers.IntegerField(help_text="Open tasks and scheduled meetings.")
+    personal_pipelines = serializers.IntegerField(help_text="Their active personal pipelines.")
+    team_members = serializers.IntegerField(help_text="Users in their team (an Admin's).")
+    legal_hold = serializers.BooleanField()
+    needs_new_owner = serializers.BooleanField(
+        help_text="The delete request must name `reassign_to`."
+    )
+    blocked_reason = serializers.CharField(
+        allow_null=True, help_text="Why the account can't be deleted now, or null."
+    )
+
+
+class DeletionResultSerializer(serializers.Serializer[Any]):
+    completed = serializers.BooleanField(
+        help_text="False (HTTP 202): this request handed over some leads and more remain;"
+        " send the same request again."
+    )
+    reassigned_leads = serializers.IntegerField(help_text="Handed over by this request.")
+    remaining_leads = serializers.IntegerField()

@@ -37,8 +37,15 @@ describe("describeSecurityEvent", () => {
     [event("auth.password_changed", { actor: RAHUL }), "Rahul Sharma changed their password"],
     [event("auth.password_reset_completed", { actor: null }), "Rahul Sharma reset their password"],
     [event("auth.password_set_by_admin"), "Anita Rao set a new password for Rahul Sharma"],
+    // ADR-0036: a reset link emailed to the account's own address; never a password.
+    [event("auth.password_reset_by_admin"), "Anita Rao sent a password reset link to Rahul Sharma"],
     [event("user.created", { details: { role: "sales_user", activation: "password" } }), "Anita Rao created Rahul Sharma"],
     [event("user.deactivated"), "Anita Rao deactivated Rahul Sharma"],
+    // ADR-0036: the account's name is the pseudonym by the time anyone reads the event.
+    [
+      event("user.deleted", { details: { role: "sales_user" }, user: { id: RAHUL_ID, full_name: "Former user 3f2b8c1e" } }),
+      "Anita Rao deleted the account of Former user 3f2b8c1e",
+    ],
     [event("user.reactivated"), "Anita Rao reactivated Rahul Sharma"],
     // ADR-0035: the stored "admin" is the Super admin; "team_admin" is an Admin.
     [event("user.role_changed", { details: { from: "sales_user", to: "admin" } }), "Anita Rao changed Rahul Sharma's role to Super admin"],

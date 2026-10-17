@@ -26,6 +26,12 @@
   seconds later; L1). Raises ArkraySignInLocked: someone guessed that account's password
   about 50 times.
 
+- `arkray_account_deletions_last_hour`: accounts an administrator deleted in the last hour
+  (`user.deleted`; ADR-0036). Raises ArkrayAccountsDeleted from a burst: an off-boarding is a
+  handful, a hijacked administrator session emptying a team is many. (An Admin's deletion is
+  also a `user.deactivated` with an administrator's role, which raises
+  ArkrayAdministratorDeactivated.)
+
 "Administrator" means either kind (ADR-0035): a super administrator (role `admin`) or a
 team administrator (`team_admin`), as `identity.policy.administrator_roles` says. A team
 administrator's deactivation or a promotion to one is worth the same look: they manage
@@ -51,6 +57,9 @@ from .mfa_services import AUDIT_LOCKED
 from .models import MfaLock
 from .policy import administrator_roles
 from .services import AUDIT_ROLE_CHANGED, AUDIT_SIGN_IN_LOCKED, AUDIT_USER_DEACTIVATED
+
+# Written by privacy.account_deletion (ADR-0036); named here because identity can't import it.
+AUDIT_USER_DELETED = "user.deleted"
 
 
 def gauges() -> list[Gauge]:
@@ -80,6 +89,10 @@ def gauges() -> list[Gauge]:
         "Accounts locked from new browsers by the daily failed sign-in cap in the last hour"
         " (auth.sign_in_locked audit events).",
     )
+    deleted = Gauge(
+        "arkray_account_deletions_last_hour",
+        "Accounts deleted by an administrator in the last hour (user.deleted audit events).",
+    )
     since = timezone.now() - timedelta(hours=1)
     administrators = sorted(administrator_roles())
     counts = AuditEvent.objects.filter(
@@ -89,6 +102,7 @@ def gauges() -> list[Gauge]:
             AUDIT_ROLE_CHANGED,
             AUDIT_LOGIN_FAILED,
             AUDIT_SIGN_IN_LOCKED,
+            AUDIT_USER_DELETED,
         ],
         occurred_at__gte=since,
     ).aggregate(
@@ -103,6 +117,7 @@ def gauges() -> list[Gauge]:
         ),
         failures=Count("pk", filter=Q(action=AUDIT_LOGIN_FAILED)),
         sign_in_locks=Count("pk", filter=Q(action=AUDIT_SIGN_IN_LOCKED)),
+        deleted=Count("pk", filter=Q(action=AUDIT_USER_DELETED)),
     )
     deactivated.add(counts["deactivated"])
     locked.add(counts["locked"])
@@ -110,4 +125,5 @@ def gauges() -> list[Gauge]:
     promoted.add(counts["promoted"])
     failures.add(counts["failures"])
     sign_in_locks.add(counts["sign_in_locks"])
-    return [deactivated, locked, until_reset, promoted, failures, sign_in_locks]
+    deleted.add(counts["deleted"])
+    return [deactivated, locked, until_reset, promoted, failures, sign_in_locks, deleted]
