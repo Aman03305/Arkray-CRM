@@ -99,7 +99,7 @@ services:
     # Debian trixie: no HIGH or CRITICAL finding (Trivy, 2026-10-11) where the bookworm build
     # the development stack keeps (its existing volume's collations come from bookworm's
     # glibc) had 57 fixable ones. Same PostgreSQL 16; the CI service container matches this.
-    image: pgvector/pgvector:0.8.7-pg16-trixie@sha256:40d828eda66737aaacb934387a337babf1455ebd56e9bdd13fc08e211257c972
+    image: pgvector/pgvector:0.8.7-pg16-trixie@sha256:9cf8b511f0e9a2c209b61430fc139f1ab9c75edbb31fb1751db6617b246a897a
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: arkray  # the administrator, pinned like every setting (not from .env)
@@ -173,7 +173,7 @@ services:
   # The cache (rate limits, breakers, counters): its own instance, nothing persisted
   # (docs/deployment.md#redis), so the client addresses in rate-limit keys never reach disk.
   redis-cache:
-    image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    image: redis:8.0-alpine@sha256:5f61955be8ab2ccee9372b84ae4d4da2e2b156f87281e3f218544055e7ee04d4
     logging: *logging
     environment:
       REDIS_PASSWORD: ${ARKRAY_PROD_REDIS_PASSWORD:?set ARKRAY_PROD_REDIS_PASSWORD}
@@ -242,7 +242,7 @@ services:
   # certificate alone in the clients' (tls-ca). The PostgreSQL image's own openssl: nothing
   # is installed at run time (R128: an unpinned `apk add` did that before).
   backend-tls:
-    image: pgvector/pgvector:0.8.7-pg16-trixie@sha256:40d828eda66737aaacb934387a337babf1455ebd56e9bdd13fc08e211257c972
+    image: pgvector/pgvector:0.8.7-pg16-trixie@sha256:9cf8b511f0e9a2c209b61430fc139f1ab9c75edbb31fb1751db6617b246a897a
     logging: *logging
     user: "0:0"
     read_only: true
@@ -300,7 +300,7 @@ services:
   # admits the superuser nowhere else, and this container has no network at all (M4).
   db-roles:
     profiles: ["app"]
-    image: pgvector/pgvector:0.8.7-pg16-trixie@sha256:40d828eda66737aaacb934387a337babf1455ebd56e9bdd13fc08e211257c972
+    image: pgvector/pgvector:0.8.7-pg16-trixie@sha256:9cf8b511f0e9a2c209b61430fc139f1ab9c75edbb31fb1751db6617b246a897a
     logging: *logging
     user: "999:999"
     network_mode: none
@@ -541,7 +541,7 @@ services:
 
   certs:
     profiles: ["app"]
-    image: pgvector/pgvector:0.8.7-pg16-trixie@sha256:40d828eda66737aaacb934387a337babf1455ebd56e9bdd13fc08e211257c972
+    image: pgvector/pgvector:0.8.7-pg16-trixie@sha256:9cf8b511f0e9a2c209b61430fc139f1ab9c75edbb31fb1751db6617b246a897a
     logging: *logging
     user: "0:0"
     read_only: true
